@@ -172,7 +172,7 @@ fn with_transport(
             prepared.save(env, keys, journal)
         }
         Next::VerifyCommitted => {
-            let mut verifier = prepared.loaded.verifier(keys)?;
+            let mut verifier = prepared.loaded.verifier_cached(env, keys)?;
             if verifier.sequence() == prepared.loaded.plan.rows.len() as u64 {
                 prepared.before_http(env, keys)?;
                 let committed = verifier.finish(&prepared.loaded.plan, keys)?;
@@ -197,6 +197,7 @@ fn with_transport(
                 .loaded
                 .with_readback(&verifier, prepared.loaded.plan.before())?
                 .ok_or_else(invalid)?;
+            prepared.loaded.remember_verifier(env, verifier)?;
             prepared.save(env, keys, journal)
         }
     }
@@ -268,7 +269,10 @@ pub(super) fn verified_fixture_for_test() -> (crate::sync::testkit::TestDevice, 
 {
     tests::verified_fixture()
 }
-#[cfg(all(test,unix))]
-pub(super) fn verified_material_fixture_for_test()->(crate::sync::testkit::TestDevice,VaultKeys,Verified){tests::material_verified_fixture()}
+#[cfg(all(test, unix))]
+pub(super) fn verified_material_fixture_for_test(
+) -> (crate::sync::testkit::TestDevice, VaultKeys, Verified) {
+    tests::material_verified_fixture()
+}
 #[cfg(all(test, unix))]
 mod tests;

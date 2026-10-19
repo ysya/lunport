@@ -44,6 +44,8 @@ pub struct SyncCore {
     pub central_user_action: Option<String>,
     pub central_migration: Option<crate::sync::central::migration_flow::Cached>,
     pub(crate) central_migration_frozen: bool,
+    pub(crate) migration_plan: Option<Box<crate::sync::central::CachedPlan>>,
+    pub(crate) migration_verifier: Option<Box<crate::sync::central::CachedVerifier>>,
     pub(crate) adoption_read: Option<Box<crate::sync::central::adoption::ReadingCache>>,
     pub central_poll: crate::sync::central::round::Polling,
     /// Probe-selected legacy sources wait for explicit workspace choice or migration.

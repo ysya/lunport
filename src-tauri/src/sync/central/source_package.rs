@@ -63,9 +63,18 @@ fn state(files: &Files, name: &str) -> Result<SyncStateV3, AppError> {
     Ok(state)
 }
 impl Package {
-    /// Strict modern Records images only; older/opaque formats remain explicit blockers.
+    /// Modern retained states; v1/v2 histories use their separate strict admission below.
     fn retained_states(&self) -> Result<Vec<SyncStateV3>, AppError> {
-        let mut result = crate::sync::record_import::inventory::read_all(&self.state, &self.files.bytes, &self.decryptors)?.states;
+        let mut result = crate::sync::record_import::inventory::read_all(
+            &self.state,
+            &self.files.bytes,
+            &self.decryptors,
+        )?
+        .states;
+        result.extend(
+            crate::sync::record_migration::inventory::read_all(&self.state, &self.files.bytes)?
+                .states,
+        );
         for (path, bytes) in &self.files.bytes {
             if path.parent() != Some(Path::new("data")) {
                 continue;
@@ -83,6 +92,14 @@ impl Package {
             if bytes.len() as u64 > crate::sync::record_runtime::MAX_STATE_BYTES {
                 return Err(invalid());
             }
+            #[derive(serde::Deserialize)]
+            struct Version {
+                version: u32,
+            }
+            let version: Version = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+            if matches!(version.version, 1 | 2) {
+                continue;
+            }
             let image: SyncStateV3 = serde_json::from_slice(bytes).map_err(|_| AppError::Other("A retained sync-state image needs supported normalization before migration. Every original file is retained.".into()))?;
             records_v3::validate_state(&image).map_err(|_| invalid())?;
             if image
@@ -95,7 +112,15 @@ impl Package {
             }
             result.push(image);
         }
-        if result.iter().any(|image| image.local.central.as_ref().is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())) { return Err(invalid()); }
+        if result.iter().any(|image| {
+            image
+                .local
+                .central
+                .as_ref()
+                .is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())
+        }) {
+            return Err(invalid());
+        }
         // A historical image may name an older backup that the selected state no longer names.
         // It is complete only when that exact backup is captured and read as a state image too.
         for image in &result {
@@ -107,7 +132,10 @@ impl Package {
                     || !(backup == &self.state_name
                         || backup.starts_with("sync-state")
                         || self.state.legacy_v1_backup.as_deref() == Some(backup.as_str()))
-                    || !self.files.bytes.contains_key(&Path::new("data").join(backup))
+                    || !self
+                        .files
+                        .bytes
+                        .contains_key(&Path::new("data").join(backup))
                 {
                     return Err(invalid());
                 }
@@ -143,12 +171,58 @@ impl Package {
     /// Full current/recovery input enumeration using this package's archived legacy keybook.
     /// Payload semantics and other captured source images still require separate admission.
     pub fn record_inputs(&self) -> Result<Inventory, AppError> {
-        if state(&self.files, &self.state_name)? != self.state { return Err(invalid()); }
+        if state(&self.files, &self.state_name)? != self.state {
+            return Err(invalid());
+        }
         let mut inventory = match &self.frozen {
             Some(frozen) => frozen.inventory(&self.sources, &self.state)?,
             None => Inventory::from_state(&self.sources, &self.state)?,
         };
-        for image in self.retained_states()? { inventory = inventory.with_retained_state(&self.sources, &image)?; }
+        for image in self.retained_states()? {
+            inventory = inventory.with_retained_state(&self.sources, &image)?;
+        }
+        let migrations =
+            crate::sync::record_migration::inventory::read_all(&self.state, &self.files.bytes)?;
+        for bytes in migrations.legacy {
+            inventory = inventory.with_retained_legacy(&self.sources, &bytes)?;
+        }
+        for (chain, rows) in migrations.chains {
+            inventory = inventory.with_retained_envelopes(&self.sources, &chain, rows)?;
+        }
+        for (path, bytes) in &self.files.bytes {
+            let name = path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or_else(invalid)?;
+            if path.parent() != Some(Path::new("data"))
+                || name == self.state_name
+                || !(name.starts_with("sync-state")
+                    || self.state.legacy_v1_backup.as_deref() == Some(name))
+            {
+                continue;
+            }
+            #[derive(serde::Deserialize)]
+            struct Version {
+                version: u32,
+                #[serde(default)]
+                legacy_v1_backup: Option<String>,
+            }
+            let version: Version = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+            if matches!(version.version, 1 | 2) {
+                if version.legacy_v1_backup.as_ref().is_some_and(|backup| {
+                    backup.contains(['/', '\\', '\0'])
+                        || !(backup.starts_with("sync-state")
+                            || self.state.legacy_v1_backup.as_ref() == Some(backup))
+                        || !self
+                            .files
+                            .bytes
+                            .contains_key(&Path::new("data").join(backup))
+                }) {
+                    return Err(invalid());
+                }
+                inventory = inventory.with_retained_legacy(&self.sources, bytes)?;
+            }
+        }
         Ok(inventory)
     }
     /// Preserve complete remote inputs alongside this exact captured source, without choosing winners.
@@ -188,10 +262,23 @@ impl Package {
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
         self.require_supported_files()?;
-        let private_inputs = self.record_inputs()?.admit_known()?.into_keys();
+        let mut normalized = self.state.clone();
+        let private_inputs = self
+            .record_inputs()?
+            .admit_known()?
+            .normalize_legacy(&mut normalized, Some(&self.files))?
+            .into_keys();
         Materials::from_files_with_key_inputs(
-            &self.state, keys, &self.files, &self.decryptors, references, private_inputs,
-        ).and_then(|materials| materials.with_retained_states(&self.retained_states()?, &self.files, &self.decryptors))
+            &normalized,
+            keys,
+            &self.files,
+            &self.decryptors,
+            references,
+            private_inputs,
+        )
+        .and_then(|materials| {
+            materials.with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)
+        })
     }
     /// Structured history candidate; other captured files and explicit consent remain gates.
     pub fn structured_history(
@@ -200,9 +287,12 @@ impl Package {
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<super::migration_library::History, AppError> {
         self.require_supported_files()?;
-        if let Some(frozen) = &self.frozen {
+        if self.frozen.is_some() {
             drop(self.record_inputs()?); // Compare the captured state image before deriving a passive candidate.
-            let prepared = frozen.reconcile_with_retained(&self.sources, &self.state, &self.retained_states()?)?.prepare()?;
+            let prepared = self
+                .record_inputs()?
+                .reconcile_captured(&self.state)?
+                .prepare_with_files(Some(&self.files))?;
             let materials = Materials::from_files_with_key_inputs(
                 &prepared.state,
                 keys,
@@ -210,12 +300,29 @@ impl Package {
                 &self.decryptors,
                 references,
                 prepared.known.key_inputs()?,
-            )?.with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)?;
+            )?
+            .with_retained_states(
+                &self.retained_states()?,
+                &self.files,
+                &self.decryptors,
+            )?;
             return super::migration_library::prepare(&prepared.state, &prepared.known, materials);
         }
-        let known = self.record_inputs()?.admit_known()?;
-        let materials = self.materials(keys, references)?;
-        super::migration_library::prepare(&self.state, &known, materials)
+        let mut normalized = self.state.clone();
+        let known = self
+            .record_inputs()?
+            .admit_known()?
+            .normalize_legacy(&mut normalized, Some(&self.files))?;
+        let materials = Materials::from_files_with_key_inputs(
+            &normalized,
+            keys,
+            &self.files,
+            &self.decryptors,
+            references,
+            known.key_inputs()?,
+        )?
+        .with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)?;
+        super::migration_library::prepare(&normalized, &known, materials)
     }
     /// The caller must have decoded this package from this exact authenticated receipt.
     /// This binds frozen inputs only; other files, consent and actual source freshness are separate.

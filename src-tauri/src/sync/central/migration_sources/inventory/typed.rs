@@ -101,7 +101,7 @@ pub(in crate::sync::central) struct KnownInput {
     pub data: KnownData,
 }
 pub(in crate::sync::central) struct Known {
-    rows: Vec<KnownInput>,
+    pub(super) rows: Vec<KnownInput>,
 }
 impl Known {
     pub(in crate::sync::central::migration_sources) fn rows_mut(&mut self) -> &mut [KnownInput] {
@@ -199,6 +199,27 @@ fn identity(scope: &Scope, view: &View<'_>) -> Result<(), AppError> {
         Err(invalid())
     }
 }
+fn legacy_slot(raw: &str) -> Result<KnownData, AppError> {
+    let slot: LegacySlot = parse(raw)?;
+    let original = crate::sync::slot_rules::KeySlotPayload {
+        schema: slot.schema,
+        name: slot.name.clone(),
+        mode: slot.mode,
+        origin_device_id: slot.origin_device_id.clone(),
+        created_at_ms: slot.created_at_ms,
+        public_key: slot.public_key.clone(),
+        fingerprint: slot.fingerprint.clone(),
+        key_type: slot.key_type.clone(),
+        has_passphrase: slot.has_passphrase,
+    };
+    if !crate::sync::slot_rules::valid_slot_payload(&original)
+        || slot.created_at_ms > MAX_SAFE_INTEGER
+        || !text(&slot.origin_device_id, 1024)
+    {
+        return Err(invalid());
+    }
+    Ok(KnownData::LegacySlot(slot))
+}
 fn admit(scope: &Scope, view: &View<'_>) -> Result<KnownData, AppError> {
     identity(scope, view)?;
     let raw = view.payload.get();
@@ -245,27 +266,7 @@ fn admit(scope: &Scope, view: &View<'_>) -> Result<KnownData, AppError> {
                 records_v3::validate_keyslot(view.id, &slot).map_err(|_| invalid())?;
                 Ok(KnownData::Keyslot(slot))
             }
-            1 => {
-                let slot: LegacySlot = parse(raw)?;
-                let original = crate::sync::slot_rules::KeySlotPayload {
-                    schema: slot.schema,
-                    name: slot.name.clone(),
-                    mode: slot.mode,
-                    origin_device_id: slot.origin_device_id.clone(),
-                    created_at_ms: slot.created_at_ms,
-                    public_key: slot.public_key.clone(),
-                    fingerprint: slot.fingerprint.clone(),
-                    key_type: slot.key_type.clone(),
-                    has_passphrase: slot.has_passphrase,
-                };
-                if !crate::sync::slot_rules::valid_slot_payload(&original)
-                    || slot.created_at_ms > MAX_SAFE_INTEGER
-                    || !text(&slot.origin_device_id, 1024)
-                {
-                    return Err(invalid());
-                }
-                Ok(KnownData::LegacySlot(slot))
-            }
+            1 => legacy_slot(raw),
             _ => Err(invalid()),
         },
         "space" => {
@@ -363,7 +364,19 @@ impl Inventory {
         let mut rows = vec![];
         for item in self.rows() {
             let view = item.view()?;
-            let data = admit(&item.location.scope, &view)?;
+            let data = if item.location.scope == Scope::Local && view.kind == "keyslot" {
+                // Old unjoined profiles have local slot metadata but no cloud account. It is
+                // historical public input only; private frames and current slots keep their scopes.
+                if item.location.position != Position::Retained
+                    || !hex(view.id, 32)
+                    || parse::<Schema>(view.payload.get())?.schema != 1
+                {
+                    return Err(invalid());
+                }
+                legacy_slot(view.payload.get())?
+            } else {
+                admit(&item.location.scope, &view)?
+            };
             rows.push(KnownInput {
                 location: item.location.clone(),
                 sequence: item.sequence,

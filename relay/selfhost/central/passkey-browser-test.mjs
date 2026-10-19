@@ -204,6 +204,17 @@ export async function checkPasskeyBrowser({
       .click();
     const last = await exchange(backup);
     assert.equal(last.subject, firstGrant.subject);
+    let protocolProof = null;
+    if (process.env.SELFHOST_TEST_PROTOCOL_MODULE) {
+      const { checkCentralProtocol } = await import(
+        pathToFileURL(process.env.SELFHOST_TEST_PROTOCOL_MODULE).href
+      );
+      protocolProof = await checkCentralProtocol({
+        address,
+        origin,
+        loginToken: last.access_token,
+      });
+    }
     assert.equal(
       (await call("logout", { token: last.refresh_token })).status,
       200,
@@ -215,6 +226,10 @@ export async function checkPasskeyBrowser({
     console.log(
       "Actual Chromium virtual Passkey registration, backup, removal, loopback PKCE and logout passed (HTTPS origin is test-intercepted; no real TLS assertion).",
     );
+    return {
+      revokedRefreshTokens: [firstGrant.refresh_token, last.refresh_token],
+      protocolProof,
+    };
   } finally {
     await browser.close();
     await new Promise((resolve) => listener.close(resolve));

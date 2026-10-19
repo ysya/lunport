@@ -217,6 +217,12 @@ impl Reconciliation {
         &self.conflicts
     }
     pub fn prepare(self) -> Result<Prepared, AppError> {
+        self.prepare_with_files(None)
+    }
+    pub fn prepare_with_files(
+        self,
+        files: Option<&super::super::migration_files::Files>,
+    ) -> Result<Prepared, AppError> {
         if !self.conflicts.is_empty() {
             return Err(AppError::Other(format!("Resolve {} source conflicts before preparing migration. Every original version is retained.",self.conflicts.len())));
         }
@@ -296,6 +302,7 @@ impl Reconciliation {
                     .or_insert_with(SpaceStateV3::default);
             }
         }
+        let known = known.normalize_legacy(&mut state, files)?;
         records_v3::validate_state(&state).map_err(|_| invalid())?;
         Ok(Prepared { state, known })
     }

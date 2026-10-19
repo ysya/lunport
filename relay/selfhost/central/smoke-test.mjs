@@ -144,7 +144,51 @@ function request(path, options = {}) {
     body: lines.join("\n"),
   };
 }
+// Snapshot only this disposable project's stopped volumes; preserve binary tar framing.
+function volumeArchive(restore, archive, appOnly = false) {
+  const id = compose(["ps", "-a", "-q", "gateway"]).stdout.trim();
+  assert.ok(id);
+  assert.equal(
+    docker(["inspect", "--format", "{{.State.Running}}", id]).stdout.trim(),
+    "false",
+  );
+  const roots = appOnly ? "data" : "data security-data";
+  const script = restore
+    ? `cat > /tmp/test-backup.tar && tar -tf /tmp/test-backup.tar >/dev/null && find ${roots
+        .split(" ")
+        .map((v) => "/" + v)
+        .join(
+          " ",
+        )} -mindepth 1 -delete && tar -xf /tmp/test-backup.tar -C / ${roots}`
+    : `tar -C / -cf - ${roots}`;
+  const result = spawnSync(
+    "docker",
+    [
+      ...base,
+      "--profile",
+      "setup",
+      "run",
+      "--rm",
+      "--no-deps",
+      "-T",
+      "--entrypoint",
+      "/bin/sh",
+      "control",
+      "-c",
+      script,
+    ],
+    {
+      env: { ...process.env },
+      input: restore ? archive : undefined,
+      timeout: 180_000,
+      maxBuffer: 32 * 1024 * 1024,
+    },
+  );
+  assert.equal(result.status, 0, String(result.stderr));
+  return result.stdout;
+}
 let proxy = null;
+let browserProof = null;
 try {
   console.log("Checking isolated Compose configuration and private inspection");
   compose(["config", "--quiet"]);
@@ -281,7 +325,7 @@ http://:8080 {
     process.env.SELFHOST_TEST_BROWSER_EXECUTABLE
   ) {
     const { checkPasskeyBrowser } = await import("./passkey-browser-test.mjs");
-    await checkPasskeyBrowser({
+    browserProof = await checkPasskeyBrowser({
       address,
       origin: `https://${host}`,
       playwrightPath: process.env.SELFHOST_TEST_BROWSER_MODULE,
@@ -306,6 +350,87 @@ http://:8080 {
     200,
   );
   console.log(
+    "Checking stopped-volume backup/restore and retained login revocations",
+  );
+  compose(["stop", "gateway"]);
+  const backup = volumeArchive(false);
+  assert.ok(backup.length > 1024);
+  compose(["up", "-d", "gateway"]);
+  await healthy();
+  const laterChain = randomBytes(32).toString("hex");
+  assert.equal(
+    request("/v1/chains/" + laterChain, {
+      method: "PUT",
+      headers: { Authorization: "Bearer " + token },
+    }).status,
+    201,
+  );
+  compose(["stop", "gateway"]);
+  volumeArchive(true, backup);
+  compose(["up", "-d", "gateway"]);
+  await healthy();
+  assert.equal(
+    request("/v1/chains/" + chain + "/records", {
+      headers: { Authorization: "Bearer " + token },
+    }).status,
+    200,
+  );
+  assert.equal(
+    request("/v1/chains/" + laterChain + "/records", {
+      headers: { Authorization: "Bearer " + token },
+    }).status,
+    404,
+    "restore must actually replace application storage",
+  );
+  for (const refresh of browserProof?.revokedRefreshTokens ?? []) {
+    assert.equal(
+      request("/v2/auth/passkey/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refresh_token: refresh }),
+      }).status,
+      401,
+      "removed Passkey/logout revocations must survive a consistent restore",
+    );
+  }
+  const positive = browserProof?.protocolProof?.positive;
+  if (positive) {
+    const restored = request(positive.path, {
+      headers: { Authorization: "Bearer " + positive.token },
+    });
+    assert.equal(
+      restored.status,
+      200,
+      "active encrypted history must survive restore",
+    );
+    const page = JSON.parse(restored.body);
+    assert.equal(page.sequence, positive.sequence);
+    assert.equal(page.history_hash, positive.history_hash);
+    assert.deepEqual(
+      page.records.map((row) => row.envelope),
+      positive.envelopes,
+    );
+    const wrapProof = browserProof.protocolProof.wrapped;
+    const wrapped = request(wrapProof.path, {
+      headers: { Authorization: "Bearer " + wrapProof.token },
+    });
+    assert.equal(wrapped.status, 200);
+    assert.deepEqual(
+      JSON.parse(wrapped.body),
+      wrapProof.value,
+      "the exact previously decrypted key wrap must survive restore",
+    );
+  }
+  for (const proof of browserProof?.protocolProof?.denials ?? []) {
+    assert.equal(
+      request(proof.path, {
+        headers: { Authorization: "Bearer " + proof.token },
+      }).status,
+      proof.status,
+      "device revocation and permanent retirement must survive restore",
+    );
+  }
+  console.log(
     "Checking persistent floor increase and refusal to reopen an older backend",
   );
   compose(["stop", "gateway"]);
@@ -324,6 +449,12 @@ http://:8080 {
     0,
   );
   assert.notEqual(control("provision-new", confirmed, false).status, 0);
+  volumeArchive(true, backup, true);
+  assert.equal(
+    json(control("inspect")).minimum,
+    2,
+    "an application-only restore cannot lower the independent security floor",
+  );
   compose(["up", "-d", "gateway"]);
   let denied;
   for (let n = 0; n < 30; n++) {
@@ -333,7 +464,7 @@ http://:8080 {
   }
   assert.equal(denied.status, 503);
   console.log(
-    "PASS: private provisioning, proxy capability, Caddy, persistence, lock, and rollback floor",
+    "PASS: private provisioning, proxy capability, Caddy, persistence, consistent backup/restore, retained login revocations, lock, and independent rollback floor",
   );
 } finally {
   if (proxy) docker(["rm", "--force", proxy], false);

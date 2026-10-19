@@ -103,7 +103,7 @@ fn complete_source_roundtrips_through_the_protected_predecessor_and_never_change
     }
 }
 #[test]
-fn lost_complete_source_cursor_reuses_exact_ciphertext_before_and_after_a_successful_write() {
+fn compact_complete_source_needs_no_second_source_copy_or_protected_write() {
     for after in [false, true] {
         let (d, keys) = capture_dispatch::ready_for_test(true);
         let env = d.env();
@@ -126,12 +126,16 @@ fn lost_complete_source_cursor_reuses_exact_ciphertext_before_and_after_a_succes
         };
         let mut interrupted = d.env();
         interrupted.keychain = &fault;
-        assert!(ensure(&interrupted, &keys).is_err());
         let exact = tree(&env);
+        let before = ensure(&interrupted, &keys).unwrap().unwrap();
+        assert!(fault.armed.load(Ordering::SeqCst));
+        assert_eq!(tree(&env), exact);
+        let receipt = before.cursor.receipt().clone();
         d.runtime.core.lock().unwrap().generation = 0;
         let complete = ensure(&env, &keys).unwrap().unwrap();
         assert_eq!(tree(&env), exact);
         assert_eq!(complete.ancestors.len() as u64, complete.cursor.revision());
+        assert_eq!(complete.cursor.receipt(), &receipt);
     }
 }
 #[test]

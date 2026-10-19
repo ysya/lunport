@@ -13,6 +13,8 @@ impl Package {
             &self.files.bytes,
             &self.decryptors,
         )?;
+        let migrations =
+            crate::sync::record_migration::inventory::read_all(&self.state, &self.files.bytes)?;
         let mut directories: BTreeSet<_> = [
             "data",
             "keys",
@@ -24,8 +26,12 @@ impl Package {
         .into_iter()
         .map(std::path::PathBuf::from)
         .collect();
-        for file in &imports.admitted {
-            directories.insert(file.parent().ok_or_else(invalid)?.to_path_buf());
+        for file in imports.admitted.iter().chain(&migrations.admitted) {
+            let mut parent = file.parent();
+            while let Some(path) = parent {
+                directories.insert(path.to_path_buf());
+                parent = path.parent();
+            }
         }
         for directory in &self.files.directories {
             if !directories.contains(directory) && !directory.starts_with("keys") {
@@ -33,7 +39,10 @@ impl Package {
             }
         }
         for file in self.files.bytes.keys() {
-            if imports.admitted.contains(file) || file.starts_with("keys") {
+            if imports.admitted.contains(file)
+                || migrations.admitted.contains(file)
+                || file.starts_with("keys")
+            {
                 continue;
             }
             let name = file

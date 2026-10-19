@@ -524,6 +524,8 @@ fn establish_locked(
             None
         };
         core.adoption_read = None;
+        core.migration_plan = None;
+        core.migration_verifier = None;
         core.central_session = Some(Arc::new(session));
     }
     drop(commit_gate);
@@ -728,6 +730,8 @@ pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
         let mut core = env.runtime.core.lock().unwrap();
         core.central_session = None;
         core.adoption_read = None;
+        core.migration_plan = None;
+        core.migration_verifier = None;
         core.central_user_action = None;
     }
     let cleanup = credentials::forget_refresh(env.keychain, &profile).and_then(|_| {

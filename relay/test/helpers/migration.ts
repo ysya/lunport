@@ -29,7 +29,12 @@ export const sign = (bytes: Uint8Array) =>
   base64(ed25519.sign(bytes, new Uint8Array(32).fill(1)));
 export const zero = "0".repeat(64),
   tokenHash = "b".repeat(64);
-export async function setup(sourceCount = 1, recordCount = 3) {
+export async function setup(
+  sourceCount = 1,
+  recordCount = 3,
+  ciphertextBytes?: number,
+  distinctRecords = recordCount,
+) {
   const member = (await trustGenesis(fixture.genesis, fixture.anchor))!;
   const locator = random(),
     vault = random(),
@@ -86,9 +91,13 @@ export async function setup(sourceCount = 1, recordCount = 3) {
   expect(await child.install(install)).toBe(200);
   const records: RecordEnvelope[] = [];
   let historyHash = zero;
+  const recordIds = Array.from({ length: distinctRecords }, () => random());
   for (let index = 0; index < recordCount; index++) {
     const envelope: RecordEnvelope = {
       ...fixture.record,
+      ...(ciphertextBytes === undefined
+        ? {}
+        : { ciphertext: base64(new Uint8Array(ciphertextBytes)) }),
       header: {
         ...fixture.record.header,
         origin: member.anchor.origin,
@@ -98,9 +107,9 @@ export async function setup(sourceCount = 1, recordCount = 3) {
         key_epoch: "1",
         membership_head: member.head,
         author: actor.device,
-        record_id: random(),
+        record_id: recordIds[index % distinctRecords],
         operation_id: random(16),
-        expected_revision: "0",
+        expected_revision: String(Math.floor(index / distinctRecords)),
       },
     };
     envelope.signature = sign(

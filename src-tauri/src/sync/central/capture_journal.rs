@@ -11,6 +11,7 @@ use super::{
 };
 use crate::{error::AppError, sync::env::SyncEnv};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 use std::sync::MutexGuard;
 use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPCAPT1\0";
@@ -43,6 +44,10 @@ pub(super) struct Journal {
     pending_book: Option<Zeroizing<String>>,
     intent: SignedFreeze,
     fetching: Option<Fetching>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inherited: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inherited_book: Option<String>,
 }
 pub(super) struct Loaded {
     pub cursor: Cursor,
@@ -89,7 +94,7 @@ impl Journal {
         }
         let owner = package.state.local.central.as_ref().ok_or_else(invalid)?;
         let result = Self {
-            version: 1,
+            version: 2,
             revision: 2,
             source: cursor.receipt().clone(),
             ancestors: vec![cursor.receipt().clone()],
@@ -103,12 +108,17 @@ impl Journal {
                 None,
             )?,
             fetching: None,
+            inherited: vec![],
+            inherited_book: None,
         };
         result.before(cursor, owner)?;
         Ok(result)
     }
     fn lineage(&self, owner: &Workspace) -> Result<(), AppError> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || self.version == 1 && (!self.inherited.is_empty() || self.inherited_book.is_some())
+            || self.inherited.len() > 65
+            || self.inherited.windows(2).any(|pair| pair[0] >= pair[1])
             || self.ancestors.is_empty()
             || self.ancestors.len() > 254
             || self.revision != self.ancestors.len() as u64 + 1
@@ -152,13 +162,100 @@ impl Journal {
         }
         Ok(())
     }
-    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    pub(super) fn frame(bytes: &[u8]) -> bool {
+        bytes.starts_with(MAGIC)
+    }
+    fn encode_full(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut bytes = Zeroizing::new(MAGIC.to_vec());
         serde_json::to_writer(&mut *bytes, self).map_err(|_| invalid())?;
         if bytes.len() > CAP {
             return Err(invalid());
         }
         Ok(bytes)
+    }
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        if self.version == 1 {
+            return self.encode_full();
+        }
+        let fetching = self
+            .fetching
+            .as_ref()
+            .map(|fetching| fetching.encode_delta(&self.inherited))
+            .transpose()?;
+        #[derive(Serialize)]
+        struct Delta<'a> {
+            version: u32,
+            revision: u64,
+            source: &'a Receipt,
+            ancestors: &'a [Receipt],
+            book: &'a str,
+            pending_book: Option<&'a str>,
+            intent: &'a SignedFreeze,
+            fetching: Option<&'a RawValue>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            inherited: &'a Vec<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            inherited_book: &'a Option<String>,
+        }
+        let fetching = fetching
+            .as_ref()
+            .map(|bytes| serde_json::from_slice::<&RawValue>(bytes).map_err(|_| invalid()))
+            .transpose()?;
+        let delta = Delta {
+            version: self.version,
+            revision: self.revision,
+            source: &self.source,
+            ancestors: &self.ancestors,
+            book: if self
+                .inherited_book
+                .as_ref()
+                .is_some_and(|hash| *hash == crypto::hash(self.book.as_bytes()))
+            {
+                ""
+            } else {
+                &self.book
+            },
+            pending_book: self.pending_book.as_ref().map(|value| value.as_str()),
+            intent: &self.intent,
+            fetching,
+            inherited: &self.inherited,
+            inherited_book: &self.inherited_book,
+        };
+        let mut bytes = Zeroizing::new(MAGIC.to_vec());
+        serde_json::to_writer(&mut *bytes, &delta).map_err(|_| invalid())?;
+        if bytes.len() > CAP {
+            return Err(invalid());
+        }
+        Ok(bytes)
+    }
+    fn inherit(
+        &mut self,
+        previous: Option<Fetching>,
+        previous_book: Option<Zeroizing<String>>,
+    ) -> Result<(), AppError> {
+        if self.version == 1 {
+            return if self.inherited.is_empty() {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
+        }
+        if let Some(expected) = &self.inherited_book {
+            let previous = previous_book.as_ref().ok_or_else(invalid)?;
+            if crypto::hash(previous.as_bytes()) != *expected {
+                return Err(invalid());
+            }
+            if self.book.is_empty() {
+                self.book = previous.clone();
+            }
+        } else if self.book.is_empty() {
+            return Err(invalid());
+        }
+        match &mut self.fetching {
+            Some(fetching) => fetching.inherit(&self.inherited, previous),
+            None if self.inherited.is_empty() && previous.is_none() => Ok(()),
+            _ => Err(invalid()),
+        }
     }
     fn decode(bytes: &[u8]) -> Result<Self, AppError> {
         if bytes.len() > CAP || !bytes.starts_with(MAGIC) {
@@ -167,22 +264,38 @@ impl Journal {
         serde_json::from_slice(&bytes[8..]).map_err(|_| invalid())
     }
     fn inputs(
-        &self,
+        &mut self,
         env: &SyncEnv,
         owner: &Workspace,
         signer: &DeviceKeys,
         mut outputs: Outputs,
-    ) -> Result<(Package, Outputs), AppError> {
+    ) -> Result<(Package, Outputs, Option<Fetching>), AppError> {
         self.lineage(owner)?;
         let profile = owner.control.profile.profile()?;
         let mut package = None;
-        for receipt in &self.ancestors {
+        let mut previous = None;
+        let mut previous_book = None;
+        for (index, receipt) in self.ancestors.iter().enumerate() {
             let (bytes, proof) = source_archive::restore_with_outputs(env, &profile, receipt)?;
             outputs = outputs.merge(proof)?;
             if receipt == &self.source {
                 package = Some(Package::decode_local(&bytes)?);
+            } else {
+                let mut prior = Self::decode(&bytes)?;
+                prior.lineage(owner)?;
+                if prior.source != self.source
+                    || prior.ancestors != self.ancestors[..index]
+                    || prior.revision != index as u64 + 1
+                {
+                    return Err(invalid());
+                }
+                prior.inherit(previous, previous_book)?;
+                previous_book = Some(prior.book);
+                previous = prior.fetching;
             }
         }
+        let parent_fetching = previous.clone();
+        self.inherit(previous, previous_book)?;
         let mut package = package.ok_or_else(invalid)?;
         if package.state.local.central.as_ref() != Some(owner)
             || !self
@@ -231,7 +344,7 @@ impl Journal {
             return Err(invalid());
         }
         package.sources = sources;
-        Ok((package, outputs))
+        Ok((package, outputs, parent_fetching))
     }
     fn restored(
         env: &SyncEnv,
@@ -239,9 +352,9 @@ impl Journal {
         signer: &DeviceKeys,
         saved: Restored,
     ) -> Result<Loaded, AppError> {
-        let journal = Self::decode(&saved.bytes)?;
+        let mut journal = Self::decode(&saved.bytes)?;
         journal.current(&saved.cursor, owner)?;
-        let (package, outputs) = journal.inputs(env, owner, signer, saved.outputs)?;
+        let (package, outputs, _) = journal.inputs(env, owner, signer, saved.outputs)?;
         Ok(Loaded {
             cursor: saved.cursor,
             journal,
@@ -257,10 +370,13 @@ impl Journal {
         signer: &DeviceKeys,
         saved: Restored,
     ) -> Result<(Package, Vec<Receipt>, Cursor, Outputs), AppError> {
+        if Self::frame(&saved.bytes) {
+            return Self::restored(env, owner, signer, saved)?.into_complete();
+        }
         let parent = saved.cursor.previous().ok_or_else(invalid)?.clone();
         let (bytes, proof) =
             source_archive::restore_with_outputs(env, &owner.control.profile.profile()?, &parent)?;
-        let journal = Self::decode(&bytes)?;
+        let mut journal = Self::decode(&bytes)?;
         journal.lineage(owner)?;
         if journal.pending_book.is_some()
             || journal.revision.checked_add(1) != Some(saved.cursor.revision())
@@ -268,7 +384,8 @@ impl Journal {
         {
             return Err(invalid());
         }
-        let (package, outputs) = journal.inputs(env, owner, signer, saved.outputs.merge(proof)?)?;
+        let (package, outputs, _) =
+            journal.inputs(env, owner, signer, saved.outputs.merge(proof)?)?;
         let fetching = journal.fetching.ok_or_else(invalid)?;
         if fetching
             .discovered_sources(&package.sources, &package.state)?
@@ -299,7 +416,7 @@ impl Journal {
             .transpose()
     }
     pub fn store(
-        self,
+        mut self,
         env: &SyncEnv,
         life: &MutexGuard<'_, ()>,
         owner: &Workspace,
@@ -318,9 +435,11 @@ impl Journal {
             return Err(invalid());
         }
         self.before(before, owner)?;
-        let (package, outputs) = self.inputs(env, owner, signer, current.outputs)?;
+        let (package, outputs, parent_fetching) =
+            self.inputs(env, owner, signer, current.outputs)?;
         if current.bytes.starts_with(MAGIC) {
-            let old = Self::decode(&current.bytes)?;
+            let mut old = Self::decode(&current.bytes)?;
+            old.fetching = parent_fetching;
             old.current(before, owner)?;
             if self.source != old.source
                 || self.ancestors[..self.ancestors.len() - 1] != old.ancestors
@@ -376,11 +495,21 @@ impl Journal {
 impl Loaded {
     fn successor(&self, owner: &Workspace) -> Result<Journal, AppError> {
         self.journal.current(&self.cursor, owner)?;
-        let mut next = Journal::decode(&self.journal.encode()?)?;
+        let mut next = Journal::decode(&self.journal.encode_full()?)?;
+        next.version = 2;
+        next.inherited_book = Some(crypto::hash(self.journal.book.as_bytes()));
+        next.inherited = self
+            .journal
+            .fetching
+            .as_ref()
+            .map_or_else(Vec::new, Fetching::response_chains);
         next.revision = next.revision.checked_add(1).ok_or_else(invalid)?;
         next.ancestors.push(self.cursor.receipt().clone());
         next.before(&self.cursor, owner)?;
         Ok(next)
+    }
+    pub(super) fn compact(&self) -> bool {
+        self.journal.version == 2
     }
     pub fn intent(&self) -> &SignedFreeze {
         &self.journal.intent

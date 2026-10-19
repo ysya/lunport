@@ -1,4 +1,4 @@
-//! Protected source-snapshot highwater only. No journal, consent, phase or publication authority.
+//! Protected source-snapshot and verified-progress highwater. No consent or publication authority.
 use super::{
     source_archive::{self, Archived, Receipt},
     wire::{invalid, MAX_SAFE_INTEGER},
@@ -17,6 +17,8 @@ pub(super) struct Cursor {
     selection: Option<String>,
     previous: Option<Receipt>,
     receipt: Receipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<super::migration_journal::checkpoint::Checkpoint>,
 }
 pub(super) struct Restored {
     pub cursor: Cursor,
@@ -32,8 +34,10 @@ fn role(owner: &Workspace) -> Result<String, AppError> {
 }
 impl Cursor {
     pub(super) fn validate(&self, owner: &Workspace) -> Result<(), AppError> {
-        if self.version != 1
-            || self.revision == 0
+        if !matches!(
+            (self.version, self.checkpoint.is_some()),
+            (1, false) | (2, true)
+        ) || self.revision == 0
             || self.revision > MAX_SAFE_INTEGER
             || self.selection != owner.identity_slot
             || (self.revision == 1) != self.previous.is_none()
@@ -70,6 +74,31 @@ impl Cursor {
         let value: Self = serde_json::from_str(&encoded).map_err(|_| invalid())?;
         value.validate(owner)?;
         Ok(Some(value))
+    }
+    pub(super) fn same_archive(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.selection == other.selection
+            && self.previous == other.previous
+            && self.receipt == other.receipt
+    }
+    pub(super) fn progress_checkpoint(
+        &self,
+    ) -> Option<&super::migration_journal::checkpoint::Checkpoint> {
+        self.checkpoint.as_ref()
+    }
+    /// Only the planned driver can mint this opaque, validated continuation. Store it atomically
+    /// with the existing archive highwater so missing metadata can never fall back to older progress.
+    pub(super) fn checkpoint(
+        &self,
+        env: &SyncEnv,
+        owner: &Workspace,
+        checkpoint: super::migration_journal::checkpoint::Checkpoint,
+    ) -> Result<Restored, AppError> {
+        self.validate(owner)?;
+        let mut next = self.clone();
+        next.version = 2;
+        next.checkpoint = Some(checkpoint);
+        Self::persist(env, owner, Some(self), next)
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -169,6 +198,7 @@ impl Cursor {
             selection: owner.identity_slot.clone(),
             previous: None,
             receipt: archived.receipt().clone(),
+            checkpoint: None,
         };
         Self::persist(env, owner, None, next)
     }
@@ -180,12 +210,16 @@ impl Cursor {
         archived: &Archived,
     ) -> Result<Restored, AppError> {
         self.validate(owner)?;
+        if self.checkpoint.is_some() {
+            return Err(invalid());
+        }
         let next = Self {
             version: 1,
             revision: self.revision.checked_add(1).ok_or_else(invalid)?,
             selection: self.selection.clone(),
             previous: Some(self.receipt.clone()),
             receipt: archived.receipt().clone(),
+            checkpoint: None,
         };
         Self::persist(env, owner, Some(self), next)
     }

@@ -460,6 +460,8 @@ pub fn activate_probe(
     core.central_user_action = None;
     core.central_migration = None;
     core.adoption_read = None;
+    core.migration_plan = None;
+    core.migration_verifier = None;
     core.central_migration_frozen = false;
     core.central_poll = Default::default();
     core.save_blocked = None;
@@ -606,6 +608,8 @@ fn persist_candidate(
     }) {
         core.central_session = None;
         core.adoption_read = None;
+        core.migration_plan = None;
+        core.migration_verifier = None;
     }
     core.records = Some(candidate);
     core.generation = generation;
@@ -688,6 +692,8 @@ fn publish_central_material(
             core.save_blocked=Some("Central library reached disk but durability is uncertain. Restart to reload; all source material and stages are retained.".into());
             core.central_session = None;
             core.adoption_read = None;
+            core.migration_plan = None;
+            core.migration_verifier = None;
         }
         return Err(error);
     }

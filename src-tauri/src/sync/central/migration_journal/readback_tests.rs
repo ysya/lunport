@@ -1,13 +1,13 @@
 use super::{tests::fixture, *};
 use crate::sync::central::{migration_progress::Progress, migration_verify::Page};
-fn retired(plan: &Plan) -> Known {
+pub(super) fn retired(plan: &Plan) -> Known {
     serde_json::from_value::<Progress>(serde_json::json!({
         "manifest":plan.manifest,"manifest_digest":plan.manifest.digest().unwrap(),"phase":"retired",
         "staged":plan.rows.len().to_string(),"history_hash":plan.manifest.body.target_history_hash,
         "retired":plan.manifest.body.sources.len().to_string()
     })).unwrap().verify(plan, None).unwrap()
 }
-fn page(plan: &Plan, start: usize, end: usize) -> Page {
+pub(super) fn page(plan: &Plan, start: usize, end: usize) -> Page {
     serde_json::from_value(serde_json::json!({
         "records":&plan.rows[start..end],"sequence":plan.rows.len().to_string(),
         "history_hash":plan.manifest.body.target_history_hash,"epoch":1,"phase":"ready",

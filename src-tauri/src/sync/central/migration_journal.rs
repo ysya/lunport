@@ -16,10 +16,16 @@ use super::{
 };
 use crate::{error::AppError, sync::env::SyncEnv};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::MutexGuard};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, MutexGuard},
+};
 use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPMIGJ1\0";
 const CAP: usize = 1024 * 1024;
+mod cache;
+pub(super) mod checkpoint;
+pub(in crate::sync) use cache::{CachedPlan, CachedVerifier};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Journal {
@@ -36,12 +42,12 @@ pub(super) struct Loaded {
     pub journal: Journal,
     pub cursor: Cursor,
     pub package: Package,
-    pub plan: Plan,
+    pub plan: Arc<Plan>,
     pub outputs: Outputs,
 }
 struct Inputs {
     package: Package,
-    plan: Plan,
+    plan: Arc<Plan>,
     outputs: Outputs,
 }
 /// Starts or resumes the durable planned phase. This does not grant human consent.
@@ -62,6 +68,7 @@ pub(super) fn ensure(
         let owner = state.local.central.as_ref().ok_or_else(invalid)?;
         let saved = Cursor::load(env, &life, owner)?.ok_or_else(invalid)?;
         Package::complete_frame(&saved.bytes)
+            || super::capture_journal::Journal::frame(&saved.bytes)
     };
     let planned = if planned {
         Some(source_plan::ensure(env, keys, references)?)
@@ -159,7 +166,7 @@ impl Journal {
     fn lineage(&self, owner: &Workspace) -> Result<(), AppError> {
         if self.version != 1
             || self.ancestors.is_empty()
-            || self.ancestors.len() > 254
+            || self.ancestors.len() > 255
             || self.revision != self.ancestors.len() as u64 + 1
             || !self.ancestors.contains(&self.source)
             || !self.ancestors.contains(&self.plan)
@@ -234,19 +241,47 @@ impl Journal {
             let (bytes, proof) = source_archive::restore_with_outputs(env, &profile, receipt)?;
             outputs = outputs.merge(proof)?;
             if receipt == &self.source {
-                package = Some(Package::decode_local(&bytes)?);
-            }
-            if receipt == &self.plan {
+                package = Some(bytes);
+            } else if receipt == &self.plan {
                 encoded_plan = Some(bytes);
             }
         }
-        let package = package.ok_or_else(invalid)?;
+        let source_bytes = package.ok_or_else(invalid)?;
+        let encoded_plan = encoded_plan.ok_or_else(invalid)?;
+        let package = if Package::complete_frame(&source_bytes) {
+            Package::decode_local(&source_bytes)?
+        } else {
+            let cursor = Plan::source_cursor(&encoded_plan)?;
+            cursor.validate(owner)?;
+            if cursor.revision() < 2
+                || cursor.receipt() != &self.source
+                || self.ancestors.get(cursor.revision() as usize - 1) != Some(&self.source)
+                || cursor.previous() != self.ancestors.get(cursor.revision() as usize - 2)
+            {
+                return Err(invalid());
+            }
+            let completed = super::capture_journal::Journal::completed_source(
+                env,
+                owner,
+                signer,
+                Restored {
+                    cursor,
+                    bytes: source_bytes,
+                    outputs,
+                },
+            )?;
+            outputs = completed.3;
+            completed.0
+        };
         if package.state.local.central.as_ref() != Some(owner) {
             return Err(invalid());
         }
         let context = package.migration_context(&self.source)?;
-        let plan = Plan::decode_local(
-            &encoded_plan.ok_or_else(invalid)?,
+        let plan = cache::plan(
+            env,
+            &self.source,
+            &self.plan,
+            &encoded_plan,
             owner,
             keys,
             signer,
@@ -278,9 +313,10 @@ impl Journal {
         signer: &DeviceKeys,
         saved: Restored,
     ) -> Result<Loaded, AppError> {
-        let journal = Self::decode(&saved.bytes)?;
+        let mut journal = Self::decode(&saved.bytes)?;
         journal.current(&saved.cursor, owner)?;
         let inputs = journal.inputs(env, owner, keys, signer, saved.outputs)?;
+        checkpoint::restore(&saved.cursor, &inputs.plan, &mut journal)?;
         Ok(Loaded {
             journal,
             cursor: saved.cursor,
@@ -313,11 +349,34 @@ impl Journal {
     ) -> Result<Loaded, AppError> {
         let current = Cursor::load(env, life, owner)?.ok_or_else(invalid)?;
         let encoded = self.encode()?;
-        // A protected write may have succeeded before reporting failure: use that exact snapshot.
+        // Exact legacy archive retries remain readable after upgrading to protected checkpoints.
         if current.cursor.revision() == self.revision
             && current.bytes.as_slice() == encoded.as_slice()
         {
             return Self::restored(env, owner, keys, signer, current);
+        }
+        if current.bytes.starts_with(MAGIC)
+            && current.cursor.revision() >= checkpoint::ARCHIVE_WINDOW
+        {
+            let pending =
+                if current.cursor.progress_checkpoint().is_none() && &current.cursor == before {
+                    let restored = Cursor::load(env, life, owner)?.ok_or_else(invalid)?;
+                    let old = Self::restored(env, owner, keys, signer, restored)?;
+                    source_archive::resume_next(
+                        env,
+                        owner,
+                        before.receipt(),
+                        generation,
+                        &encoded,
+                        &old.outputs,
+                    )?
+                    .is_some()
+                } else {
+                    false
+                };
+            if !pending {
+                return checkpoint::store(self, env, life, owner, keys, signer, before, current);
+            }
         }
         if &current.cursor != before {
             return Err(invalid());
@@ -479,7 +538,8 @@ impl Loaded {
         self.plan.matches_history(
             keys,
             &package.structured_history(keys, references)?.into_rows(),
-        )
+        )?;
+        Ok(())
     }
     fn successor(&self, owner: &Workspace) -> Result<Journal, AppError> {
         self.journal.current(&self.cursor, owner)?;
@@ -496,6 +556,20 @@ impl Loaded {
         };
         next.before(&self.cursor, owner)?;
         Ok(next)
+    }
+    pub(super) fn verifier_cached(
+        &self,
+        env: &SyncEnv,
+        keys: &VaultKeys,
+    ) -> Result<Verifier, AppError> {
+        cache::verifier(env, self, keys)
+    }
+    pub(super) fn remember_verifier(
+        &self,
+        env: &SyncEnv,
+        verifier: Verifier,
+    ) -> Result<(), AppError> {
+        cache::remember_verifier(env, self, verifier)
     }
     pub fn verifier(&self, keys: &VaultKeys) -> Result<Verifier, AppError> {
         let retired = self.journal.progress.as_ref().ok_or_else(invalid)?;

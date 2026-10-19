@@ -451,3 +451,272 @@ fn completed_import_snapshots_join_package_history_without_resurrecting_later_re
         .contains_key(&record_key(RecordKind::Host, &host_id)));
     assert!(!package.state.local.keys.contains_key(&key));
 }
+#[test]
+fn v1_and_v2_backups_convert_hosts_after_real_archive_restore_without_activating_history() {
+    for version in [1, 2] {
+        let (device, package, keys, owner, _) = super::tests::fixture();
+        let parent = package.state.account.as_ref().unwrap().chain_id.clone();
+        let mut row = host("old-alias", "unused");
+        row.record.payload = serde_json::json!({"schema":1,"text":"Host old-alias\n  HostName legacy.invalid\n  PreferredAuthentications password,keyboard-interactive\n"});
+        let bytes = if version == 1 {
+            serde_json::to_vec(&serde_json::json!({"version":1,"chain_id":parent,"device_id":"d".repeat(32),"device_name":"Old","relay_url":package.state.relay_url,"cursor_seq":0,"password_sync":false,"records":{"host:old-alias":row},"sealed":{},"last_sync_ms":null,"last_error":null})).unwrap()
+        } else {
+            let mut old = crate::sync::state_v2::SyncStateV2::fresh("Old").unwrap();
+            old.relay_url = package.state.relay_url.clone();
+            old.account = Some(crate::sync::state_v2::AccountState::new(&parent));
+            let mut space = crate::sync::state_v2::SpaceState::new("old");
+            space.records.insert("host:old-alias".into(), row);
+            old.spaces.insert(parent.clone(), space);
+            serde_json::to_vec(&old).unwrap()
+        };
+        let package = replace(&device, package, &bytes);
+        let env = device.env();
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let archived = package.archive(&env, &life, &owner, 0).unwrap();
+        let restored = Package::restore(
+            &env,
+            &owner.control.profile.profile().unwrap(),
+            archived.receipt(),
+        )
+        .unwrap();
+        let frozen = freeze(restored, &owner, archived.receipt().operation()).unwrap();
+        let history = frozen
+            .structured_history(&keys, &BTreeMap::new())
+            .unwrap()
+            .into_rows();
+        let id = records_v3::migration_host_id(&parent, "old-alias").unwrap();
+        assert!(history.iter().any(|(i, data)| i.kind == "host"
+            && i.id == id
+            && matches!(data,Data::Host(host) if host.hostname == "legacy.invalid")));
+        assert!(matches!(
+            history
+                .iter()
+                .rev()
+                .find(|(i, _)| i.kind == "host" && i.id == id)
+                .unwrap()
+                .1,
+            Data::Deleted
+        ));
+        assert_eq!(
+            frozen.files.bytes[Path::new("data/sync-state.retained")].as_slice(),
+            bytes
+        );
+        let (_, _, signer) = migration_history::tests::initial();
+        migration_history::prepare(
+            &owner,
+            &keys,
+            &signer,
+            frozen.migration_context(archived.receipt()).unwrap(),
+            &history,
+        )
+        .unwrap();
+    }
+}
+#[test]
+fn old_backup_unknown_fields_missing_original_keys_and_stronger_floors_block_without_data_loss() {
+    for case in ["unknown", "key", "floor"] {
+        let (device, package, _, owner, _) = super::tests::fixture();
+        let parent = package.state.account.as_ref().unwrap().chain_id.clone();
+        let mut value = serde_json::json!({"version":1,"chain_id":parent,"device_id":"d".repeat(32),"device_name":"Old","relay_url":package.state.relay_url,"cursor_seq":0,"password_sync":false,"records":{},"last_sync_ms":null,"last_error":null});
+        match case {
+            "unknown" => value["unexpected_secret"] = "SOURCE-SENTINEL".into(),
+            "key" => value["chain_id"] = "f".repeat(64).into(),
+            _ => value["cursor_seq"] = 1.into(),
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let package = replace(&device, package, &bytes);
+        if case == "floor" {
+            assert!(freeze(package, &owner, &"1".repeat(32)).is_err());
+        } else {
+            assert!(package.record_inputs().is_err());
+        }
+        assert_eq!(
+            std::fs::read(
+                device
+                    .env()
+                    .state_path
+                    .parent()
+                    .unwrap()
+                    .join("sync-state.retained")
+            )
+            .unwrap(),
+            bytes
+        );
+    }
+}
+
+#[cfg(test)]
+mod completed_migration_evidence {
+    use super::*;
+    use crate::sync::record_migration::{self, inventory::read_all, MigrationConsent};
+    use crate::sync::{
+        central::{
+            inventory_keys::Snapshot, migration_files::Files, migration_history,
+            migration_sources::Sources, payload::Data, source_package::Package,
+        },
+        fake_relay::FakeRelay,
+        record_runtime,
+        testkit::{TestClock, TestDevice},
+    };
+    #[test]
+    fn actual_completed_local_migration_evidence_is_read_without_replaying_original_paths() {
+        let d=TestDevice::with_main_config("legacy-captured",&FakeRelay::new(),&TestClock::new(),"Host local\n HostName local.test\n PreferredAuthentications password,keyboard-interactive\n");
+        {
+            let mut core = d.runtime.core.lock().unwrap();
+            core.state.as_mut().unwrap().device_id = "a".repeat(32);
+            core.legacy_paused = true;
+        }
+        std::fs::create_dir_all(d.env().state_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &d.env().state_path,
+            serde_json::to_vec(&d.runtime.core.lock().unwrap().state).unwrap(),
+        )
+        .unwrap();
+        let receipt = record_migration::confirm(
+            &d.env(),
+            record_migration::prepare(&d.env(), None).unwrap(),
+            MigrationConsent {
+                old_clients_stopped_or_compatible: true,
+            },
+        )
+        .unwrap();
+        assert!(receipt.complete);
+        let mut selected = record_runtime::snapshot(&d.env()).unwrap().0;
+        let captured = Files::capture(&d.env(), None).unwrap();
+        let original_path = d.env().ssh_dir.join("config");
+        std::fs::remove_file(&original_path).unwrap();
+        assert!(!original_path.exists());
+        let images = read_all(&selected, &captured.bytes).unwrap();
+        assert_eq!(images.states.len(), 1);
+        assert_eq!(images.legacy.len(), 1);
+        assert!(images
+            .admitted
+            .iter()
+            .any(|path| path.extension().is_some_and(|v| v == "config")));
+        for case in ["pending", "missing", "unknown", "document"] {
+            let mut files = captured.bytes.clone();
+            let base = Path::new("data/migrations").join(&receipt.migration_id);
+            match case {
+                "pending" => {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&files[&base.join("journal.json")]).unwrap();
+                    value["phase"] = "publishing".into();
+                    files.insert(
+                        base.join("journal.json"),
+                        Zeroizing::new(serde_json::to_vec(&value).unwrap()),
+                    );
+                }
+                "missing" => {
+                    files.remove(&base.join("state.json"));
+                }
+                "unknown" => {
+                    files.insert(
+                        base.join("unknown.source"),
+                        Zeroizing::new(b"SENTINEL".to_vec()),
+                    );
+                }
+                _ => {
+                    let path = files
+                        .keys()
+                        .find(|path| path.extension().is_some_and(|v| v == "config"))
+                        .unwrap()
+                        .clone();
+                    files.insert(path, Zeroizing::new(b"CHANGED SOURCE".to_vec()));
+                }
+            }
+            assert!(read_all(&selected, &files).is_err(), "{case}");
+        }
+        let (owner, keys, _) = migration_history::tests::initial();
+        selected.version = records_v3::CENTRAL_STATE_VERSION;
+        selected.relay_url = owner.control.profile.origin.clone();
+        selected.local.central = Some(owner.clone());
+        std::fs::write(&d.env().state_path, serde_json::to_vec(&selected).unwrap()).unwrap();
+        let package = Package::assemble(
+            &selected,
+            d.env().state_path.file_name().unwrap().to_str().unwrap(),
+            Files::capture(&d.env(), None).unwrap(),
+            Sources::discover(&selected, None).unwrap(),
+            Snapshot::decode_local(br#"{"version":1,"keys":[]}"#).unwrap(),
+        )
+        .unwrap();
+        let history = package
+            .structured_history(&keys, &BTreeMap::new())
+            .unwrap()
+            .into_rows();
+        assert!(history
+            .iter()
+            .any(|(_, data)| matches!(data,Data::Host(host) if host.hostname=="local.test")));
+        let env = d.env();
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let archive = package.archive(&env, &life, &owner, 0).unwrap();
+        let restored = Package::restore(
+            &env,
+            &owner.control.profile.profile().unwrap(),
+            archive.receipt(),
+        )
+        .unwrap();
+        restored
+            .structured_history(&keys, &BTreeMap::new())
+            .unwrap();
+    }
+}
+
+#[test]
+fn unjoined_v2_own_slots_remain_retained_public_metadata_without_cloud_authority() {
+    use crate::sync::{fake_relay::FakeRelay, state_v2, testkit::TestClock};
+    let d = TestDevice::new("unjoined-v2-slots", &FakeRelay::new(), &TestClock::new());
+    let env = d.env();
+    std::fs::create_dir_all(env.state_path.parent().unwrap()).unwrap();
+    let (owner, keys, _) = migration_history::tests::initial();
+    let selected:SyncStateV3=serde_json::from_value(serde_json::json!({"version":8,"device_id":"d".repeat(32),"device_name":"Synthetic","relay_url":owner.control.profile.origin,"local":{"central":owner},"last_sync_ms":null,"last_error":null})).unwrap();
+    std::fs::write(&env.state_path, serde_json::to_vec(&selected).unwrap()).unwrap();
+    let id = "1".repeat(32);
+    let name = crate::sync::slot_rules::slot_file_name("own", &id);
+    let mut old = state_v2::SyncStateV2::fresh("Old unjoined").unwrap();
+    old.key_slots.insert(id.clone(),serde_json::from_value(serde_json::json!({"file_name":name,"payload":{"schema":1,"name":"own","mode":"own","origin_device_id":"legacy","created_at_ms":1,"public_key":null,"fingerprint":null,"key_type":null,"has_passphrase":null}})).unwrap());
+    std::fs::write(
+        env.state_path
+            .parent()
+            .unwrap()
+            .join("sync-state.v2-backup"),
+        serde_json::to_vec(&old).unwrap(),
+    )
+    .unwrap();
+    let root = env.ssh_dir.join("sshelter/keys");
+    std::fs::create_dir_all(&root).unwrap();
+    let raw = crate::sync::slot_rules::test_keys::encrypted();
+    std::fs::write(root.join(name), &raw).unwrap();
+    let package = Package::assemble(
+        &selected,
+        env.state_path.file_name().unwrap().to_str().unwrap(),
+        Files::capture(&env, None).unwrap(),
+        Sources::discover(&selected, None).unwrap(),
+        Snapshot::decode_local(br#"{"version":1,"keys":[]}"#).unwrap(),
+    )
+    .unwrap();
+    assert!(package.sources.chains().is_empty());
+    let input = package.record_inputs().unwrap();
+    assert!(input.rows().iter().all(
+        |row| row.location.position == Position::Retained && row.location.scope == Scope::Local
+    ));
+    let history = package
+        .structured_history(&keys, &BTreeMap::new())
+        .unwrap()
+        .into_rows();
+    assert!(history.iter().any(|(identity, data)| identity.kind == "key"
+        && identity.id == id
+        && matches!(data,Data::Key(private) if private.private()==raw)));
+    assert!(matches!(
+        history
+            .iter()
+            .rev()
+            .find(|(identity, _)| identity.kind == "keyslot" && identity.id == id)
+            .unwrap()
+            .1,
+        Data::Deleted
+    ));
+    assert_eq!(
+        std::fs::read(root.join(crate::sync::slot_rules::slot_file_name("own", &id))).unwrap(),
+        raw.as_bytes()
+    );
+}

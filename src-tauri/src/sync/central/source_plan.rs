@@ -78,7 +78,7 @@ pub(super) fn ensure(
     let owner = state.local.central.as_ref().ok_or_else(invalid)?;
     let signer = &session.identity.as_ref().ok_or_else(invalid)?.keys;
     let saved = Cursor::load(env, &life, owner)?.ok_or_else(invalid)?;
-    let planned = if Package::complete_frame(&saved.bytes) {
+    let planned = if Package::complete_frame(&saved.bytes) || Journal::frame(&saved.bytes) {
         let (package, _, before, outputs) = Journal::completed_source(env, owner, signer, saved)?;
         let context = package.migration_context(before.receipt())?;
         let history = package.structured_history(keys, references)?.into_rows();

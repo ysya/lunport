@@ -69,6 +69,21 @@ pub(super) fn ensure(env: &SyncEnv, keys: &VaultKeys) -> Result<Option<Completed
         if !capture_dispatch::ready(&loaded)? {
             return Ok(None);
         }
+        if loaded.compact() {
+            let (package, ancestors, cursor, outputs) = loaded.into_complete()?;
+            package.files.require_unchanged_after_archive(
+                env,
+                package.state.legacy_v1_backup.as_deref(),
+                &outputs,
+            )?;
+            check(env, &state, generation, &session, keys)?;
+            return Ok(Some(Completed {
+                package,
+                ancestors,
+                cursor,
+                outputs,
+            }));
+        }
         let (package, mut ancestors, before, outputs) = loaded.into_complete()?;
         let bytes = package.encode_local()?;
         let ordinal = before.receipt().next_ordinal()?;

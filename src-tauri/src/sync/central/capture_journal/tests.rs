@@ -212,7 +212,7 @@ fn corrupt_or_crossed_journal_fields_do_not_get_repaired() {
         }
         let mut bytes = MAGIC.to_vec();
         bytes.extend(serde_json::to_vec(&value).unwrap());
-        if let Ok(journal) = Journal::decode(&bytes) {
+        if let Ok(mut journal) = Journal::decode(&bytes) {
             assert!(
                 journal.before(&begun.cursor, &owner).is_err()
                     || journal
@@ -525,4 +525,72 @@ fn parent_discovery_remains_pending_until_its_exact_extended_freeze_is_saved() {
     let (complete, _, _, _) = fetched.into_complete().unwrap();
     assert!(complete.state.spaces.is_empty());
     assert_eq!(complete.sources.chains().len(), 2);
+}
+#[test]
+#[ignore = "explicit maximum frozen-source framing benchmark"]
+fn capacity_capture_delta_framing_avoids_cumulative_source_and_book_copies() {
+    let (_, _, _, begun) = fixture();
+    let mut journal = Journal::decode(&begun.journal.encode_full().unwrap()).unwrap();
+    // Framing-only synthetic ciphertext at the 65-source/32 MiB boundary. No semantic
+    // admission or migration permit is claimed for these opaque test responses.
+    journal.book = Zeroizing::new("b".repeat(1024 * 1024));
+    let mut responses = serde_json::Map::new();
+    let progress = progress(&begun);
+    let mut previous: Option<Fetching> = None;
+    let mut previous_book = None;
+    let (mut compact, mut repeated) = (0usize, 0usize);
+    for index in 0..65 {
+        let inherited = previous
+            .as_ref()
+            .map_or_else(Vec::new, Fetching::response_chains);
+        let chain = format!("{index:064x}");
+        let records: Vec<_> = (0..if index == 0 { 0 } else { 8 }).map(|row| serde_json::json!({
+            "seq":row+1,"idHash":format!("{row:064x}"),"kind":"host","nonce":"A".repeat(32),"ciphertext":"A".repeat(60000),"deleted":false,
+        })).collect();
+        responses.insert(
+            chain.clone(),
+            serde_json::json!({"chain":chain,"sequence":records.len(),"records":records}),
+        );
+        journal.fetching = Some(serde_json::from_value(serde_json::json!({"version":1,"local_context":"1".repeat(64),"keybook":"2".repeat(64),"operation":"3".repeat(32),"progress":progress,"responses":responses})).unwrap());
+        journal.inherited = inherited;
+        journal.inherited_book = previous_book
+            .as_ref()
+            .map(|book: &Zeroizing<String>| crypto::hash(book.as_bytes()));
+        let full = journal.encode_full().unwrap();
+        let delta = journal.encode().unwrap();
+        compact += delta.len();
+        repeated += full.len();
+        let mut restored = Journal::decode(&delta).unwrap();
+        if index > 0 {
+            let mut missing = Journal::decode(&delta).unwrap();
+            assert!(missing.inherit(None, None).is_err());
+        }
+        restored.inherit(previous, previous_book).unwrap();
+        assert_eq!(restored.book.as_str(), journal.book.as_str());
+        assert_eq!(
+            restored
+                .fetching
+                .as_ref()
+                .unwrap()
+                .encode_local()
+                .unwrap()
+                .as_slice(),
+            journal
+                .fetching
+                .as_ref()
+                .unwrap()
+                .encode_local()
+                .unwrap()
+                .as_slice()
+        );
+        previous = restored.fetching;
+        previous_book = Some(restored.book);
+    }
+    assert!(previous.unwrap().encode_local().unwrap().len() < MAX_FROZEN_BYTES);
+    assert!(repeated > 256 * 1024 * 1024);
+    assert!(compact < 40 * 1024 * 1024);
+    eprintln!(
+        "capacity framing: 65 sources, compact {} bytes versus repeated {} bytes",
+        compact, repeated
+    );
 }

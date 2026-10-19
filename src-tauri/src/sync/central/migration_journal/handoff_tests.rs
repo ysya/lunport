@@ -342,18 +342,21 @@ fn an_unbound_signed_plan_and_journal_never_pass_the_runtime_whole_source_gate()
         .cursor;
     let mut ancestors = source.ancestors;
     ancestors.push(cursor.receipt().clone());
-    Journal::planned(&cursor, source.cursor.receipt().clone(), ancestors, owner)
-        .unwrap()
-        .store(
-            &env,
-            &life,
-            owner,
-            &keys,
-            signer,
-            &cursor,
-            cursor.receipt().next_ordinal().unwrap(),
-        )
-        .unwrap();
+    assert!(
+        Journal::planned(&cursor, source.cursor.receipt().clone(), ancestors, owner)
+            .unwrap()
+            .store(
+                &env,
+                &life,
+                owner,
+                &keys,
+                signer,
+                &cursor,
+                cursor.receipt().next_ordinal().unwrap(),
+            )
+            .is_err()
+    );
+    assert!(Cursor::load(&env, &life, owner).unwrap().unwrap().cursor == cursor);
     drop(life);
     let exact = tree(&env);
     assert!(ensure(&env, &keys, &BTreeMap::new()).is_err());

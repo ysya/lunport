@@ -2,7 +2,7 @@
 
 This separate Compose runs the same application as managed Workers. A stable workerd gateway image owns the private entry point, permanent retirement registry and security floor. A separate application image exports only the core module into a read-only runtime mount. The application updater has no security volume, proxy capability or network access. One workerd process hosts both Workers through their existing named RPC; only Caddy can reach its private HTTP socket.
 
-Central account support remains a disabled preview. This configuration does not complete native migration, production HTTPS/provider verification or production restore validation. The existing [legacy relay Compose](../compose.yaml) remains available. This preview creates new installation namespaces; an existing relay needs a reviewed namespace/data/security-marker import before changing its public origin. Starting empty volumes cannot establish that old sync codes or revoked devices are safe.
+Central account support remains a disabled preview. The isolated deployment tests cover encrypted migration, device approval/revocation and consistent restore. Production HTTPS/origin verification and operator restore procedures still require the actual deployment environment. The existing [legacy relay Compose](../compose.yaml) remains available. This preview creates new installation namespaces; an existing relay needs a reviewed namespace/data/security-marker import before changing its public origin. Starting empty volumes cannot establish that old sync codes or revoked devices are safe.
 
 ## New installation
 
@@ -75,7 +75,16 @@ After building the two images, run the disposable integration check from the rep
 node relay/selfhost/central/smoke-test.mjs
 ```
 
-It creates a uniquely named project with synthetic settings, checks private provisioning, Caddy header replacement, proxy spoof rejection, independent storage, restart persistence, mutual exclusion and a monotonic floor, then removes only its own containers/volumes. `SELFHOST_TEST_SECURITY_IMAGE` and `SELFHOST_TEST_CORE_IMAGE` select other already built test images. The test enables central mode only in its disposable installation and checks Passkey discovery, page and bundle without OIDC. Its Caddy listener is loopback-only HTTP for forwarding checks; real HTTPS certificates, optional OIDC and multi-device/restore behavior still need deployment testing. Set `SELFHOST_TEST_BROWSER_MODULE` to an installed Playwright module and `SELFHOST_TEST_BROWSER_EXECUTABLE` to Chromium to also exercise an actual virtual authenticator through this deployment. That check intercepts a synthetic HTTPS origin and makes no claim about real TLS. No real SSH material or production data is used.
+It creates a uniquely named project with synthetic settings, checks private provisioning, Caddy header replacement, proxy spoof rejection, independent storage, restart persistence, consistent stopped-volume backup/restore, persisted login revocations, mutual exclusion and a monotonic floor, then removes only its own containers/volumes. `SELFHOST_TEST_SECURITY_IMAGE` and `SELFHOST_TEST_CORE_IMAGE` select other already built test images. The test enables central mode only in its disposable installation and checks Passkey discovery, page and bundle without OIDC. Its Caddy listener is loopback-only HTTP for forwarding checks; real HTTPS certificates and an optional OIDC provider still require their own deployment environment. Set `SELFHOST_TEST_BROWSER_MODULE` to an installed Playwright module and `SELFHOST_TEST_BROWSER_EXECUTABLE` to Chromium to also exercise an actual virtual authenticator through this deployment. That check intercepts a synthetic HTTPS origin and makes no claim about real TLS. No real SSH material or production data is used.
+
+For the central protocol check, bundle the test client with the locked relay development dependencies:
+
+```sh
+node relay/node_modules/esbuild/bin/esbuild relay/selfhost/central/protocol-test.ts \
+  --bundle --platform=node --format=esm --outfile=/tmp/lunport-protocol-test.mjs
+```
+
+Also set `SELFHOST_TEST_PROTOCOL_MODULE=/tmp/lunport-protocol-test.mjs` alongside the two browser settings when running the smoke test. It then creates synthetic devices, migrates the encrypted native fixture through the deployed HTTP gateway, permanently retires a legacy chain, denies an unapproved device, verifies a pairing confirmation, unwraps/decrypts the same history on the approved second device, and revokes that device. The stopped-volume restore must preserve the device denial, legacy retirement and login-family revocations. An application-only restore must preserve the independent security floor. This tests a consistent backup taken after those changes; it does not make an older backup safe or replace reconciliation with the latest security high-water state.
 
 ## Passkey accounts
 

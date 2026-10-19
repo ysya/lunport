@@ -11,6 +11,20 @@ use crate::sync::{
     testkit::TestDevice,
 };
 pub(super) fn fixture() -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
+    fixture_with(0)
+}
+pub(super) fn fixture_with(extra: usize) -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
+    fixture_sized(extra, None)
+}
+pub(super) fn fixture_capacity(
+    total: usize,
+) -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
+    fixture_sized(0, Some(total))
+}
+fn fixture_sized(
+    extra: usize,
+    total: Option<usize>,
+) -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
     let (device, package, keys, owner, _) = crate::sync::central::source_package::tests::fixture();
     let (_, _, signer) = migration_history::tests::initial();
     let env = device.env();
@@ -66,10 +80,15 @@ pub(super) fn fixture() -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded
         .unwrap()
         .cursor;
     let context = package.migration_context(second.receipt()).unwrap();
-    let history = package
+    let mut history = package
         .structured_history(&keys, &std::collections::BTreeMap::new())
         .unwrap()
         .into_rows();
+    for index in 1..=total.map_or(extra, |total| total.checked_sub(history.len()).unwrap()) {
+        history.push((super::super::payload::Identity {
+            kind: "host".into(), id: format!("{:016x}", if total.is_some() {index % 1024 + 1} else {index}), scope: Some(crate::sync::records_v3::HostScope::Local),
+        }, super::super::payload::Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":format!("capacity-{index}"),"hostname":"capacity.invalid","auth":"password"})).unwrap())));
+    }
     let plan = migration_history::prepare(&owner, &keys, &signer, context, &history).unwrap();
     let third = source_archive::next(
         &env,

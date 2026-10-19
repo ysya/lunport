@@ -34,6 +34,28 @@ pub(super) struct Plan {
     pages: Vec<Range<usize>>,
 }
 impl Plan {
+    pub(super) fn require_keys(
+        &self,
+        keys: &VaultKeys,
+        signer: &DeviceKeys,
+    ) -> Result<(), AppError> {
+        archive::target(&self.before, keys, signer).map(|_| ())
+    }
+    pub(super) fn require_read_keys(&self, keys: &VaultKeys) -> Result<(), AppError> {
+        let first = self.rows.first().ok_or_else(invalid)?;
+        let author = self
+            .before
+            .control
+            .verified_chain()?
+            .author_at(
+                &first.envelope.header.membership_head,
+                &first.envelope.header.author,
+            )
+            .cloned()
+            .ok_or_else(invalid)?;
+        let plaintext = first.envelope.verify(&author.signing)?.open(keys)?;
+        payload::admit(keys, &first.envelope.header, &plaintext).map(|_| ())
+    }
     pub fn before(&self) -> &Workspace {
         &self.before
     }

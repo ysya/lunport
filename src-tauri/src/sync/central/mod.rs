@@ -18,6 +18,7 @@ pub mod migration_freeze;
 mod migration_history;
 mod migration_progress;
 mod migration_journal;
+pub(in crate::sync) use migration_journal::{CachedPlan, CachedVerifier};
 mod capture_journal;
 mod capture_dispatch;
 mod source_complete;

@@ -1,7 +1,7 @@
 //! Passive partial frozen inputs. Only a complete set can become FrozenSet.
 use super::*;
 use crate::sync::{record::Envelope, relay::PullResponse};
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Response {
     chain: String,
@@ -9,7 +9,7 @@ struct Response {
     records: Vec<Envelope>,
 }
 /// Only explicit local encoding for an encrypted source archive. Never an IPC DTO or runtime.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::sync::central) struct Fetching {
     version: u32,
@@ -296,3 +296,5 @@ impl Fetching {
 }
 #[cfg(test)]
 mod tests;
+
+mod delta;
