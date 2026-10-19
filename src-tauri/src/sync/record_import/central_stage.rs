@@ -72,7 +72,7 @@ mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
 mod input;
 use input::Input;
-pub(crate) use input::{prepare as prepare_initial, resume as resume_initial};
+pub(crate) use input::{prepare as prepare_initial, prepare_reserved as prepare_initial_reserved, resume as resume_initial};
 mod publication;
 pub(super) use publication::publish_vault_image;
 pub(crate) use publication::{publish, Publication};
@@ -379,6 +379,9 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
     prepare_input(env, Input::Library(delta))
 }
 fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
+    prepare_with_reservation(env,input,None)
+}
+fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&central::InitialPreparation,&central::crypto::VaultKeys)>)->Result<Staged,AppError>{
     let delta = input.delta();
     if !cfg!(unix) {
         return Err(failure(
@@ -392,6 +395,10 @@ fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _publication = env.runtime.format_publication.lock().unwrap();
+    if let Some((prepared,keys))=reservation {
+        if !matches!(input,Input::Initial(_)) || input.binding()?!=Input::Initial(prepared.projection()).binding()? {return Err(failure("initial stage reservation does not match its projection"));}
+        prepared.check_locked(env,keys,&_lifecycle)?;
+    }
     drop(saved_source(env, input)?);
     if !super::pending_imports(env)?.is_empty() {
         return Err(failure(
@@ -411,7 +418,7 @@ fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
     {
         return Err(failure("source vault changed during preflight"));
     }
-    let operation = central::crypto::random_id(16)?;
+    let operation = match reservation {Some((prepared,_))=>prepared.operation().to_string(),None=>central::crypto::random_id(16)?};
     let paths = Paths::new(env, &operation)?;
     if paths.dir.exists() {
         return Err(failure("central stage ID is already occupied"));
@@ -477,6 +484,7 @@ fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
         bindings,
         phase: Phase::Prepared,
     };
+    if let Some((prepared,keys))=reservation {prepared.check_locked(env,keys,&_lifecycle)?;}
     save(&paths, &journal)?;
     super::step(super::PublishStep::JournalPrepared)?;
     execute(env, &paths, &mut journal, input)?;

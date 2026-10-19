@@ -92,6 +92,19 @@ impl<'a> Input<'a> {
 pub(crate) fn prepare(env: &SyncEnv, initial: &InitialProjection) -> Result<Staged, AppError> {
     with_background(env, |safe| prepare_input(safe, Input::Initial(initial)))
 }
+pub(crate) fn prepare_reserved(
+    env: &SyncEnv,
+    prepared: &crate::sync::central::InitialPreparation,
+    keys: &crate::sync::central::crypto::VaultKeys,
+) -> Result<Staged, AppError> {
+    with_background(env, |safe| {
+        prepare_with_reservation(
+            safe,
+            Input::Initial(prepared.projection()),
+            Some((prepared, keys)),
+        )
+    })
+}
 pub(crate) fn resume(
     env: &SyncEnv,
     operation: &str,

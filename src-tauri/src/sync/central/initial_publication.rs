@@ -24,8 +24,8 @@ struct Reservation {
     operation: String,
     observed: u64,
 }
-pub(super) struct Prepared {
-    pub initial: Candidate,
+pub(in crate::sync) struct Prepared {
+    initial: Candidate,
     loaded: Loaded,
     approval: Approval,
     generation: u64,
@@ -93,6 +93,9 @@ fn reserve(env: &SyncEnv, loaded: &Loaded) -> Result<Reservation, AppError> {
     Ok(checked)
 }
 impl Prepared {
+    pub(in crate::sync) fn projection(&self) -> &Candidate {
+        &self.initial
+    }
     pub fn operation(&self) -> &str {
         &self.reservation.operation
     }
@@ -106,7 +109,7 @@ impl Prepared {
         let _publication = env.runtime.format_publication.lock().unwrap();
         self.check_locked(env, keys, &life)
     }
-    fn check_locked(
+    pub(in crate::sync) fn check_locked(
         &self,
         env: &SyncEnv,
         keys: &VaultKeys,

@@ -26,6 +26,7 @@ mod migration_dispatch;
 mod migration_request;
 mod migration_verify;
 mod initial_publication;
+pub(in crate::sync) use initial_publication::Prepared as InitialPreparation;
 mod initial_projection;
 pub(super) use initial_projection::Candidate as InitialProjection;
 #[cfg(test)]
