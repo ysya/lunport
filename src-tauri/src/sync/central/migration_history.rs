@@ -17,6 +17,7 @@ use std::{
 const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024 - 256 * 1024;
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
+mod archive;
 
 pub(super) struct Context {
     pub operation: String,
@@ -47,43 +48,11 @@ pub(super) fn prepare(
     context: Context,
     history: &[(Identity, Data)],
 ) -> Result<Plan, AppError> {
-    before.validate()?;
-    before.require_key_recipients()?;
-    let replica = before.replica.as_ref().ok_or_else(invalid)?;
-    let chain = before.control.verified_chain()?;
-    if before.control.cutover
-        || before.control.phase != Phase::Enrolled
-        || signer.public() != before.control.device.keys
-        || before.bootstrap.is_some()
-        || before.replacement.is_some()
-        || !before.replacement_archives.is_empty()
-        || before.rotation.is_some()
-        || before.recovery.is_some()
-        || !before.epochs.is_empty()
-        || !before.observed_epochs.is_empty()
-        || replica.checkpoint.epoch != 1
-        || replica.checkpoint.sequence != 0
-        || replica.checkpoint.history_hash != ZERO
-        || !replica.current.is_empty()
-        || !replica.pending.is_empty()
-        || !replica.conflicts.is_empty()
-        || !replica.baseline_ready()
-        || history.is_empty()
-        || history.len() > 16384
-    {
+    if history.is_empty() || history.len() > 16384 {
         return Err(invalid());
     }
-    replica.verify_write_authority(&chain, before.control.auth_epoch, 1, &before.epochs)?;
-    let own = before
-        .own_wraps
-        .iter()
-        .find(|wrap| wrap.header.key_epoch == "1")
-        .ok_or_else(invalid)?;
-    let author = chain
-        .author_at(&own.header.membership_head, &own.header.author)
-        .ok_or_else(invalid)?;
-    let opened = own.open(signer, &own.header, &author.signing)?;
-    opened.verify_same(keys)?;
+    let chain = archive::target(before, keys, signer)?;
+    let replica = before.replica.as_ref().ok_or_else(invalid)?;
     let member = chain.current();
     let anchor = member.anchor();
     let mut body = Body {
@@ -283,7 +252,7 @@ pub(super) mod tests {
         before.validate().unwrap();
         (before, keys, signer)
     }
-    fn context() -> Context {
+    pub(super) fn context() -> Context {
         Context {
             operation: "7".repeat(32),
             inventory_digest: "8".repeat(64),
@@ -306,7 +275,7 @@ pub(super) mod tests {
             }),
         )
     }
-    fn library() -> Vec<(Identity, Data)> {
+    pub(super) fn library() -> Vec<(Identity, Data)> {
         let active = crate::sync::slot_rules::test_keys::plain();
         let inactive = crate::sync::slot_rules::test_keys::encrypted();
         vec![
