@@ -18,6 +18,7 @@ pub mod migration_freeze;
 mod migration_history;
 mod migration_progress;
 mod migration_journal;
+mod migration_request;
 mod migration_library;
 mod migration_sources;
 mod migration_materials;
