@@ -535,6 +535,8 @@ impl Loaded {
     }
 }
 
+pub(super) mod review;
+
 #[cfg(test)]
 mod tests;
 
