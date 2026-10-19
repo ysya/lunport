@@ -27,11 +27,15 @@ function setup(t) {
     "CREATE TABLE security_state(id INTEGER PRIMARY KEY,revoked INTEGER); INSERT INTO security_state VALUES(1,0)",
   );
   db.close();
-  const metadata = new DatabaseSync(path.join(app, name, "metadata.sqlite"));
-  metadata.exec(
-    "CREATE TABLE objects(id TEXT PRIMARY KEY); INSERT INTO objects VALUES('synthetic')",
-  );
-  metadata.close();
+  for (const role of ["accounts", "vaults", "passkeys"]) {
+    const ns = path.join(app, `lunport-${install}-${role}`);
+    fs.mkdirSync(ns, { recursive: true });
+    const metadata = new DatabaseSync(path.join(ns, "metadata.sqlite"));
+    metadata.exec(
+      "CREATE TABLE objects(id TEXT PRIMARY KEY); INSERT INTO objects VALUES('synthetic')",
+    );
+    metadata.close();
+  }
   return { root, app, security, plan: checkpoint(app, install) };
 }
 test("imports exact namespace files and IDs, preserves source and is idempotent", (t) => {
@@ -119,11 +123,14 @@ test("a partial namespace publication resumes but a wrong prior receipt never ch
     path.join(f.security, "central-authority-import.json"),
     "{}",
   );
-  const before = checkpoint(f.security, install);
+  const before = fs.readFileSync(path.join(f.security, name, id + ".sqlite"));
   assert.throws(() =>
     importAuthority(f.app, f.security, install, f.plan.sha256),
   );
-  assert.deepEqual(checkpoint(f.security, install), before);
+  assert.deepEqual(
+    fs.readFileSync(path.join(f.security, name, id + ".sqlite")),
+    before,
+  );
   fs.unlinkSync(path.join(f.security, "central-authority-import.json"));
   importAuthority(f.app, f.security, install, f.plan.sha256);
   assert.deepEqual(checkpoint(f.security, install), f.plan);
@@ -188,4 +195,27 @@ test("a malformed SQLite database cannot be published or become a handoff receip
     false,
   );
   assert.equal(fs.existsSync(path.join(f.security, name)), false);
+});
+
+test("missing whole namespaces or metadata cannot masquerade as empty authority", (t) => {
+  for (const remove of ["passkeys", "accounts/metadata.sqlite"]) {
+    const f = setup(t);
+    const target = remove.includes("/")
+      ? path.join(f.app, `lunport-${install}-accounts`, "metadata.sqlite")
+      : path.join(f.app, `lunport-${install}-${remove}`);
+    fs.rmSync(target, { recursive: true });
+    assert.throws(() => checkpoint(f.app, install));
+    assert.throws(() =>
+      importAuthority(f.app, f.security, install, f.plan.sha256),
+    );
+    assert.deepEqual(fs.readdirSync(f.security), []);
+  }
+  const f = setup(t);
+  importAuthority(f.app, f.security, install, f.plan.sha256);
+  fs.rmSync(path.join(f.security, `lunport-${install}-vaults`), {
+    recursive: true,
+  });
+  assert.throws(() =>
+    reconcileAuthority(f.app, f.security, install, f.plan.sha256),
+  );
 });

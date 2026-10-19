@@ -61,7 +61,7 @@ function fileDigest(name) {
   }
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-function inventory(root, installation) {
+function inventory(root, installation, allowMissing = false) {
   if (!HEX32.test(installation)) fail();
   directory(root);
   let total = 0,
@@ -81,6 +81,8 @@ function inventory(root, installation) {
             return { name, ...value };
           })
       : [];
+    if (!allowMissing && !files.some((file) => file.name === "metadata.sqlite"))
+      fail();
     for (const file of files)
       if (file.name.endsWith("-wal") || file.name.endsWith("-shm")) {
         const base = file.name.replace(/-(wal|shm)$/, "");
@@ -248,7 +250,7 @@ export function importAuthority(app, security, installation, expected) {
       fs.closeSync(fd);
     }
   }
-  const existing = checkpoint(security, installation);
+  const existing = { value: inventory(security, installation, true) };
   // Check every destination before creating any stage; never replace newer authority.
   for (let i = 0; i < ROLES.length; i++)
     if (
@@ -262,7 +264,7 @@ export function importAuthority(app, security, installation, expected) {
     if (
       directory(target, true) &&
       same(
-        checkpoint(security, installation).value.namespaces.find(
+        inventory(security, installation, true).namespaces.find(
           (v) => v.role === ns.role,
         ),
         ns,
@@ -340,7 +342,7 @@ export function reconcileAuthority(
   if (!HEX64.test(expectedCurrent)) fail();
   const latest = checkpoint(current, installation);
   if (latest.sha256 !== expectedCurrent) fail();
-  const older = checkpoint(candidate, installation);
+  const older = { value: inventory(candidate, installation, true) };
   const differences = latest.value.namespaces
     .filter((ns, i) => !same(ns, older.value.namespaces[i]))
     .map((ns) => ns.role);

@@ -72,7 +72,7 @@ docker compose run --rm core-bundle
 docker compose --profile setup run --rm authority-operator plan
 ```
 
-Run the offline import before starting the new runtime or control image; workerd creates namespace metadata at startup. An existing floor without an authority pin remains unavailable. Do not run `provision-new`. The plan lists exact fixed namespaces, object filenames, byte counts and hashes; preserve its SHA-256 outside the candidate backup. The offline operator requires Node's built-in SQLite support, bundled in its separate image. It mounts original application storage read-only, holds the runtime lock, validates SQLite in private scratch copies and preserves every source byte.
+Run the offline import before starting the new runtime or control image; workerd creates namespace metadata at startup. An existing floor without an authority pin remains unavailable. Do not run `provision-new`. All three original namespace directories and their `metadata.sqlite` files are required; missing namespace data is never inferred to be empty. The plan lists exact fixed namespaces, object filenames, byte counts and hashes; preserve its SHA-256 outside the candidate backup. The offline operator requires Node's built-in SQLite support, bundled in its separate image. It mounts original application storage read-only, holds the runtime lock, validates SQLite in private scratch copies and preserves every source byte.
 
 ```sh
 docker compose --profile setup run --rm authority-operator import --expected <plan-sha256>

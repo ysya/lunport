@@ -14,13 +14,13 @@ async function fixture(selected = installation) {
     roles.map(async (role) => ({
       role,
       name: `lunport-${selected}-${role}`,
-      files: [
-        {
-          name: "b".repeat(64) + ".sqlite",
+      files: await Promise.all(
+        ["b".repeat(64) + ".sqlite", "metadata.sqlite"].map(async (name) => ({
+          name,
           bytes: bytes.length,
           sha256: await hash(bytes),
-        },
-      ],
+        })),
+      ),
     })),
   );
   const value = { version: 1, installation: selected, namespaces },
@@ -37,7 +37,7 @@ async function fixture(selected = installation) {
           return Response.json(
             ns.files.map((file) => ({ name: file.name, type: "file" })),
           );
-        if (name === `/${ns.name}/${ns.files[0].name}`)
+        if (ns.files.some((file) => name === `/${ns.name}/${file.name}`))
           return new Response(bytes, {
             headers: { "content-length": String(bytes.length) },
           });
@@ -84,6 +84,23 @@ it("verifies every fixed namespace and database byte before permitting a private
       verifyAuthorityImport(installation, f.sha256, f.text, storage),
     ).rejects.toThrow();
   }
+  const missingMetadata = await fixture();
+  for (const ns of missingMetadata.value.namespaces)
+    ns.files = ns.files.filter((file) => file.name !== "metadata.sqlite");
+  const incompleteDigest = await hash(
+    new TextEncoder().encode(JSON.stringify(missingMetadata.value)),
+  );
+  await expect(
+    verifyAuthorityImport(
+      installation,
+      incompleteDigest,
+      JSON.stringify({
+        value: missingMetadata.value,
+        sha256: incompleteDigest,
+      }),
+      missingMetadata.storage,
+    ),
+  ).rejects.toThrow();
   await expect(
     verifyAuthorityImport("c".repeat(32), f.sha256, f.text, f.storage),
   ).rejects.toThrow();

@@ -52,7 +52,9 @@ export async function verifyAuthorityImport(
       bytes.set(chunk, offset);
       offset += chunk.length;
     }
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+      bytes,
+    );
   };
   const listing = async (name: string) => {
     const reply = await storage.fetch(new Request("http://authority/" + name));
@@ -74,6 +76,7 @@ export async function verifyAuthorityImport(
       ns.role !== roles[i] ||
       ns.name !== name ||
       !Array.isArray(ns.files) ||
+      !ns.files.some((entry: any) => entry?.name === "metadata.sqlite") ||
       !root.some((entry) => entry.name === name && entry.type === "directory")
     )
       throw invalid();
