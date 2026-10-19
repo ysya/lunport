@@ -685,6 +685,19 @@ describe("signed central initial-library migration", () => {
     expect(
       (await json(await s.child.retireMigration(fresh, s.operation))).phase,
     ).toBe("retired");
+    // Joining devices need the original signed receipt after authorization advances.
+    const retired = await json(await s.child.migrationStatus(fresh));
+    expect(retired).toMatchObject({
+      manifest: s.manifest,
+      manifest_digest: await migrationDigest(s.manifest),
+      phase: "retired",
+      staged: s.manifest.body.target_sequence,
+      history_hash: s.manifest.body.target_history_hash,
+      retired: String(s.manifest.body.sources.length),
+    });
+    expect((await s.child.migrationStatus(s.actor)).status).toBe(403);
+    await evictDurableObject(s.child);
+    expect(await json(await s.child.migrationStatus(fresh))).toEqual(retired);
   });
 
   it("keeps a durable commit receipt without replaying over later edits", async () => {

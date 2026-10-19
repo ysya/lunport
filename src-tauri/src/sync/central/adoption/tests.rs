@@ -23,12 +23,25 @@ struct Fixture {
     rows: Vec<super::super::rekey::Version>,
     wrap: super::super::crypto::WrappedKeys,
     origin: String,
+    manifest: super::super::migration::SignedMigration,
 }
 fn fixture(local: bool) -> Fixture {
     fixture_at(local, false)
 }
 fn fixture_at(local: bool, empty_minimum: bool) -> Fixture {
-    let (first, keys) = super::super::capture_dispatch::material_ready_for_adoption_test();
+    fixture_legacy(local, empty_minimum, false)
+}
+fn fixture_legacy(local: bool, empty_minimum: bool, legacy: bool) -> Fixture {
+    let (first, keys) = if legacy {
+        super::super::capture_dispatch::material_ready_legacy_for_adoption_test()
+    } else {
+        super::super::capture_dispatch::material_ready_for_adoption_test()
+    };
+    let legacy_phrase = first
+        .keychain
+        .get(crate::sync::state::MNEMONIC_ACCOUNT)
+        .unwrap()
+        .map(Zeroizing::new);
     super::super::source_complete::ensure(&first.env(), &keys)
         .unwrap()
         .unwrap();
@@ -46,6 +59,7 @@ fn fixture_at(local: bool, empty_minimum: bool) -> Fixture {
     .unwrap();
     let verified = super::super::migration_dispatch::verified_for_test(&first.env(), &keys);
     let rows = verified.loaded.plan.rows.clone();
+    let manifest = verified.loaded.plan.manifest.clone();
     let first_owner = verified.loaded.plan.before().clone();
     fs::set_permissions(
         first.env().state_path.parent().unwrap(),
@@ -224,6 +238,25 @@ fn fixture_at(local: bool, empty_minimum: bool) -> Fixture {
         device_access_denied: false,
         tokens_started: std::time::Instant::now(),
     }));
+    if legacy {
+        let phrase = legacy_phrase.as_ref().unwrap();
+        let parent = crate::sync::crypto::derive_account(phrase).unwrap();
+        assert!(manifest
+            .body
+            .sources
+            .iter()
+            .any(|source| source.chain_id == parent.chain_id));
+        peer.keychain
+            .set(crate::sync::state::MNEMONIC_ACCOUNT, phrase)
+            .unwrap();
+        record_runtime::mutate_records(&env, |state| {
+            let mut state = state.clone();
+            state.account = Some(crate::sync::state_v2::AccountState::new(&parent.chain_id));
+            state.relay_url = anchor.origin.clone();
+            Ok(state)
+        })
+        .unwrap();
+    }
     Fixture {
         first,
         peer,
@@ -232,6 +265,7 @@ fn fixture_at(local: bool, empty_minimum: bool) -> Fixture {
         rows,
         wrap,
         origin: anchor.origin,
+        manifest,
     }
 }
 struct Service {
@@ -850,113 +884,135 @@ fn an_enrolled_peer_can_adopt_a_later_epoch_only_with_the_verified_original_sour
         recovery_read::{EpochBundle, HistoryPage, RecoveryVault},
         recovery_revalidation::Bridge,
     };
-    let f = fixture(false);
-    let env = f.peer.env();
-    let source = record_runtime::snapshot(&env).unwrap().0;
-    let owner = source.local.central.as_ref().unwrap();
-    let first = controller::context(&f.first.env()).unwrap();
-    let identity = first.identity.as_ref().unwrap();
-    let chain = f
-        .proof
-        .verify(owner.control.anchor.as_ref().unwrap(), None)
-        .unwrap();
-    let zero = Checkpoint {
-        epoch: 1,
-        sequence: 0,
-        history_hash: "0".repeat(64),
-    };
-    let checkpoint = Checkpoint {
-        epoch: 1,
-        sequence: f.rows.len() as u64,
-        history_hash: f
-            .rows
-            .last()
-            .map(|r| r.history_hash.clone())
-            .unwrap_or_else(|| "0".repeat(64))
-            .clone(),
-    };
-    let plan = super::super::rekey::prepare(
-        &chain,
-        &identity.id,
-        &identity.keys,
-        owner.control.personal_vault.as_ref().unwrap(),
-        3,
-        &f.keys,
-        &checkpoint,
-        &zero,
-        &f.rows,
-    )
-    .unwrap();
-    let peer = controller::context(&env).unwrap();
-    let peer_identity = peer.identity.as_ref().unwrap();
-    let wrap = plan
-        .wraps
-        .iter()
-        .find(|w| w.header.recipient == peer_identity.id)
-        .unwrap()
-        .clone();
-    let snapshot = Snapshot {
-        membership_head: chain.current().head().into(),
-        auth_epoch: 3,
-        vault: RecoveryVault {
-            vault: owner.control.personal_vault.clone().unwrap(),
-            epoch: 2,
-            phase: "ready".into(),
-            wrap,
-            committed: Some(EpochBundle {
-                manifest: plan.manifest.clone(),
-                wraps: plan.wraps.clone(),
-            }),
-            commits: vec![plan.manifest.clone()],
-            sequence: plan.rows.len().to_string(),
-            history_hash: plan
+    for legacy in [false, true] {
+        let f = fixture_legacy(false, false, legacy);
+        let env = f.peer.env();
+        let source = record_runtime::snapshot(&env).unwrap().0;
+        let owner = source.local.central.as_ref().unwrap();
+        let first = controller::context(&f.first.env()).unwrap();
+        let identity = first.identity.as_ref().unwrap();
+        let chain = f
+            .proof
+            .verify(owner.control.anchor.as_ref().unwrap(), None)
+            .unwrap();
+        let zero = Checkpoint {
+            epoch: 1,
+            sequence: 0,
+            history_hash: "0".repeat(64),
+        };
+        let checkpoint = Checkpoint {
+            epoch: 1,
+            sequence: f.rows.len() as u64,
+            history_hash: f
                 .rows
                 .last()
                 .map(|r| r.history_hash.clone())
                 .unwrap_or_else(|| "0".repeat(64))
                 .clone(),
-        },
-    };
-    let page = HistoryPage {
-        records: plan.rows,
-        sequence: snapshot.vault.sequence.clone(),
-        history_hash: snapshot.vault.history_hash.clone(),
-        membership_head: snapshot.membership_head.clone(),
-        epoch: 2,
-        phase: "ready".into(),
-    };
-    let transcript = Transcript {
-        snapshot,
-        proof: f.proof.clone(),
-        bridges: vec![Bridge {
-            epoch: 2,
-            digests: f
-                .rows
-                .iter()
-                .map(|r| super::super::rekey::SourceDigest {
-                    sequence: r.sequence.clone(),
-                    digest: r.digest.clone(),
-                })
-                .collect(),
-        }],
-        pages: vec![page],
-    };
-    let read = transcript.verify(owner, peer_identity, None).unwrap();
-    assert!(read.epoch_acceptance().is_some());
-    let candidate =
-        Candidate::adopt(&source, &read, &"c".repeat(64), env.now(), &BTreeMap::new()).unwrap();
-    assert!(!candidate.delta().required_material().is_empty());
-    candidate
-        .shadow()
-        .local
-        .central
-        .as_ref()
-        .unwrap()
-        .validate()
+        };
+        let plan = super::super::rekey::prepare(
+            &chain,
+            &identity.id,
+            &identity.keys,
+            owner.control.personal_vault.as_ref().unwrap(),
+            3,
+            &f.keys,
+            &checkpoint,
+            &zero,
+            &f.rows,
+        )
         .unwrap();
-    let mut forged = transcript;
-    forged.bridges.clear();
-    assert!(forged.verify(owner, peer_identity, None).is_err());
+        let peer = controller::context(&env).unwrap();
+        let peer_identity = peer.identity.as_ref().unwrap();
+        let wrap = plan
+            .wraps
+            .iter()
+            .find(|w| w.header.recipient == peer_identity.id)
+            .unwrap()
+            .clone();
+        let snapshot = Snapshot {
+            membership_head: chain.current().head().into(),
+            auth_epoch: 3,
+            vault: RecoveryVault {
+                vault: owner.control.personal_vault.clone().unwrap(),
+                epoch: 2,
+                phase: "ready".into(),
+                wrap,
+                committed: Some(EpochBundle {
+                    manifest: plan.manifest.clone(),
+                    wraps: plan.wraps.clone(),
+                }),
+                commits: vec![plan.manifest.clone()],
+                sequence: plan.rows.len().to_string(),
+                history_hash: plan
+                    .rows
+                    .last()
+                    .map(|r| r.history_hash.clone())
+                    .unwrap_or_else(|| "0".repeat(64))
+                    .clone(),
+            },
+        };
+        let page = HistoryPage {
+            records: plan.rows,
+            sequence: snapshot.vault.sequence.clone(),
+            history_hash: snapshot.vault.history_hash.clone(),
+            membership_head: snapshot.membership_head.clone(),
+            epoch: 2,
+            phase: "ready".into(),
+        };
+        let transcript = Transcript {
+            snapshot,
+            proof: f.proof.clone(),
+            bridges: vec![Bridge {
+                epoch: 2,
+                digests: f
+                    .rows
+                    .iter()
+                    .map(|r| super::super::rekey::SourceDigest {
+                        sequence: r.sequence.clone(),
+                        digest: r.digest.clone(),
+                    })
+                    .collect(),
+            }],
+            pages: vec![page],
+        };
+        let read = transcript.verify(owner, peer_identity, None).unwrap();
+        assert!(read.epoch_acceptance().is_some());
+        if legacy {
+            let evidence: legacy::Evidence = serde_json::from_value(
+                json!({"version":1,"proof":f.proof,"status":retired_status(&f)}),
+            )
+            .unwrap();
+            evidence.require_read(&read, &transcript).unwrap();
+            let mut manifest = f.manifest.clone();
+            manifest.body.target_history_hash = "f".repeat(64);
+            manifest =
+                super::super::migration::SignedMigration::sign(manifest.body, &identity.keys)
+                    .unwrap();
+            let mut status = retired_status(&f);
+            status["manifest"] = serde_json::to_value(&manifest).unwrap();
+            status["manifest_digest"] = manifest.digest().unwrap().into();
+            status["history_hash"] = "f".repeat(64).into();
+            let forged: legacy::Evidence =
+                serde_json::from_value(json!({"version":1,"proof":f.proof,"status":status}))
+                    .unwrap();
+            assert!(forged.require_read(&read, &transcript).is_err());
+        }
+        let candidate =
+            Candidate::adopt(&source, &read, &"c".repeat(64), env.now(), &BTreeMap::new()).unwrap();
+        assert!(!candidate.delta().required_material().is_empty());
+        candidate
+            .shadow()
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .validate()
+            .unwrap();
+        let mut forged = transcript;
+        forged.bridges.clear();
+        assert!(forged.verify(owner, peer_identity, None).is_err());
+    }
 }
 struct StateWriteFault<'a> {
     inner: &'a crate::sync::testkit::MemKeychain,
@@ -1008,10 +1064,12 @@ fn archive_bytes(env: &SyncEnv) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
 }
 #[test]
 fn archive_attachment_uncertainty_recovers_the_same_remote_plan_and_final_ciphertext() {
-    for field in ["remote", "plan", "final_read"] {
+    for field in ["legacy", "remote", "plan", "final_read"] {
         for after in [false, true] {
-            let f = fixture(false);
-            let s = service(&f);
+            let f = fixture_legacy(false, false, field == "legacy");
+            let mut s = service(&f);
+            let _retirement =
+                (field == "legacy").then(|| migration_status_mock(&mut s, &f, retired_status(&f)));
             api::with_test_transport(&f.origin, &s.server.url(), || {
                 let owner = record_runtime::snapshot(&f.peer.env())
                     .unwrap()
@@ -1122,4 +1180,157 @@ fn approved_peer_waits_without_capturing_local_data_until_the_first_library_is_p
             .flat_map(|s| s.records.values())
             .any(|r| r.record.payload["alias"] == "added-while-waiting"));
     });
+}
+
+fn retired_status(f: &Fixture) -> Value {
+    json!({"manifest": f.manifest, "manifest_digest": f.manifest.digest().unwrap(), "phase":"retired", "staged": f.manifest.body.target_sequence, "history_hash": f.manifest.body.target_history_hash, "retired": f.manifest.body.sources.len().to_string()})
+}
+fn migration_status_mock(s: &mut Service, f: &Fixture, status: Value) -> mockito::Mock {
+    let vault = &f.manifest.body.vault_id;
+    s.server
+        .mock("GET", format!("/v2/vaults/{vault}/migration").as_str())
+        .with_body(status.to_string())
+        .create()
+}
+#[test]
+fn retired_legacy_source_peer_preserves_local_edits_and_originals_across_review_and_cold_reentry() {
+    use crate::sync::record::{record_key, LocalRecord, Record, RecordKind};
+    let f = fixture_legacy(true, false, true);
+    let parent = f.manifest.body.sources[0].chain_id.clone();
+    // This retained/local draft has never reached the frozen parent snapshot.
+    // Additive joining must preserve it without treating it as a remote update.
+    record_runtime::mutate_records(&f.peer.env(), |state| {
+        let mut state = state.clone();
+        // Local hosts and managed material were already created by the fixture.
+        state.account.as_mut().unwrap().records.insert(
+            record_key(RecordKind::Meta, crate::sync::record::ACCOUNT_META_ID),
+            LocalRecord {
+                record: Record {
+                    kind: RecordKind::Meta,
+                    id: crate::sync::record::ACCOUNT_META_ID.into(),
+                    version: 1,
+                    updated_at_ms: 1,
+                    device_id: state.device_id.clone(),
+                    deleted: false,
+                    payload: json!({"schema_version":3,"created_by_app_version":"synthetic"}),
+                },
+                seq: 0,
+                dirty: true,
+            },
+        );
+        Ok(state)
+    })
+    .unwrap();
+    let mut s = service(&f);
+    let status = migration_status_mock(&mut s, &f, retired_status(&f));
+    let before = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        assert_eq!(s.rows.lock().unwrap().as_slice(), f.rows.as_slice());
+        let archives = archive_bytes(&f.peer.env());
+        let loaded = load(&f.peer.env()).unwrap().unwrap();
+        assert!(loaded.state.legacy.is_some());
+        assert!(loaded.legacy_evidence(&f.peer.env()).unwrap().is_some());
+        drop(loaded);
+        reopen(&f.peer);
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let active = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert!(active.local.central.as_ref().unwrap().control.cutover);
+        assert_ne!(active.account.as_ref().unwrap().chain_id, parent);
+        let local_key = before
+            .local
+            .keys
+            .values()
+            .find(|key| key.public.name == "peer-key")
+            .unwrap();
+        assert!(active
+            .local
+            .keys
+            .values()
+            .any(|key| key.public.fingerprint == local_key.public.fingerprint));
+        assert!(active
+            .spaces
+            .values()
+            .flat_map(|space| space.records.values())
+            .any(|host| host.record.payload["alias"] == "peer-local-host"));
+        let latest = archive_bytes(&f.peer.env());
+        for (path, bytes) in archives {
+            assert_eq!(latest.get(&path), Some(&bytes));
+        }
+        assert!(s.rows.lock().unwrap().starts_with(&f.rows));
+        assert_eq!(before.account.as_ref().unwrap().chain_id, parent);
+    });
+    status.assert();
+}
+#[test]
+fn incomplete_retirement_wrong_source_or_missing_original_target_blocks_before_local_capture() {
+    for case in [
+        "phase",
+        "retired",
+        "signature",
+        "source",
+        "floor",
+        "origin",
+        "target",
+    ] {
+        let f = fixture_legacy(false, false, true);
+        let mut s = service(&f);
+        let mut status = retired_status(&f);
+        match case {
+            "phase" => status["phase"] = "committed".into(),
+            "retired" => status["retired"] = "0".into(),
+            "signature" => status["manifest"]["signature"] = "AAAA".into(),
+            "source" => {
+                let session = controller::context(&f.first.env()).unwrap();
+                let mut manifest = f.manifest.clone();
+                manifest.body.sources[0].chain_id = "f".repeat(64);
+                let manifest = super::super::migration::SignedMigration::sign(
+                    manifest.body,
+                    &session.identity.as_ref().unwrap().keys,
+                )
+                .unwrap();
+                status["manifest_digest"] = manifest.digest().unwrap().into();
+                status["manifest"] = serde_json::to_value(manifest).unwrap();
+            }
+            "origin" => {
+                record_runtime::mutate_records(&f.peer.env(), |state| {
+                    let mut state = state.clone();
+                    state.relay_url = "https://other.invalid".into();
+                    Ok(state)
+                })
+                .unwrap();
+            }
+            "floor" => {
+                record_runtime::mutate_records(&f.peer.env(), |state| {
+                    let mut state = state.clone();
+                    state.account.as_mut().unwrap().cursor_seq = 2;
+                    Ok(state)
+                })
+                .unwrap();
+            }
+            _ => {
+                s.rows.lock().unwrap().clear();
+            }
+        }
+        let _m = migration_status_mock(&mut s, &f, status);
+        let before = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        let env = f.peer.env();
+        let scope = Scope::from_state(&before).unwrap();
+        api::with_test_transport(&f.origin, &s.server.url(), || {
+            if case == "target" {
+                assert_eq!(
+                    migration_flow::prepare(&env, &scope)
+                        .unwrap()
+                        .progress
+                        .phase,
+                    "waiting"
+                );
+            } else {
+                assert!(migration_flow::prepare(&env, &scope).is_err(), "{case}");
+            }
+            assert!(load(&env).unwrap().is_none());
+            assert_eq!(record_runtime::snapshot(&env).unwrap().0, before);
+        });
+    }
 }

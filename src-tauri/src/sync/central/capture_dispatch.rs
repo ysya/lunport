@@ -368,3 +368,8 @@ mod tests;
 
 #[cfg(all(test,unix))]
 pub(super) fn material_ready_for_adoption_test()->(crate::sync::testkit::TestDevice,VaultKeys){tests::material_ready_fixture_at(true)}
+
+#[cfg(all(test, unix))]
+pub(super) fn material_ready_legacy_for_adoption_test() -> (crate::sync::testkit::TestDevice, VaultKeys) {
+    tests::material_ready_fixture_legacy(true, true)
+}

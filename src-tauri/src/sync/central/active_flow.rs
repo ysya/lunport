@@ -482,7 +482,7 @@ impl Reading {
         Ok(true)
     }
     pub(super) fn capture(&mut self, extra: Vec<Checkpoint>) -> Result<(), AppError> {
-        if self.read.is_some() || self.transcript.is_some() || extra.len() > 1 {
+        if self.read.is_some() || self.transcript.is_some() || extra.len() > 2 {
             return Err(invalid());
         }
         let plan = self.plan.as_ref().ok_or_else(invalid)?;

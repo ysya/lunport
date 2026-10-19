@@ -52,6 +52,36 @@ pub(in crate::sync::central) struct Inventory {
     minima: BTreeMap<String, u64>,
 }
 impl Inventory {
+    /// A retired initial migration must cover every observed local/recovery source floor.
+    pub(in crate::sync::central) fn require_retired_sources(
+        &self,
+        sources: &[super::super::migration::Source],
+    ) -> Result<(), AppError> {
+        let mut minima = self.minima.clone();
+        for row in &self.rows {
+            let chain = match &row.location.scope {
+                Scope::Local => continue,
+                Scope::Account(id) | Scope::Space(id) => id,
+            };
+            minima
+                .entry(chain.clone())
+                .and_modify(|floor| *floor = (*floor).max(row.sequence))
+                .or_insert(row.sequence);
+        }
+        for (chain, minimum) in minima {
+            if sources
+                .iter()
+                .find(|source| source.chain_id == chain)
+                .is_none_or(|source| {
+                    super::super::wire::number(&source.sequence, true)
+                        .map_or(true, |floor| floor < minimum)
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
     pub fn rows(&self) -> &[Item] {
         &self.rows
     }

@@ -148,20 +148,22 @@ pub(super) fn capture(
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
 ) -> Result<Captured, AppError> {
-    capture_inner(env, keys, references, false)
+    capture_inner(env, keys, references, false, None)
 }
 pub(super) fn capture_adoption(
     env: &SyncEnv,
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
+    retired: Option<&super::adoption::legacy::Witness>,
 ) -> Result<Captured, AppError> {
-    capture_inner(env, keys, references, true)
+    capture_inner(env, keys, references, true, retired)
 }
 fn capture_inner(
     env: &SyncEnv,
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
     adoption: bool,
+    retired: Option<&super::adoption::legacy::Witness>,
 ) -> Result<Captured, AppError> {
     controller::require_enabled()?;
     let _life = env.runtime.lifecycle.lock().unwrap();
@@ -182,10 +184,12 @@ fn capture_inner(
     let readonly = NonInteractiveKeychain(env.keychain);
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
-    if adoption && !sources.chains().is_empty() {
-        return Err(AppError::Other("This device still has legacy cloud sources. Finish their complete migration before merging this device into an existing Vault; all sources are retained.".into()));
-    }
     let record_inputs = Inventory::from_state(&sources, &before)?;
+    if adoption && !sources.chains().is_empty() {
+        retired
+            .ok_or_else(invalid)?
+            .require_inventory(owner, &sources, &record_inputs)?;
+    }
     let private_inputs = record_inputs.admit_known()?.into_keys();
     drop(record_inputs);
     let mut initial = super::source_archive::initial_inputs(env, &_life, owner)?;
@@ -233,6 +237,13 @@ fn capture_inner(
                 return Err(crate::sync::runtime::superseded());
             }
         }
+    }
+    if adoption && !package.sources.chains().is_empty() {
+        retired.ok_or_else(invalid)?.require_inventory(
+            owner,
+            &package.sources,
+            &package.record_inputs()?,
+        )?;
     }
     drop(package.materials(keys, references)?);
     let latest_account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);

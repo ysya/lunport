@@ -640,7 +640,30 @@ pub(super) fn material_ready_fixture() -> (TestDevice, VaultKeys) {
     material_ready_fixture_at(false)
 }
 pub(super) fn material_ready_fixture_at(canonical: bool) -> (TestDevice, VaultKeys) {
-    let (device, keys, session) = source_capture::tests::fixture(false);
+    material_ready_fixture_legacy(canonical, false)
+}
+pub(super) fn material_ready_fixture_legacy(
+    canonical: bool,
+    legacy: bool,
+) -> (TestDevice, VaultKeys) {
+    let (device, keys, session) = source_capture::tests::fixture(legacy);
+    // Real ciphertext in the frozen parent makes adoption prove more than an empty source marker.
+    let frozen = if legacy {
+        let state = record_runtime::snapshot(&device.env()).unwrap().0;
+        let mut parent = record_runtime::read_account_keys(&state, &device.keychain)
+            .unwrap()
+            .unwrap();
+        let row = crate::sync::state_v2::SealedRecord::seal(&parent, &crate::sync::record::Record {
+            kind: crate::sync::record::RecordKind::Key,
+            id: "9".repeat(32), version: 1, updated_at_ms: 1,
+            device_id: state.device_id.clone(), deleted: false,
+            payload: serde_json::json!({"schema":1,"private_key":crate::sync::slot_rules::test_keys::plain()}),
+        }, 1).unwrap();
+        parent.clear_sensitive();
+        vec![row.envelope]
+    } else {
+        vec![]
+    };
     if canonical {
         // Older unit fixtures used an arbitrary Vault id. Actual account reads pin the
         // deterministic personal id, so integration fixtures use the production derivation.
@@ -703,10 +726,22 @@ pub(super) fn material_ready_fixture_at(canonical: bool) -> (TestDevice, VaultKe
     let env = device.env();
     for _ in 0..10 {
         let step = with_transport(&env, &keys, |_, loaded, action| match action {
-            Action::Freeze { .. } => Ok(Received::Freeze(progress(loaded, true))),
+            Action::Freeze { .. } => {
+                let mut proof = progress(loaded, true);
+                if legacy {
+                    proof.sources = loaded
+                        .intent()
+                        .body
+                        .source_order()
+                        .iter()
+                        .map(|id| legacy_checkpoint(id, 1, &frozen).unwrap())
+                        .collect();
+                }
+                Ok(Received::Freeze(proof))
+            }
             Action::Fetch(_) => Ok(Received::Fetch(PullResponse {
-                records: vec![],
-                latest_seq: 0,
+                records: frozen.clone(),
+                latest_seq: if legacy { 1 } else { 0 },
             })),
             _ => panic!("local step cannot cross HTTP"),
         })

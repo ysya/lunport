@@ -28,6 +28,7 @@ use std::{
     sync::{Arc, MutexGuard},
 };
 use zeroize::Zeroizing;
+pub(in crate::sync::central) mod legacy;
 mod merge;
 mod rebase;
 const CAP: usize = 32768;
@@ -40,6 +41,8 @@ struct State {
     source: Cursor,
     floor: Checkpoint,
     archives: Vec<Receipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy: Option<Receipt>,
     remote: Option<Receipt>,
     plan: Option<Receipt>,
     final_read: Option<Receipt>,
@@ -64,6 +67,7 @@ struct Frame {
     deny_unknown_fields
 )]
 enum Body {
+    Legacy(legacy::Evidence),
     Remote(Transcript),
     Plan(merge::Plan),
     Rebase {
@@ -143,7 +147,7 @@ impl State {
             }
             previous = receipt;
         }
-        for r in [&self.remote, &self.plan, &self.final_read]
+        for r in [&self.legacy, &self.remote, &self.plan, &self.final_read]
             .into_iter()
             .flatten()
         {
@@ -288,9 +292,36 @@ impl Loaded {
         }
         Ok(value.body)
     }
+    fn legacy_evidence(&self, env: &SyncEnv) -> Result<Option<legacy::Evidence>, AppError> {
+        match &self.state.legacy {
+            Some(receipt) => match self.body(env, receipt)? {
+                Body::Legacy(evidence) => {
+                    evidence.witness(self.owner()?)?.require_inventory(
+                        self.owner()?,
+                        &self.package.sources,
+                        &self.package.record_inputs()?,
+                    )?;
+                    Ok(Some(evidence))
+                }
+                _ => Err(invalid()),
+            },
+            None if self.package.sources.chains().is_empty() => Ok(None),
+            None => Err(invalid()),
+        }
+    }
     fn remote(&self, env: &SyncEnv) -> Result<Transcript, AppError> {
         match self.body(env, self.state.remote.as_ref().ok_or_else(invalid)?)? {
-            Body::Remote(r) => Ok(r),
+            Body::Remote(r) => {
+                if let Some(legacy) = self.legacy_evidence(env)? {
+                    let read = r.verify(
+                        self.owner()?,
+                        self.session.identity.as_ref().ok_or_else(invalid)?,
+                        None,
+                    )?;
+                    legacy.require_read(&read, &r)?;
+                }
+                Ok(r)
+            }
             _ => Err(invalid()),
         }
     }
@@ -407,6 +438,12 @@ impl Loaded {
         let mut next = self.state.clone();
         let receipt = archived.receipt().clone();
         match frame(&encoded)?.body {
+            Body::Legacy(_) => {
+                if next.legacy.is_some() || next.remote.is_some() {
+                    return Err(invalid());
+                }
+                next.legacy = Some(receipt.clone());
+            }
             Body::Remote(_) => {
                 if next.remote.is_some() {
                     return Err(invalid());
@@ -488,9 +525,15 @@ fn load(env: &SyncEnv) -> Result<Option<Loaded>, AppError> {
         session: controller::context(env)?,
     }))
 }
-fn initialize(env: &SyncEnv, scope: &Scope, reading: &Reading) -> Result<Loaded, AppError> {
+fn initialize(
+    env: &SyncEnv,
+    scope: &Scope,
+    reading: &Reading,
+    retired: Option<&legacy::Witness>,
+) -> Result<Loaded, AppError> {
     scope.check(env)?;
-    let captured = super::source_capture::capture_adoption(env, reading.keys()?, &BTreeMap::new())?;
+    let captured =
+        super::source_capture::capture_adoption(env, reading.keys()?, &BTreeMap::new(), retired)?;
     let life = env.runtime.lifecycle.lock().unwrap();
     let _vault = env
         .runtime
@@ -525,6 +568,7 @@ fn initialize(env: &SyncEnv, scope: &Scope, reading: &Reading) -> Result<Loaded,
         source: source.cursor,
         floor: reading.checkpoint()?,
         archives: vec![],
+        legacy: None,
         remote: None,
         plan: None,
         final_read: None,
@@ -574,11 +618,16 @@ fn read_remote(
         }
         _ => {
             let mut r = Reading::begin_bounded(env, OwnerPath::Current, selected, &check, budget)?;
-            r.capture(
-                loaded
-                    .map(|l| vec![l.state.floor.clone()])
-                    .unwrap_or_default(),
-            )?;
+            r.capture(match loaded {
+                Some(l) => {
+                    let mut floors = vec![l.state.floor.clone()];
+                    if let Some(proof) = l.legacy_evidence(env)? {
+                        floors.push(proof.witness(l.owner()?)?.checkpoint().clone());
+                    }
+                    floors
+                }
+                None => vec![],
+            })?;
             r
         }
     };
@@ -650,7 +699,7 @@ fn progress(loaded: &Loaded, total: usize, phase: &'static str) -> Progress {
     Progress {
         phase,
         mode: "join",
-        legacy_sources: false,
+        legacy_sources: !loaded.package.sources.chains().is_empty(),
         total: total.max(if loaded.state.remote.is_some() {
             loaded.state.floor.sequence as usize
         } else {
@@ -727,8 +776,28 @@ fn run_once(
                 None,
             );
         }
-        reading.capture(vec![])?;
-        let next = initialize(env, scope, &reading)?;
+        let state = scope.check(env)?;
+        let retired = if state.account.is_some() {
+            Some(legacy::fetch(
+                env,
+                scope,
+                reading.before(),
+                reading.session(),
+                budget,
+            )?)
+        } else {
+            None
+        };
+        reading.capture(
+            retired
+                .as_ref()
+                .map(|w| vec![w.checkpoint().clone()])
+                .unwrap_or_default(),
+        )?;
+        let mut next = initialize(env, scope, &reading, retired.as_ref())?;
+        if let Some(retired) = retired {
+            next.append(env, Body::Legacy(retired.evidence()))?;
+        }
         env.runtime.core.lock().unwrap().adoption_read = Some(Box::new(ReadingCache { reading }));
         loaded = Some(next);
     }
@@ -741,6 +810,23 @@ fn continue_loaded(
     budget: &Budget,
     mut loaded: Loaded,
 ) -> Result<Preparation, AppError> {
+    if !loaded.package.sources.chains().is_empty() && loaded.state.legacy.is_none() {
+        let evidence = match loaded.pending(env)? {
+            Some(Frame {
+                source,
+                body: Body::Legacy(evidence),
+                ..
+            }) if source == *loaded.state.source.receipt() => evidence,
+            Some(_) => return Err(invalid()),
+            None => legacy::fetch(env, scope, loaded.owner()?, &loaded.session, budget)?.evidence(),
+        };
+        evidence.witness(loaded.owner()?)?.require_inventory(
+            loaded.owner()?,
+            &loaded.package.sources,
+            &loaded.package.record_inputs()?,
+        )?;
+        loaded.append(env, Body::Legacy(evidence))?;
+    }
     if loaded.state.final_read.is_none() && loaded.pending(env)?.is_none() {
         loaded.check(env)?;
     }
@@ -1081,6 +1167,9 @@ impl InitialTransaction for Prepared {
             self.loaded.session.identity.as_ref().ok_or_else(invalid)?,
             Some(&self.loaded.state.floor),
         )?;
+        if let Some(legacy) = self.loaded.legacy_evidence(env)? {
+            legacy.require_read(&read, &self.proof)?;
+        }
         read.keys().verify_same(keys)?;
         Ok(())
     }

@@ -88,6 +88,9 @@ struct SecretRecord<'a> {
     payload: &'a RawValue,
 }
 impl Sources {
+    pub(in crate::sync::central) fn legacy_origin(&self) -> Option<&str> {
+        self.legacy_origin.as_deref()
+    }
     /// Read-only historical admission. Never discovers or releases a new transport credential.
     fn historical_subset(&self, state: &SyncStateV3) -> Result<Self, AppError> {
         let subset = if let Some(account) = &state.account {
