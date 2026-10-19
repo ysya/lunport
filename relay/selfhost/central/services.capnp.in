@@ -1,0 +1,50 @@
+using Workerd = import "/workerd/workerd.capnp";
+# Per-installation namespace identities are derived only from the explicit stable installation ID.
+const security :Workerd.Service = (name = "security", worker = (
+  modules = [(name = "security.js", esModule = embed "/relay/security/index.js")],
+  compatibilityDate = "2026-08-20",
+  durableObjectNamespaces = [
+    (className = "LegacyRetirementStore", uniqueKey = "lunport-__INSTALLATION__-retirement", enableSql = true),
+    (className = "SecurityFloorStore", uniqueKey = "lunport-__INSTALLATION__-floor", enableSql = true),
+    (className = "IpLimiter", uniqueKey = "lunport-__INSTALLATION__-security-ip", enableSql = true),
+  ],
+  durableObjectStorage = (localDisk = "security-storage"),
+  bindings = [
+    (name = "LEGACY_RETIREMENT", durableObjectNamespace = "LegacyRetirementStore"),
+    (name = "SECURITY_FLOOR", durableObjectNamespace = "SecurityFloorStore"),
+    (name = "IP_LIMIT", durableObjectNamespace = "IpLimiter"),
+    (name = "VAULT", durableObjectNamespace = (className = "VaultStore", serviceName = "core")),
+    (name = "CORE", service = (name = "core", entrypoint = "CentralSyncBackend")),
+    (name = "SELFHOST_PROXY_KEY", fromEnvironment = "SELFHOST_PROXY_KEY"),
+    (name = "SECURITY_INSTALLATION", fromEnvironment = "SECURITY_INSTALLATION"),
+    (name = "CENTRAL_ORIGIN", fromEnvironment = "CENTRAL_ORIGIN"),
+  ],
+));
+const core :Workerd.Service = (name = "core", worker = (
+  modules = [(name = "core.js", esModule = embed "/core/index.js")],
+  compatibilityDate = "2026-08-20",
+  durableObjectNamespaces = [
+    (className = "ChainStore", uniqueKey = "lunport-__INSTALLATION__-chains", enableSql = true),
+    (className = "IpLimiter", uniqueKey = "lunport-__INSTALLATION__-core-ip", enableSql = true),
+    (className = "AccountStore", uniqueKey = "lunport-__INSTALLATION__-accounts", enableSql = true),
+    (className = "VaultStore", uniqueKey = "lunport-__INSTALLATION__-vaults", enableSql = true),
+  ],
+  durableObjectStorage = (localDisk = "application-storage"),
+  bindings = [
+    (name = "CHAIN", durableObjectNamespace = "ChainStore"),
+    (name = "IP_LIMIT", durableObjectNamespace = "IpLimiter"),
+    (name = "ACCOUNT", durableObjectNamespace = "AccountStore"),
+    (name = "VAULT", durableObjectNamespace = "VaultStore"),
+    (name = "LEGACY_RETIREMENT", durableObjectNamespace = (className = "LegacyRetirementStore", serviceName = "security")),
+    (name = "CENTRAL_PRIVATE_CORE", text = "1"),
+    (name = "CENTRAL_ENABLED", fromEnvironment = "CENTRAL_ENABLED"),
+    (name = "CENTRAL_ORIGIN", fromEnvironment = "CENTRAL_ORIGIN"),
+    (name = "OIDC_ISSUER", fromEnvironment = "OIDC_ISSUER"),
+    (name = "OIDC_JWKS_URL", fromEnvironment = "OIDC_JWKS_URL"),
+    (name = "OIDC_API_AUDIENCE", fromEnvironment = "OIDC_API_AUDIENCE"),
+    (name = "OIDC_NATIVE_CLIENT_ID", fromEnvironment = "OIDC_NATIVE_CLIENT_ID"),
+    (name = "OIDC_SYNC_SCOPE", fromEnvironment = "OIDC_SYNC_SCOPE"),
+  ],
+));
+const securityStorage :Workerd.Service = (name = "security-storage", disk = (path = "/security-data", writable = true));
+const applicationStorage :Workerd.Service = (name = "application-storage", disk = (path = "/data", writable = true));

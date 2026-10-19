@@ -1,0 +1,12 @@
+**
+!package.json
+!package-lock.json
+!src/
+!src/**
+!selfhost/
+!selfhost/central/
+!selfhost/central/Dockerfile
+!selfhost/central/*.capnp
+!selfhost/central/*.capnp.in
+!selfhost/central/*.ts
+!selfhost/central/*.sh
