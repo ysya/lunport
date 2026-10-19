@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPSRCPK1";
 const FROZEN_MAGIC: &[u8; 8] = b"LPSRCPK2";
 const MAX_BYTES: usize = 192 * 1024 * 1024;
+mod coverage;
 /// Only explicit native encode/decode. Never a frontend DTO or an SSH private-key export.
 pub(super) struct Package {
     state_name: String,
@@ -95,6 +96,23 @@ impl Package {
             result.push(image);
         }
         if result.iter().any(|image| image.local.central.as_ref().is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())) { return Err(invalid()); }
+        // A historical image may name an older backup that the selected state no longer names.
+        // It is complete only when that exact backup is captured and read as a state image too.
+        for image in &result {
+            if let Some(backup) = &image.legacy_v1_backup {
+                if backup.is_empty()
+                    || backup.len() > 255
+                    || matches!(backup.as_str(), "." | "..")
+                    || backup.contains(['/', '\\', '\0'])
+                    || !(backup == &self.state_name
+                        || backup.starts_with("sync-state")
+                        || self.state.legacy_v1_backup.as_deref() == Some(backup.as_str()))
+                    || !self.files.bytes.contains_key(&Path::new("data").join(backup))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
         Ok(result)
     }
     /// The caller captures observed decryptors using Materials::from_files; no live key fallback here.
@@ -162,6 +180,7 @@ impl Package {
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
+        self.require_supported_files()?;
         let private_inputs = self.record_inputs()?.admit_known()?.into_keys();
         Materials::from_files_with_key_inputs(
             &self.state, keys, &self.files, &self.decryptors, references, private_inputs,
@@ -173,6 +192,7 @@ impl Package {
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<super::migration_library::History, AppError> {
+        self.require_supported_files()?;
         if let Some(frozen) = &self.frozen {
             drop(self.record_inputs()?); // Compare the captured state image before deriving a passive candidate.
             let prepared = frozen.reconcile_with_retained(&self.sources, &self.state, &self.retained_states()?)?.prepare()?;
@@ -388,7 +408,7 @@ pub(in crate::sync::central) mod tests {
                 },
             )
             .unwrap();
-        fs::create_dir_all(root.join("imports/unknown-empty")).unwrap();
+        fs::create_dir_all(root.join("imports")).unwrap();
         let mut retained = state.clone();
         retained.version = records_v3::LOCAL_CONFLICT_STATE_VERSION;
         retained.local.central = None;
@@ -454,7 +474,7 @@ pub(in crate::sync::central) mod tests {
         assert!(restored
             .files
             .directories
-            .contains(Path::new("data/imports/unknown-empty")));
+            .contains(Path::new("data/imports")));
         let materials = restored.materials(&keys, &BTreeMap::new()).unwrap();
         assert_eq!(materials.retained, 1);
         assert!(materials.active.is_empty());

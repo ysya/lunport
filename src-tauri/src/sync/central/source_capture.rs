@@ -329,6 +329,34 @@ mod tests {
             .exists());
     }
     #[test]
+    fn unknown_recovery_inputs_stop_actual_capture_before_archiving_or_publishing() {
+        for (path, directory) in [
+            ("imports/empty-unknown", true),
+            ("migrations/old/journal.json", false),
+            ("central-recovery-archives/old.lparch", false),
+        ] {
+            let (device, keys, _) = fixture(false);
+            let readonly = ReadOnly { inner: &device.keychain };
+            let mut env = device.env();
+            env.keychain = &readonly;
+            let root = env.state_path.parent().unwrap();
+            let source = root.join(path);
+            if directory {
+                fs::create_dir_all(&source).unwrap();
+            } else {
+                fs::create_dir_all(source.parent().unwrap()).unwrap();
+                fs::write(&source, b"UNREVIEWED-SECRET-SENTINEL").unwrap();
+            }
+            let before = fs::read(&env.state_path).unwrap();
+            let error = capture(&env, &keys, &BTreeMap::new()).err().unwrap().to_string();
+            assert!(!error.contains("UNREVIEWED-SECRET-SENTINEL"));
+            assert_eq!(fs::read(&env.state_path).unwrap(), before);
+            assert_eq!(device.runtime.core.lock().unwrap().generation, 9);
+            assert!(!root.join("central-source-archives").exists());
+            assert!(source.exists());
+        }
+    }
+    #[test]
     fn local_and_joined_source_capture_are_read_only_noninteractive_and_leave_the_single_core_unchanged(
     ) {
         for joined in [false, true] {

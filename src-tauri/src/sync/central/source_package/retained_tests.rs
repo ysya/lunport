@@ -125,6 +125,8 @@ fn opaque_unsupported_foreign_or_unknown_state_images_block_semantic_inventory()
         "parent",
         "origin",
         "central-outbox",
+        "missing-backup",
+        "uncovered-backup",
     ] {
         let (device, package, keys, _, _) = super::tests::fixture();
         let mut retained = image(&package);
@@ -134,6 +136,8 @@ fn opaque_unsupported_foreign_or_unknown_state_images_block_semantic_inventory()
             "unknown-field" => value["unreviewed_secret"] = "SECRET-SENTINEL".into(),
             "parent" => value["account"]["chain_id"] = "f".repeat(64).into(),
             "origin" => value["relay_url"] = "https://other.invalid".into(),
+            "missing-backup" => value["legacy_v1_backup"] = "old-backup-only-in-retained-state".into(),
+            "uncovered-backup" => value["legacy_v1_backup"] = "vault.json".into(),
             "central-outbox" => {
                 retained.version = records_v3::CENTRAL_STATE_VERSION;
                 retained.local.central = package.state.local.central.clone();
