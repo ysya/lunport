@@ -137,6 +137,22 @@ impl Receipt {
         }
         Ok(())
     }
+    pub(super) fn matches_selected(&self, owner: &Workspace) -> Result<(), AppError> {
+        self.validate()?;
+        self.context.matches_owner(owner)?;
+        if self.context.device != owner.control.device {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn follows(&self, before: &Self) -> Result<bool, AppError> {
+        self.validate()?;
+        before.validate()?;
+        Ok(self.context.scope()? == before.context.scope()?
+            && self.context.snapshot != before.context.snapshot
+            && super::wire::number(&self.context.generation, true)?
+                >= super::wire::number(&before.context.generation, true)?)
+    }
     pub fn operation(&self) -> &str {
         &self.context.operation
     }

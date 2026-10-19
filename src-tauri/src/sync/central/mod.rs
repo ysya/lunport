@@ -42,6 +42,7 @@ pub mod recovery_flow;
 pub mod recovery_revalidation;
 mod archive_directory;
 mod source_archive;
+mod source_cursor;
 mod inventory_keys;
 mod source_package;
 mod source_capture;
