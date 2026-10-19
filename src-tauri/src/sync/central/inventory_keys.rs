@@ -126,7 +126,7 @@ impl Keychain for Capture<'_> {
     }
 }
 /// Only explicit native encode/decode; no Debug/Serialize/OS fallback.
-pub(super) struct Snapshot {
+pub(in crate::sync) struct Snapshot {
     keys: BTreeMap<String, Zeroizing<String>>,
 }
 fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {

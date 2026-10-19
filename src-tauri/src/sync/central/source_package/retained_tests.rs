@@ -350,3 +350,100 @@ fn different_historical_material_with_the_same_logical_key_id_never_replaces_cur
         matches!(&rows.iter().rev().find(|(identity, _)| identity.id == "1".repeat(32) && identity.kind == "keyslot").unwrap().1, Data::Keyslot(slot) if slot.public.name == "Current new key")
     );
 }
+
+#[test]
+fn completed_import_snapshots_join_package_history_without_resurrecting_later_removals() {
+    use crate::sync::{record_import, record_runtime, records_v3::importer::ImportOptions};
+    let (device, package, keys, _, _) = super::tests::fixture();
+    let env = device.env();
+    record_runtime::activate_probe(
+        &mut device.runtime.core.lock().unwrap(),
+        record_runtime::probe_startup(&env.state_path, "import-history"),
+    )
+    .unwrap();
+    let source = device.home.path().join("historical-import");
+    let private = device.home.path().join("historical-private");
+    std::fs::write(&private, crate::sync::slot_rules::test_keys::encrypted()).unwrap();
+    std::fs::write(
+        &source,
+        format!(
+            "Host retained-import
+ HostName retained-import.invalid
+ IdentityFile {}
+",
+            private.display()
+        ),
+    )
+    .unwrap();
+    let mut prepared =
+        record_import::prepare(&source, &ImportOptions::new(device.home.path().into())).unwrap();
+    let key = prepared.preview().key_references[0].key_id.clone();
+    record_import::select_key_copy(&mut prepared, &key).unwrap();
+    let receipt = record_import::confirm(&env, prepared).unwrap();
+    let host_id = receipt.host_ids[0].clone();
+    record_runtime::mutate_records(&env, |state| {
+        let mut next = state.clone();
+        next.local
+            .hosts
+            .remove(&record_key(RecordKind::Host, &host_id));
+        next.local.keys.remove(&key);
+        if let Some(row) = next
+            .account
+            .as_mut()
+            .and_then(|a| a.records.get_mut(&record_key(RecordKind::KeySlot, &key)))
+        {
+            row.record.deleted = true;
+            row.record.payload = serde_json::Value::Null;
+            row.record.version += 1;
+            row.record.updated_at_ms += 1;
+            row.dirty = true;
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let selected = record_runtime::snapshot(&env).unwrap().0;
+    let package = Package::assemble(
+        &selected,
+        &package.state_name,
+        Files::capture(&env, None).unwrap(),
+        package.sources,
+        package.decryptors,
+    )
+    .unwrap();
+    let history = package
+        .structured_history(&keys, &BTreeMap::new())
+        .unwrap()
+        .into_rows();
+    assert!(history
+        .iter()
+        .any(|(identity, data)| identity.kind == "host"
+            && identity.id == host_id
+            && matches!(data, Data::Host(host) if host.alias == "retained-import")));
+    assert!(matches!(
+        history
+            .iter()
+            .rev()
+            .find(|(identity, _)| identity.kind == "host" && identity.id == host_id)
+            .unwrap()
+            .1,
+        Data::Deleted
+    ));
+    assert!(history
+        .iter()
+        .any(|(identity, data)| identity.id == key && matches!(data, Data::Key(_))));
+    assert!(matches!(
+        history
+            .iter()
+            .rev()
+            .find(|(identity, _)| identity.kind == "keyslot" && identity.id == key)
+            .unwrap()
+            .1,
+        Data::Deleted
+    ));
+    assert!(!package
+        .state
+        .local
+        .hosts
+        .contains_key(&record_key(RecordKind::Host, &host_id)));
+    assert!(!package.state.local.keys.contains_key(&key));
+}

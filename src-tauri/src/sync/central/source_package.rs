@@ -64,7 +64,7 @@ fn state(files: &Files, name: &str) -> Result<SyncStateV3, AppError> {
 impl Package {
     /// Strict modern Records images only; older/opaque formats remain explicit blockers.
     fn retained_states(&self) -> Result<Vec<SyncStateV3>, AppError> {
-        let mut result = vec![];
+        let mut result = crate::sync::record_import::inventory::read_all(&self.state, &self.files.bytes, &self.decryptors)?.states;
         for (path, bytes) in &self.files.bytes {
             if path.parent() != Some(Path::new("data")) {
                 continue;
@@ -94,6 +94,7 @@ impl Package {
             }
             result.push(image);
         }
+        if result.iter().any(|image| image.local.central.as_ref().is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())) { return Err(invalid()); }
         Ok(result)
     }
     /// The caller captures observed decryptors using Materials::from_files; no live key fallback here.

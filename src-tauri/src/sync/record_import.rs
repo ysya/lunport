@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 pub(crate) mod central_stage;
 pub(crate) mod central_local;
+pub(crate) mod inventory;
 
 pub const MAX_PRIVATE_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
@@ -870,6 +871,16 @@ pub fn resume(env: &SyncEnv, id: &str) -> Result<ImportReceipt, AppError> {
     let mut journal: Journal =
         serde_json::from_slice(&bounded_read(&paths.journal, MAX_JOURNAL_BYTES)?)
             .map_err(|_| failure("import journal is not readable"))?;
+    validate_journal(&journal, id)?;
+    let (state, _) = snapshot_for_write(env)?;
+    if journal.phase == Phase::Active && !already_applied(&state, &journal)? {
+        return Err(failure(
+            "active import has no matching durable state receipt",
+        ));
+    }
+    execute(env, &paths, &mut journal, None, None)
+}
+fn validate_journal(journal: &Journal, id: &str) -> Result<(), AppError> {
     if journal.version != JOURNAL_VERSION
         || journal.import_id != id
         || !journal.source.is_absolute()
@@ -970,14 +981,9 @@ pub fn resume(env: &SyncEnv, id: &str) -> Result<ImportReceipt, AppError> {
         ));
     }
     central_local::validate_journal(&journal)?;
-    let (state, _) = snapshot_for_write(env)?;
-    if journal.phase == Phase::Active && !already_applied(&state, &journal)? {
-        return Err(failure(
-            "active import has no matching durable state receipt",
-        ));
-    }
-    execute(env, &paths, &mut journal, None, None)
+    Ok(())
 }
+
 fn expected_receipt(journal: &Journal) -> crate::sync::records_v3::LocalImportReceipt {
     crate::sync::records_v3::LocalImportReceipt {
         source_digest: journal.source_digest.clone(),
