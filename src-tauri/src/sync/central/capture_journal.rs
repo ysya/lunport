@@ -325,6 +325,16 @@ impl Loaded {
     pub fn intent(&self) -> &SignedFreeze {
         &self.journal.intent
     }
+    pub fn pending_discovery(&self) -> bool {
+        self.journal.pending_book.is_some()
+    }
+    pub fn effective_sources(&self) -> Result<Sources, AppError> {
+        let encoded = match &self.journal.pending_book {
+            Some(book) => Zeroizing::new(book.as_bytes().to_vec()),
+            None => self.package.sources.encode_local()?,
+        };
+        Sources::decode_local(&encoded, &self.package.state)
+    }
     pub fn fetching(&self) -> Option<&Fetching> {
         self.journal.fetching.as_ref()
     }

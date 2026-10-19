@@ -26,6 +26,8 @@ mod pending;
 pub(super) use pending::resume_next;
 mod initial;
 pub(super) use initial::initialize_checked as initialize_source;
+pub(super) use initial::inputs as initial_inputs;
+pub(super) use initial::attached as initial_attached;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,6 +160,11 @@ impl Receipt {
             && self.context.snapshot != before.context.snapshot
             && super::wire::number(&self.context.generation, true)?
                 >= super::wire::number(&before.context.generation, true)?)
+    }
+    pub fn next_ordinal(&self)->Result<u64,AppError>{
+        let next=super::wire::number(&self.context.generation,true)?.checked_add(1).ok_or_else(invalid)?;
+        super::wire::number(&next.to_string(),true)?;
+        Ok(next)
     }
     pub fn operation(&self) -> &str {
         &self.context.operation

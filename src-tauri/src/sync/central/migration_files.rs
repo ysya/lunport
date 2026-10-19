@@ -24,6 +24,33 @@ impl Files {
     pub fn capture(env: &SyncEnv, legacy_backup: Option<&str>) -> Result<Self, AppError> {
         Self::capture_checked(env, legacy_backup, BTreeMap::new())
     }
+    pub fn capture_after_archive(
+        env: &SyncEnv,
+        backup: Option<&str>,
+        outputs: &super::source_archive::Outputs,
+    ) -> Result<Self, AppError> {
+        let owned = outputs
+            .files()
+            .map(|(path, bytes)| (path.to_owned(), bytes))
+            .collect();
+        Self::capture_checked(env, backup, owned)
+    }
+    /// Only an empty native output root can differ after an interrupted first reservation.
+    /// The caller must then match the entire encoded package to its protected source digest.
+    pub fn without_empty_source_root(&mut self) -> Result<(), AppError> {
+        let root = Path::new("data/central-source-archives");
+        if self.bytes.keys().any(|p| p.starts_with(root))
+            || self
+                .directories
+                .iter()
+                .any(|p| p != root && p.starts_with(root))
+            || !self.directories.remove(root)
+        {
+            return Err(invalid());
+        }
+        self.entries = self.entries.checked_sub(1).ok_or_else(invalid)?;
+        Ok(())
+    }
     fn capture_checked(
         env: &SyncEnv,
         legacy_backup: Option<&str>,

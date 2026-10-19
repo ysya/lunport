@@ -230,6 +230,27 @@ impl Fetching {
         }
         Ok(())
     }
+    pub fn discovered_sources(
+        &self,
+        sources: &Sources,
+        state: &SyncStateV3,
+    ) -> Result<Option<Sources>, AppError> {
+        let snapshots = self.validate(sources, state)?;
+        if sources.parent.is_empty() || sources.discovery.is_some() {
+            return Ok(None);
+        }
+        let Some(parent) = snapshots
+            .iter()
+            .find(|snapshot| snapshot.checkpoint().chain_id == sources.parent)
+        else {
+            return Ok(None);
+        };
+        let copy = Sources::decode_local(&sources.encode_local()?, state)?;
+        Ok(Some(copy.with_parent_discovery(
+            state.local.central.as_ref().ok_or_else(invalid)?,
+            parent,
+        )?))
+    }
     pub fn complete(self, sources: &Sources, state: &SyncStateV3) -> Result<FrozenSet, AppError> {
         let snapshots = self.validate(sources, state)?;
         FrozenSet::capture(

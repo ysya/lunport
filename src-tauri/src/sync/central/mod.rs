@@ -19,6 +19,7 @@ mod migration_history;
 mod migration_progress;
 mod migration_journal;
 mod capture_journal;
+mod capture_dispatch;
 mod migration_request;
 mod migration_verify;
 mod initial_projection;

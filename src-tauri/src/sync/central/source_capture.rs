@@ -1,4 +1,4 @@
-//! Native preflight input capture. No consent, transport, migration or publication authority.
+//! Native source capture and durable start. No consent, network or library publication authority.
 use super::{
     api::DeviceState,
     client_state::Phase,
@@ -47,6 +47,11 @@ fn session(owner: &Workspace, session: &Session) -> Result<(), AppError> {
         || session.tokens.subject != profile.subject
         || session.device_access_denied
         || grant.expired()
+        || session
+            .tokens_started
+            .elapsed()
+            .saturating_add(std::time::Duration::from_secs(5))
+            >= session.tokens.expires_in
         || grant.device_state != DeviceState::Active
         || grant.account_id != owner.control.account_id
         || grant.auth_epoch != owner.control.auth_epoch
@@ -113,6 +118,15 @@ fn target(owner: &Workspace, current: &Session, keys: &VaultKeys) -> Result<(), 
     )?;
     opened.verify_same(keys)
 }
+pub(super) fn require_target(
+    env: &SyncEnv,
+    owner: &Workspace,
+    selected: &Session,
+    keys: &VaultKeys,
+) -> Result<(), AppError> {
+    target(owner, selected, keys)?;
+    protected(env, owner, selected)
+}
 fn current(env: &SyncEnv) -> Result<(SyncStateV3, u64, Arc<Session>), AppError> {
     let core = env.runtime.core.lock().unwrap();
     if core.save_blocked.is_some() {
@@ -147,31 +161,68 @@ pub(super) fn capture(
     let record_inputs = Inventory::from_state(&sources, &before)?;
     let private_inputs = record_inputs.admit_known()?.into_keys();
     drop(record_inputs);
-    let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
-    let observer = Capture::new(&readonly);
-    drop(Materials::from_files_with_key_inputs(
-        &before, keys, &files, &observer, references, private_inputs,
-    )?);
-    let decryptors = observer.finish()?;
-    let package = Package::assemble(
-        &before,
-        env.state_path
-            .file_name()
-            .and_then(|v| v.to_str())
-            .ok_or_else(invalid)?,
-        files,
-        sources,
-        decryptors,
-    )?;
+    let mut initial = super::source_archive::initial_inputs(env, &_life, owner)?;
+    let original = initial.as_mut().and_then(|input| input.original.take());
+    let mut package = if let Some(original) = original {
+        let package = Package::decode_local(&original)?;
+        if package.state != before {
+            return Err(crate::sync::runtime::superseded());
+        }
+        package
+    } else {
+        let files = match &initial {
+            Some(input) => Files::capture_after_archive(
+                env,
+                before.legacy_v1_backup.as_deref(),
+                &input.outputs,
+            )?,
+            None => Files::capture(env, before.legacy_v1_backup.as_deref())?,
+        };
+        let observer = Capture::new(&readonly);
+        drop(Materials::from_files_with_key_inputs(
+            &before,
+            keys,
+            &files,
+            &observer,
+            references,
+            private_inputs,
+        )?);
+        let decryptors = observer.finish()?;
+        Package::assemble(
+            &before,
+            env.state_path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or_else(invalid)?,
+            files,
+            sources,
+            decryptors,
+        )?
+    };
+    if let Some(input) = &initial {
+        if !input.matches(&package.encode_local()?) {
+            package.files.without_empty_source_root()?;
+            if !input.matches(&package.encode_local()?) {
+                return Err(crate::sync::runtime::superseded());
+            }
+        }
+    }
     drop(package.materials(keys, references)?);
     let latest_account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let latest_sources = Sources::discover(&before, latest_account.0.as_ref())?;
     if latest_sources.encode_local()?.as_slice() != package.sources.encode_local()?.as_slice() {
         return Err(crate::sync::runtime::superseded());
     }
-    package
-        .files
-        .require_unchanged(env, before.legacy_v1_backup.as_deref())?;
+    match &initial {
+        Some(input) => package.files.require_unchanged_after_archive(
+            env,
+            before.legacy_v1_backup.as_deref(),
+            &input.outputs,
+        )?,
+        None => package
+            .files
+            .require_unchanged(env, before.legacy_v1_backup.as_deref())?,
+    }
     protected(env, owner, &selected)?;
     let (latest, latest_generation, latest_session) = current(env)?;
     if generation != latest_generation
@@ -188,8 +239,135 @@ pub(super) fn capture(
     })
 }
 
+/// Foreground start/re-entry. Restore protected progress before considering a new capture.
+pub(super) fn start_or_resume(
+    env: &SyncEnv,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<super::capture_journal::Loaded, AppError> {
+    controller::require_enabled()?;
+    {
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let _vault = env
+            .runtime
+            .vault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _publication = env.runtime.format_publication.lock().unwrap();
+        let (state, generation, selected) = current(env)?;
+        let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+        target(owner, &selected, keys)?;
+        protected(env, owner, &selected)?;
+        if let Some(saved) = super::source_cursor::Cursor::load(env, &life, owner)? {
+            let signer = &selected.identity.as_ref().ok_or_else(invalid)?.keys;
+            let loaded = if saved.cursor.revision() == 1 {
+                let package = Package::decode_local(&saved.bytes)?;
+                if package.state != state {
+                    return Err(crate::sync::runtime::superseded());
+                }
+                drop(package.materials(keys, references)?);
+                let cursor = if super::source_archive::initial_attached(env, owner, &saved.cursor)?
+                {
+                    saved.cursor
+                } else {
+                    package.initialize_source(env, &life, owner, 0)?.cursor
+                };
+                super::capture_journal::Journal::begin(&cursor, &package, signer)?.store(
+                    env,
+                    &life,
+                    owner,
+                    signer,
+                    &cursor,
+                    cursor.receipt().next_ordinal()?,
+                )?
+            } else {
+                super::capture_journal::Journal::load(env, &life, owner, signer)?
+                    .ok_or_else(invalid)?
+            };
+            if loaded.package.state != state {
+                return Err(crate::sync::runtime::superseded());
+            }
+            let readonly = NonInteractiveKeychain(env.keychain);
+            let legacy = Legacy(record_runtime::read_account_keys(&state, &readonly)?);
+            let live = Sources::discover(&state, legacy.0.as_ref())?;
+            if !loaded
+                .package
+                .sources
+                .follows_book(&super::crypto::hash(&live.encode_local()?))?
+            {
+                return Err(crate::sync::runtime::superseded());
+            }
+            loaded.require_unchanged(env)?;
+            protected(env, owner, &selected)?;
+            let (latest, next_generation, next_session) = current(env)?;
+            if latest != state
+                || generation != next_generation
+                || !Arc::ptr_eq(&selected, &next_session)
+            {
+                return Err(crate::sync::runtime::superseded());
+            }
+            return Ok(loaded);
+        }
+    }
+    capture(env, keys, references)?.begin(env)
+}
+
+impl Captured {
+    fn require_current(&self, env: &SyncEnv) -> Result<(), AppError> {
+        let owner = self
+            .package
+            .state
+            .local
+            .central
+            .as_ref()
+            .ok_or_else(invalid)?;
+        protected(env, owner, &self.session)?;
+        let (state, generation, session) = current(env)?;
+        if state != self.package.state
+            || generation != self.generation
+            || !Arc::ptr_eq(&session, &self.session)
+        {
+            return Err(crate::sync::runtime::superseded());
+        }
+        Ok(())
+    }
+    /// The signed freeze intent is durable before transport can use it. No HTTP or events here.
+    pub fn begin(&self, env: &SyncEnv) -> Result<super::capture_journal::Loaded, AppError> {
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let _vault = env
+            .runtime
+            .vault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _publication = env.runtime.format_publication.lock().unwrap();
+        self.require_current(env)?;
+        let owner = self
+            .package
+            .state
+            .local
+            .central
+            .as_ref()
+            .ok_or_else(invalid)?;
+        let initial = self.package.initialize_source(env, &life, owner, 0)?;
+        self.require_current(env)?;
+        let signer = &self.session.identity.as_ref().ok_or_else(invalid)?.keys;
+        let journal =
+            super::capture_journal::Journal::begin(&initial.cursor, &self.package, signer)?;
+        let loaded = journal.store(
+            env,
+            &life,
+            owner,
+            signer,
+            &initial.cursor,
+            initial.cursor.receipt().next_ordinal()?,
+        )?;
+        self.require_current(env)?;
+        loaded.require_unchanged(env)?;
+        Ok(loaded)
+    }
+}
 #[cfg(all(test, unix))]
-mod tests {
+pub(in crate::sync::central) mod tests {
     use super::*;
     use crate::sync::{
         central::{api::DeviceSession, crypto::DeviceKeys, oidc::LoginTokens},
@@ -204,7 +382,7 @@ mod tests {
         time::{Duration, Instant},
     };
     use zeroize::Zeroizing;
-    fn fixture(joined: bool) -> (TestDevice, VaultKeys, Arc<Session>) {
+    pub(in crate::sync::central) fn fixture(joined: bool) -> (TestDevice, VaultKeys, Arc<Session>) {
         let (device, package, keys, owner, _) = super::super::source_package::tests::fixture();
         let mut state = package.state;
         if joined {
@@ -761,6 +939,73 @@ mod tests {
                 .unwrap()
                 .join("central-source-archives")
                 .exists());
+        }
+    }
+
+    struct InitialFault<'a>{inner:&'a MemKeychain,role:String,at:usize,after:bool,writes:std::sync::atomic::AtomicUsize}
+    impl Keychain for InitialFault<'_>{
+        fn get(&self,k:&str)->Result<Option<String>,AppError>{self.inner.get(k)}
+        fn get_noninteractive(&self,k:&str)->Result<Option<String>,AppError>{self.inner.get_noninteractive(k)}
+        fn set(&self,k:&str,v:&str)->Result<(),AppError>{self.inner.set(k,v)}
+        fn delete(&self,_:&str)->Result<(),AppError>{panic!("capture/start must preserve credentials")}
+        fn set_noninteractive(&self,k:&str,v:&str)->Result<(),AppError>{
+            let n=if k==self.role {self.writes.fetch_add(1,Ordering::SeqCst)+1}else{usize::MAX};
+            if n==self.at && !self.after {return Err(invalid());}
+            self.inner.set_noninteractive(k,v)?;
+            if n==self.at && self.after {return Err(invalid());}
+            Ok(())
+        }
+    }
+    #[test]
+    fn native_capture_reloads_a_reserved_or_completed_first_package_then_begins_the_same_operation(){
+        for (at,after) in [(1,true),(2,false),(2,true),(3,false)] {
+            let (device,keys,_)=fixture(false);let env=device.env();
+            let first=capture(&env,&keys,&BTreeMap::new()).unwrap();
+            let original=first.package.encode_local().unwrap();
+            let owner=first.package.state.local.central.clone().unwrap();
+            let role=owner.control.profile.profile().unwrap().slot("source-migration-initial");
+            let fault=InitialFault{inner:&device.keychain,role,at,after,writes:std::sync::atomic::AtomicUsize::new(0)};
+            let mut interrupted=device.env();interrupted.keychain=&fault;
+            {
+                let life=env.runtime.lifecycle.lock().unwrap();
+                assert!(first.package.initialize_source(&interrupted,&life,&owner,0).is_err());
+            }
+            drop(first);
+            // No Captured or original Package object is supplied to the second capture.
+            let resumed=capture(&env,&keys,&BTreeMap::new()).unwrap();
+            assert_eq!(resumed.package.encode_local().unwrap().as_slice(),original.as_slice());
+            let loaded=resumed.begin(&env).unwrap();
+            assert_eq!(loaded.cursor.revision(),2);
+            assert_eq!(loaded.intent().body.migration_id,loaded.cursor.receipt().operation());
+            loaded.require_unchanged(&env).unwrap();
+            assert!(!loaded.package.state.local.central.as_ref().unwrap().control.cutover);
+            assert!(capture(&env,&keys,&BTreeMap::new()).is_err());
+        }
+    }
+    #[test]
+    fn actual_begin_rejects_a_replaced_runtime_session_before_creating_archive_outputs(){
+        let (device,keys,_)=fixture(false);let env=device.env();let captured=capture(&env,&keys,&BTreeMap::new()).unwrap();
+        device.runtime.core.lock().unwrap().central_session=None;
+        assert!(captured.begin(&env).is_err());
+        let root=env.state_path.parent().unwrap().join("central-source-archives");assert!(!root.exists());
+    }
+
+    #[test]
+    fn start_reentry_recovers_a_lost_first_journal_cursor_without_reencrypting_its_orphan(){
+        for after in [false,true] {
+            let (device,keys,_)=fixture(false);let env=device.env();let owner=current(&env).unwrap().0.local.central.unwrap();
+            let fault=InitialFault{inner:&device.keychain,role:owner.control.profile.profile().unwrap().slot("source-migration-cursor"),at:2,after,writes:std::sync::atomic::AtomicUsize::new(0)};
+            let mut interrupted=device.env();interrupted.keychain=&fault;
+            assert!(start_or_resume(&interrupted,&keys,&BTreeMap::new()).is_err());
+            let root=env.state_path.parent().unwrap().join("central-source-archives");
+            let exact: BTreeMap<_,_>=fs::read_dir(&root).unwrap().map(|e|{let e=e.unwrap();(e.file_name(),fs::read(e.path()).unwrap())}).collect();
+            assert_eq!(exact.len(),3); // marker, original package, first capture journal.
+            device.runtime.core.lock().unwrap().generation=0;
+            let resumed=start_or_resume(&env,&keys,&BTreeMap::new()).unwrap();
+            assert_eq!(resumed.cursor.revision(),2);assert_eq!(resumed.cursor.receipt().next_ordinal().unwrap(),2);
+            let checked:BTreeMap<_,_>=fs::read_dir(&root).unwrap().map(|e|{let e=e.unwrap();(e.file_name(),fs::read(e.path()).unwrap())}).collect();
+            assert_eq!(checked,exact);resumed.require_unchanged(&env).unwrap();
+            let again=start_or_resume(&env,&keys,&BTreeMap::new()).unwrap();assert_eq!(again.cursor.receipt(),resumed.cursor.receipt());
         }
     }
 

@@ -84,18 +84,19 @@ impl Initial {
         }
         Ok(())
     }
-    fn outputs(&self, env: &SyncEnv, owner: &Workspace, plain: &[u8]) -> Result<Outputs, AppError> {
+    fn captured(
+        &self,
+        env: &SyncEnv,
+        owner: &Workspace,
+    ) -> Result<(Option<Zeroizing<Vec<u8>>>, Outputs), AppError> {
         self.validate(owner)?;
-        if crypto::hash(plain) != self.source {
-            return Err(crate::sync::runtime::superseded());
-        }
         if let Stage::Complete { receipt } | Stage::Attached { receipt } = &self.stage {
-            let (restored, outputs) =
+            let (plain, outputs) =
                 restore_with_outputs(env, &owner.control.profile.profile()?, receipt)?;
-            if restored.as_slice() != plain {
+            if crypto::hash(&plain) != self.source {
                 return Err(invalid());
             }
-            return Ok(outputs);
+            return Ok((Some(plain), outputs));
         }
         let directory = ArchiveDirectory::open(env, Kind::Source)?;
         let name = self.context.filename()?;
@@ -103,6 +104,7 @@ impl Initial {
         let blob = directory.read(&name)?;
         let marker = directory.read(&marker_name)?;
         let mut files = vec![];
+        let mut original = None;
         if let Some(marker) = marker {
             let key = protected_key(env, &owner.control.profile.profile()?, &self.context, false)?;
             if marker.as_slice() != crypto::hash(key.as_slice()).as_bytes() {
@@ -113,9 +115,11 @@ impl Initial {
                 marker,
             ));
             if let Some(blob) = blob {
-                if decode(&self.context, &key, &blob)?.as_slice() != plain {
+                let plain = decode(&self.context, &key, &blob)?;
+                if crypto::hash(&plain) != self.source {
                     return Err(invalid());
                 }
+                original = Some(plain);
                 files.push((
                     std::path::Path::new("data/central-source-archives").join(name),
                     blob,
@@ -125,10 +129,26 @@ impl Initial {
             return Err(invalid());
         }
         directory.sync()?;
-        Ok(Outputs {
-            scope: self.context.scope()?,
-            files,
-        })
+        Ok((
+            original,
+            Outputs {
+                scope: self.context.scope()?,
+                files,
+            },
+        ))
+    }
+    fn outputs(&self, env: &SyncEnv, owner: &Workspace, plain: &[u8]) -> Result<Outputs, AppError> {
+        if crypto::hash(plain) != self.source {
+            return Err(crate::sync::runtime::superseded());
+        }
+        let (original, outputs) = self.captured(env, owner)?;
+        if original
+            .as_ref()
+            .is_some_and(|bytes| bytes.as_slice() != plain)
+        {
+            return Err(invalid());
+        }
+        Ok(outputs)
     }
     /// Only an uncompleted reservation can create a missing blob. Once a receipt exists,
     /// every missing/corrupt input fails closed through the ordinary immutable readback.
@@ -170,6 +190,51 @@ impl Initial {
         write(env, &profile, self.context.clone(), plain, false)
     }
 }
+/// Native capture re-entry only. This supplies no cursor/freeze/consent authority.
+pub(in crate::sync::central) struct Inputs {
+    initial: Initial,
+    pub(in crate::sync::central) original: Option<Zeroizing<Vec<u8>>>,
+    pub(in crate::sync::central) outputs: Outputs,
+}
+impl Inputs {
+    pub(in crate::sync::central) fn matches(&self, plain: &[u8]) -> bool {
+        crypto::hash(plain) == self.initial.source
+    }
+}
+pub(in crate::sync::central) fn attached(
+    env: &SyncEnv,
+    owner: &Workspace,
+    cursor: &Cursor,
+) -> Result<bool, AppError> {
+    let saved = Initial::load(env, owner)?.ok_or_else(invalid)?;
+    let receipt = match &saved.stage {
+        Stage::Complete { receipt } | Stage::Attached { receipt } => receipt,
+        Stage::Reserved => return Err(invalid()),
+    };
+    if cursor.revision() != 1 || cursor.receipt() != receipt {
+        return Err(invalid());
+    }
+    Ok(matches!(saved.stage, Stage::Attached { .. }))
+}
+pub(in crate::sync::central) fn inputs(
+    env: &SyncEnv,
+    life: &MutexGuard<'_, ()>,
+    owner: &Workspace,
+) -> Result<Option<Inputs>, AppError> {
+    let Some(initial) = Initial::load(env, owner)? else {
+        return Ok(None);
+    };
+    if Cursor::load(env, life, owner)?.is_some_and(|saved| saved.cursor.revision() != 1) {
+        return Err(AppError::Other("This migration has already started. Resume its saved progress before capturing another source.".into()));
+    }
+    let (original, outputs) = initial.captured(env, owner)?;
+    Ok(Some(Inputs {
+        initial,
+        original,
+        outputs,
+    }))
+}
+
 /// Requires the caller's current-session/source checks and lifecycle owner. No network or events.
 /// A restart uses the saved archive ordinal, never a possibly reset in-memory Core generation.
 pub(in crate::sync::central) fn initialize_checked(
