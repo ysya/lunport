@@ -2,7 +2,8 @@
 use super::{
     crypto::{DeviceKeys, VaultKeys},
     migration_history::Plan,
-    migration_progress::Known,
+    migration_progress::{Known, Phase},
+    migration_verify::{Prefix, Verifier},
     source_archive::{self, Outputs, Receipt},
     source_cursor::{Cursor, Restored},
     source_package::Package,
@@ -24,6 +25,8 @@ pub(super) struct Journal {
     plan: Receipt,
     ancestors: Vec<Receipt>,
     progress: Option<Known>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified: Option<Prefix>,
 }
 pub(super) struct Loaded {
     pub journal: Journal,
@@ -52,6 +55,7 @@ impl Journal {
             plan: cursor.receipt().clone(),
             ancestors,
             progress: None,
+            verified: None,
         };
         result.before(cursor, owner)?;
         Ok(result)
@@ -155,6 +159,16 @@ impl Journal {
         if let Some(progress) = &self.progress {
             progress.validate(&plan)?;
         }
+        if let Some(prefix) = &self.verified {
+            if self
+                .progress
+                .as_ref()
+                .is_none_or(|p| p.phase() != Phase::Retired)
+            {
+                return Err(invalid());
+            }
+            prefix.validate(&plan)?;
+        }
         Ok(Inputs {
             package,
             plan,
@@ -234,7 +248,16 @@ impl Journal {
                     .ok_or_else(invalid)?
                     .require_after(&inputs.plan, &minimum)?;
             }
-        } else if before.receipt() != &self.plan || self.progress.is_some() {
+            if let Some(minimum) = &old.verified {
+                self.verified
+                    .as_ref()
+                    .ok_or_else(invalid)?
+                    .require_after(&inputs.plan, minimum)?;
+            }
+        } else if before.receipt() != &self.plan
+            || self.progress.is_some()
+            || self.verified.is_some()
+        {
             return Err(invalid());
         }
         inputs.package.files.require_unchanged_after_archive(
@@ -250,6 +273,52 @@ impl Journal {
     }
 }
 impl Loaded {
+    fn successor(&self, owner: &Workspace) -> Result<Journal, AppError> {
+        self.journal.current(&self.cursor, owner)?;
+        let mut ancestors = self.journal.ancestors.clone();
+        ancestors.push(self.cursor.receipt().clone());
+        let next = Journal {
+            version: 1,
+            revision: self.cursor.revision().checked_add(1).ok_or_else(invalid)?,
+            source: self.journal.source.clone(),
+            plan: self.journal.plan.clone(),
+            ancestors,
+            progress: self.journal.progress.clone(),
+            verified: self.journal.verified.clone(),
+        };
+        next.before(&self.cursor, owner)?;
+        Ok(next)
+    }
+    pub fn verifier(&self, keys: &VaultKeys) -> Result<Verifier, AppError> {
+        let retired = self.journal.progress.as_ref().ok_or_else(invalid)?;
+        match &self.journal.verified {
+            Some(prefix) => Verifier::resume(&self.plan, retired, keys, prefix),
+            None => Verifier::new(&self.plan, retired),
+        }
+    }
+    /// Derive a floor from actual native readback, never from remote status counters.
+    pub fn with_readback(
+        &self,
+        verifier: &Verifier,
+        owner: &Workspace,
+    ) -> Result<Option<Journal>, AppError> {
+        self.journal.current(&self.cursor, owner)?;
+        let retired = self.journal.progress.as_ref().ok_or_else(invalid)?;
+        retired.validate(&self.plan)?;
+        if retired.phase() != Phase::Retired {
+            return Err(invalid());
+        }
+        let prefix = verifier.snapshot(&self.plan)?;
+        if self.journal.verified.as_ref() == Some(&prefix) {
+            return Ok(None);
+        }
+        if let Some(previous) = &self.journal.verified {
+            prefix.require_after(&self.plan, previous)?;
+        }
+        let mut journal = self.successor(owner)?;
+        journal.verified = Some(prefix);
+        Ok(Some(journal))
+    }
     pub fn with_progress(
         &self,
         next: Known,
@@ -263,17 +332,8 @@ impl Loaded {
         if let Some(minimum) = &self.journal.progress {
             next.require_after(&self.plan, minimum)?;
         }
-        let mut ancestors = self.journal.ancestors.clone();
-        ancestors.push(self.cursor.receipt().clone());
-        let journal = Journal {
-            version: 1,
-            revision: self.cursor.revision().checked_add(1).ok_or_else(invalid)?,
-            source: self.journal.source.clone(),
-            plan: self.journal.plan.clone(),
-            ancestors,
-            progress: Some(next),
-        };
-        journal.before(&self.cursor, owner)?;
+        let mut journal = self.successor(owner)?;
+        journal.progress = Some(next);
         Ok(Some(journal))
     }
     pub fn require_unchanged(&self, env: &SyncEnv) -> Result<(), AppError> {
@@ -287,3 +347,6 @@ impl Loaded {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod readback_tests;

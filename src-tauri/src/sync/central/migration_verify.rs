@@ -48,7 +48,15 @@ fn checkpoint(plan: &Plan) -> Result<Checkpoint, AppError> {
     })
 }
 impl Prefix {
-    fn validate(&self, plan: &Plan) -> Result<(), AppError> {
+    pub(super) fn require_after(&self, plan: &Plan, previous: &Self) -> Result<(), AppError> {
+        self.validate(plan)?;
+        previous.validate(plan)?;
+        if self.sequence < previous.sequence {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn validate(&self, plan: &Plan) -> Result<(), AppError> {
         let target = checkpoint(plan)?;
         if self.version != 1
             || self.manifest != plan.manifest.digest()?

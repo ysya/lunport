@@ -10,7 +10,7 @@ use crate::sync::{
     relay::PullResponse,
     testkit::TestDevice,
 };
-fn fixture() -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
+pub(super) fn fixture() -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
     let (device, package, keys, owner, _) = crate::sync::central::source_package::tests::fixture();
     let (_, _, signer) = migration_history::tests::initial();
     let env = device.env();
@@ -98,7 +98,7 @@ fn fixture() -> (TestDevice, Workspace, VaultKeys, DeviceKeys, Loaded) {
     drop(life);
     (device, owner, keys, signer, loaded)
 }
-fn progress(plan: &Plan, staged: u64) -> Known {
+pub(super) fn progress(plan: &Plan, staged: u64) -> Known {
     let body = serde_json::json!({"manifest":plan.manifest,"manifest_digest":plan.manifest.digest().unwrap(),"phase":"staging","staged":staged.to_string(),"history_hash":if staged==0{"0".repeat(64)}else{plan.rows[staged as usize-1].history_hash.clone()},"retired":"0"});
     serde_json::from_value::<MigrationProgress>(body)
         .unwrap()
@@ -297,10 +297,10 @@ fn journal_lineage_and_counter_tampering_never_form_a_valid_current_or_successor
     assert_ne!(protected, previous);
 }
 
-struct Uncertain<'a> {
-    inner: &'a crate::sync::testkit::MemKeychain,
-    after: std::sync::atomic::AtomicBool,
-    writes: std::sync::atomic::AtomicUsize,
+pub(super) struct Uncertain<'a> {
+    pub(super) inner: &'a crate::sync::testkit::MemKeychain,
+    pub(super) after: std::sync::atomic::AtomicBool,
+    pub(super) writes: std::sync::atomic::AtomicUsize,
 }
 impl Keychain for Uncertain<'_> {
     fn get(&self, _: &str) -> Result<Option<String>, AppError> {
