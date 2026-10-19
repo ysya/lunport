@@ -1,6 +1,6 @@
 //! Actual source and proposed projection stay distinct for initial staging.
 use super::*;
-use crate::sync::{central::InitialProjection, env::NonInteractiveKeychain};
+use crate::sync::central::{credentials::Background, InitialProjection};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InitialBinding {
@@ -105,7 +105,9 @@ fn with_background<T>(
     env: &SyncEnv,
     action: impl FnOnce(&SyncEnv) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
-    let keychain = NonInteractiveKeychain(env.keychain);
+    // ScopedKeychain validates the only writable vault-master roles and retains their receipts.
+    // Fresh initial libraries may need their first scoped master; every operation stays noninteractive.
+    let keychain = Background(env.keychain);
     let safe = SyncEnv {
         doc: env.doc,
         backed_up: env.backed_up,

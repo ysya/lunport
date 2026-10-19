@@ -306,3 +306,30 @@ fn an_initial_library_without_managed_private_keys_still_stages_without_creating
     assert!(resumed.mapping().is_empty());
     assert!(record_runtime::snapshot(&env).unwrap().0 == *initial.source());
 }
+
+#[test]
+fn initial_stage_can_create_its_first_scoped_vault_master_without_a_credential_prompt() {
+    let initial = crate::sync::central::initial_fresh_projection_for_test();
+    let device = TestDevice::new("fresh-initial-stage", &FakeRelay::new(), &TestClock::new());
+    record_runtime::save_active(&device.env().state_path, initial.source()).unwrap();
+    let probe = record_runtime::probe_startup(&device.env().state_path, "fresh-initial-stage");
+    record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
+    let guard = NoPrompt(&device.keychain);
+    let mut env = device.env();
+    env.keychain = &guard;
+    let before = fs::read(&env.state_path).unwrap();
+    assert!(!store::vault_path(&env.state_path).exists());
+    let staged = prepare_initial(&env, &initial).unwrap();
+    let account = staged.journal.staged_key_account.as_ref().unwrap();
+    assert!(device
+        .keychain
+        .entry(&format!("migration:{}:{account}", staged.operation()))
+        .is_some());
+    assert!(device.keychain.entry(account).is_none());
+    assert_eq!(fs::read(&env.state_path).unwrap(), before);
+    assert!(!store::vault_path(&env.state_path).exists());
+    let exact = fs::read(&staged.paths.vault).unwrap();
+    let resumed = resume_initial(&env, staged.operation(), &initial).unwrap();
+    assert_eq!(resumed.mapping(), staged.mapping());
+    assert_eq!(fs::read(&resumed.paths.vault).unwrap(), exact);
+}
