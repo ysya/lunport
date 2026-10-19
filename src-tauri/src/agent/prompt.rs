@@ -215,7 +215,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
             .inner_size(460.0, 340.0)
             .resizable(false)
             .always_on_top(true)
-            .center()
+            .visible(false)
             .build()
         {
             Ok(window) => (Some(window), true),
@@ -228,9 +228,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
     // 只有剛建好,或有新的請求排到最前面才把視窗叫到前面:別的請求逾時,不該搶走使用者正在操作的焦點。
     if let Some(window) = window {
         if built || new_head {
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
+            crate::prompt_window::show(&window);
         }
     }
     let _ = app.emit_to(APPROVAL_WINDOW, APPROVALS_EVENT, &pending);
