@@ -24,7 +24,7 @@ pub(super) struct Planned {
     pub cursor: Cursor,
     pub outputs: Outputs,
 }
-fn restored(
+pub(super) fn restored(
     env: &SyncEnv,
     owner: &super::workspace::Workspace,
     keys: &VaultKeys,

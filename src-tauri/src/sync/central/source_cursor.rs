@@ -110,6 +110,42 @@ impl Cursor {
         }
         self.clone().restore(env, owner)
     }
+    /// Read-only ancestry proof pinned by the actual current cursor and its authenticated journal.
+    /// The complete lineage includes the current receipt. This never writes historical progress.
+    pub fn restored_ancestor(
+        &self,
+        env: &SyncEnv,
+        owner: &Workspace,
+        current: &Cursor,
+        lineage: &[Receipt],
+    ) -> Result<Restored, AppError> {
+        self.validate(owner)?;
+        current.validate(owner)?;
+        if self.selection != current.selection
+            || self.revision > current.revision
+            || lineage.len() as u64 != current.revision
+            || lineage.last() != Some(current.receipt())
+            || lineage.get(self.revision as usize - 1) != Some(self.receipt())
+            || (self.revision > 1 && lineage.get(self.revision as usize - 2) != self.previous())
+            || (current.revision > 1
+                && lineage.get(current.revision as usize - 2) != current.previous())
+        {
+            return Err(invalid());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for receipt in lineage {
+            receipt.matches_selected(owner)?;
+            if !seen.insert(&receipt.ciphertext_hash) {
+                return Err(invalid());
+            }
+        }
+        for pair in lineage.windows(2) {
+            if !pair[1].follows(&pair[0])? {
+                return Err(invalid());
+            }
+        }
+        self.clone().restore(env, owner)
+    }
     /// None means no cursor was read, never permission to ignore existing source obligations.
     pub fn load(
         env: &SyncEnv,

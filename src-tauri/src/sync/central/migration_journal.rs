@@ -1,18 +1,22 @@
 //! Referenced planned-migration progress only. No consent, complete inventory or cutover permit.
 use super::{
+    controller,
     crypto::{DeviceKeys, VaultKeys},
     migration_history::Plan,
     migration_progress::{Known, Phase},
     migration_verify::{Prefix, Verifier},
+    payload::KeyStorage,
     source_archive::{self, Outputs, Receipt},
+    source_complete,
     source_cursor::{Cursor, Restored},
     source_package::Package,
+    source_plan,
     wire::invalid,
     workspace::Workspace,
 };
 use crate::{error::AppError, sync::env::SyncEnv};
 use serde::{Deserialize, Serialize};
-use std::sync::MutexGuard;
+use std::{collections::BTreeMap, sync::MutexGuard};
 use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPMIGJ1\0";
 const CAP: usize = 1024 * 1024;
@@ -39,6 +43,83 @@ struct Inputs {
     package: Package,
     plan: Plan,
     outputs: Outputs,
+}
+/// Starts or resumes the durable planned phase. This does not grant human consent.
+/// Capture must be complete; a pre-existing journal is restored without regenerating its plan.
+pub(super) fn ensure(
+    env: &SyncEnv,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<Loaded, AppError> {
+    controller::require_enabled()?;
+    // Do not hold runtime locks while entering the plan driver, which owns the same locks.
+    // Recheck the exact protected cursor, state and session after acquiring them again below.
+    let planned = {
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let (state, generation) = crate::sync::record_runtime::snapshot(env)?;
+        let session = controller::context(env)?;
+        source_complete::check(env, &state, generation, &session, keys)?;
+        let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+        let saved = Cursor::load(env, &life, owner)?.ok_or_else(invalid)?;
+        Package::complete_frame(&saved.bytes)
+    };
+    let planned = if planned {
+        Some(source_plan::ensure(env, keys, references)?)
+    } else {
+        None
+    };
+    let life = env.runtime.lifecycle.lock().unwrap();
+    let _vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let (state, generation) = crate::sync::record_runtime::snapshot(env)?;
+    let session = controller::context(env)?;
+    source_complete::check(env, &state, generation, &session, keys)?;
+    let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+    let signer = &session.identity.as_ref().ok_or_else(invalid)?.keys;
+    let current = Cursor::load(env, &life, owner)?.ok_or_else(invalid)?;
+    let mut loaded = if current.bytes.starts_with(MAGIC) {
+        Journal::restored(env, owner, keys, signer, current)?
+    } else {
+        let planned = match planned {
+            Some(planned) => planned,
+            None => source_plan::restored(env, owner, keys, signer, references, current)?,
+        };
+        if Cursor::load(env, &life, owner)?.ok_or_else(invalid)?.cursor != planned.cursor
+            || planned.package.state != state
+        {
+            return Err(crate::sync::runtime::superseded());
+        }
+        Journal::planned(
+            &planned.cursor,
+            planned.source_cursor.receipt().clone(),
+            planned.ancestors,
+            owner,
+        )?
+        .store(
+            env,
+            &life,
+            owner,
+            keys,
+            signer,
+            &planned.cursor,
+            planned.cursor.receipt().next_ordinal()?,
+        )?
+    };
+    loaded.require_bound(env, owner, keys, signer, references)?;
+    if let Some(next) = loaded.recover_pending(env, &life, owner, keys, signer)? {
+        loaded = next;
+        loaded.require_bound(env, owner, keys, signer, references)?;
+    }
+    if loaded.package.state != state {
+        return Err(crate::sync::runtime::superseded());
+    }
+    loaded.require_unchanged(env)?;
+    source_complete::check(env, &state, generation, &session, keys)?;
+    Ok(loaded)
 }
 impl Journal {
     /// Creates metadata only. The caller still owes full source normalization and explicit consent.
@@ -260,19 +341,128 @@ impl Journal {
         {
             return Err(invalid());
         }
+        let pending = source_archive::resume_next(
+            env,
+            owner,
+            before.receipt(),
+            generation,
+            &encoded,
+            &inputs.outputs,
+        )?;
+        let (snapshot, outputs) = match pending {
+            Some((snapshot, proof)) => (Some(snapshot), inputs.outputs.merge(proof)?),
+            None => (None, inputs.outputs),
+        };
         inputs.package.files.require_unchanged_after_archive(
             env,
             inputs.package.state.legacy_v1_backup.as_deref(),
-            &inputs.outputs,
+            &outputs,
         )?;
-        inputs.outputs.require_room_for_snapshot(encoded.len())?;
-        let snapshot =
-            source_archive::next(env, life, owner, generation, before.receipt(), &encoded)?;
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => {
+                outputs.require_room_for_snapshot(encoded.len())?;
+                source_archive::next(env, life, owner, generation, before.receipt(), &encoded)?
+            }
+        };
+        let outputs =
+            outputs.merge(snapshot.outputs(env, &owner.control.profile.profile()?, &encoded)?)?;
+        inputs.package.files.require_unchanged_after_archive(
+            env,
+            inputs.package.state.legacy_v1_backup.as_deref(),
+            &outputs,
+        )?;
         let saved = before.advance(env, life, owner, &snapshot)?;
         Self::restored(env, owner, keys, signer, saved)
     }
 }
 impl Loaded {
+    fn recover_pending(
+        &self,
+        env: &SyncEnv,
+        life: &MutexGuard<'_, ()>,
+        owner: &Workspace,
+        keys: &VaultKeys,
+        signer: &DeviceKeys,
+    ) -> Result<Option<Loaded>, AppError> {
+        let ordinal = self.cursor.receipt().next_ordinal()?;
+        let Some(bytes) = source_archive::candidate_next(
+            env,
+            owner,
+            self.cursor.receipt(),
+            ordinal,
+            &self.outputs,
+        )?
+        else {
+            return Ok(None);
+        };
+        let pending = Journal::decode(&bytes)?;
+        pending.before(&self.cursor, owner)?;
+        // Reconstruct exactly one typed progress/readback transition. An authenticated blob
+        // does not authorize changing source/plan bindings or inventing another journal step.
+        let expected = if pending.progress != self.journal.progress {
+            if pending.verified != self.journal.verified {
+                return Err(invalid());
+            }
+            self.with_progress(pending.progress.clone().ok_or_else(invalid)?, owner)?
+        } else if pending.verified != self.journal.verified {
+            let verifier = Verifier::resume(
+                &self.plan,
+                self.journal.progress.as_ref().ok_or_else(invalid)?,
+                keys,
+                pending.verified.as_ref().ok_or_else(invalid)?,
+            )?;
+            self.with_readback(&verifier, owner)?
+        } else {
+            return Err(invalid());
+        }
+        .ok_or_else(invalid)?;
+        if expected.encode()?.as_slice() != bytes.as_slice() {
+            return Err(invalid());
+        }
+        Ok(Some(expected.store(
+            env,
+            life,
+            owner,
+            keys,
+            signer,
+            &self.cursor,
+            ordinal,
+        )?))
+    }
+    /// Runtime gate: fixtures or independently signed plans do not establish whole-source coverage.
+    fn require_bound(
+        &self,
+        env: &SyncEnv,
+        owner: &Workspace,
+        keys: &VaultKeys,
+        signer: &DeviceKeys,
+        references: &BTreeMap<String, KeyStorage>,
+    ) -> Result<(), AppError> {
+        let bytes =
+            source_archive::restore(env, &owner.control.profile.profile()?, &self.journal.plan)?;
+        let source = Plan::source_cursor(&bytes)?;
+        if source.receipt() != &self.journal.source
+            || self.journal.ancestors.get(source.revision() as usize) != Some(&self.journal.plan)
+        {
+            return Err(invalid());
+        }
+        let mut lineage = self.journal.ancestors.clone();
+        lineage.push(self.cursor.receipt().clone());
+        let saved = source.restored_ancestor(env, owner, &self.cursor, &lineage)?;
+        let (package, ancestors, _, _) =
+            super::capture_journal::Journal::completed_source(env, owner, signer, saved)?;
+        if ancestors.as_slice() != &self.journal.ancestors[..source.revision() as usize]
+            || package.encode_local()?.as_slice() != self.package.encode_local()?.as_slice()
+            || self.plan.encode_with_source(&source)?.as_slice() != bytes.as_slice()
+        {
+            return Err(invalid());
+        }
+        self.plan.matches_history(
+            keys,
+            &package.structured_history(keys, references)?.into_rows(),
+        )
+    }
     fn successor(&self, owner: &Workspace) -> Result<Journal, AppError> {
         self.journal.current(&self.cursor, owner)?;
         let mut ancestors = self.journal.ancestors.clone();
@@ -350,3 +540,6 @@ mod tests;
 
 #[cfg(test)]
 mod readback_tests;
+
+#[cfg(all(test, unix))]
+mod handoff_tests;
