@@ -376,7 +376,8 @@ pub(super) fn prepare(
                 .iter()
                 .rev()
                 .find_map(|(identity, value)| match value {
-                    Data::Key(private) if identity.id == *id => Some(private),
+                    Data::Key(private)
+                        if identity.id == *id && private.validate_against(id, slot).is_ok() => Some(private),
                     _ => None,
                 })
                 .ok_or_else(invalid)?;

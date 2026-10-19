@@ -101,6 +101,18 @@ impl FrozenSet {
         }
         Ok(result)
     }
+    pub fn reconcile_with_retained(
+        &self,
+        sources: &Sources,
+        state: &SyncStateV3,
+        retained: &[SyncStateV3],
+    ) -> Result<super::reconcile::Reconciliation, AppError> {
+        let mut inventory = self.inventory(sources, state)?;
+        for image in retained {
+            inventory = inventory.with_retained_state(sources, image)?;
+        }
+        super::reconcile::Reconciliation::from_complete(inventory, state)
+    }
     pub fn reconcile(
         &self,
         sources: &Sources,

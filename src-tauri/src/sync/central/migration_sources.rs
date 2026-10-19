@@ -86,6 +86,31 @@ struct SecretRecord<'a> {
     payload: &'a RawValue,
 }
 impl Sources {
+    /// Read-only historical admission. Never discovers or releases a new transport credential.
+    fn historical_subset(&self, state: &SyncStateV3) -> Result<Self, AppError> {
+        let subset = if let Some(account) = &state.account {
+            if account.chain_id != self.parent {
+                return Err(invalid());
+            }
+            let parent = self.keys.get(&self.parent).ok_or_else(invalid)?;
+            let keys = Temporary(
+                ChainKeys::from_parts(&self.parent, &parent.token, &parent.encryption)
+                    .map_err(|_| invalid())?,
+            );
+            Self::discover(state, Some(&keys.0))?
+        } else {
+            Self::discover(state, None)?
+        };
+        if !subset.parent.is_empty() && subset.legacy_origin != self.legacy_origin
+            || subset
+                .keys
+                .iter()
+                .any(|(id, key)| self.keys.get(id).is_none_or(|known| !known.same(key)))
+        {
+            return Err(invalid());
+        }
+        Ok(subset)
+    }
     pub fn discover(
         state: &SyncStateV3,
         account_keys: Option<&ChainKeys>,

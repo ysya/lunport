@@ -99,7 +99,7 @@ impl Reconciliation {
                 Position::ConflictBase | Position::ConflictLocal | Position::ConflictRemote => {
                     group.saved = true
                 }
-                Position::Retained => return Err(invalid()),
+                Position::Retained => {} // Preserved history never votes for a current winner.
             }
         }
         let mut result = Self {

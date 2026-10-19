@@ -163,6 +163,7 @@ pub(super) fn capture(
         sources,
         decryptors,
     )?;
+    drop(package.materials(keys, references)?);
     let latest_account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let latest_sources = Sources::discover(&before, latest_account.0.as_ref())?;
     if latest_sources.encode_local()?.as_slice() != package.sources.encode_local()?.as_slice() {
@@ -216,6 +217,13 @@ mod tests {
         } else {
             state.account = None;
         }
+        let mut retained = state.clone();
+        retained.version = crate::sync::records_v3::LOCAL_CONFLICT_STATE_VERSION;
+        retained.local.central = None;
+        fs::write(
+            device.env().state_path.parent().unwrap().join("sync-state.retained"),
+            serde_json::to_vec(&retained).unwrap(),
+        ).unwrap();
         let profile = owner.control.profile.profile().unwrap();
         let signer = DeviceKeys::decode_secret(&B64.encode([1u8; 64])).unwrap();
         let encoded=Zeroizing::new(serde_json::json!({"version":1,"locator":profile.locator,"id":owner.control.device.id,"keys":&*signer.encode_secret(),"credential":"d".repeat(64)}).to_string());
@@ -291,6 +299,34 @@ mod tests {
         fn delete(&self, _: &str) -> Result<(), AppError> {
             panic!("preflight cannot erase")
         }
+    }
+    #[test]
+    fn an_unreadable_retained_state_blocks_capture_without_creating_an_archive_or_credentials() {
+        let (device, keys, _) = fixture(false);
+        let readonly = ReadOnly {
+            inner: &device.keychain,
+        };
+        let mut env = device.env();
+        env.keychain = &readonly;
+        fs::write(
+            env.state_path.parent().unwrap().join("sync-state.extra"),
+            b"UNREVIEWED-SECRET-SENTINEL",
+        )
+        .unwrap();
+        let before = fs::read(&env.state_path).unwrap();
+        let error = capture(&env, &keys, &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("UNREVIEWED-SECRET-SENTINEL"));
+        assert_eq!(fs::read(&env.state_path).unwrap(), before);
+        assert_eq!(device.runtime.core.lock().unwrap().generation, 9);
+        assert!(!env
+            .state_path
+            .parent()
+            .unwrap()
+            .join("central-source-archives")
+            .exists());
     }
     #[test]
     fn local_and_joined_source_capture_are_read_only_noninteractive_and_leave_the_single_core_unchanged(

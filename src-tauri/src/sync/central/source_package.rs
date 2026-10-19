@@ -62,6 +62,40 @@ fn state(files: &Files, name: &str) -> Result<SyncStateV3, AppError> {
     Ok(state)
 }
 impl Package {
+    /// Strict modern Records images only; older/opaque formats remain explicit blockers.
+    fn retained_states(&self) -> Result<Vec<SyncStateV3>, AppError> {
+        let mut result = vec![];
+        for (path, bytes) in &self.files.bytes {
+            if path.parent() != Some(Path::new("data")) {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or_else(invalid)?;
+            if name == self.state_name
+                || !(name.starts_with("sync-state")
+                    || self.state.legacy_v1_backup.as_deref() == Some(name))
+            {
+                continue;
+            }
+            if bytes.len() as u64 > crate::sync::record_runtime::MAX_STATE_BYTES {
+                return Err(invalid());
+            }
+            let image: SyncStateV3 = serde_json::from_slice(bytes).map_err(|_| AppError::Other("A retained sync-state image needs supported normalization before migration. Every original file is retained.".into()))?;
+            records_v3::validate_state(&image).map_err(|_| invalid())?;
+            if image
+                .local
+                .central
+                .as_ref()
+                .is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())
+            {
+                return Err(invalid());
+            }
+            result.push(image);
+        }
+        Ok(result)
+    }
     /// The caller captures observed decryptors using Materials::from_files; no live key fallback here.
     pub fn assemble(
         expected: &SyncStateV3,
@@ -91,10 +125,12 @@ impl Package {
     /// Payload semantics and other captured source images still require separate admission.
     pub fn record_inputs(&self) -> Result<Inventory, AppError> {
         if state(&self.files, &self.state_name)? != self.state { return Err(invalid()); }
-        match &self.frozen {
-            Some(frozen) => frozen.inventory(&self.sources, &self.state),
-            None => Inventory::from_state(&self.sources, &self.state),
-        }
+        let mut inventory = match &self.frozen {
+            Some(frozen) => frozen.inventory(&self.sources, &self.state)?,
+            None => Inventory::from_state(&self.sources, &self.state)?,
+        };
+        for image in self.retained_states()? { inventory = inventory.with_retained_state(&self.sources, &image)?; }
+        Ok(inventory)
     }
     /// Preserve complete remote inputs alongside this exact captured source, without choosing winners.
     pub fn with_frozen(
@@ -116,6 +152,7 @@ impl Package {
             minimum,
             snapshots,
         )?);
+        drop(self.record_inputs()?);
         Ok(self)
     }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
@@ -127,7 +164,7 @@ impl Package {
         let private_inputs = self.record_inputs()?.admit_known()?.into_keys();
         Materials::from_files_with_key_inputs(
             &self.state, keys, &self.files, &self.decryptors, references, private_inputs,
-        )
+        ).and_then(|materials| materials.with_retained_states(&self.retained_states()?, &self.files, &self.decryptors))
     }
     /// Structured history candidate; other captured files and explicit consent remain gates.
     pub fn structured_history(
@@ -137,7 +174,7 @@ impl Package {
     ) -> Result<super::migration_library::History, AppError> {
         if let Some(frozen) = &self.frozen {
             drop(self.record_inputs()?); // Compare the captured state image before deriving a passive candidate.
-            let prepared = frozen.reconcile(&self.sources, &self.state)?.prepare()?;
+            let prepared = frozen.reconcile_with_retained(&self.sources, &self.state, &self.retained_states()?)?.prepare()?;
             let materials = Materials::from_files_with_key_inputs(
                 &prepared.state,
                 keys,
@@ -145,7 +182,7 @@ impl Package {
                 &self.decryptors,
                 references,
                 prepared.known.key_inputs()?,
-            )?;
+            )?.with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)?;
             return super::migration_library::prepare(&prepared.state, &prepared.known, materials);
         }
         let known = self.record_inputs()?.admit_known()?;
@@ -173,9 +210,7 @@ impl Package {
             .as_ref()
             .map(|value| value.encode_local())
             .transpose()?;
-        if let Some(value) = &self.frozen {
-            drop(value.inventory(&self.sources, &self.state)?);
-        }
+        if self.frozen.is_some() { drop(self.record_inputs()?); }
         let mut sections = vec![
             self.state_name.as_bytes(),
             files.as_slice(),
@@ -339,7 +374,7 @@ pub(in crate::sync::central) mod tests {
         vault
             .put(
                 &device.keychain,
-                "orphan",
+                &"3".repeat(32),
                 &store::VaultEntry {
                     private_key: raw.clone(),
                     public_key: parsed.public_key().to_openssh().unwrap(),
@@ -353,9 +388,12 @@ pub(in crate::sync::central) mod tests {
             )
             .unwrap();
         fs::create_dir_all(root.join("imports/unknown-empty")).unwrap();
+        let mut retained = state.clone();
+        retained.version = records_v3::LOCAL_CONFLICT_STATE_VERSION;
+        retained.local.central = None;
         fs::write(
             root.join("sync-state.retained"),
-            b"unique retained bytes\0\xff",
+            serde_json::to_vec(&retained).unwrap(),
         )
         .unwrap();
         let files = Files::capture(&env, None).unwrap();
@@ -409,10 +447,9 @@ pub(in crate::sync::central) mod tests {
         )
         .unwrap();
         assert_eq!(restored.sources.chains().len(), 1);
-        assert_eq!(
-            restored.files.bytes[Path::new("data/sync-state.retained")].as_slice(),
-            b"unique retained bytes\0\xff"
-        );
+        let retained: SyncStateV3 = serde_json::from_slice(&restored.files.bytes[Path::new("data/sync-state.retained")]).unwrap();
+        assert!(retained.local.central.is_none());
+        assert_eq!(retained.account.as_ref().unwrap().chain_id, restored.state.account.as_ref().unwrap().chain_id);
         assert!(restored
             .files
             .directories
@@ -598,3 +635,6 @@ pub(in crate::sync::central) mod tests {
         assert!(backup.encode_local().is_err());
     }
 }
+
+#[cfg(test)]
+mod retained_tests;

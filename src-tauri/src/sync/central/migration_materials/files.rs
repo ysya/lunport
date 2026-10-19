@@ -85,6 +85,76 @@ pub(super) fn same_private(
     }
 }
 impl Materials {
+    /// Preserve old local-only metadata/pointers without allowing them into current activation.
+    pub(in crate::sync::central) fn with_retained_states(
+        mut self,
+        states: &[SyncStateV3],
+        files: &Files,
+        keychain: &dyn Keychain,
+    ) -> Result<Self, AppError> {
+        if states.iter().all(|state| state.local.keys.is_empty()) {
+            return Ok(self);
+        }
+        let mut views = vec![];
+        for (path, bytes) in &files.bytes {
+            let name = path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or_else(invalid)?;
+            if path.starts_with("data")
+                && (name.starts_with("vault") || name == "original-vault.json")
+            {
+                views.push(image(path, bytes, keychain)?);
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for (identity, data) in &self.history {
+            seen.insert((
+                identity.kind.clone(),
+                identity.id.clone(),
+                super::super::crypto::hash(&payload::encode(identity, data)?),
+            ));
+        }
+        for state in states {
+            records_v3::validate_state(state).map_err(|_| invalid())?;
+            for (id, local) in &state.local.keys {
+                let mut matched = false;
+                for view in &views {
+                    let Some(entry) = view.get_inventory(&local.vault_id).map_err(|_| invalid())?
+                    else {
+                        continue;
+                    };
+                    let private = original(&entry)?;
+                    let slot = SharedKeyslot {
+                        public: local.public.clone(),
+                        storage: KeyStorage::Managed {
+                            sha256: private.digest(),
+                        },
+                    };
+                    if private.validate_against(id, &slot).is_err() {
+                        continue;
+                    }
+                    matched = true;
+                    for (identity, data) in [
+                        (identity("keyslot", id), Data::Keyslot(slot)),
+                        (identity("key", id), Data::Key(private)),
+                    ] {
+                        let hash = super::super::crypto::hash(&payload::encode(&identity, &data)?);
+                        if seen.insert((identity.kind.clone(), identity.id.clone(), hash)) {
+                            if matches!(data, Data::Key(_)) {
+                                self.retained = self.retained.checked_add(1).ok_or_else(invalid)?;
+                            }
+                            self.append(identity, data)?;
+                        }
+                    }
+                }
+                if !matched {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(self)
+    }
     pub fn from_files(
         state: &SyncStateV3,
         keys: &VaultKeys,

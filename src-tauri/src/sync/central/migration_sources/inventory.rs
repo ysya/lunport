@@ -327,3 +327,5 @@ pub(in crate::sync::central) use keys::KeyInput;
 pub(in crate::sync::central) use typed::{Known, KnownData, KnownInput};
 #[cfg(test)]
 mod tests;
+
+mod retained;
