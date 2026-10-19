@@ -294,6 +294,7 @@ fn with_transport(
 }
 /// Resumes only an existing protected capture journal. New sources require explicit foreground start.
 pub(super) fn advance(env: &SyncEnv, keys: &VaultKeys, budget: &Budget) -> Result<Step, AppError> {
+    round::check_cooldown(env)?;
     if !controller::resume_bounded(env, false, budget)? {
         return Err(invalid());
     }

@@ -27,7 +27,7 @@ pub(super) struct Summary {
     key_versions: Vec<KeyVersion>,
 }
 #[derive(Serialize)]
-pub(super) struct Preview {
+pub struct Preview {
     ticket: String,
     approved: bool,
     summary: Summary,
@@ -51,7 +51,7 @@ struct Review {
 }
 /// Native evidence only. Callers must freshly check source/session/cursor and protected storage
 /// before every remote effect and before the dedicated initial publication transaction.
-pub(super) struct Approval {
+pub(in crate::sync::central) struct Approval {
     binding: Binding,
 }
 impl Binding {
@@ -120,7 +120,10 @@ impl Approval {
         Ok(())
     }
 }
-pub(super) fn accepted(env: &SyncEnv, loaded: &Loaded) -> Result<Approval, AppError> {
+pub(in crate::sync::central) fn accepted(
+    env: &SyncEnv,
+    loaded: &Loaded,
+) -> Result<Approval, AppError> {
     let review = read(env, loaded)?.ok_or_else(|| {
         AppError::Other(
             "Review and confirm the complete library before migration can upload any material."
@@ -206,7 +209,7 @@ fn with_current<T>(
     loaded.require_unchanged(env)?;
     Ok(result)
 }
-pub(super) fn preview(
+pub(in crate::sync::central) fn preview(
     env: &SyncEnv,
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
@@ -238,7 +241,7 @@ pub(super) fn preview(
         })
     })
 }
-pub(super) fn confirm(
+pub(in crate::sync::central) fn confirm(
     env: &SyncEnv,
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,

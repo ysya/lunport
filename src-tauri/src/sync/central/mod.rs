@@ -22,6 +22,7 @@ mod capture_journal;
 mod capture_dispatch;
 mod source_complete;
 mod source_plan;
+mod migration_dispatch;
 mod migration_request;
 mod migration_verify;
 mod initial_projection;

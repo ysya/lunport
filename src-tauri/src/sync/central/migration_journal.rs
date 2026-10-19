@@ -377,6 +377,7 @@ impl Journal {
     }
 }
 impl Loaded {
+    pub fn progress(&self) -> Option<&Known> { self.journal.progress.as_ref() }
     fn recover_pending(
         &self,
         env: &SyncEnv,

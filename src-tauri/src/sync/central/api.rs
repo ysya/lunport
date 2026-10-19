@@ -24,6 +24,10 @@ pub struct Reply {
     body: Zeroizing<Vec<u8>>,
 }
 impl Reply {
+    #[cfg(test)]
+    pub(super) fn for_test(status:u16, body:&impl Serialize)->Self {
+        Self { status, retry_after:None, body:Zeroizing::new(serde_json::to_vec(body).unwrap()) }
+    }
     pub fn decode<T: DeserializeOwned>(&self) -> Result<T, AppError> {
         serde_json::from_slice(&self.body)
             .map_err(|_| AppError::Other("The account service returned invalid data.".into()))
@@ -775,6 +779,7 @@ pub enum VaultResource {
     SourceProof { epoch: u64, after: u64 },
     Receipt { operation: String },
 }
+#[derive(Clone, Copy)]
 pub(super) enum MigrationAction {
     Begin,
     Stage,
