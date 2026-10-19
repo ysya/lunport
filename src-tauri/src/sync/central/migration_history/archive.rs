@@ -53,9 +53,29 @@ struct Stored {
     manifest: SignedMigration,
     rows: Vec<Version>,
     wraps: Vec<WrappedKeys>,
+    #[serde(default)]
+    source_cursor: Option<super::super::source_cursor::Cursor>,
 }
 impl Plan {
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        self.encode_bound(None)
+    }
+    pub fn encode_with_source(
+        &self,
+        source: &super::super::source_cursor::Cursor,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        source.validate(&self.before)?;
+        if source.receipt().operation() != self.manifest.body.migration_id
+            || source.receipt().ciphertext_hash != self.manifest.body.inventory_digest
+        {
+            return Err(invalid());
+        }
+        self.encode_bound(Some(source))
+    }
+    fn encode_bound(
+        &self,
+        source_cursor: Option<&super::super::source_cursor::Cursor>,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         #[derive(Serialize)]
         struct Stored<'a> {
             version: u32,
@@ -63,6 +83,8 @@ impl Plan {
             manifest: &'a SignedMigration,
             rows: &'a [Version],
             wraps: &'a [WrappedKeys],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            source_cursor: Option<&'a super::super::source_cursor::Cursor>,
         }
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(
@@ -73,6 +95,7 @@ impl Plan {
                 manifest: &self.manifest,
                 rows: &self.rows,
                 wraps: &self.wraps,
+                source_cursor,
             },
         )
         .map_err(|_| invalid())?;
@@ -80,6 +103,46 @@ impl Plan {
             return Err(invalid());
         }
         Ok(bytes)
+    }
+    /// Metadata peek only; callers must validate the parent against protected child progress.
+    pub fn source_cursor(bytes: &[u8]) -> Result<super::super::source_cursor::Cursor, AppError> {
+        if bytes.len() > MAX_PLAN_BYTES {
+            return Err(invalid());
+        }
+        #[derive(Deserialize)]
+        struct Bound {
+            source_cursor: super::super::source_cursor::Cursor,
+        }
+        serde_json::from_slice::<Bound>(bytes)
+            .map(|bound| bound.source_cursor)
+            .map_err(|_| invalid())
+    }
+    pub fn matches_history(
+        &self,
+        keys: &VaultKeys,
+        history: &[(Identity, Data)],
+    ) -> Result<(), AppError> {
+        if self.rows.len() != history.len() {
+            return Err(invalid());
+        }
+        let chain = self.before.control.verified_chain()?;
+        for (row, (identity, data)) in self.rows.iter().zip(history) {
+            let header = &row.envelope.header;
+            if header.record_id != identity.opaque(keys)?
+                || header.kind != identity.kind
+                || header.deleted != matches!(data, Data::Deleted)
+            {
+                return Err(invalid());
+            }
+            let author = chain
+                .author_at(&header.membership_head, &header.author)
+                .ok_or_else(invalid)?;
+            let actual = row.envelope.verify(&author.signing)?.open(keys)?;
+            if actual.as_slice() != payload::encode(identity, data)?.as_slice() {
+                return Err(invalid());
+            }
+        }
+        Ok(())
     }
     pub fn decode_local(
         bytes: &[u8],
@@ -102,6 +165,14 @@ impl Plan {
             || stored.manifest.body.sources != expected.sources
         {
             return Err(invalid());
+        }
+        if let Some(source) = &stored.source_cursor {
+            source.validate(before)?;
+            if source.receipt().operation() != expected.operation
+                || source.receipt().ciphertext_hash != expected.inventory_digest
+            {
+                return Err(invalid());
+            }
         }
         let chain = target(before, keys, signer)?;
         let member = chain.current();

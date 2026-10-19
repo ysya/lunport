@@ -31,7 +31,7 @@ fn role(owner: &Workspace) -> Result<String, AppError> {
         .slot("source-migration-cursor"))
 }
 impl Cursor {
-    fn validate(&self, owner: &Workspace) -> Result<(), AppError> {
+    pub(super) fn validate(&self, owner: &Workspace) -> Result<(), AppError> {
         if self.version != 1
             || self.revision == 0
             || self.revision > MAX_SAFE_INTEGER
@@ -92,6 +92,23 @@ impl Cursor {
             bytes,
             outputs,
         })
+    }
+    /// Read-only predecessor proof pinned by an actual protected child. This cannot rewind storage.
+    pub fn restored_parent(
+        &self,
+        env: &SyncEnv,
+        owner: &Workspace,
+        child: &Cursor,
+    ) -> Result<Restored, AppError> {
+        self.validate(owner)?;
+        child.validate(owner)?;
+        if self.revision.checked_add(1) != Some(child.revision)
+            || self.selection != child.selection
+            || child.previous.as_ref() != Some(&self.receipt)
+        {
+            return Err(invalid());
+        }
+        self.clone().restore(env, owner)
     }
     /// None means no cursor was read, never permission to ignore existing source obligations.
     pub fn load(

@@ -22,7 +22,7 @@ pub(super) struct Completed {
     pub cursor: Cursor,
     pub outputs: Outputs,
 }
-fn check(
+pub(super) fn check(
     env: &SyncEnv,
     state: &SyncStateV3,
     generation: u64,
