@@ -9,6 +9,29 @@ fn fixture(joined: bool) -> (TestDevice, VaultKeys) {
     source_capture::start_or_resume(&device.env(), &keys, &BTreeMap::new()).unwrap();
     (device, keys)
 }
+pub(super) fn ready_fixture(joined: bool) -> (TestDevice, VaultKeys) {
+    let (device, keys) = fixture(joined);
+    let env = device.env();
+    for _ in 0..10 {
+        let step = with_transport(&env, &keys, |_, loaded, action| match action {
+            Action::Freeze { .. } => Ok(Received::Freeze(if loaded.pending_discovery() {
+                loaded.fetching().unwrap().progress().clone()
+            } else {
+                progress(loaded, true)
+            })),
+            Action::Fetch(_) => Ok(Received::Fetch(PullResponse {
+                records: vec![],
+                latest_seq: 0,
+            })),
+            _ => panic!("local step cannot cross HTTP"),
+        })
+        .unwrap();
+        if step == Step::Ready {
+            return (device, keys);
+        }
+    }
+    panic!("fixture did not finish capture")
+}
 fn progress(loaded: &Loaded, freeze: bool) -> Progress {
     let chains = loaded.intent().body.source_order();
     Progress {

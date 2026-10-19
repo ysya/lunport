@@ -249,6 +249,45 @@ impl Journal {
             outputs,
         })
     }
+    /// A protected complete-source cursor pins this predecessor and all of its ancestry.
+    /// Re-derive exact complete bytes; this creates no historical cursor or publication permit.
+    pub fn completed_source(
+        env: &SyncEnv,
+        owner: &Workspace,
+        signer: &DeviceKeys,
+        saved: Restored,
+    ) -> Result<(Package, Vec<Receipt>, Cursor, Outputs), AppError> {
+        let parent = saved.cursor.previous().ok_or_else(invalid)?.clone();
+        let (bytes, proof) =
+            source_archive::restore_with_outputs(env, &owner.control.profile.profile()?, &parent)?;
+        let journal = Self::decode(&bytes)?;
+        journal.lineage(owner)?;
+        if journal.pending_book.is_some()
+            || journal.revision.checked_add(1) != Some(saved.cursor.revision())
+            || !parent.follows(journal.ancestors.last().ok_or_else(invalid)?)?
+        {
+            return Err(invalid());
+        }
+        let (package, outputs) = journal.inputs(env, owner, signer, saved.outputs.merge(proof)?)?;
+        let fetching = journal.fetching.ok_or_else(invalid)?;
+        if fetching
+            .discovered_sources(&package.sources, &package.state)?
+            .is_some()
+        {
+            return Err(invalid());
+        }
+        let complete = package.finish_fetching(fetching)?;
+        if complete.encode_local()?.as_slice() != saved.bytes.as_slice() {
+            return Err(invalid());
+        }
+        let mut ancestors = journal.ancestors;
+        ancestors.push(parent);
+        ancestors.push(saved.cursor.receipt().clone());
+        if ancestors.len() as u64 != saved.cursor.revision() {
+            return Err(invalid());
+        }
+        Ok((complete, ancestors, saved.cursor, outputs))
+    }
     pub fn load(
         env: &SyncEnv,
         life: &MutexGuard<'_, ()>,

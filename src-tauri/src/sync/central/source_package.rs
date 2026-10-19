@@ -269,6 +269,7 @@ impl Package {
         }
         Ok(out)
     }
+    pub fn complete_frame(bytes:&[u8])->bool {bytes.starts_with(FROZEN_MAGIC)}
     pub fn decode_local(bytes: &[u8]) -> Result<Self, AppError> {
         let magic = bytes.get(..8);
         if bytes.len() > MAX_BYTES

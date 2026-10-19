@@ -70,6 +70,9 @@ fn action(loaded: &Loaded) -> Result<Action, AppError> {
         next,
     })
 }
+pub(super) fn ready(loaded: &Loaded) -> Result<bool, AppError> {
+    Ok(matches!(action(loaded)?, Action::Ready))
+}
 struct Prepared {
     loaded: Loaded,
     generation: u64,
@@ -352,6 +355,10 @@ pub(super) fn advance(env: &SyncEnv, keys: &VaultKeys, budget: &Budget) -> Resul
             Step::Ready => return Ok(Step::Ready),
         }
     }
+}
+#[cfg(all(test, unix))]
+pub(super) fn ready_for_test(joined: bool) -> (crate::sync::testkit::TestDevice, VaultKeys) {
+    tests::ready_fixture(joined)
 }
 #[cfg(all(test, unix))]
 mod tests;
