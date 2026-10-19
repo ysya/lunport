@@ -1,6 +1,36 @@
 //! Historical copies contribute only retained versions and stronger observed source minima.
 use super::*;
 impl Inventory {
+    /// Ancestors normalize against their own captured files and retain their complete logical
+    /// history separately. Transport must also meet every stronger ancestor checkpoint.
+    pub(in crate::sync::central) fn with_retained_requirements(
+        mut self,
+        sources: &Sources,
+        historical_sources: &Sources,
+        historical: Self,
+    ) -> Result<Self, AppError> {
+        sources.require_retained_subset(historical_sources)?;
+        if self.keybook != super::super::super::crypto::hash(&sources.encode_local()?) {
+            return Err(invalid());
+        }
+        for (chain, minimum) in historical.minima {
+            if !sources.keys.contains_key(&chain)
+                || self.frozen_context.is_some()
+                    && self.frozen.get(&chain).is_none_or(|known| {
+                        super::super::super::wire::number(&known.sequence, true)
+                            .map_or(true, |n| n < minimum)
+                    })
+            {
+                return Err(invalid());
+            }
+            self.minima
+                .entry(chain)
+                .and_modify(|n| *n = (*n).max(minimum))
+                .or_insert(minimum);
+        }
+        Ok(self)
+    }
+
     pub fn with_retained_state(
         mut self,
         sources: &Sources,

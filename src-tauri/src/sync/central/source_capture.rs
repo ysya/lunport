@@ -210,14 +210,17 @@ fn capture_inner(
             None => Files::capture(env, before.legacy_v1_backup.as_deref())?,
         };
         let observer = Capture::new(&readonly);
-        drop(Materials::from_files_with_key_inputs(
+        let materials = Materials::from_files_with_key_inputs(
             &before,
             keys,
             &files,
             &observer,
             references,
             private_inputs,
-        )?);
+        )?;
+        let historical = super::replacement_archive::captured::read_all(&files.bytes, &observer)?;
+        drop(materials.with_retained_states(&historical.states, &files, &observer)?);
+        drop(super::source_archive::captured::read_all(&files.bytes, &observer)?);
         let decryptors = observer.finish()?;
         Package::assemble(
             &before,

@@ -26,6 +26,39 @@ pub(super) struct History {
     latest: BTreeMap<String, String>,
 }
 impl History {
+    /// Ancestor-only items remain inactive; selected library versions always come last.
+    pub(in crate::sync::central) fn with_retained(
+        self,
+        histories: Vec<Self>,
+    ) -> Result<Self, AppError> {
+        if histories.is_empty() {
+            return Ok(self);
+        }
+        let desired: BTreeSet<_> = self.rows.iter().map(|(id, _)| identity_key(id)).collect();
+        let mut result = Self {
+            rows: vec![],
+            bytes: 0,
+            seen: BTreeSet::new(),
+            latest: BTreeMap::new(),
+        };
+        let mut closing = BTreeMap::new();
+        for history in histories {
+            for (id, data) in history.rows {
+                let key = identity_key(&id);
+                if !desired.contains(&key) {
+                    closing.insert(key, id.clone());
+                }
+                result.append(id, data, false)?;
+            }
+        }
+        for id in closing.into_values() {
+            result.append(id, Data::Deleted, true)?;
+        }
+        for (id, data) in self.rows {
+            result.append(id, data, true)?;
+        }
+        Ok(result)
+    }
     pub fn into_rows(self) -> Vec<(Identity, Data)> {
         self.rows
     }

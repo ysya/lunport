@@ -226,39 +226,42 @@ fn decode(context: &Context, key: &[u8; 32], bytes: &[u8]) -> Result<Zeroizing<V
     }
     Ok(plaintext)
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredKey {
+    version: u32,
+    scope: String,
+    key: String,
+}
+impl Drop for StoredKey {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+fn parse_key(context: &Context, value: &str) -> Result<Zeroizing<[u8; 32]>, AppError> {
+    if value.len() > 1024 {
+        return Err(invalid());
+    }
+    let stored: StoredKey = serde_json::from_str(value).map_err(|_| invalid())?;
+    if stored.version != 1 || stored.scope != context.key_scope()? {
+        return Err(invalid());
+    }
+    let decoded = Zeroizing::new(crypto::decode(&stored.key, 32, 32)?);
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(&decoded);
+    Ok(key)
+}
+pub(in crate::sync::central) mod captured;
+
 fn archive_key(
     env: &SyncEnv,
     profile: &Profile,
     context: &Context,
     create: bool,
 ) -> Result<Zeroizing<[u8; 32]>, AppError> {
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Stored {
-        version: u32,
-        scope: String,
-        key: String,
-    }
-    impl Drop for Stored {
-        fn drop(&mut self) {
-            self.key.zeroize();
-        }
-    }
     let slot = profile.slot(&format!("replacement-archive-{}", context.operation));
     let scope = context.key_scope()?;
-    let parse = |encoded: &str| -> Result<Zeroizing<[u8; 32]>, AppError> {
-        if encoded.len() > 1024 {
-            return Err(invalid());
-        }
-        let stored: Stored = serde_json::from_str(encoded).map_err(|_| invalid())?;
-        if stored.version != 1 || stored.scope != scope {
-            return Err(invalid());
-        }
-        let decoded = Zeroizing::new(crypto::decode(&stored.key, 32, 32)?);
-        let mut key = Zeroizing::new([0u8; 32]);
-        key.copy_from_slice(&decoded);
-        Ok(key)
-    };
+    let parse = |value: &str| parse_key(context, value);
     if let Some(value) = env.keychain.get(&slot)? {
         return parse(&Zeroizing::new(value));
     }
@@ -267,7 +270,7 @@ fn archive_key(
     }
     let mut key = Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut *key).map_err(|_| invalid())?;
-    let stored = Stored {
+    let stored = StoredKey {
         version: 1,
         scope: scope.clone(),
         key: B64.encode(&*key),

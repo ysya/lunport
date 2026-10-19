@@ -271,6 +271,32 @@ impl Materials {
         self.history.push((identity, data));
         Ok(())
     }
+    pub(in crate::sync::central) fn with_retained_materials(
+        mut self,
+        historical: Self,
+    ) -> Result<Self, AppError> {
+        let mut seen: BTreeSet<_> = self
+            .history
+            .iter()
+            .map(|(id, data)| {
+                payload::encode(id, data)
+                    .map(|bytes| (id.kind.clone(), id.id.clone(), super::crypto::hash(&bytes)))
+            })
+            .collect::<Result<_, _>>()?;
+        for (id, data) in historical.history {
+            if seen.insert((
+                id.kind.clone(),
+                id.id.clone(),
+                super::crypto::hash(&payload::encode(&id, &data)?),
+            )) {
+                if matches!(data, Data::Key(_)) {
+                    self.retained = self.retained.checked_add(1).ok_or_else(invalid)?;
+                }
+                self.append(id, data)?;
+            }
+        }
+        Ok(self)
+    }
     pub fn into_history(self) -> Vec<(Identity, Data)> {
         self.history
     }

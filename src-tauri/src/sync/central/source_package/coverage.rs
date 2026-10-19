@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 impl Package {
     /// Each accepted role has a strict semantic reader in record_inputs/materials. Other trees,
     /// including old encrypted archives and empty unknown import directories, remain blockers.
-    pub(super) fn require_supported_files(&self) -> Result<(), AppError> {
+    pub(super) fn require_own_supported_files(&self) -> Result<(), AppError> {
         self.files.validate_archive()?;
         let imports = crate::sync::record_import::inventory::read_all(
             &self.state,
@@ -15,6 +15,11 @@ impl Package {
         )?;
         let migrations =
             crate::sync::record_migration::inventory::read_all(&self.state, &self.files.bytes)?;
+        let recovery = super::super::replacement_archive::captured::read_all(
+            &self.files.bytes,
+            &self.decryptors,
+        )?;
+        let sources = super::super::source_archive::captured::read_all(&self.files.bytes, &self.decryptors)?;
         let mut directories: BTreeSet<_> = [
             "data",
             "keys",
@@ -41,6 +46,8 @@ impl Package {
         for file in self.files.bytes.keys() {
             if imports.admitted.contains(file)
                 || migrations.admitted.contains(file)
+                || recovery.admitted.contains(file)
+                || sources.admitted.contains(file)
                 || file.starts_with("keys")
             {
                 continue;

@@ -268,16 +268,29 @@ impl Journal {
         env: &SyncEnv,
         owner: &Workspace,
         signer: &DeviceKeys,
-        mut outputs: Outputs,
+        outputs: Outputs,
     ) -> Result<(Package, Outputs, Option<Fetching>), AppError> {
-        self.lineage(owner)?;
         let profile = owner.control.profile.profile()?;
+        let mut outputs = Some(outputs);
+        let (package, parent) = self.captured_inputs(owner, Some(signer), |receipt| {
+            let (bytes, proof) = source_archive::restore_with_outputs(env, &profile, receipt)?;
+            outputs = Some(outputs.take().ok_or_else(invalid)?.merge(proof)?);
+            Ok(bytes)
+        })?;
+        Ok((package, outputs.ok_or_else(invalid)?, parent))
+    }
+    fn captured_inputs(
+        &mut self,
+        owner: &Workspace,
+        signer: Option<&DeviceKeys>,
+        mut read: impl FnMut(&Receipt) -> Result<Zeroizing<Vec<u8>>, AppError>,
+    ) -> Result<(Package, Option<Fetching>), AppError> {
+        self.lineage(owner)?;
         let mut package = None;
         let mut previous = None;
         let mut previous_book = None;
         for (index, receipt) in self.ancestors.iter().enumerate() {
-            let (bytes, proof) = source_archive::restore_with_outputs(env, &profile, receipt)?;
-            outputs = outputs.merge(proof)?;
+            let bytes = read(receipt)?;
             if receipt == &self.source {
                 package = Some(Package::decode_local(&bytes)?);
             } else {
@@ -290,6 +303,15 @@ impl Journal {
                     return Err(invalid());
                 }
                 prior.inherit(previous, previous_book)?;
+                // A captured ancestor may not hide an unreadable book or invalid intent just
+                // because its successor supplied a replacement book instead of a delta.
+                if signer.is_none() {
+                    drop(prior.checked_sources(
+                        owner,
+                        None,
+                        package.as_ref().ok_or_else(invalid)?,
+                    )?);
+                }
                 previous_book = Some(prior.book);
                 previous = prior.fetching;
             }
@@ -297,6 +319,16 @@ impl Journal {
         let parent_fetching = previous.clone();
         self.inherit(previous, previous_book)?;
         let mut package = package.ok_or_else(invalid)?;
+        let sources = self.checked_sources(owner, signer, &package)?;
+        package.sources = sources;
+        Ok((package, parent_fetching))
+    }
+    fn checked_sources(
+        &self,
+        owner: &Workspace,
+        signer: Option<&DeviceKeys>,
+        package: &Package,
+    ) -> Result<Sources, AppError> {
         if package.state.local.central.as_ref() != Some(owner)
             || !self
                 .intent
@@ -333,18 +365,40 @@ impl Journal {
         if !effective.follows_book(&crypto::hash(&sources.encode_local()?))? {
             return Err(invalid());
         }
-        let expected = effective.intent(
+        let expected = effective.intent_body(
             owner,
-            signer,
             self.source.operation(),
             &self.source.ciphertext_hash,
             self.fetching.as_ref().map(Fetching::progress),
         )?;
-        if expected != self.intent {
+        if expected != self.intent.body {
             return Err(invalid());
         }
-        package.sources = sources;
-        Ok((package, outputs, parent_fetching))
+        if let Some(signer) = signer {
+            if effective.intent(
+                owner,
+                signer,
+                self.source.operation(),
+                &self.source.ciphertext_hash,
+                self.fetching.as_ref().map(Fetching::progress),
+            )? != self.intent
+            {
+                return Err(invalid());
+            }
+        } else {
+            self.intent.verify(
+                owner.control.verified_chain()?.current(),
+                owner.control.auth_epoch,
+                owner.replica.as_ref().ok_or_else(invalid)?.checkpoint.epoch,
+                owner
+                    .control
+                    .personal_vault
+                    .as_deref()
+                    .ok_or_else(invalid)?,
+                &owner.control.device.id,
+            )?;
+        }
+        Ok(sources)
     }
     fn restored(
         env: &SyncEnv,
@@ -612,6 +666,7 @@ impl Loaded {
         Ok((complete, ancestors, self.cursor, self.outputs))
     }
 }
+mod captured;
 #[cfg(test)]
 mod tests;
 

@@ -15,7 +15,20 @@ use std::{
 use zeroize::Zeroizing;
 const MAX_ROLES: usize = 8192;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
+fn archive_role(role: &str) -> bool {
+    role.strip_prefix("central:v2:")
+        .and_then(|s| s.split_once(':'))
+        .is_some_and(|(kind, locator)| {
+            hex(locator, 64)
+                && ["replacement-archive-", "source-archive-"]
+                    .iter()
+                    .any(|prefix| kind.strip_prefix(prefix).is_some_and(|op| hex(op, 32)))
+        })
+}
 fn allowed(role: &str) -> bool {
+    if archive_role(role) {
+        return true;
+    }
     if store::is_vault_key_account(role) {
         return true;
     }
@@ -26,7 +39,29 @@ fn allowed(role: &str) -> bool {
         })
 }
 fn check(role: &str, value: &str) -> Result<(), AppError> {
-    if !allowed(role) || value.len() > 128 {
+    if !allowed(role) {
+        return Err(invalid());
+    }
+    if archive_role(role) {
+        if value.len() > 1024 {
+            return Err(invalid());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Stored {
+            version: u32,
+            scope: String,
+            #[serde(deserialize_with = "secret")]
+            key: Zeroizing<String>,
+        }
+        let stored: Stored = serde_json::from_str(value).map_err(|_| invalid())?;
+        if stored.version != 1 || !hex(&stored.scope, 64) {
+            return Err(invalid());
+        }
+        let _key = Zeroizing::new(crypto::decode(&stored.key, 32, 32)?);
+        return Ok(());
+    }
+    if value.len() > 128 {
         return Err(invalid());
     }
     let _key = Zeroizing::new(crypto::decode(value, 32, 32)?);
@@ -293,7 +328,7 @@ mod tests {
         }
     }
     #[test]
-    fn passwords_tokens_identities_source_archive_keys_and_untrusted_role_names_never_reach_live_storage(
+    fn passwords_tokens_device_identities_and_unscoped_role_names_never_reach_live_storage(
     ) {
         for role in [
             "host:password",

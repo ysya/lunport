@@ -8,7 +8,7 @@ use crate::sync::{
     relay::PullResponse,
     testkit::TestDevice,
 };
-use std::fs;
+use std::{fs,collections::BTreeMap};
 fn fixture() -> (TestDevice, Workspace, DeviceKeys, Loaded) {
     let (device, package, _, owner, _) = super::super::source_package::tests::fixture();
     let (_, _, signer) = migration_history::tests::initial();
@@ -593,4 +593,141 @@ fn capacity_capture_delta_framing_avoids_cumulative_source_and_book_copies() {
         "capacity framing: 65 sources, compact {} bytes versus repeated {} bytes",
         compact, repeated
     );
+}
+
+#[test]
+fn captured_complete_journal_rechecks_ancestors_and_signatures_without_live_archive_or_device_keys()
+{
+    use super::super::{inventory_keys::Capture, migration_files::Files, source_package::Package};
+    let (device, owner, signer, begun) = fixture();
+    let env = device.env();
+    let life = env.runtime.lifecycle.lock().unwrap();
+    let progress = progress(&begun);
+    let frozen = begun
+        .with_progress(&owner, &progress)
+        .unwrap()
+        .store(&env, &life, &owner, &signer, &begun.cursor, 0)
+        .unwrap();
+    let parent = frozen
+        .package
+        .state
+        .account
+        .as_ref()
+        .unwrap()
+        .chain_id
+        .clone();
+    let snapshot = frozen
+        .package
+        .sources
+        .admit_frozen(
+            &owner,
+            &frozen.intent().body.migration_id,
+            &progress,
+            None,
+            &parent,
+            PullResponse {
+                records: vec![],
+                latest_seq: 0,
+            },
+        )
+        .unwrap();
+    let expanded = Sources::decode_local(
+        &frozen.package.sources.encode_local().unwrap(),
+        &frozen.package.state,
+    )
+    .unwrap()
+    .with_parent_discovery(&owner, &snapshot)
+    .unwrap();
+    let fetched = frozen
+        .with_snapshot(&owner, snapshot)
+        .unwrap()
+        .store(&env, &life, &owner, &signer, &frozen.cursor, 0)
+        .unwrap();
+    let pending = fetched
+        .with_discovery(&owner, &signer, expanded)
+        .unwrap()
+        .store(&env, &life, &owner, &signer, &fetched.cursor, 0)
+        .unwrap();
+    let finished = pending
+        .with_progress(&owner, &progress)
+        .unwrap()
+        .store(&env, &life, &owner, &signer, &pending.cursor, 0)
+        .unwrap();
+    let files = Files::capture(&env, None).unwrap();
+    let observer = Capture::new(&device.keychain);
+    let frames = source_archive::captured::read_all(&files.bytes, &observer).unwrap();
+    let receipt = finished.cursor.receipt().clone();
+    let read = |expected: &Receipt| -> Result<Zeroizing<Vec<u8>>, AppError> {
+        frames
+            .frames
+            .iter()
+            .find(|(r, _)| r == expected)
+            .map(|(_, b)| Zeroizing::new(b.to_vec()))
+            .ok_or_else(invalid)
+    };
+    let bytes = read(&receipt).unwrap();
+    let (passive, ancestors) = Journal::captured_complete(&bytes, &receipt, &read).unwrap();
+    assert_eq!(
+        passive.encode_local().unwrap().as_slice(),
+        finished
+            .into_complete()
+            .unwrap()
+            .0
+            .encode_local()
+            .unwrap()
+            .as_slice()
+    );
+    for missing in &ancestors {
+        assert!(
+            Journal::captured_complete(&bytes, &receipt, |r| if r == missing {
+                Err(invalid())
+            } else {
+                read(r)
+            })
+            .is_err()
+        );
+    }
+    for ancestor in &ancestors {
+        let original = read(ancestor).unwrap();
+        if Journal::frame(&original) {
+            let mut prior = Journal::decode(&original).unwrap();
+            prior.book =
+                Zeroizing::new("{\"unsupported_private_schema\":\"PRIVATE_SENTINEL\"}".into());
+            let tampered = prior.encode().unwrap();
+            let rejected = Journal::captured_complete(&bytes, &receipt, |r| {
+                if r == ancestor {
+                    Ok(Zeroizing::new(tampered.to_vec()))
+                } else {
+                    read(r)
+                }
+            });
+            assert!(rejected.is_err());
+        }
+    }
+    let mut changed = Journal::decode(&bytes).unwrap();
+    changed.intent.signature = "A".repeat(88);
+    assert!(Journal::captured_complete(&changed.encode().unwrap(), &receipt, &read).is_err());
+    let mut outer = Package::decode_local(&passive.encode_local().unwrap()).unwrap();
+    outer.files = files;
+    super::super::migration_materials::Materials::from_files(
+        &outer.state,
+        &migration_history::tests::initial().1,
+        &outer.files,
+        &observer,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let sources =
+        Sources::decode_local(&outer.sources.encode_local().unwrap(), &outer.state).unwrap();
+    let outer = Package::assemble(
+        &outer.state,
+        env.state_path.file_name().unwrap().to_str().unwrap(),
+        outer.files,
+        sources,
+        observer.finish().unwrap(),
+    )
+    .unwrap();
+    assert!(outer
+        .structured_history(&migration_history::tests::initial().1, &BTreeMap::new())
+        .is_ok());
 }

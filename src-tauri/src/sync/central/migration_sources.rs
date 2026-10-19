@@ -284,6 +284,21 @@ impl Sources {
         }
         Ok(())
     }
+    pub(in crate::sync::central) fn require_retained_subset(
+        &self,
+        other: &Self,
+    ) -> Result<(), AppError> {
+        if !other.parent.is_empty()
+            && (self.parent != other.parent || self.legacy_origin != other.legacy_origin)
+            || other
+                .keys
+                .iter()
+                .any(|(id, key)| self.keys.get(id).is_none_or(|known| !known.same(key)))
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
     pub fn chains(&self) -> Vec<String> {
         self.keys.keys().cloned().collect()
     }
@@ -295,12 +310,26 @@ impl Sources {
         preview: &str,
         previous: Option<&Progress>,
     ) -> Result<SignedFreeze, AppError> {
+        if owner.control.device.keys != signer.public() {
+            return Err(invalid());
+        }
+        SignedFreeze::sign(
+            self.intent_body(owner, operation, preview, previous)?,
+            signer,
+        )
+    }
+    pub(in crate::sync::central) fn intent_body(
+        &self,
+        owner: &Workspace,
+        operation: &str,
+        preview: &str,
+        previous: Option<&Progress>,
+    ) -> Result<Body, AppError> {
         owner.validate()?;
         self.require_service(&owner.control.profile.origin)?;
         owner.require_key_recipients()?;
         if owner.control.cutover
             || owner.control.phase != Phase::Enrolled
-            || owner.control.device.keys != signer.public()
             || owner.bootstrap.is_some()
             || owner.replacement.is_some()
             || owner.rotation.is_some()
@@ -355,13 +384,13 @@ impl Sources {
             body.revision = last.intent.body.revision.clone();
             body.previous_digest = last.intent.body.previous_digest.clone();
             if body == last.intent.body {
-                return Ok(last.intent.clone());
+                return Ok(last.intent.body.clone());
             }
             body.revision = (previous.proof.len() + 1).to_string();
             body.previous_digest = last.digest.clone();
             body.extends(&last.intent.body, &last.digest)?;
         }
-        SignedFreeze::sign(body, signer)
+        Ok(body)
     }
     /// Explicit freeze credential export: bounded native HTTP bytes, never a persistable DTO.
     pub fn freeze_body(

@@ -24,6 +24,7 @@ const MAGIC: &[u8; 8] = b"LPSRCPK1";
 const FROZEN_MAGIC: &[u8; 8] = b"LPSRCPK2";
 const MAX_BYTES: usize = 192 * 1024 * 1024;
 mod coverage;
+mod retained;
 /// Only explicit native encode/decode. Never a frontend DTO or an SSH private-key export.
 pub(super) struct Package {
     state_name: String,
@@ -74,6 +75,9 @@ impl Package {
         result.extend(
             crate::sync::record_migration::inventory::read_all(&self.state, &self.files.bytes)?
                 .states,
+        );
+        result.extend(
+            super::replacement_archive::captured::read_all(&self.files.bytes, &self.decryptors)?.states,
         );
         for (path, bytes) in &self.files.bytes {
             if path.parent() != Some(Path::new("data")) {
@@ -170,7 +174,7 @@ impl Package {
     }
     /// Full current/recovery input enumeration using this package's archived legacy keybook.
     /// Payload semantics and other captured source images still require separate admission.
-    pub fn record_inputs(&self) -> Result<Inventory, AppError> {
+    fn own_record_inputs(&self) -> Result<Inventory, AppError> {
         if state(&self.files, &self.state_name)? != self.state {
             return Err(invalid());
         }
@@ -255,16 +259,29 @@ impl Package {
         drop(self.record_inputs()?);
         Ok(self)
     }
+    /// Historical graph readers own the shared depth/byte budget. Do not recurse into capsule
+    /// graphs here; the caller must visit every enclosed source before semantic admission.
+    pub(in crate::sync::central) fn finish_captured_fetching(
+        mut self,
+        fetching: super::migration_sources::Fetching,
+    ) -> Result<Self, AppError> {
+        if self.frozen.is_some() {
+            return Err(invalid());
+        }
+        self.frozen = Some(fetching.complete(&self.sources, &self.state)?);
+        drop(self.own_record_inputs()?);
+        Ok(self)
+    }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
-    pub fn materials(
+    fn own_materials(
         &self,
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
-        self.require_supported_files()?;
+        self.require_own_supported_files()?;
         let mut normalized = self.state.clone();
         let private_inputs = self
-            .record_inputs()?
+            .own_record_inputs()?
             .admit_known()?
             .normalize_legacy(&mut normalized, Some(&self.files))?
             .into_keys();
@@ -281,16 +298,16 @@ impl Package {
         })
     }
     /// Structured history candidate; other captured files and explicit consent remain gates.
-    pub fn structured_history(
+    fn own_structured_history(
         &self,
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<super::migration_library::History, AppError> {
-        self.require_supported_files()?;
+        self.require_own_supported_files()?;
         if self.frozen.is_some() {
-            drop(self.record_inputs()?); // Compare the captured state image before deriving a passive candidate.
+            drop(self.own_record_inputs()?); // Compare the captured state image before deriving a passive candidate.
             let prepared = self
-                .record_inputs()?
+                .own_record_inputs()?
                 .reconcile_captured(&self.state)?
                 .prepare_with_files(Some(&self.files))?;
             let materials = Materials::from_files_with_key_inputs(
@@ -310,7 +327,7 @@ impl Package {
         }
         let mut normalized = self.state.clone();
         let known = self
-            .record_inputs()?
+            .own_record_inputs()?
             .admit_known()?
             .normalize_legacy(&mut normalized, Some(&self.files))?;
         let materials = Materials::from_files_with_key_inputs(

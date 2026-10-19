@@ -22,6 +22,7 @@ const MAX_PLAIN: usize = 192 * 1024 * 1024;
 const MAX_FILE: usize = MAX_PLAIN + MAX_HEADER + 28;
 const MAX_OUTPUTS: usize = 256;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+pub(in crate::sync::central) mod captured;
 mod pending;
 pub(super) use pending::resume_next;
 pub(super) use pending::candidate_next;
