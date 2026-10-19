@@ -246,14 +246,15 @@ export function CentralLibraryMigration({
       )}
       {progress?.mode === "join" && progress.phase === "waiting" && (
         <p>
-          This approved device is waiting for verified library adoption. It will
-          not start another initial migration or upload its local library.
+          Verify the existing encrypted library before connecting this device.
+          Any local data will be reviewed as a separate merge before upload.
         </p>
       )}
       {progress && progress.total > 0 && (
         <p>
-          {progress.staged} of {progress.total} records staged ·{" "}
-          {progress.verified} verified by readback
+          {progress.mode === "join"
+            ? `${progress.verified} of ${progress.total} records verified · ${progress.staged} local records merged`
+            : `${progress.staged} of ${progress.total} records staged · ${progress.verified} verified by readback`}
         </p>
       )}
       {shown && !shown.approved && (
@@ -281,18 +282,15 @@ export function CentralLibraryMigration({
           </Button>
         </>
       )}
-      {!shown &&
-        progress &&
-        progress.mode === "publish" &&
-        !progress.approved && (
-          <Button disabled={blocked} onClick={() => void prepare()}>
-            {progress.phase === "idle"
-              ? "Prepare library review"
-              : progress.phase === "review"
-                ? "Review complete library"
-                : "Continue preparing"}
-          </Button>
-        )}
+      {!shown && progress && !progress.approved && (
+        <Button disabled={blocked} onClick={() => void prepare()}>
+          {progress.phase === "idle"
+            ? "Prepare library review"
+            : progress.phase === "review"
+              ? "Review complete library"
+              : "Continue preparing"}
+        </Button>
+      )}
       {progress?.approved && progress.phase !== "complete" && (
         <Button disabled={blocked} onClick={() => void advance()}>
           Continue library sync

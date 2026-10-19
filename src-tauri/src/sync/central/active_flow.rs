@@ -14,7 +14,7 @@ use super::{
     workspace::Workspace,
 };
 use crate::{error::AppError, sync::env::SyncEnv};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -105,6 +105,8 @@ pub(super) struct Reading {
     plan: Option<Plan>,
     work: Work,
     read: Option<ReadSession>,
+    transcript: Option<Vec<HistoryPage>>,
+    extra_floors: Vec<Checkpoint>,
 }
 fn bridges_for(bridges: &[Bridge], floors: &[Checkpoint]) -> Result<Vec<Bridge>, AppError> {
     let epoch = floors.first().ok_or_else(invalid)?.epoch;
@@ -136,6 +138,34 @@ impl Reading {
         check: &impl Fn() -> Result<(), AppError>,
         started: Instant,
     ) -> Result<Self, AppError> {
+        Self::begin_with_budget(env, path, session, source, check, started, None)
+    }
+    pub(super) fn begin_bounded(
+        env: &SyncEnv,
+        path: OwnerPath,
+        session: Arc<Session>,
+        check: &impl Fn() -> Result<(), AppError>,
+        budget: &super::request_budget::Budget,
+    ) -> Result<Self, AppError> {
+        Self::begin_with_budget(
+            env,
+            path,
+            session,
+            None,
+            check,
+            Instant::now(),
+            Some(budget),
+        )
+    }
+    fn begin_with_budget(
+        env: &SyncEnv,
+        path: OwnerPath,
+        session: Arc<Session>,
+        source: Option<Workspace>,
+        check: &impl Fn() -> Result<(), AppError>,
+        started: Instant,
+        external: Option<&super::request_budget::Budget>,
+    ) -> Result<Self, AppError> {
         let before = path.snapshot(env)?;
         let identity = session.identity.as_ref().ok_or_else(invalid)?;
         let device = session.device.as_ref().ok_or_else(invalid)?;
@@ -148,7 +178,10 @@ impl Reading {
         {
             return Err(invalid());
         }
-        let api = Api::new(&before.control.profile.origin)?;
+        let api = match external {
+            Some(b) => Api::bounded(&before.control.profile.origin, b)?,
+            None => Api::new(&before.control.profile.origin)?,
+        };
         let mut budget = Budget {
             started,
             requests: 0,
@@ -277,6 +310,8 @@ impl Reading {
             plan: Some(plan),
             work,
             read: None,
+            transcript: None,
+            extra_floors: vec![],
         })
     }
     fn check_metadata(snapshot: &Snapshot, metadata: &Metadata) -> Result<(), AppError> {
@@ -318,11 +353,30 @@ impl Reading {
         env: &SyncEnv,
         check: &impl Fn() -> Result<(), AppError>,
     ) -> Result<bool, AppError> {
+        self.advance_with_budget(env, check, None)
+    }
+    pub(super) fn advance_bounded(
+        &mut self,
+        env: &SyncEnv,
+        check: &impl Fn() -> Result<(), AppError>,
+        budget: &super::request_budget::Budget,
+    ) -> Result<bool, AppError> {
+        self.advance_with_budget(env, check, Some(budget))
+    }
+    fn advance_with_budget(
+        &mut self,
+        env: &SyncEnv,
+        check: &impl Fn() -> Result<(), AppError>,
+        external: Option<&super::request_budget::Budget>,
+    ) -> Result<bool, AppError> {
         self.complete = false;
         if self.path.snapshot(env)? != self.before {
             return Err(crate::sync::runtime::superseded());
         }
-        let api = Api::new(&self.before.control.profile.origin)?;
+        let api = match external {
+            Some(b) => Api::bounded(&self.before.control.profile.origin, b)?,
+            None => Api::new(&self.before.control.profile.origin)?,
+        };
         let device = self.session.device.as_ref().ok_or_else(invalid)?;
         if device.expired() {
             return Err(invalid());
@@ -362,6 +416,17 @@ impl Reading {
             if let Some(source) = &self.source {
                 replacement_proof::pin_active_read(source, &mut read, &self.source_bridges()?)?;
             }
+            for floor in &self.extra_floors {
+                let bridges = bridges_for(&self.work.bridges, std::slice::from_ref(floor))?;
+                read.pin_prefixes(replacement_proof::extend_minimums(
+                    read.chain(),
+                    read.vault(),
+                    read.epochs(),
+                    std::slice::from_ref(floor),
+                    &bridges,
+                    read.checkpoint().epoch,
+                )?)?;
+            }
             self.read = Some(read);
         }
         let read = self.read.as_mut().ok_or_else(invalid)?;
@@ -380,7 +445,11 @@ impl Reading {
                     )
                 })?
                 .decode()?;
+            let retained = self.transcript.as_ref().map(|_| page.clone());
             read.append(page)?;
+            if let (Some(pages), Some(page)) = (&mut self.transcript, retained) {
+                pages.push(page);
+            }
         }
         // Leave enough room for both final fences; a continuation performs them together.
         if budget.requests > 30 || !budget.available() {
@@ -412,6 +481,58 @@ impl Reading {
         self.complete = true;
         Ok(true)
     }
+    pub(super) fn capture(&mut self, extra: Vec<Checkpoint>) -> Result<(), AppError> {
+        if self.read.is_some() || self.transcript.is_some() || extra.len() > 1 {
+            return Err(invalid());
+        }
+        let plan = self.plan.as_ref().ok_or_else(invalid)?;
+        let mut floors = plan.floors().to_vec();
+        floors.extend(extra.clone());
+        floors.sort_by_key(|p| (p.epoch, p.sequence));
+        floors.dedup();
+        let base = floors.first().ok_or_else(invalid)?.clone();
+        self.work = Work::new(
+            base,
+            floors.into_iter().skip(1).collect(),
+            plan.checkpoint().epoch,
+        )?;
+        self.extra_floors = extra;
+        self.transcript = Some(vec![]);
+        Ok(())
+    }
+    pub(super) fn checkpoint(&self) -> Result<Checkpoint, AppError> {
+        Ok(Checkpoint {
+            epoch: self.snapshot.vault.epoch,
+            sequence: number(&self.snapshot.vault.sequence, true)?,
+            history_hash: self.snapshot.vault.history_hash.clone(),
+        })
+    }
+    pub(super) fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+    pub(super) fn before(&self) -> &Workspace {
+        &self.before
+    }
+    pub(super) fn keys(&self) -> Result<&super::crypto::VaultKeys, AppError> {
+        match (&self.plan, &self.read) {
+            (Some(p), _) => Ok(p.keys()),
+            (_, Some(r)) => Ok(r.keys()),
+            _ => Err(invalid()),
+        }
+    }
+    pub(super) fn finish_captured(mut self) -> Result<(VerifiedLibrary, Transcript), AppError> {
+        if !self.complete {
+            return Err(invalid());
+        }
+        let transcript = Transcript {
+            snapshot: self.snapshot.clone(),
+            proof: self.proof.clone(),
+            bridges: self.work.bridges.clone(),
+            pages: self.transcript.take().ok_or_else(invalid)?,
+        };
+        let read = self.read.take().ok_or_else(invalid)?.finish()?;
+        Ok((read, transcript))
+    }
     /// Caller must have received true from advance under the same lifecycle/cancellation gate.
     pub(super) fn finish(
         mut self,
@@ -422,5 +543,45 @@ impl Reading {
         let own = self.own_bridges()?;
         let source = self.source_bridges()?;
         Ok((self.read.take().ok_or_else(invalid)?.finish()?, own, source))
+    }
+}
+
+/// Ciphertext transcript only. Decoding it never creates a publication capability.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Transcript {
+    pub snapshot: Snapshot,
+    pub proof: super::trust::ControlProof,
+    pub bridges: Vec<Bridge>,
+    pub pages: Vec<HistoryPage>,
+}
+impl Transcript {
+    pub(super) fn verify(
+        &self,
+        before: &Workspace,
+        identity: &super::credentials::DeviceIdentity,
+        floor: Option<&Checkpoint>,
+    ) -> Result<VerifiedLibrary, AppError> {
+        if self.pages.len() > 16384 || self.bridges.len() > 64 {
+            return Err(invalid());
+        }
+        let plan = Plan::new(before, identity, self.proof.clone(), self.snapshot.clone())?;
+        let own = bridges_for(&self.bridges, plan.floors())?;
+        let mut read = plan.start(&own)?;
+        if let Some(floor) = floor {
+            let bridges = bridges_for(&self.bridges, std::slice::from_ref(floor))?;
+            read.pin_prefixes(replacement_proof::extend_minimums(
+                read.chain(),
+                read.vault(),
+                read.epochs(),
+                std::slice::from_ref(floor),
+                &bridges,
+                read.checkpoint().epoch,
+            )?)?;
+        }
+        for page in &self.pages {
+            read.append(page.clone())?;
+        }
+        read.finish()
     }
 }

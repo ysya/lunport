@@ -175,10 +175,10 @@ fn reserved_initial_stage_uses_only_the_protected_operation_and_cannot_create_a_
     let pending = crate::sync::record_import::pending_imports(&env).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].import_id, context.operation());
-    assert!(
-        crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &context, &keys)
-            .is_err()
-    );
+    let retried=crate::sync::record_import::central_stage::prepare_initial_reserved(&env,&context,&keys).unwrap();
+    assert_eq!(retried.operation(),context.operation());
+    assert_eq!(retried.mapping(),staged.mapping());
+    assert_eq!(record_runtime::snapshot(&env).unwrap(),before);
     assert_eq!(
         crate::sync::record_import::pending_imports(&env)
             .unwrap()

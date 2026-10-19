@@ -146,6 +146,9 @@ impl Prepared {
         }
         Ok(())
     }
+    pub(in crate::sync) fn original_import_root(&self) -> bool {
+        self.loaded.package.files.directories.contains(std::path::Path::new("data/imports"))
+    }
     pub(in crate::sync) fn projection(&self) -> &Candidate {
         &self.initial
     }

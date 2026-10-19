@@ -80,6 +80,23 @@ impl Candidate {
             plan.manifest.body.inventory_digest.clone(),
             &owner.control.highwater.as_ref().ok_or_else(invalid)?.head,
         )?;
+        Self::from_owner(source, owner, keys, plan.manifest.digest()?, observed, None)
+    }
+    fn from_owner(
+        source: &SyncStateV3,
+        owner: super::workspace::Workspace,
+        keys: &VaultKeys,
+        manifest: String,
+        observed: u64,
+        selections_override: Option<&BTreeMap<String, bool>>,
+    ) -> Result<Self, AppError> {
+        records_v3::validate_state(source).map_err(|_| invalid())?;
+        if observed > MAX_SAFE_INTEGER
+            || !super::wire::hex(&manifest, 64)
+            || source.local.central_projection.is_some()
+        {
+            return Err(invalid());
+        }
         let projected = projection::Plan::current(owner.clone(), keys)
             .map_err(|_| AppError::Other("Initial projection history is invalid.".into()))?;
         if !projected.complete() {
@@ -90,8 +107,12 @@ impl Candidate {
             .iter()
             .map(|(id, space)| (id.clone(), space.selected))
             .collect();
-        let cache = Cache::initial(&projected, observed, &selections)
-            .map_err(|_| AppError::Other("Initial projection cache is invalid.".into()))?;
+        let cache = Cache::initial(
+            &projected,
+            observed,
+            selections_override.unwrap_or(&selections),
+        )
+        .map_err(|_| AppError::Other("Initial projection cache is invalid.".into()))?;
         let mut shadow = source.clone();
         shadow.version = records_v3::CENTRAL_STATE_VERSION;
         shadow.account = Some(cache.account);
@@ -123,9 +144,50 @@ impl Candidate {
             source: source.clone(),
             shadow,
             delta,
-            manifest: plan.manifest.digest()?,
+            manifest,
             observed,
         })
+    }
+    pub(super) fn adopt(
+        source: &SyncStateV3,
+        read: &super::active_read::VerifiedLibrary,
+        commitment: &str,
+        observed: u64,
+        selections: &BTreeMap<String, bool>,
+    ) -> Result<Self, AppError> {
+        let before = source.local.central.as_ref().ok_or_else(invalid)?;
+        if before != read.previous_owner()
+            || before.control.cutover
+            || read.checkpoint().sequence == 0
+            || read.phase() != "ready"
+        {
+            return Err(invalid());
+        }
+        let mut owner = before.clone();
+        owner.control.proof = Some(read.proof().clone());
+        owner.control.highwater = Some(read.chain().highwater());
+        owner.control.auth_epoch = read.auth_epoch();
+        owner.control.cutover = true;
+        owner.control = owner
+            .control
+            .approve_library(commitment.into(), read.chain().current().head())?;
+        owner.replica = Some(read.replica().clone());
+        owner.last_epoch_acceptance = read.epoch_acceptance().cloned();
+        owner.epochs = read.epochs().to_vec();
+        owner.observed_epochs.clear();
+        owner
+            .own_wraps
+            .retain(|w| w.header.key_epoch != read.checkpoint().epoch.to_string());
+        owner.own_wraps.push(read.wrap().clone());
+        owner.validate()?;
+        Self::from_owner(
+            source,
+            owner,
+            read.keys(),
+            commitment.into(),
+            observed,
+            Some(selections),
+        )
     }
     pub fn finish(
         self,

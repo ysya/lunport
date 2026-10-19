@@ -637,7 +637,46 @@ fn a_remote_only_child_is_discovered_and_durably_bound_before_its_first_frozen_r
 }
 
 pub(super) fn material_ready_fixture() -> (TestDevice, VaultKeys) {
-    let (device, keys, _) = source_capture::tests::fixture(false);
+    material_ready_fixture_at(false)
+}
+pub(super) fn material_ready_fixture_at(canonical: bool) -> (TestDevice, VaultKeys) {
+    let (device, keys, session) = source_capture::tests::fixture(false);
+    if canonical {
+        // Older unit fixtures used an arbitrary Vault id. Actual account reads pin the
+        // deterministic personal id, so integration fixtures use the production derivation.
+        let env = device.env();
+        let mut state = record_runtime::snapshot(&env).unwrap().0;
+        let owner = state.local.central.as_mut().unwrap();
+        let vault =
+            super::super::membership::personal_vault_id(owner.control.anchor.as_ref().unwrap())
+                .unwrap();
+        owner.control.personal_vault = Some(vault.clone());
+        owner.replica.as_mut().unwrap().vault = vault.clone();
+        owner.control.auth_epoch = 2;
+        owner.replica.as_mut().unwrap().creation_authorization_epoch = 2;
+        let signer = &session.identity.as_ref().unwrap().keys;
+        let mut header = owner.own_wraps[0].header.clone();
+        header.vault_id = vault;
+        owner.own_wraps = vec![super::super::crypto::wrap_keys(&keys, signer, header).unwrap()];
+        let account = owner.control.account_id.clone();
+        owner.validate().unwrap();
+        fs::write(&env.state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let mut core = device.runtime.core.lock().unwrap();
+        core.records = Some(state);
+        core.central_session = Some(Arc::new(Session {
+            profile: session.profile.clone(),
+            identity: session.identity.clone(),
+            tokens: Arc::clone(&session.tokens),
+            device: Some(super::super::api::DeviceSession::synthetic_for_test(
+                account,
+                super::super::api::DeviceState::Active,
+                2,
+                std::time::Duration::from_secs(300),
+            )),
+            device_access_denied: false,
+            tokens_started: std::time::Instant::now(),
+        }));
+    }
     {
         let env = device.env();
         let view = crate::vault::store::read_vault(

@@ -294,7 +294,14 @@ impl Api {
                 "Could not contact the account service. Local changes are retained.".into(),
             )
         };
-        let mut request = self.http.request(method, format!("{}{path}", self.origin));
+        #[cfg(test)]
+        let transport = TEST_TRANSPORT.with(|slot| {
+            slot.borrow().as_ref().filter(|(origin, _)| origin == &self.origin)
+                .map(|(_, target)| target.clone()).unwrap_or_else(|| self.origin.clone())
+        });
+        #[cfg(not(test))]
+        let transport = &self.origin;
+        let mut request = self.http.request(method, format!("{}{path}", transport));
         if let Some(bearer) = bearer {
             let mut header =
                 HeaderValue::from_str(&format!("Bearer {bearer}")).map_err(|_| invalid())?;
@@ -312,6 +319,9 @@ impl Api {
         }
         let response = request.send().map_err(|_| failure())?;
         let status = response.status().as_u16();
+        if bearer.is_some() && matches!(status, 401 | 403) {
+            if let Some(budget) = &self.budget { budget.note_refusal(); }
+        }
         let retry_after = response
             .headers()
             .get("retry-after")
@@ -1144,4 +1154,25 @@ mod tests {
         }
         legacy.assert();
     }
+}
+
+#[cfg(test)]
+thread_local! {static TEST_TRANSPORT:std::cell::RefCell<Option<(String,String)>>=const{std::cell::RefCell::new(None)};}
+/// Exercise the real HTTP adapter while signed test data retains its HTTPS origin.
+#[cfg(test)]
+pub(super) fn with_test_transport<T>(origin: &str, target: &str, run: impl FnOnce() -> T) -> T {
+    assert!(origin.starts_with("https://"));
+    let parsed = reqwest::Url::parse(target).unwrap();
+    assert_eq!(parsed.scheme(), "http");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(parsed.port().is_some());
+    struct Restore(Option<(String, String)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_TRANSPORT.with(|v| *v.borrow_mut() = self.0.take());
+        }
+    }
+    let old = TEST_TRANSPORT.with(|v| v.replace(Some((origin.into(), target.into()))));
+    let _restore = Restore(old);
+    run()
 }

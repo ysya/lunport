@@ -13,16 +13,16 @@ use super::{
     workspace::Workspace,
 };
 use crate::error::AppError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpochBundle {
     pub manifest: SignedRekey,
     pub wraps: Vec<WrappedKeys>,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryVault {
     pub vault: String,
@@ -41,7 +41,7 @@ pub struct RecoveryReply {
     pub auth_epoch: u64,
     pub results: Vec<RecoveryVault>,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryPage {
     pub records: Vec<Version>,

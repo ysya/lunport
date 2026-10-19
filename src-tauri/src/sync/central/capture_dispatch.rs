@@ -365,3 +365,6 @@ pub(super) fn ready_for_test(joined: bool) -> (crate::sync::testkit::TestDevice,
 pub(super) fn material_ready_for_test()->(crate::sync::testkit::TestDevice,VaultKeys){tests::material_ready_fixture()}
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test,unix))]
+pub(super) fn material_ready_for_adoption_test()->(crate::sync::testkit::TestDevice,VaultKeys){tests::material_ready_fixture_at(true)}

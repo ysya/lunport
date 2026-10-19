@@ -1,13 +1,13 @@
 //! Dedicated first-library cutover. Ordinary central projection publication stays separate.
 use super::*;
 use crate::sync::{
-    central::{api::DeviceState, client_state::Phase as AccountPhase, InitialPreparation},
+    central::{api::DeviceState, client_state::Phase as AccountPhase, InitialTransaction},
     records_v3::LocalImportReceipt,
     runtime::SyncCore,
 };
 use std::{path::PathBuf, sync::Arc};
 pub(in crate::sync) struct Publication<'a> {
-    prepared: &'a InitialPreparation,
+    prepared: &'a dyn InitialTransaction,
     effects: &'a InitialEffects,
     candidate: SyncStateV3,
     state_path: PathBuf,
@@ -152,7 +152,7 @@ pub(super) fn matches_receipt(
 }
 pub(in crate::sync) fn publish(
     env: &SyncEnv,
-    prepared: &InitialPreparation,
+    prepared: &dyn InitialTransaction,
     keys: &central::crypto::VaultKeys,
 ) -> Result<PendingImport, AppError> {
     input::with_background(env, |safe| {
@@ -291,7 +291,7 @@ pub(in crate::sync) fn complete_saved(
                 "saved initial source does not match its projection binding",
             ));
         }
-        InitialPreparation::verify_saved_reservation(
+        central::verify_initial_saved(
             safe,
             &life,
             owner,

@@ -137,11 +137,11 @@ describe("whole-library review and continuation", () => {
       ),
     ).toContain("10 of 10 records staged · 4 verified by readback");
   });
-  it("keeps approved joiners from starting another initial migration", () => {
+  it("lets approved joiners prepare a verified merge of their local data", () => {
     const html = render({ mode: "join", phase: "waiting" }).html;
     expect(text(html)).toContain("Connect this device");
-    expect(text(html)).toContain("waiting for verified library adoption");
-    expect(html).not.toContain("<button");
+    expect(text(html)).toContain("separate merge before upload");
+    expect(text(html)).toContain("Continue preparing");
   });
   it("hides migration actions for an unapproved, signed-out or replacement device", () => {
     for (const partial of [

@@ -102,10 +102,57 @@ pub(crate) fn prepare(env: &SyncEnv, initial: &InitialProjection) -> Result<Stag
 }
 pub(crate) fn prepare_reserved(
     env: &SyncEnv,
-    prepared: &crate::sync::central::InitialPreparation,
+    prepared: &dyn crate::sync::central::InitialTransaction,
     keys: &crate::sync::central::crypto::VaultKeys,
 ) -> Result<Staged, AppError> {
     with_background(env, |safe| {
+        let paths = Paths::new(safe, prepared.operation())?;
+        match fs::symlink_metadata(&paths.dir) {
+            Ok(_) => {
+                let life = safe.runtime.lifecycle.lock().unwrap();
+                let _vault = safe
+                    .runtime
+                    .vault
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _publication = safe.runtime.format_publication.lock().unwrap();
+                let effects = initial_effects_locked(safe, prepared, keys, &life)?;
+                if effects.empty() {
+                    // Only the exact private empty directory under this sealed reservation
+                    // can be removed. Unknown files/directories already failed full readback.
+                    fs::remove_dir(&paths.dir)?;
+                    let root = paths
+                        .dir
+                        .parent()
+                        .ok_or_else(|| failure("reserved stage has no root"))?;
+                    fs::File::open(root)?.sync_all()?;
+                    if !prepared.original_import_root() {
+                        fs::remove_dir(root)?;
+                    }
+                    fs::File::open(
+                        root.parent()
+                            .ok_or_else(|| failure("reserved stage has no parent"))?,
+                    )?
+                    .sync_all()?;
+                    prepared.check_locked(safe, keys, &life)?;
+                } else {
+                    let mut journal: Journal =
+                        serde_json::from_slice(&bounded_read(&paths.journal, MAX_JOURNAL_BYTES)?)
+                            .map_err(|_| failure("reserved initial stage journal is unreadable"))?;
+                    validate_header(&journal, prepared.operation())?;
+                    execute(
+                        safe,
+                        &paths,
+                        &mut journal,
+                        Input::Initial(prepared.projection()),
+                    )?;
+                    drop(initial_effects_locked(safe, prepared, keys, &life)?);
+                    return Ok(Staged { journal, paths });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         prepare_with_reservation(
             safe,
             Input::Initial(prepared.projection()),

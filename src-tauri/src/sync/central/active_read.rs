@@ -13,9 +13,11 @@ use super::{
     workspace::Workspace,
 };
 use crate::error::AppError;
+use serde::{Deserialize, Serialize};
 
 /// Ciphertext and account checkpoint assembled from bounded authenticated API responses.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub membership_head: String,
     pub auth_epoch: u64,
@@ -26,6 +28,7 @@ pub struct ReadSession {
     proof: ControlProof,
     auth_epoch: u64,
     baseline: Baseline,
+    epoch_acceptance: Option<super::workspace::EpochAcceptance>,
 }
 /// A saved Replica or service DTO cannot construct this completed-read capability.
 pub struct VerifiedLibrary {
@@ -155,6 +158,9 @@ impl Plan {
             creation_auth,
         })
     }
+    pub(super) fn keys(&self) -> &super::crypto::VaultKeys {
+        &self.keys
+    }
     pub(super) fn floors(&self) -> &[Checkpoint] {
         &self.floors
     }
@@ -205,6 +211,29 @@ impl Plan {
         } else {
             None
         };
+        let epoch_acceptance = if let Some(last) = bridges.last() {
+            let mut from = floors
+                .iter()
+                .min_by_key(|p| (p.epoch, p.sequence))
+                .ok_or_else(invalid)?
+                .clone();
+            for bridge in bridges.iter().take(bridges.len() - 1) {
+                from = super::recovery_revalidation::finish_bridge(
+                    &chain,
+                    &source.vault,
+                    &source.commits,
+                    &from,
+                    bridge,
+                )?;
+            }
+            Some(super::workspace::EpochAcceptance {
+                manifest: source.commits.last().ok_or_else(invalid)?.clone(),
+                from,
+                source_suffix: last.digests.clone(),
+            })
+        } else {
+            before.last_epoch_acceptance.clone()
+        };
         let mut baseline = Baseline::new(chain, keys, checked, creation, creation_auth)?;
         baseline.replica.minimum = minimum;
         baseline.replica.validate(&baseline.chain)?;
@@ -215,6 +244,7 @@ impl Plan {
             proof,
             auth_epoch,
             baseline,
+            epoch_acceptance,
         })
     }
 }
@@ -252,6 +282,9 @@ impl ReadSession {
     pub(super) fn pin_prefixes(&mut self, minimums: Vec<Checkpoint>) -> Result<(), AppError> {
         self.baseline.pin_prefixes(minimums)
     }
+    pub(super) fn keys(&self) -> &super::crypto::VaultKeys {
+        &self.baseline.keys
+    }
     pub fn position(&self) -> u64 {
         self.baseline.position()
     }
@@ -270,6 +303,9 @@ impl ReadSession {
     }
 }
 impl VerifiedLibrary {
+    pub(super) fn epoch_acceptance(&self) -> Option<&super::workspace::EpochAcceptance> {
+        self.session.epoch_acceptance.as_ref()
+    }
     pub(super) fn wrap(&self) -> &super::crypto::WrappedKeys {
         &self.session.baseline.source.wrap
     }

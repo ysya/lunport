@@ -271,3 +271,8 @@ pub(in crate::sync::central) fn is_approved(
 ) -> Result<bool, AppError> {
     Ok(read(env, loaded)?.is_some_and(|r| r.accepted))
 }
+
+pub(in crate::sync::central) fn from_history(ticket:String,approved:bool,history:&[(Identity,Data)])->Result<Preview,AppError>{
+    if !hex(&ticket,64){return Err(invalid());}
+    Ok(Preview{ticket,approved,summary:summary(history)?})
+}

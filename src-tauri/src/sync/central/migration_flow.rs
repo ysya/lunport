@@ -27,7 +27,7 @@ pub struct Scope {
     authorization_epoch: String,
 }
 impl Scope {
-    fn from_state(state: &SyncStateV3) -> Result<Self, AppError> {
+    pub(super) fn from_state(state: &SyncStateV3) -> Result<Self, AppError> {
         let w = state.local.central.as_ref().ok_or_else(invalid)?;
         Ok(Self {
             service: w.control.profile.origin.clone(),
@@ -50,7 +50,7 @@ impl Scope {
             authorization_epoch: w.control.auth_epoch.to_string(),
         })
     }
-    fn check(&self, env: &SyncEnv) -> Result<SyncStateV3, AppError> {
+    pub(super) fn check(&self, env: &SyncEnv) -> Result<SyncStateV3, AppError> {
         controller::require_enabled()?;
         let state = record_runtime::snapshot(env)?.0;
         if Self::from_state(&state)? != *self {
@@ -61,13 +61,13 @@ impl Scope {
 }
 #[derive(Clone, Serialize)]
 pub struct Progress {
-    phase: &'static str,
-    mode: &'static str,
-    legacy_sources: bool,
-    total: usize,
-    staged: usize,
-    verified: usize,
-    approved: bool,
+    pub(super) phase: &'static str,
+    pub(super) mode: &'static str,
+    pub(super) legacy_sources: bool,
+    pub(super) total: usize,
+    pub(super) staged: usize,
+    pub(super) verified: usize,
+    pub(super) approved: bool,
 }
 impl Default for Progress {
     fn default() -> Self {
@@ -89,8 +89,8 @@ pub struct Cached {
 }
 #[derive(Serialize)]
 pub struct Preparation {
-    progress: Progress,
-    review: Option<review::Preview>,
+    pub(super) progress: Progress,
+    pub(super) review: Option<review::Preview>,
 }
 struct Running<'a>(&'a std::sync::atomic::AtomicBool);
 impl Drop for Running<'_> {
@@ -107,7 +107,11 @@ fn enter<'a>(env: &'a SyncEnv<'_>) -> Result<Running<'a>, AppError> {
     }
     Ok(Running(&env.runtime.syncing))
 }
-fn cached(env: &SyncEnv, scope: &Scope, progress: Progress) -> Result<Progress, AppError> {
+pub(super) fn cached(
+    env: &SyncEnv,
+    scope: &Scope,
+    progress: Progress,
+) -> Result<Progress, AppError> {
     scope.check(env)?;
     env.runtime.core.lock().unwrap().central_migration = Some(Cached {
         scope: scope.clone(),
@@ -252,7 +256,7 @@ fn publish(
     })
 }
 #[derive(Clone, Copy)]
-enum Action {
+pub(super) enum Action {
     Prepare,
     Continue,
     Background,
@@ -270,15 +274,23 @@ fn run(
         .as_ref()
         .is_some_and(|w| w.control.cutover)
     {
-        initial_publication::complete_saved(env)?;
+        super::initial_transaction::complete_saved(env)?;
         return Ok(Preparation {
             progress: status(env, scope)?,
             review: None,
         });
     }
     if joining(&state)? {
-        return Err(AppError::Other("This approved device requires verified adoption of the existing encrypted library. Initial publication can only run on the Vault's first device; no local sources were frozen or uploaded.".into()));
+        return super::adoption::run(env, scope, action, budget);
     }
+    run_first(env, scope, action, budget)
+}
+fn run_first(
+    env: &SyncEnv,
+    scope: &Scope,
+    action: Action,
+    budget: &Budget,
+) -> Result<Preparation, AppError> {
     round::check_cooldown(env)?;
     if !controller::resume_bounded(env, false, budget)? {
         return Err(invalid());
@@ -370,7 +382,9 @@ fn run(
 fn foreground(env: &SyncEnv, scope: &Scope, action: Action) -> Result<Preparation, AppError> {
     scope.check(env)?;
     let running = enter(env)?;
-    let result = run(env, scope, action, &Budget::new());
+    let budget = Budget::new();
+    let result = run(env, scope, action, &budget);
+    env.runtime.core.lock().unwrap().central_poll.requests = budget.used();
     drop(running);
     env.events.status();
     result
@@ -385,6 +399,9 @@ pub fn confirm(env: &SyncEnv, scope: &Scope, ticket: &str) -> Result<Progress, A
     scope.check(env)?;
     let running = enter(env)?;
     let result = (|| {
+        if joining(&scope.check(env)?)? {
+            return super::adoption::confirm(env, scope, ticket);
+        }
         let keys = keys(env, scope)?;
         scope.check(env)?;
         review::confirm(env, &keys, &BTreeMap::new(), ticket)?;

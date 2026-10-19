@@ -83,7 +83,11 @@ fn target(owner: &Workspace, current: &Session, keys: &VaultKeys) -> Result<(), 
     session(owner, current)?;
     let replica = owner.replica.as_ref().ok_or_else(invalid)?;
     if owner.control.phase != Phase::Enrolled
-        || owner.control.proof.as_ref().is_none_or(|proof| proof.genesis.first != owner.control.device)
+        || owner
+            .control
+            .proof
+            .as_ref()
+            .is_none_or(|proof| proof.genesis.first != owner.control.device)
         || owner.control.cutover
         || owner.bootstrap.is_some()
         || owner.replacement.is_some()
@@ -144,6 +148,21 @@ pub(super) fn capture(
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
 ) -> Result<Captured, AppError> {
+    capture_inner(env, keys, references, false)
+}
+pub(super) fn capture_adoption(
+    env: &SyncEnv,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<Captured, AppError> {
+    capture_inner(env, keys, references, true)
+}
+fn capture_inner(
+    env: &SyncEnv,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+    adoption: bool,
+) -> Result<Captured, AppError> {
     controller::require_enabled()?;
     let _life = env.runtime.lifecycle.lock().unwrap();
     let _vault = env
@@ -154,11 +173,18 @@ pub(super) fn capture(
     let _publication = env.runtime.format_publication.lock().unwrap();
     let (before, generation, selected) = current(env)?;
     let owner = before.local.central.as_ref().ok_or_else(invalid)?;
-    target(owner, &selected, keys)?;
+    if adoption {
+        super::adoption::target(env, owner, &selected, keys)?;
+    } else {
+        target(owner, &selected, keys)?;
+    }
     protected(env, owner, &selected)?;
     let readonly = NonInteractiveKeychain(env.keychain);
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
+    if adoption && !sources.chains().is_empty() {
+        return Err(AppError::Other("This device still has legacy cloud sources. Finish their complete migration before merging this device into an existing Vault; all sources are retained.".into()));
+    }
     let record_inputs = Inventory::from_state(&sources, &before)?;
     let private_inputs = record_inputs.admit_known()?.into_keys();
     drop(record_inputs);
@@ -314,7 +340,7 @@ pub(super) fn start_or_resume(
 }
 
 impl Captured {
-    fn require_current(&self, env: &SyncEnv) -> Result<(), AppError> {
+    pub(super) fn require_current(&self, env: &SyncEnv) -> Result<(), AppError> {
         let owner = self
             .package
             .state
@@ -368,6 +394,65 @@ impl Captured {
         Ok(loaded)
     }
 }
+
+pub(super) fn require_adoption_target(
+    env: &SyncEnv,
+    owner: &Workspace,
+    current: &Session,
+    keys: &VaultKeys,
+) -> Result<(), AppError> {
+    owner.validate()?;
+    owner.require_key_recipients()?;
+    protected(env, owner, current)?;
+    if owner.control.phase != Phase::Enrolled
+        || owner.control.cutover
+        || owner.bootstrap.is_some()
+        || owner.replacement.is_some()
+        || !owner.replacement_archives.is_empty()
+        || owner.recovery.is_some()
+        || owner.rotation.is_some()
+    {
+        return Err(invalid());
+    }
+    let replica = owner.replica.as_ref().ok_or_else(invalid)?;
+    if !replica.pending.is_empty() || !replica.conflicts.is_empty() {
+        return Err(AppError::Other("Resolve pending central edits and conflicts before joining the existing library. All data is retained.".into()));
+    }
+    let chain = owner.control.verified_chain()?;
+    let wrap = owner
+        .own_wraps
+        .iter()
+        .find(|w| {
+            w.header.key_epoch
+                == owner
+                    .replica
+                    .as_ref()
+                    .ok_or_else(invalid)
+                    .map(|r| r.checkpoint.epoch.to_string())
+                    .unwrap_or_default()
+        })
+        .ok_or_else(invalid)?;
+    let author = chain
+        .author_at(&wrap.header.membership_head, &wrap.header.author)
+        .ok_or_else(invalid)?;
+    // A reader may have admitted a later committed epoch than the owner's old wrap. Its keys
+    // are independently checked by the transcript; this preflight still proves the selected wrap.
+    wrap.open(
+        &current.identity.as_ref().ok_or_else(invalid)?.keys,
+        &wrap.header,
+        &author.signing,
+    )?
+    .verify_index(keys)
+}
+
+pub(super) fn require_selected(
+    env: &SyncEnv,
+    owner: &Workspace,
+    current: &Session,
+) -> Result<(), AppError> {
+    protected(env, owner, current)
+}
+
 #[cfg(all(test, unix))]
 pub(in crate::sync::central) mod tests {
     use super::*;

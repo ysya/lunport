@@ -1,6 +1,6 @@
 //! Exact readback of one reserved initial stage; never a caller-supplied exclusion list.
 use super::*;
-use crate::sync::central::{crypto::VaultKeys, InitialPreparation, InitialProjection};
+use crate::sync::central::{crypto::VaultKeys, InitialProjection, InitialTransaction};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 struct Replacement {
@@ -25,6 +25,9 @@ impl InitialEffects {
             return Err(failure("owned initial stage belongs to another operation"));
         }
         Input::Initial(initial).verify_binding(Some(&self.binding))
+    }
+    pub(super) fn empty(&self) -> bool {
+        self.files.is_empty() && self.replacement.is_none()
     }
     pub(in crate::sync) fn files(&self) -> impl Iterator<Item = (&Path, &[u8])> {
         self.files.iter().map(|(p, b)| (p.as_path(), b.as_slice()))
@@ -75,6 +78,42 @@ fn from_stage(
 ) -> Result<InitialEffects, AppError> {
     let paths = Paths::new(env, operation)?;
     let before_names = names(&paths)?;
+    if before_names.is_empty() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            for directory in [
+                paths.dir.as_path(),
+                paths
+                    .dir
+                    .parent()
+                    .ok_or_else(|| failure("reserved stage binding is invalid"))?,
+            ] {
+                let meta = fs::symlink_metadata(directory)?;
+                if !meta.is_dir()
+                    || meta.file_type().is_symlink()
+                    || meta.uid() != unsafe { libc::geteuid() }
+                    || meta.mode() & 0o077 != 0
+                {
+                    return Err(failure("empty reserved stage must be private and owned"));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        return Err(failure(
+            "empty reserved stages require the verified secure file implementation",
+        ));
+        let directory = Path::new("data/imports").join(operation);
+        return Ok(InitialEffects {
+            operation: operation.into(),
+            binding: Input::Initial(initial)
+                .binding()?
+                .ok_or_else(|| failure("reserved stage binding is invalid"))?,
+            files: BTreeMap::new(),
+            directories: BTreeSet::from([PathBuf::from("data/imports"), directory]),
+            replacement: None,
+        });
+    }
     let journal_bytes = bounded_read(&paths.journal, MAX_JOURNAL_BYTES)?;
     let journal: Journal = serde_json::from_slice(&journal_bytes)
         .map_err(|_| failure("initial stage journal is unreadable"))?;
@@ -276,7 +315,7 @@ fn from_stage(
 }
 pub(in crate::sync) fn read(
     env: &SyncEnv,
-    prepared: &InitialPreparation,
+    prepared: &dyn InitialTransaction,
     keys: &VaultKeys,
 ) -> Result<InitialEffects, AppError> {
     let life = env.runtime.lifecycle.lock().unwrap();
@@ -291,7 +330,7 @@ pub(in crate::sync) fn read(
 /// Caller owns lifecycle -> vault -> publication. This function performs no mutation or HTTP.
 pub(in crate::sync) fn read_locked(
     env: &SyncEnv,
-    prepared: &InitialPreparation,
+    prepared: &dyn InitialTransaction,
     keys: &VaultKeys,
     life: &std::sync::MutexGuard<'_, ()>,
 ) -> Result<InitialEffects, AppError> {

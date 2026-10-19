@@ -1334,9 +1334,12 @@ fn stage(
         save_journal(paths, journal)?;
     }
     let original_state = optional_bytes(&env.state_path, record_runtime::MAX_STATE_BYTES)?;
-    if let Some(bytes) = original_state {
-        if !paths.original_state.exists() {
-            fsutil::atomic_write(&paths.original_state, &bytes, 0o600)?;
+    if !paths.original_state.exists() {
+        match original_state {
+            Some(bytes) => fsutil::atomic_write(&paths.original_state, &bytes, 0o600)?,
+            // A key import can be the first action on a fresh installation. Preserve the
+            // actual in-memory baseline too, so later complete migration can admit it.
+            None => record_runtime::save_active(&paths.original_state, &state)?,
         }
     }
     if let Some(bytes) = &original {

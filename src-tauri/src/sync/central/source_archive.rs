@@ -480,6 +480,14 @@ impl Outputs {
             files: files.into_iter().collect(),
         })
     }
+    /// Copy authenticated ciphertext provenance before extending a passive source proof.
+    pub(super) fn extended(&self, next: Self) -> Result<Self, AppError> {
+        Self {
+            scope: self.scope.clone(),
+            files: self.files.clone(),
+        }
+        .merge(next)
+    }
     /// Reserve one new same-operation snapshot; the already verified key marker is unchanged.
     pub fn require_room_for_snapshot(&self, plaintext: usize) -> Result<(), AppError> {
         let mut total = plaintext.checked_add(MAX_HEADER + 28).ok_or_else(invalid)?;

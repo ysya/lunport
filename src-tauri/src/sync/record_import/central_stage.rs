@@ -388,7 +388,7 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
 fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
     prepare_with_reservation(env,input,None)
 }
-fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&central::InitialPreparation,&central::crypto::VaultKeys)>)->Result<Staged,AppError>{
+fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&dyn central::InitialTransaction,&central::crypto::VaultKeys)>)->Result<Staged,AppError>{
     let delta = input.delta();
     if !cfg!(unix) {
         return Err(failure(

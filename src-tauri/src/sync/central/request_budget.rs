@@ -2,7 +2,7 @@
 use crate::error::AppError;
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -16,6 +16,7 @@ struct Inner {
     duration: Duration,
     limit: usize,
     used: AtomicUsize,
+    refused: AtomicBool,
 }
 impl Budget {
     pub fn new() -> Self {
@@ -27,7 +28,14 @@ impl Budget {
             duration,
             limit,
             used: AtomicUsize::new(0),
+            refused: AtomicBool::new(false),
         }))
+    }
+    pub(super) fn note_refusal(&self) {
+        self.0.refused.store(true, Ordering::SeqCst);
+    }
+    pub(super) fn take_refusal(&self) -> bool {
+        self.0.refused.swap(false, Ordering::SeqCst)
     }
     pub fn used(&self) -> usize {
         self.0.used.load(Ordering::SeqCst)
