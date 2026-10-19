@@ -383,3 +383,151 @@ fn current_legacy_text_is_not_silently_treated_as_a_complete_structured_source()
     let materials = Materials::from_vault(&state, &keys, &read, &BTreeMap::new()).unwrap();
     assert!(prepare(&state, &known, materials).is_err());
 }
+
+#[test]
+fn retained_only_hosts_and_key_metadata_cannot_reappear_as_current_after_migration() {
+    use crate::sync::{
+        central::{inventory_keys::Capture, migration_files::Files, source_package::Package},
+        record_conflicts::RecordVersion,
+    };
+    let (device, package, keys, owner, raw) =
+        crate::sync::central::source_package::tests::fixture();
+    let mut state = package.state.clone();
+    let key_id = "3".repeat(32);
+    let host_id = "3333333333333333";
+    let parsed = crate::vault::material::parse(&raw).unwrap();
+    let slot = crate::sync::records_v3::KeySlotPayload {
+        schema: 2,
+        name: "retained_only".into(),
+        public_key: parsed.public_key().to_openssh().unwrap(),
+        fingerprint: parsed
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string(),
+        key_type: parsed.public_key().algorithm().as_str().into(),
+        has_passphrase: true,
+        created_at_ms: 1,
+        origin_device_id: state.device_id.clone(),
+    };
+    state.account.as_mut().unwrap().recovery.bases.insert(
+        record_key(RecordKind::KeySlot, &key_id),
+        RecordVersion::Public(row(
+            RecordKind::KeySlot,
+            &key_id,
+            serde_json::to_value(slot).unwrap(),
+            1,
+        )),
+    );
+    let old = row(
+        RecordKind::Host,
+        host_id,
+        json!({"schema":2,"alias":"retained_only","hostname":"fixture.invalid","auth":"password"}),
+        1,
+    );
+    let child = ChainKeys::generate().unwrap();
+    // Keep the retained host scoped to a known unselected collection.
+    state.account.as_mut().unwrap().records.insert(
+        record_key(RecordKind::Space, &child.chain_id),
+        row(
+            RecordKind::Space,
+            &child.chain_id,
+            json!({"schema":1,"name":"Unselected","slug":"unselected","created_at_ms":1}),
+            1,
+        ),
+    );
+    let mut space = SpaceStateV3::default();
+    space.recovery.bases.insert(
+        record_key(RecordKind::Host, host_id),
+        RecordVersion::Public(old),
+    );
+    let group_id = "4444444444444444";
+    space.recovery.bases.insert(
+        record_key(RecordKind::Group, group_id),
+        RecordVersion::Public(row(
+            RecordKind::Group,
+            group_id,
+            json!({"schema":1,"name":"retained_only_group"}),
+            1,
+        )),
+    );
+    state.spaces.insert(child.chain_id.clone(), space);
+    let original_book = package.sources.encode_local().unwrap();
+    let parent_value: serde_json::Value = serde_json::from_slice(&original_book).unwrap();
+    let parent = &parent_value["keys"][0];
+    let parent_key = ChainKeys::from_parts(
+        parent["chain_id"].as_str().unwrap(),
+        parent["auth_token"].as_str().unwrap(),
+        parent["encryption_key"].as_str().unwrap(),
+    )
+    .unwrap();
+    let secret = crate::sync::state_v2::SealedRecord::seal(
+        &parent_key,
+        &Record {
+            kind: RecordKind::SpaceKey,
+            id: child.chain_id.clone(),
+            version: 1,
+            updated_at_ms: 1,
+            device_id: state.device_id.clone(),
+            deleted: false,
+            payload: serde_json::to_value(crate::sync::record::SpaceKeyPayload::from_keys(&child))
+                .unwrap(),
+        },
+        0,
+    )
+    .unwrap();
+    state
+        .account
+        .as_mut()
+        .unwrap()
+        .sealed
+        .insert(secret.key(), secret);
+    let env = device.env();
+    std::fs::write(&env.state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let files = Files::capture(&env, None).unwrap();
+    let observer = Capture::new(&device.keychain);
+    Materials::from_files(&state, &keys, &files, &observer, &BTreeMap::new()).unwrap();
+    let package = Package::assemble(
+        &state,
+        env.state_path.file_name().unwrap().to_str().unwrap(),
+        files,
+        Sources::discover(&state, Some(&parent_key)).unwrap(),
+        observer.finish().unwrap(),
+    )
+    .unwrap();
+    let history = package
+        .structured_history(&keys, &BTreeMap::new())
+        .unwrap()
+        .into_rows();
+    for (kind, id) in [
+        ("host", host_id),
+        ("group", group_id),
+        ("keyslot", key_id.as_str()),
+        ("key", key_id.as_str()),
+    ] {
+        let last = history
+            .iter()
+            .rev()
+            .find(|(identity, _)| identity.kind == kind && identity.id == id)
+            .unwrap();
+        assert!(
+            matches!(last.1, Data::Deleted),
+            "retained-only {kind} became current"
+        );
+    }
+    assert!(history
+        .iter()
+        .any(|(_, data)| matches!(data,Data::Key(private)if private.private()==raw)));
+    let (_, _, signer) = migration_history::tests::initial();
+    migration_history::prepare(
+        &owner,
+        &keys,
+        &signer,
+        migration_history::Context {
+            operation: "7".repeat(32),
+            inventory_digest: "9".repeat(64),
+            sources: vec![],
+        },
+        &history,
+    )
+    .unwrap();
+}

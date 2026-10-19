@@ -31,15 +31,7 @@ impl History {
     }
     fn append(&mut self, id: Identity, data: Data, force: bool) -> Result<(), AppError> {
         let bytes = payload::encode(&id, &data)?;
-        let scope = match &id.scope {
-            None => "account".into(),
-            Some(HostScope::Local) => "local".into(),
-            Some(HostScope::Space { space_id }) => format!("space:{space_id}"),
-        };
-        let key = (
-            format!("{}:{scope}:{}", id.kind, id.id),
-            crypto::hash(&bytes),
-        );
+        let key = (identity_key(&id), crypto::hash(&bytes));
         if self.latest.get(&key.0) == Some(&key.1) || !force && self.seen.contains(&key) {
             return Ok(());
         }
@@ -52,6 +44,14 @@ impl History {
         self.rows.push((id, data));
         Ok(())
     }
+}
+fn identity_key(id: &Identity) -> String {
+    let scope = match &id.scope {
+        None => "account".into(),
+        Some(HostScope::Local) => "local".into(),
+        Some(HostScope::Space { space_id }) => format!("space:{space_id}"),
+    };
+    format!("{}:{scope}:{}", id.kind, id.id)
 }
 fn failure() -> AppError {
     AppError::Other("Complete legacy conversion, missing collection recovery and source conflict resolution before preparing this structured library. Every original source is retained.".into())
@@ -467,6 +467,27 @@ pub(super) fn prepare(
     // Retained material is already inactive where required. Current library always comes last.
     for (id, value) in material_rows {
         history.append(id, value, false)?;
+    }
+    // Retaining an old version must not manufacture a live item absent from the current library.
+    let desired: BTreeSet<_> = public
+        .iter()
+        .map(|(id, _)| identity_key(id))
+        .chain(
+            current_private
+                .keys()
+                .map(|id| identity_key(&key_id("key", id))),
+        )
+        .collect();
+    let closing: BTreeMap<_, _> = history
+        .rows
+        .iter()
+        .filter_map(|(id, _)| {
+            let key = identity_key(id);
+            (!desired.contains(&key)).then(|| (key, id.clone()))
+        })
+        .collect();
+    for id in closing.into_values() {
+        history.append(id, Data::Deleted, true)?;
     }
     for (id, value) in public {
         history.append(id, value, true)?;
