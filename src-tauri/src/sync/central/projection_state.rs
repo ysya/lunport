@@ -555,13 +555,32 @@ impl Ledger {
     }
     /// Credentials/keys never validate a cached logical ID merely by being supplied by a caller.
     /// Re-open the retained signed basis and bind its typed identity and semantic digest first.
-    pub(in crate::sync::central) fn verify_native(&self, owner: &Workspace, keys: &VaultKeys) -> Result<(), AppError> {
+    pub(in crate::sync::central) fn verify_native(
+        &self,
+        owner: &Workspace,
+        keys: &VaultKeys,
+    ) -> Result<(), AppError> {
+        self.verify_native_with(owner, |_| Ok(keys))
+    }
+    pub(in crate::sync::central) fn verify_historical_native(
+        &self,
+        owner: &Workspace,
+        keys: &BTreeMap<u64, VaultKeys>,
+    ) -> Result<(), AppError> {
+        self.verify_native_with(owner, |epoch| keys.get(&epoch).ok_or_else(invalid))
+    }
+    fn verify_native_with<'a>(
+        &self,
+        owner: &Workspace,
+        select: impl Fn(u64) -> Result<&'a VaultKeys, AppError>,
+    ) -> Result<(), AppError> {
         let chain = owner.control.verified_chain()?;
         let mut catalog = None;
         let mut storage = BTreeMap::new();
         for (opaque, basis) in &self.bases {
             let r = &basis.remote;
             let header = &basis.wire.version.envelope.header;
+            let keys = select(super::wire::number(&header.key_epoch, false)?)?;
             let author = chain
                 .author_at(&header.membership_head, &header.author)
                 .ok_or_else(invalid)?;

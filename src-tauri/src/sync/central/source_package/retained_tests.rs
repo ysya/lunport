@@ -720,3 +720,37 @@ fn unjoined_v2_own_slots_remain_retained_public_metadata_without_cloud_authority
         raw.as_bytes()
     );
 }
+
+#[test]
+fn a_retained_preapproval_account_keeps_legacy_content_without_recreating_an_approval_or_device_secret(
+) {
+    let (device, package, keys, owner, _) = super::tests::fixture();
+    let mut old = image(&package);
+    old.version = records_v3::CENTRAL_STATE_VERSION;
+    old.local.central = Some(
+        crate::sync::central::workspace::Workspace::new(
+            crate::sync::central::client_state::State::new(
+                owner.control.profile.clone(),
+                owner.control.account_id.clone(),
+                owner.control.device.clone(),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let bytes = serde_json::to_vec(&old).unwrap();
+    let package = replace(&device, package, &bytes);
+    package.record_inputs().unwrap();
+    let rows = package
+        .structured_history(&keys, &BTreeMap::new())
+        .unwrap()
+        .into_rows();
+    assert!(!rows.is_empty());
+    assert_eq!(package.state.local.central.as_ref(), Some(&owner));
+    assert!(!owner.control.cutover);
+    assert_eq!(
+        package.files.bytes[Path::new("data/sync-state.retained")].as_slice(),
+        bytes.as_slice()
+    );
+}

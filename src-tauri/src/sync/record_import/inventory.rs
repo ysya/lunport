@@ -3,10 +3,11 @@ use super::*;
 pub(in crate::sync) struct Images {
     pub states: Vec<SyncStateV3>,
     pub admitted: BTreeSet<PathBuf>,
+    pub central_floors: Vec<crate::sync::central::rekey::Checkpoint>,
 }
-struct Masters<'a> {
-    keychain: &'a dyn Keychain,
-    operation: &'a str,
+pub(super) struct Masters<'a> {
+    pub(super) keychain: &'a dyn Keychain,
+    pub(super) operation: &'a str,
 }
 impl Keychain for Masters<'_> {
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
@@ -28,7 +29,7 @@ impl Keychain for Masters<'_> {
         Err(failure("import inventory is read-only"))
     }
 }
-fn state(bytes: &[u8]) -> Result<SyncStateV3, AppError> {
+pub(super) fn state(bytes: &[u8]) -> Result<SyncStateV3, AppError> {
     if bytes.len() as u64 > record_runtime::MAX_STATE_BYTES {
         return Err(failure("import state image is too large"));
     }
@@ -76,6 +77,7 @@ pub(in crate::sync) fn read_all(
     }
     let mut result = Images {
         states: vec![],
+        central_floors: vec![],
         admitted: BTreeSet::new(),
     };
     for operation in operations {
@@ -86,12 +88,19 @@ pub(in crate::sync) fn read_all(
         if bytes.len() as u64 > MAX_JOURNAL_BYTES {
             return Err(failure("import journal is too large"));
         }
+        if let Some(images) =
+            super::central_stage::inventory::read_operation(selected, &operation, files, keychain)?
+        {
+            result.states.extend(images.states);
+            result.admitted.extend(images.admitted);
+            result.central_floors.extend(images.central_floors);
+            continue;
+        }
         let journal: Journal = serde_json::from_slice(bytes)
             .map_err(|_| failure("import journal needs supported normalization"))?;
         validate_journal(&journal, &operation)?;
         if journal.phase != Phase::Active
             || !journal.originals_captured
-            || journal.central_intent.is_some()
             || !already_applied(selected, &journal)?
         {
             return Err(failure(
@@ -108,7 +117,7 @@ pub(in crate::sync) fn read_all(
                 .get(&base.join("original-state.json"))
                 .ok_or_else(|| failure("original import state is missing"))?,
         )?;
-        let staged = state(
+        let mut staged = state(
             files
                 .get(&base.join("state.json"))
                 .ok_or_else(|| failure("staged import state is missing"))?,
@@ -162,6 +171,17 @@ pub(in crate::sync) fn read_all(
                 return Err(failure("captured import master selection differs"));
             }
             verify_material(&view, &journal)?;
+            if let Some(intent) = &journal.central_intent {
+                if overlay(&original, &journal)? != staged {
+                    return Err(failure(
+                        "central local staged overlay differs from its original",
+                    ));
+                }
+                let entry = view
+                    .get_inventory(intent.vault_id())?
+                    .ok_or_else(|| failure("central local staged material missing"))?;
+                staged = intent.historical_image(&staged, &entry)?;
+            }
         } else if !journal.keys.is_empty() || journal.staged_key_account.is_some() {
             return Err(failure("import material evidence is missing"));
         }

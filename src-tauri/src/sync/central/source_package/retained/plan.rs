@@ -7,8 +7,46 @@ pub(super) struct Evidence {
     journals: Vec<super::super::super::migration_journal::Journal>,
 }
 impl Evidence {
+    pub(super) fn source(&self) -> &Receipt {
+        &self.source
+    }
+    pub(super) fn capture(
+        &self,
+        package: &Package,
+        identity: &DeviceIdentity,
+    ) -> Result<History, AppError> {
+        let owner = package.state.local.central.as_ref().ok_or_else(invalid)?;
+        owner.validate()?;
+        if identity.device() != owner.control.device {
+            return Err(invalid());
+        }
+        let chain = owner.control.verified_chain()?;
+        let epoch = owner
+            .replica
+            .as_ref()
+            .ok_or_else(invalid)?
+            .checkpoint
+            .epoch
+            .to_string();
+        let wrap = owner
+            .own_wraps
+            .iter()
+            .find(|w| w.header.key_epoch == epoch)
+            .ok_or_else(invalid)?;
+        let author = chain
+            .author_at(&wrap.header.membership_head, &wrap.header.author)
+            .ok_or_else(invalid)?;
+        let keys = wrap.open(&identity.keys, &wrap.header, &author.signing)?;
+        // Only the exact source and complete original progress chain can validate a plan. Its
+        // target rows are never promoted to an accepted central checkpoint.
+        let context = package.migration_context(&self.source)?;
+        let plan = Plan::read_captured(&self.bytes, owner, &keys, &context)?;
+        let references = plan.reference_classifications(&keys)?;
+        self.validate(package, &keys, &references)?;
+        package.structured_history(&keys, &references)
+    }
     pub(super) fn validate(
-        self,
+        &self,
         package: &Package,
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,

@@ -70,6 +70,7 @@ struct Journal {
 #[cfg(test)]
 mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
+pub(in crate::sync::record_import) mod inventory;
 mod input;
 mod initial_effects;
 mod initial_publish;

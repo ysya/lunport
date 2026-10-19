@@ -511,3 +511,66 @@ fn captured_modern_source_bound_plan_preserves_all_actual_capture_ancestors() {
         original.as_slice()
     );
 }
+
+#[test]
+fn signed_captured_plan_survives_content_key_rotation_without_promoting_planned_rows_to_a_history_floor(
+) {
+    use super::super::credentials::DeviceIdentity;
+    use zeroize::Zeroizing;
+    let (device, owner, keys, signer, loaded) = fixture();
+    let mut package = captured_outer(&device, &loaded.package, &keys);
+    let profile = owner.control.profile.profile().unwrap();
+    let role = profile
+        .device_slot("device", owner.identity_slot.as_deref())
+        .unwrap();
+    device.keychain.set(&role,&Zeroizing::new(serde_json::json!({"version":1,"locator":profile.locator,"id":owner.control.device.id,"keys":&*signer.encode_secret(),"credential":"d".repeat(64)}).to_string())).unwrap();
+    let identity = DeviceIdentity::load_selected(
+        &device.keychain,
+        &profile,
+        owner.identity_slot.as_deref(),
+        false,
+    )
+    .unwrap();
+    let later = keys.next_epoch().unwrap();
+    assert!(package
+        .structured_history(&later, &BTreeMap::new())
+        .is_err());
+    package
+        .capture_historical_snapshots(
+            &identity,
+            &|old| {
+                DeviceIdentity::load_selected(
+                    &device.keychain,
+                    &old.control.profile.profile()?,
+                    old.identity_slot.as_deref(),
+                    false,
+                )
+            },
+            &later,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+    let bytes = package.encode_local().unwrap();
+    device.keychain.delete(&role).unwrap();
+    let restored = Package::decode_local(&bytes).unwrap();
+    assert!(!restored
+        .structured_history(&later, &BTreeMap::new())
+        .unwrap()
+        .into_rows()
+        .is_empty());
+    assert!(restored.historical_floors().unwrap().is_empty());
+    assert!(
+        !restored
+            .state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .control
+            .cutover
+    );
+    assert_eq!(
+        restored.encode_local().unwrap().as_slice(),
+        bytes.as_slice()
+    );
+}

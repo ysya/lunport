@@ -7,6 +7,7 @@ struct Retained {
     package: Box<Package>,
     plan: Option<plan::Evidence>,
     history: Option<History>,
+    whole_history: bool,
     floors: Vec<Checkpoint>,
     controls: Vec<super::super::adoption::captured::ControlMinimum>,
 }
@@ -134,6 +135,53 @@ impl Package {
                     inherit_groups(groups, &package)?;
                 }
             }
+            for group in super::super::replacement_archive::captured::read_all(
+                &parent.files.bytes,
+                &parent.decryptors,
+            )?
+            .histories
+            {
+                let key = group.key()?;
+                if let Some(existing) = groups.get(&key) {
+                    if existing != &group {
+                        return Err(invalid());
+                    }
+                } else {
+                    if groups.len() >= MAX_PACKAGES {
+                        return Err(invalid());
+                    }
+                    groups.insert(key, group);
+                }
+            }
+            for state in parent
+                .retained_states()?
+                .into_iter()
+                .filter(|state| parent.needs_state_history(state))
+            {
+                let key = snapshot::Group::state_key(&state)?;
+                let group = match groups.get(&key) {
+                    Some(group) => {
+                        group.require_state(&state)?;
+                        group.clone()
+                    }
+                    None => {
+                        let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+                        identities.ok_or_else(invalid)?; // New witnesses are created only by explicit native capture.
+                        let captured = if super::super::historical_state::needed(&state) {
+                            let identity = identities.ok_or_else(invalid)?(owner)?;
+                            super::super::historical_state::read(&state, &identity)?
+                        } else {
+                            super::super::historical_state::read_public_control(&state)?
+                        };
+                        snapshot::Group::state_captured(&state, captured)?
+                    }
+                };
+                if groups.len() >= MAX_PACKAGES && !groups.contains_key(&key) {
+                    return Err(invalid());
+                }
+                used.insert(key.clone());
+                groups.insert(key, group);
+            }
             let mut covered = BTreeSet::new();
             let mut adoption_sources = BTreeMap::new();
             for (_, plain) in &captured.frames {
@@ -171,7 +219,7 @@ impl Package {
                     .collect::<Result<_, _>>()?;
                 used.extend(needed);
                 let group = match groups.get(&hash) {
-                    Some(group) if group.source() == &source => group.clone(),
+                    Some(group) if group.source() == Some(&source) => group.clone(),
                     Some(_) => return Err(invalid()),
                     None => captured_group(&source, &captured.frames, &nested, identities)?,
                 };
@@ -183,6 +231,7 @@ impl Package {
                     package: nested,
                     plan: None,
                     history: Some(group.history()?),
+                    whole_history: false,
                     floors: group.floors().to_vec(),
                     controls: group.controls().to_vec(),
                 });
@@ -215,17 +264,19 @@ impl Package {
                 if covered.contains(&receipt.ciphertext_hash) {
                     continue;
                 }
-                if (super::super::capture_journal::Journal::frame(plain)
-                    || super::super::migration_journal::Journal::captured_frame(plain))
-                    && referenced.contains(&receipt.ciphertext_hash)
-                {
+                if referenced.contains(&receipt.ciphertext_hash) {
                     continue;
                 }
                 if result.len() >= MAX_PACKAGES {
                     return Err(invalid());
                 }
-                let (mut nested, evidence, ancestors) =
+                let (mut nested, mut evidence, ancestors) =
                     captured_package(receipt, plain, &captured.frames)?;
+                let admitted: BTreeSet<_> = ancestors
+                    .iter()
+                    .map(|r| r.ciphertext_hash.clone())
+                    .chain(std::iter::once(receipt.ciphertext_hash.clone()))
+                    .collect();
                 covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
                 covered.insert(receipt.ciphertext_hash.clone());
                 require_owner(selected, &nested, receipt)?;
@@ -246,10 +297,45 @@ impl Package {
                 if result.len() >= MAX_PACKAGES {
                     return Err(invalid());
                 }
+                let mut history = None;
+                if let Some(plan) = &evidence {
+                    let key = snapshot::Group::plan_key(plan.source(), &admitted)?;
+                    let group = match groups.get(&key) {
+                        Some(group) => {
+                            group.require_plan(plan.source(), &admitted)?;
+                            Some(group.clone())
+                        }
+                        None => match identities {
+                            Some(identities) => {
+                                let owner =
+                                    nested.state.local.central.as_ref().ok_or_else(invalid)?;
+                                let identity = identities(owner)?;
+                                Some(snapshot::Group::planned(
+                                    plan.source(),
+                                    admitted,
+                                    plan.capture(&nested, &identity)?,
+                                    owner,
+                                )?)
+                            }
+                            None => None,
+                        },
+                    };
+                    if let Some(group) = group {
+                        history = Some(group.history()?);
+                        evidence = None;
+                        if groups.len() >= MAX_PACKAGES && !groups.contains_key(&key) {
+                            return Err(invalid());
+                        }
+                        used.insert(key.clone());
+                        groups.insert(key, group);
+                    }
+                }
+                let whole_history = history.is_some();
                 result.push(Retained {
                     package: nested,
                     plan: evidence,
-                    history: None,
+                    history,
+                    whole_history,
                     floors: vec![],
                     controls: vec![],
                 });
@@ -273,7 +359,6 @@ impl Package {
             let current = selected.state.local.central.as_ref().ok_or_else(invalid)?;
             if current.control.anchor != owner.control.anchor
                 || current.control.profile != owner.control.profile
-                || current.control.device != owner.control.device
                 || current.control.personal_vault != owner.control.personal_vault
             {
                 return Err(invalid());
@@ -345,11 +430,38 @@ impl Package {
         ),
         AppError,
     > {
-        let mut floors = vec![];
+        let mut floors = crate::sync::record_import::inventory::read_all(
+            &self.state,
+            &self.files.bytes,
+            &self.decryptors,
+        )?
+        .central_floors;
         let mut controls = vec![];
+        for group in self.snapshot_groups()? {
+            floors.extend(group.floors().iter().cloned());
+            controls.extend(group.controls().iter().cloned());
+        }
+        for state in self.retained_states()? {
+            if let Some(owner) = state.local.central.as_ref() {
+                if owner.control.anchor.is_some() {
+                    controls.push(super::super::adoption::captured::ControlMinimum {
+                        highwater: owner.control.verified_chain()?.highwater(),
+                        auth_epoch: owner.control.auth_epoch,
+                    });
+                }
+            }
+        }
         for retained in self.retained_packages()? {
             floors.extend(retained.floors);
             controls.extend(retained.controls);
+            floors.extend(
+                crate::sync::record_import::inventory::read_all(
+                    &retained.package.state,
+                    &retained.package.files.bytes,
+                    &retained.package.decryptors,
+                )?
+                .central_floors,
+            );
             let owner = retained
                 .package
                 .state
@@ -478,6 +590,7 @@ impl Package {
         Ok(())
     }
     pub fn record_inputs(&self) -> Result<Inventory, AppError> {
+        drop(self.state_groups()?);
         let mut inventory = self.own_record_inputs()?;
         for retained in self.retained_packages()? {
             let package = retained.package;
@@ -500,8 +613,10 @@ impl Package {
             if let Some(plan) = retained.plan {
                 plan.validate(&package, keys, references)?;
             }
-            materials =
-                materials.with_retained_materials(package.own_materials(keys, references)?)?;
+            if !retained.whole_history {
+                materials =
+                    materials.with_retained_materials(package.own_materials(keys, references)?)?;
+            }
             if let Some(history) = retained.history {
                 materials = materials.with_retained_history(history)?;
             }
@@ -521,7 +636,9 @@ impl Package {
             if let Some(plan) = source.plan {
                 plan.validate(&package, keys, references)?;
             }
-            retained.push(package.own_structured_history(keys, references)?);
+            if !source.whole_history {
+                retained.push(package.own_structured_history(keys, references)?);
+            }
             if let Some(history) = source.history {
                 retained.push(history);
             }

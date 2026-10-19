@@ -416,7 +416,7 @@ pub(crate) fn publish(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::{delta, fixture};
     use super::*;
     use crate::sync::{
@@ -425,7 +425,7 @@ mod tests {
     };
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use std::time::{Duration, Instant};
-    pub(super) fn session(
+    pub(in crate::sync::record_import::central_stage) fn session(
         device: &crate::sync::testkit::TestDevice,
         lifetime: Duration,
     ) -> Arc<Session> {

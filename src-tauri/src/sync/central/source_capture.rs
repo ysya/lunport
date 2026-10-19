@@ -220,7 +220,12 @@ fn capture_inner(
         )?;
         let historical =
             super::replacement_archive::captured::read_all(&files.bytes, &observer)?;
-        drop(materials.with_retained_states(&historical.states, &files, &observer)?);
+        let legacy: Vec<_> = historical
+            .states
+            .into_iter()
+            .filter(|s| !super::historical_state::projected(s))
+            .collect();
+        drop(materials.with_retained_states(&legacy, &files, &observer)?);
         drop(super::source_archive::captured::read_all(
             &files.bytes,
             &observer,

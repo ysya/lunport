@@ -41,11 +41,11 @@ impl Inventory {
         }
         let subset = sources.historical_subset(state)?;
         let historical = Self::from_state(&subset, state)?;
-        if historical
-            .target
-            .as_ref()
-            .is_some_and(|target| Some(target) != self.target.as_ref())
-        {
+        if historical.target.as_ref().is_some_and(|target| {
+            self.target
+                .as_ref()
+                .is_none_or(|selected| !target.same_account(selected))
+        }) {
             return Err(invalid());
         }
         for (chain, minimum) in historical.minima {

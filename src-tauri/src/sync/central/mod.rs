@@ -41,6 +41,7 @@ pub(super) use initial_projection::fresh_fixture_for_stage as initial_fresh_proj
 #[cfg(test)]
 pub(super) use initial_projection::empty_fixture_for_stage as initial_empty_projection_for_test;
 mod migration_library;
+mod historical_state;
 mod migration_sources;
 mod migration_materials;
 mod migration_files;

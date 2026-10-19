@@ -74,6 +74,9 @@ impl History {
         }
         Ok(result)
     }
+    pub(in crate::sync::central) fn rows(&self) -> &[(Identity, Data)] {
+        &self.rows
+    }
     pub fn into_rows(self) -> Vec<(Identity, Data)> {
         self.rows
     }

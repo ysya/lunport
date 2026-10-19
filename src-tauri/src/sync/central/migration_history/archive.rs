@@ -333,6 +333,31 @@ impl Plan {
 /// ciphertext; without the recipient identity, their enclosed key pair cannot be opened here.
 pub(in crate::sync::central) struct CapturedPlan(Plan);
 impl CapturedPlan {
+    pub(in crate::sync::central) fn reference_classifications(
+        &self,
+        keys: &VaultKeys,
+    ) -> Result<BTreeMap<String, payload::KeyStorage>, AppError> {
+        let chain = self.0.before.control.verified_chain()?;
+        let mut references = BTreeMap::new();
+        for row in &self.0.rows {
+            let h = &row.envelope.header;
+            let author = chain
+                .author_at(&h.membership_head, &h.author)
+                .ok_or_else(invalid)?;
+            let plain = row.envelope.verify(&author.signing)?.open(keys)?;
+            let value = payload::admit(keys, h, &plain)?;
+            if value.identity.kind == "keyslot" {
+                references.remove(&value.identity.id);
+                if let Data::Keyslot(slot) = value.data {
+                    if !matches!(slot.storage, payload::KeyStorage::Managed { .. }) {
+                        references.insert(value.identity.id, slot.storage);
+                    }
+                }
+            }
+        }
+        Ok(references)
+    }
+
     pub(in crate::sync::central) fn matches_history(
         &self,
         keys: &VaultKeys,

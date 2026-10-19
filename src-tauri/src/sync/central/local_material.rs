@@ -253,6 +253,104 @@ impl Intent {
     pub fn verify_scope(&self, owner: &Workspace) -> Result<(), AppError> {
         self.receipt.verify(owner)
     }
+    pub(in crate::sync) fn historical_image(
+        &self,
+        staged: &SyncStateV3,
+        entry: &VaultEntry,
+    ) -> Result<SyncStateV3, AppError> {
+        records_v3::validate_state(staged).map_err(|_| invalid())?;
+        let owner = staged.local.central.as_ref().ok_or_else(invalid)?;
+        self.receipt.verify(owner)?;
+        let local = staged.local.keys.get(self.key_id()).ok_or_else(invalid)?;
+        if local.vault_id != self.vault_id()
+            || &local.public != self.public()
+            || self.origin.as_ref().is_some_and(|o| o != &entry.origin)
+        {
+            return Err(invalid());
+        }
+        self.receipt
+            .verify_material(owner, self.key_id(), local, entry)?;
+        let slot = self.receipt.slot();
+        let private = material(entry, slot, self.key_id())?;
+        let expected = [
+            payload::encode(
+                &identity("keyslot", self.key_id()),
+                &Data::Keyslot(slot.clone()),
+            )?,
+            payload::encode(&identity("key", self.key_id()), &Data::Key(private))?,
+        ];
+        let handles = self.receipt.wire_handles();
+        for (index, pending) in self.pending.iter().enumerate() {
+            let draft = &pending.latest;
+            let h = &draft.envelope.header;
+            let b = &self.receipt.body;
+            if pending.sent.is_some()
+                || pending.claimed.is_some()
+                || pending.confirmed.is_some()
+                || draft.local_revision != 1
+                || draft.content_hash != crypto::hash(&expected[index])
+                || h.origin != b.anchor.origin
+                || h.account_id != b.anchor.account_id
+                || h.genesis_hash != b.anchor.genesis_hash
+                || h.vault_id != b.vault
+                || h.record_id != if index == 0 { handles.0 } else { handles.1 }
+                || h.key_epoch != b.key_epoch
+                || h.membership_head != b.membership_head
+                || h.author != b.device.id
+                || h.kind != if index == 0 { "keyslot" } else { "key" }
+                || h.deleted
+                || h.expected_revision != "0"
+            {
+                return Err(invalid());
+            }
+            draft.envelope.verify(&b.device.keys.signing)?;
+        }
+        let mut image = staged.clone();
+        let owner = image.local.central.as_mut().ok_or_else(invalid)?;
+        let replica = owner.replica.as_mut().ok_or_else(invalid)?;
+        for pending in &self.pending {
+            let id = &pending.latest.envelope.header.record_id;
+            if replica.current.contains_key(id)
+                || replica.conflicts.contains_key(id)
+                || replica
+                    .pending
+                    .insert(id.clone(), pending.clone())
+                    .is_some()
+            {
+                return Err(invalid());
+            }
+        }
+        image
+            .local
+            .central_projection
+            .as_mut()
+            .ok_or_else(invalid)?
+            .add_local_source(owner, self.receipt.clone())?;
+        let id = self.key_id();
+        let key = record_key(RecordKind::KeySlot, id);
+        let account = image.account.as_mut().ok_or_else(invalid)?;
+        if account.records.contains_key(&key) || account.sealed.contains_key(&key) {
+            return Err(invalid());
+        }
+        account.records.insert(
+            key,
+            crate::sync::record::LocalRecord {
+                record: crate::sync::record::Record {
+                    kind: RecordKind::KeySlot,
+                    id: id.into(),
+                    version: 1,
+                    updated_at_ms: self.public().created_at_ms,
+                    device_id: self.public().origin_device_id.clone(),
+                    deleted: false,
+                    payload: serde_json::to_value(self.public()).map_err(|_| invalid())?,
+                },
+                seq: 0,
+                dirty: false,
+            },
+        );
+        records_v3::validate_state(&image).map_err(|_| invalid())?;
+        Ok(image)
+    }
     pub fn raw_hash(&self) -> Result<&str, AppError> {
         match &self.receipt.slot().storage {
             KeyStorage::Managed { sha256 } => Ok(sha256),

@@ -26,7 +26,7 @@ const FROZEN_MAGIC: &[u8; 8] = b"LPSRCPK2";
 const MAX_BYTES: usize = 192 * 1024 * 1024;
 mod coverage;
 mod retained;
-mod snapshot;
+pub(in crate::sync::central) mod snapshot;
 /// Only explicit native encode/decode. Never a frontend DTO or an SSH private-key export.
 pub(super) struct Package {
     state_name: String,
@@ -82,7 +82,8 @@ impl Package {
                 .states,
         );
         result.extend(
-            super::replacement_archive::captured::read_all(&self.files.bytes, &self.decryptors)?.states,
+            super::replacement_archive::captured::read_all(&self.files.bytes, &self.decryptors)?
+                .states,
         );
         for (path, bytes) in &self.files.bytes {
             if path.parent() != Some(Path::new("data")) {
@@ -111,24 +112,25 @@ impl Package {
             }
             let image: SyncStateV3 = serde_json::from_slice(bytes).map_err(|_| AppError::Other("A retained sync-state image needs supported normalization before migration. Every original file is retained.".into()))?;
             records_v3::validate_state(&image).map_err(|_| invalid())?;
-            if image
-                .local
-                .central
-                .as_ref()
-                .is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())
-            {
-                return Err(invalid());
-            }
             result.push(image);
         }
-        if result.iter().any(|image| {
-            image
-                .local
-                .central
-                .as_ref()
-                .is_some_and(|owner| Some(owner) != self.state.local.central.as_ref())
-        }) {
-            return Err(invalid());
+        for image in &result {
+            if let Some(old) = &image.local.central {
+                old.validate()?;
+                let selected = self.state.local.central.as_ref().ok_or_else(invalid)?;
+                let old_anchor = match &old.recovery {
+                    Some(super::recovery_state::RecoveryState::Pending { package }) => {
+                        Some(&package.admission.anchor)
+                    }
+                    _ => old.control.anchor.as_ref(),
+                };
+                if old_anchor.is_some() && old_anchor != selected.control.anchor.as_ref()
+                    || old.control.profile != selected.control.profile
+                    || old.control.account_id != selected.control.account_id
+                {
+                    return Err(invalid());
+                }
+            }
         }
         // A historical image may name an older backup that the selected state no longer names.
         // It is complete only when that exact backup is captured and read as a state image too.
@@ -149,6 +151,37 @@ impl Package {
                     return Err(invalid());
                 }
             }
+        }
+        Ok(result)
+    }
+    fn needs_state_history(&self, state: &SyncStateV3) -> bool {
+        super::historical_state::needed(state)
+            || state.local.central.as_ref().is_some_and(|owner| {
+                owner.control.anchor.is_some() && Some(owner) != self.state.local.central.as_ref()
+            })
+    }
+    fn legacy_retained_states(&self) -> Result<Vec<SyncStateV3>, AppError> {
+        Ok(self
+            .retained_states()?
+            .into_iter()
+            .filter(|s| !super::historical_state::projected(s))
+            .collect())
+    }
+    fn state_groups(&self) -> Result<Vec<snapshot::Group>, AppError> {
+        let groups = self.snapshot_groups()?;
+        let mut result = vec![];
+        for state in self
+            .retained_states()?
+            .into_iter()
+            .filter(|state| self.needs_state_history(state))
+        {
+            let key = snapshot::Group::state_key(&state)?;
+            let group = groups
+                .iter()
+                .find(|g| g.key().ok().as_ref() == Some(&key))
+                .ok_or_else(invalid)?;
+            group.require_state(&state)?;
+            result.push(group.clone());
         }
         Ok(result)
     }
@@ -189,7 +222,11 @@ impl Package {
             Some(frozen) => frozen.inventory(&self.sources, &self.state)?,
             None => Inventory::from_state(&self.sources, &self.state)?,
         };
-        for image in self.retained_states()? {
+        for image in self
+            .retained_states()?
+            .into_iter()
+            .filter(|s| !super::historical_state::projected(s))
+        {
             inventory = inventory.with_retained_state(&self.sources, &image)?;
         }
         let migrations =
@@ -301,7 +338,15 @@ impl Package {
             private_inputs,
         )
         .and_then(|materials| {
-            materials.with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)
+            let mut materials = materials.with_retained_states(
+                &self.legacy_retained_states()?,
+                &self.files,
+                &self.decryptors,
+            )?;
+            for group in self.state_groups()? {
+                materials = materials.with_retained_history(group.history()?)?;
+            }
+            Ok(materials)
         })
     }
     /// Structured history candidate; other captured files and explicit consent remain gates.
@@ -326,11 +371,17 @@ impl Package {
                 prepared.known.key_inputs()?,
             )?
             .with_retained_states(
-                &self.retained_states()?,
+                &self.legacy_retained_states()?,
                 &self.files,
                 &self.decryptors,
             )?;
-            return super::migration_library::prepare(&prepared.state, &prepared.known, materials);
+            return super::migration_library::prepare(&prepared.state, &prepared.known, materials)?
+                .with_retained(
+                    self.state_groups()?
+                        .into_iter()
+                        .map(|g| g.history())
+                        .collect::<Result<_, _>>()?,
+                );
         }
         let mut normalized = self.state.clone();
         let known = self
@@ -345,8 +396,17 @@ impl Package {
             references,
             known.key_inputs()?,
         )?
-        .with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)?;
-        super::migration_library::prepare(&normalized, &known, materials)
+        .with_retained_states(
+            &self.legacy_retained_states()?,
+            &self.files,
+            &self.decryptors,
+        )?;
+        super::migration_library::prepare(&normalized, &known, materials)?.with_retained(
+            self.state_groups()?
+                .into_iter()
+                .map(|g| g.history())
+                .collect::<Result<_, _>>()?,
+        )
     }
     pub(in crate::sync::central) fn captured_initial_digest(&self) -> Result<&str, AppError> {
         self.frozen.as_ref().ok_or_else(invalid)?.initial_digest()

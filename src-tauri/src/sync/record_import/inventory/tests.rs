@@ -170,3 +170,109 @@ fn unfinished_missing_unknown_or_changed_evidence_never_becomes_admitted_import_
         assert!(!error.contains("PRIVATE-SENTINEL"), "{case}");
     }
 }
+
+#[test]
+fn actual_completed_central_local_intent_normalizes_ciphertext_without_replaying_publication() {
+    use crate::sync::{record_import::central_local, record_keys};
+    let device = central_local::tests::fixture();
+    let env = device.env();
+    let (before, generation) = record_runtime::snapshot(&env).unwrap();
+    let scope = central_local::invocation(&before)
+        .unwrap()
+        .with_generation(generation);
+    let raw = crate::sync::slot_rules::test_keys::encrypted();
+    record_keys::import_local_scoped(
+        &env,
+        "historical-local-key",
+        Zeroizing::new(raw.clone()),
+        EntryOrigin::Imported,
+        Some(&scope),
+    )
+    .unwrap();
+    let selected = record_runtime::snapshot(&env).unwrap().0;
+    let root = env.state_path.parent().unwrap().join("imports");
+    let operation = fs::read_dir(&root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    let base = Path::new("data/imports").join(&operation);
+    let mut files = BTreeMap::new();
+    for e in fs::read_dir(root.join(&operation)).unwrap() {
+        let e = e.unwrap();
+        files.insert(
+            base.join(e.file_name()),
+            Zeroizing::new(fs::read(e.path()).unwrap()),
+        );
+    }
+    let journal: Journal = serde_json::from_slice(&files[&base.join("journal.json")]).unwrap();
+    let mut roles = BTreeSet::new();
+    if let Some(role) = &journal.staged_key_account {
+        roles.insert(role.clone());
+        roles.insert(format!("migration:{operation}:{role}"));
+    }
+    let entries: Vec<_> = roles
+        .into_iter()
+        .filter_map(|role| {
+            device
+                .keychain
+                .entry(&role)
+                .map(|value| serde_json::json!({"role":role,"value":value}))
+        })
+        .collect();
+    let keys = Snapshot::decode_local(&Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({"version":1,"keys":entries})).unwrap(),
+    ))
+    .unwrap();
+    let exact = fs::read(&env.state_path).unwrap();
+    let read = read_all(&selected, &files, &keys).unwrap();
+    assert_eq!(read.states.len(), 2);
+    let historical = &read.states[1];
+    assert_eq!(historical, &selected);
+    assert_eq!(
+        historical
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending
+            .len(),
+        2
+    );
+    assert_eq!(fs::read(&env.state_path).unwrap(), exact);
+    for case in ["ciphertext", "hash", "stage", "scope"] {
+        let mut files = files.clone();
+        let mut j = journal.clone();
+        if case == "stage" {
+            let mut staged: SyncStateV3 =
+                serde_json::from_slice(&files[&base.join("state.json")]).unwrap();
+            staged.device_name = "substituted-stage".into();
+            files.insert(
+                base.join("state.json"),
+                Zeroizing::new(serde_json::to_vec(&staged).unwrap()),
+            );
+        } else {
+            let mut value = serde_json::to_value(j.central_intent.take().unwrap()).unwrap();
+            match case {
+                "ciphertext" => {
+                    value["pending"][1]["latest"]["envelope"]["ciphertext"] =
+                        "A".repeat(32).into()
+                }
+                "hash" => value["pending"][1]["latest"]["content_hash"] = "f".repeat(64).into(),
+                _ => value["receipt"]["body"]["identity_slot"] = "e".repeat(32).into(),
+            };
+            j.central_intent = Some(serde_json::from_value(value).unwrap());
+        }
+        files.insert(
+            base.join("journal.json"),
+            Zeroizing::new(serde_json::to_vec(&j).unwrap()),
+        );
+        assert!(read_all(&selected, &files, &keys).is_err(), "{case}");
+    }
+}

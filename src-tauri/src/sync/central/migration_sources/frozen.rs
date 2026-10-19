@@ -20,6 +20,10 @@ pub(super) struct Target {
     key_epoch: u64,
 }
 impl Target {
+    pub(super) fn same_account(&self, other: &Self) -> bool {
+        self.profile == other.profile && self.anchor == other.anchor && self.vault == other.vault
+    }
+
     pub(super) fn binding(&self) -> Result<String, AppError> {
         let auth = self.auth_epoch.to_string();
         let key = self.key_epoch.to_string();

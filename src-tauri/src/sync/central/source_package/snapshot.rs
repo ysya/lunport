@@ -12,13 +12,17 @@ const MAX_HISTORY: usize = 32 * 1024 * 1024 - 256 * 1024;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Metadata {
-    source: Receipt,
+    source: Option<Receipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    planned: bool,
     admitted: BTreeSet<String>,
     floors: Vec<Checkpoint>,
     controls: Vec<super::super::adoption::captured::ControlMinimum>,
 }
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Group {
+pub(in crate::sync::central) struct Group {
     meta: Metadata,
     rows: Zeroizing<Vec<u8>>,
 }
@@ -75,7 +79,9 @@ impl Group {
     ) -> Result<Self, AppError> {
         let result = Self {
             meta: Metadata {
-                source: source.clone(),
+                source: Some(source.clone()),
+                state: None,
+                planned: false,
                 admitted: value.admitted,
                 floors: value.floors,
                 controls: value.controls,
@@ -86,20 +92,32 @@ impl Group {
         Ok(result)
     }
     fn validate(&self) -> Result<(), AppError> {
-        self.meta.source.validate()?;
-        if self.meta.admitted.len() < 2
-            || self.meta.admitted.len() > 9
-            || !self
-                .meta
-                .admitted
-                .contains(&self.meta.source.ciphertext_hash)
+        if let Some(source) = &self.meta.source {
+            source.validate()?;
+            if self.meta.state.is_some()
+                || self.meta.admitted.len() < 2
+                || !self.meta.admitted.contains(&source.ciphertext_hash)
+                || !self.meta.planned && self.meta.floors.is_empty()
+            {
+                return Err(invalid());
+            }
+        } else {
+            let state = self.meta.state.as_ref().ok_or_else(invalid)?;
+            if self.meta.planned
+                || !super::super::wire::hex(state, 64)
+                || self.meta.admitted != BTreeSet::from([state.clone()])
+            {
+                return Err(invalid());
+            }
+        }
+        if self.meta.admitted.is_empty()
+            || self.meta.admitted.len() > if self.meta.planned { 256 } else { 9 }
             || self
                 .meta
                 .admitted
                 .iter()
                 .any(|s| !super::super::wire::hex(s, 64))
-            || self.meta.floors.is_empty()
-            || self.meta.floors.len() > 16
+            || self.meta.floors.len() > if self.meta.state.is_some() { 256 } else { 16 }
             || self.rows.len() > MAX_HISTORY
         {
             return Err(invalid());
@@ -127,14 +145,104 @@ impl Group {
         }
         Ok(())
     }
+    pub(super) fn planned(
+        source: &Receipt,
+        admitted: BTreeSet<String>,
+        history: History,
+        owner: &Workspace,
+    ) -> Result<Self, AppError> {
+        let group = Self {
+            meta: Metadata {
+                source: Some(source.clone()),
+                state: None,
+                planned: true,
+                admitted,
+                floors: vec![],
+                controls: vec![super::super::adoption::captured::ControlMinimum {
+                    highwater: owner.control.verified_chain()?.highwater(),
+                    auth_epoch: owner.control.auth_epoch,
+                }],
+            },
+            rows: rows(history)?,
+        };
+        group.validate()?;
+        Ok(group)
+    }
+    pub(super) fn require_plan(
+        &self,
+        source: &Receipt,
+        admitted: &BTreeSet<String>,
+    ) -> Result<(), AppError> {
+        self.validate()?;
+        if !self.meta.planned
+            || self.meta.source.as_ref() != Some(source)
+            || &self.meta.admitted != admitted
+            || !self.meta.floors.is_empty()
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn plan_key(
+        source: &Receipt,
+        admitted: &BTreeSet<String>,
+    ) -> Result<String, AppError> {
+        group_key(source, admitted)
+    }
     pub(super) fn controls(&self) -> &[super::super::adoption::captured::ControlMinimum] {
         &self.meta.controls
     }
     pub(super) fn key(&self) -> Result<String, AppError> {
-        group_key(&self.meta.source, &self.meta.admitted)
+        match &self.meta.source {
+            Some(source) => group_key(source, &self.meta.admitted),
+            None => Ok(format!(
+                "state:{}",
+                self.meta.state.as_ref().ok_or_else(invalid)?
+            )),
+        }
     }
-    pub(super) fn source(&self) -> &Receipt {
-        &self.meta.source
+    pub(super) fn source(&self) -> Option<&Receipt> {
+        self.meta.source.as_ref()
+    }
+    pub(in crate::sync::central) fn state_key(state: &SyncStateV3) -> Result<String, AppError> {
+        Ok(format!(
+            "state:{}",
+            crypto::hash(&Zeroizing::new(
+                serde_json::to_vec(state).map_err(|_| invalid())?
+            ))
+        ))
+    }
+    pub(super) fn state_captured(
+        state: &SyncStateV3,
+        captured: super::super::historical_state::Captured,
+    ) -> Result<Self, AppError> {
+        let hash = Self::state_key(state)?
+            .strip_prefix("state:")
+            .ok_or_else(invalid)?
+            .to_owned();
+        let group = Self {
+            meta: Metadata {
+                source: None,
+                state: Some(hash.clone()),
+                planned: false,
+                admitted: BTreeSet::from([hash]),
+                floors: captured.floors,
+                controls: captured.controls,
+            },
+            rows: rows(captured.history)?,
+        };
+        group.validate()?;
+        Ok(group)
+    }
+    pub(in crate::sync::central) fn require_state(
+        &self,
+        state: &SyncStateV3,
+    ) -> Result<(), AppError> {
+        self.validate()?;
+        if self.meta.source.is_some() || self.key()? != Self::state_key(state)? {
+            return Err(invalid());
+        }
+        Ok(())
     }
     pub(super) fn admitted(&self) -> &BTreeSet<String> {
         &self.meta.admitted
@@ -175,23 +283,27 @@ impl Group {
         frames: &[(Receipt, Zeroizing<Vec<u8>>)],
     ) -> Result<(), AppError> {
         self.validate()?;
+        if self.meta.planned {
+            return Err(invalid());
+        }
+        let source = self.meta.source.as_ref().ok_or_else(invalid)?;
         let (_, plain) = frames
             .iter()
-            .find(|(r, _)| r == &self.meta.source)
+            .find(|(r, _)| r == source)
             .ok_or_else(invalid)?;
         let package = Package::decode_local(plain)?;
-        self.meta
-            .source
-            .matches_selected(package.state.local.central.as_ref().ok_or_else(invalid)?)?;
-        let mut actual = BTreeSet::from([self.meta.source.ciphertext_hash.clone()]);
+        source.matches_selected(package.state.local.central.as_ref().ok_or_else(invalid)?)?;
+        let mut actual = BTreeSet::from([source.ciphertext_hash.clone()]);
         for (receipt, bytes) in frames {
             if let Some(source) = super::super::adoption::captured::source(bytes)? {
-                if source == self.meta.source {
+                if &source == self.meta.source.as_ref().ok_or_else(invalid)? {
                     if !receipt.follows(&source)? || !actual.insert(receipt.ciphertext_hash.clone())
                     {
                         return Err(invalid());
                     }
-                } else if receipt.operation() == self.meta.source.operation() {
+                } else if receipt.operation()
+                    == self.meta.source.as_ref().ok_or_else(invalid)?.operation()
+                {
                     return Err(invalid());
                 }
             }
@@ -346,5 +458,77 @@ impl Snapshot {
             drop(group.history()?);
         }
         Ok(groups)
+    }
+}
+
+/// A state-bound logical witness for replacement archival. Enclose only in native encryption.
+pub(in crate::sync::central) struct StateSnapshot {
+    bytes: Zeroizing<Vec<u8>>,
+}
+impl StateSnapshot {
+    pub(in crate::sync::central) fn create(
+        state: &SyncStateV3,
+        identity: &DeviceIdentity,
+    ) -> Result<Self, AppError> {
+        let group = Group::state_captured(
+            state,
+            super::super::historical_state::read(state, identity)?,
+        )?;
+        let mut bytes = Zeroizing::new(b"LPSTATE1".to_vec());
+        put(
+            &mut bytes,
+            &serde_json::to_vec(&group.meta).map_err(|_| invalid())?,
+        )?;
+        put(&mut bytes, &group.rows)?;
+        let mut signed = Zeroizing::new(b"lunport-native-state-history-v1\0".to_vec());
+        signed.extend_from_slice(&bytes);
+        put(&mut bytes, identity.keys.sign(&signed).as_bytes())?;
+        let result = Self { bytes };
+        drop(result.verify(state)?);
+        Ok(result)
+    }
+    pub(in crate::sync::central) fn decode(bytes: &[u8]) -> Result<Self, AppError> {
+        if bytes.len() > MAX_HISTORY + 128 * 1024 || !bytes.starts_with(b"LPSTATE1") {
+            return Err(invalid());
+        }
+        Ok(Self {
+            bytes: Zeroizing::new(bytes.to_vec()),
+        })
+    }
+    pub(in crate::sync::central) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub(in crate::sync::central) fn verify(&self, state: &SyncStateV3) -> Result<Group, AppError> {
+        records_v3::validate_state(state).map_err(|_| invalid())?;
+        let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+        let chain = match &owner.recovery {
+            Some(super::super::recovery_state::RecoveryState::Pending { package }) => {
+                package.admission.verify(&package.proof())?
+            }
+            _ => owner.control.verified_chain()?,
+        };
+        if !(0..=chain.highwater().revision).any(|r| {
+            chain.head_at(r as usize).is_some_and(|head| {
+                chain.author_at(head, &owner.control.device.id) == Some(&owner.control.device.keys)
+            })
+        }) {
+            return Err(invalid());
+        }
+        let mut input = &self.bytes[8..];
+        let meta =
+            serde_json::from_slice(section(&mut input, 128 * 1024)?).map_err(|_| invalid())?;
+        let rows = Zeroizing::new(section(&mut input, MAX_HISTORY)?.to_vec());
+        let signed_len = self.bytes.len() - input.len();
+        let signature = std::str::from_utf8(section(&mut input, 88)?).map_err(|_| invalid())?;
+        if !input.is_empty() {
+            return Err(invalid());
+        }
+        let mut signed = Zeroizing::new(b"lunport-native-state-history-v1\0".to_vec());
+        signed.extend_from_slice(&self.bytes[..signed_len]);
+        crypto::verify(&owner.control.device.keys.signing, &signed, signature)?;
+        let group = Group { meta, rows };
+        group.require_state(state)?;
+        drop(group.history()?);
+        Ok(group)
     }
 }

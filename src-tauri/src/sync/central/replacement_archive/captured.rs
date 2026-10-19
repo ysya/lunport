@@ -11,6 +11,7 @@ const MAX_PLAIN: usize = 128 * 1024 * 1024;
 pub(in crate::sync::central) struct Captured {
     pub states: Vec<SyncStateV3>,
     pub admitted: BTreeSet<PathBuf>,
+    pub histories: Vec<super::super::source_package::snapshot::Group>,
 }
 /// All entries must have a supported interpretation. A key marker alone is unfinished input.
 pub(in crate::sync::central) fn read_all(
@@ -20,11 +21,14 @@ pub(in crate::sync::central) fn read_all(
     let root = Path::new(ROOT);
     let mut result = Captured {
         states: vec![],
+        histories: vec![],
         admitted: BTreeSet::new(),
     };
     let mut used_markers = BTreeSet::new();
     let mut markers = BTreeSet::new();
     let mut total = 0usize;
+    let mut histories = BTreeSet::new();
+    let mut used_histories = BTreeSet::new();
     for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(root)) {
         if path.parent() != Some(root) {
             return Err(invalid());
@@ -33,6 +37,16 @@ pub(in crate::sync::central) fn read_all(
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(invalid)?;
+        if let Some(archive) = name.strip_suffix(".lphist") {
+            if !archive.ends_with(".lparch")
+                || bytes.len() > MAX_HISTORY_FILE
+                || !bytes.starts_with(HISTORY_MAGIC)
+            {
+                return Err(invalid());
+            }
+            histories.insert(path.clone());
+            continue;
+        }
         if let Some(operation) = name.strip_suffix("-key.sha256") {
             if !hex(operation, 32)
                 || bytes.len() != 64
@@ -50,7 +64,8 @@ pub(in crate::sync::central) fn read_all(
         {
             return Err(invalid());
         }
-        let length = u32::from_be_bytes(bytes[8..12].try_into().map_err(|_| invalid())?) as usize;
+        let length =
+            u32::from_be_bytes(bytes[8..12].try_into().map_err(|_| invalid())?) as usize;
         if length > MAX_HEADER || bytes.len() < 12 + length {
             return Err(invalid());
         }
@@ -91,14 +106,26 @@ pub(in crate::sync::central) fn read_all(
         {
             return Err(invalid());
         }
+        let history_path = root.join(format!("{name}.lphist"));
+        if let Some(history) = files.get(&history_path) {
+            total = total.checked_add(history.len()).ok_or_else(invalid)?;
+            if total > MAX_PLAIN {
+                return Err(invalid());
+            }
+            result
+                .histories
+                .push(decode_history(context, &key, history, &state)?);
+            used_histories.insert(history_path);
+        }
         result.states.push(state);
         result.admitted.insert(path.clone());
         used_markers.insert(marker);
     }
-    if markers != used_markers {
+    if markers != used_markers || histories != used_histories {
         return Err(invalid());
     }
     result.admitted.extend(markers);
+    result.admitted.extend(histories);
     Ok(result)
 }
 

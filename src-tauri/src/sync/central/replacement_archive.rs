@@ -110,11 +110,13 @@ impl Context {
 pub struct Receipt {
     pub context: Context,
     pub file_hash: String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub history_hash: Option<String>,
 }
 impl Receipt {
     pub fn validate(&self) -> Result<(), AppError> {
         self.context.validate()?;
-        if !hex(&self.file_hash, 64) {
+        if !hex(&self.file_hash, 64) || self.history_hash.as_ref().is_some_and(|h| !hex(h, 64)) {
             return Err(invalid());
         }
         Ok(())
@@ -225,6 +227,80 @@ fn decode(context: &Context, key: &[u8; 32], bytes: &[u8]) -> Result<Zeroizing<V
         return Err(invalid());
     }
     Ok(plaintext)
+}
+const HISTORY_MAGIC: &[u8;8]=b"LPRAHS1\0";
+const MAX_HISTORY_FILE: usize=32*1024*1024+128*1024+MAX_HEADER+28;
+fn history_aad(context: &Context) -> Result<Vec<u8>, AppError> {
+    let mut aad = b"lunport-replacement-logical-history-v1\0".to_vec();
+    aad.extend(context.aad()?);
+    Ok(aad)
+}
+fn encode_history(
+    context: &Context,
+    key: &[u8; 32],
+    plain: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut nonce).map_err(|_| invalid())?;
+    let header = serde_json::to_vec(&Header {
+        context: context.clone(),
+        nonce: B64.encode(nonce),
+    })
+    .map_err(|_| invalid())?;
+    if header.len() > MAX_HEADER {
+        return Err(invalid());
+    }
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| invalid())?
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plain,
+                aad: &history_aad(context)?,
+            },
+        )
+        .map_err(|_| invalid())?;
+    let mut out = Vec::new();
+    out.extend_from_slice(HISTORY_MAGIC);
+    out.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    out.extend(header);
+    out.extend(cipher);
+    if out.len() > MAX_HISTORY_FILE {
+        return Err(invalid());
+    }
+    Ok(out)
+}
+fn decode_history(
+    context: &Context,
+    key: &[u8; 32],
+    bytes: &[u8],
+    state: &SyncStateV3,
+) -> Result<super::source_package::snapshot::Group, AppError> {
+    if bytes.len() < 12 || bytes.len() > MAX_HISTORY_FILE || !bytes.starts_with(HISTORY_MAGIC) {
+        return Err(invalid());
+    }
+    let n = u32::from_be_bytes(bytes[8..12].try_into().map_err(|_| invalid())?) as usize;
+    if n > MAX_HEADER || bytes.len() < 12 + n + 16 {
+        return Err(invalid());
+    }
+    let h: Header = serde_json::from_slice(&bytes[12..12 + n]).map_err(|_| invalid())?;
+    if &h.context != context {
+        return Err(invalid());
+    }
+    let nonce = crypto::decode(&h.nonce, 24, 24)?;
+    let plain = Zeroizing::new(
+        XChaCha20Poly1305::new_from_slice(key)
+            .map_err(|_| invalid())?
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &bytes[12 + n..],
+                    aad: &history_aad(context)?,
+                },
+            )
+            .map_err(|_| invalid())?,
+    );
+    super::source_package::snapshot::StateSnapshot::decode(&plain)?.verify(state)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,6 +425,50 @@ pub fn prepare(
             bytes
         }
     };
+    let history_hash = if super::historical_state::needed(state) {
+        let history_name = format!("{name}.lphist");
+        let history = match dir.read(&history_name)? {
+            Some(history) => {
+                drop(decode_history(&context, &key, &history, state)?);
+                history
+            }
+            None => {
+                let slot = profile.device_slot("device", workspace.identity_slot.as_deref())?;
+                if Zeroizing::new(env.keychain.get_noninteractive(&slot)?).is_none() {
+                    // Recovery may begin after the old identity was already lost. Preserve the
+                    // exact encrypted original; no logical-history completeness is claimed.
+                    // A later source merge must still fail closed if it cannot read this history.
+                    Vec::new()
+                } else {
+                    let identity = super::credentials::DeviceIdentity::load_selected(
+                        env.keychain,
+                        &profile,
+                        workspace.identity_slot.as_deref(),
+                        false,
+                    )?;
+                    let snapshot = super::source_package::snapshot::StateSnapshot::create(
+                        state, &identity,
+                    )?;
+                    let bytes = encode_history(&context, &key, snapshot.bytes())?;
+                    dir.publish(&history_name, &bytes)?;
+                    bytes
+                }
+            }
+        };
+        if history.is_empty() {
+            None
+        } else {
+            dir.sync()?;
+            let readback = dir.read(&history_name)?.ok_or_else(invalid)?;
+            if history != readback {
+                return Err(invalid());
+            }
+            drop(decode_history(&context, &key, &readback, state)?);
+            Some(crypto::hash(&readback))
+        }
+    } else {
+        None
+    };
     dir.sync()?;
     let readback = dir.read(&name)?.ok_or_else(invalid)?;
     if bytes != readback || decode(&context, &key, &readback)?.as_slice() != plain.as_slice() {
@@ -358,6 +478,7 @@ pub fn prepare(
         receipt: Receipt {
             context,
             file_hash: crypto::hash(&readback),
+            history_hash,
         },
     })
 }
@@ -388,6 +509,15 @@ pub fn restore(
         .is_some_and(|w| receipt.context.matches(w))
     {
         return Err(invalid());
+    }
+    if let Some(hash) = &receipt.history_hash {
+        let history = ArchiveDirectory::open(env, ArchiveKind::Replacement)?
+            .read(&format!("{}.lphist", receipt.context.filename()?))?
+            .ok_or_else(invalid)?;
+        if crypto::hash(&history) != *hash {
+            return Err(invalid());
+        }
+        drop(decode_history(&receipt.context, &key, &history, &state)?);
     }
     Ok(state)
 }
