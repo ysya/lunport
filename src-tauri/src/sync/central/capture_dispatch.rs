@@ -361,5 +361,7 @@ pub(super) fn advance(env: &SyncEnv, keys: &VaultKeys, budget: &Budget) -> Resul
 pub(super) fn ready_for_test(joined: bool) -> (crate::sync::testkit::TestDevice, VaultKeys) {
     tests::ready_fixture(joined)
 }
+#[cfg(all(test,unix))]
+pub(super) fn material_ready_for_test()->(crate::sync::testkit::TestDevice,VaultKeys){tests::material_ready_fixture()}
 #[cfg(all(test, unix))]
 mod tests;

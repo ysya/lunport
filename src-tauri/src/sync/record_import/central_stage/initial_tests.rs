@@ -5,7 +5,7 @@ use crate::sync::{
     fake_relay::FakeRelay,
     testkit::{TestClock, TestDevice},
 };
-fn fixture() -> (TestDevice, InitialProjection) {
+pub(super) fn fixture() -> (TestDevice, InitialProjection) {
     let (initial, _) = initial_projection_for_test();
     let device = TestDevice::new("initial-stage", &FakeRelay::new(), &TestClock::new());
     record_runtime::save_active(&device.env().state_path, initial.source()).unwrap();

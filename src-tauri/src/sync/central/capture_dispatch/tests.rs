@@ -635,3 +635,46 @@ fn a_remote_only_child_is_discovered_and_durably_bound_before_its_first_frozen_r
     parent.clear_sensitive();
     child.clear_sensitive();
 }
+
+pub(super) fn material_ready_fixture() -> (TestDevice, VaultKeys) {
+    let (device, keys, _) = source_capture::tests::fixture(false);
+    {
+        let env = device.env();
+        let view = crate::vault::store::read_vault(
+            &crate::vault::store::vault_path(&env.state_path),
+            env.keychain,
+        )
+        .unwrap();
+        let entry = view.get(&"3".repeat(32)).unwrap().unwrap();
+        let public = super::super::projection::tests::slot(&entry.private_key).public;
+        record_runtime::mutate_records(&env, |state| {
+            let mut next = state.clone();
+            next.local.keys.insert(
+                "1".repeat(32),
+                crate::sync::records_v3::LocalKeyMetadata {
+                    vault_id: "3".repeat(32),
+                    public: public.clone(),
+                },
+            );
+            Ok(next)
+        })
+        .unwrap();
+        source_capture::start_or_resume(&env, &keys, &BTreeMap::new()).unwrap();
+    }
+    let env = device.env();
+    for _ in 0..10 {
+        let step = with_transport(&env, &keys, |_, loaded, action| match action {
+            Action::Freeze { .. } => Ok(Received::Freeze(progress(loaded, true))),
+            Action::Fetch(_) => Ok(Received::Fetch(PullResponse {
+                records: vec![],
+                latest_seq: 0,
+            })),
+            _ => panic!("local step cannot cross HTTP"),
+        })
+        .unwrap();
+        if step == Step::Ready {
+            return (device, keys);
+        }
+    }
+    panic!("material fixture did not finish capture")
+}

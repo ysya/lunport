@@ -333,3 +333,19 @@ pub(super) fn verified_fixture() -> (TestDevice, VaultKeys, Verified) {
     let verified = verified(&d.env(), &keys);
     (d, keys, verified)
 }
+
+pub(super) fn material_verified_fixture() -> (TestDevice, VaultKeys, Verified) {
+    let (d, keys) = super::super::capture_dispatch::material_ready_for_test();
+    source_complete::ensure(&d.env(), &keys).unwrap().unwrap();
+    let shown =
+        serde_json::to_value(review::preview(&d.env(), &keys, &BTreeMap::new()).unwrap()).unwrap();
+    review::confirm(
+        &d.env(),
+        &keys,
+        &BTreeMap::new(),
+        shown["ticket"].as_str().unwrap(),
+    )
+    .unwrap();
+    let result = verified(&d.env(), &keys);
+    (d, keys, result)
+}

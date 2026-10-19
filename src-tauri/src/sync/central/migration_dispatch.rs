@@ -268,5 +268,7 @@ pub(super) fn verified_fixture_for_test() -> (crate::sync::testkit::TestDevice, 
 {
     tests::verified_fixture()
 }
+#[cfg(all(test,unix))]
+pub(super) fn verified_material_fixture_for_test()->(crate::sync::testkit::TestDevice,VaultKeys,Verified){tests::material_verified_fixture()}
 #[cfg(all(test, unix))]
 mod tests;

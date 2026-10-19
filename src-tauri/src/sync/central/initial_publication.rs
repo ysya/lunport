@@ -109,7 +109,7 @@ impl Prepared {
         let _publication = env.runtime.format_publication.lock().unwrap();
         self.check_locked(env, keys, &life)
     }
-    pub(in crate::sync) fn check_locked(
+    pub(in crate::sync) fn check_identity_locked(
         &self,
         env: &SyncEnv,
         keys: &VaultKeys,
@@ -137,7 +137,59 @@ impl Prepared {
         {
             return Err(invalid());
         }
+        Ok(())
+    }
+    pub(in crate::sync) fn check_locked(
+        &self,
+        env: &SyncEnv,
+        keys: &VaultKeys,
+        life: &std::sync::MutexGuard<'_, ()>,
+    ) -> Result<(), AppError> {
+        self.check_identity_locked(env, keys, life)?;
         self.loaded.require_unchanged(env)
+    }
+    pub(in crate::sync) fn original_state<'a>(
+        &'a self,
+        env: &SyncEnv,
+    ) -> Result<&'a [u8], AppError> {
+        let name = env.state_path.file_name().ok_or_else(invalid)?;
+        self.loaded
+            .package
+            .files
+            .bytes
+            .get(&std::path::Path::new("data").join(name))
+            .map(|b| b.as_slice())
+            .ok_or_else(invalid)
+    }
+    pub(in crate::sync) fn original_vault<'a>(
+        &'a self,
+        env: &SyncEnv,
+    ) -> Result<Option<&'a [u8]>, AppError> {
+        let path = crate::vault::store::vault_path(&env.state_path);
+        let name = path.file_name().ok_or_else(invalid)?;
+        Ok(self
+            .loaded
+            .package
+            .files
+            .bytes
+            .get(&std::path::Path::new("data").join(name))
+            .map(|b| b.as_slice()))
+    }
+    pub(in crate::sync) fn check_effects_locked(
+        &self,
+        env: &SyncEnv,
+        keys: &VaultKeys,
+        life: &std::sync::MutexGuard<'_, ()>,
+        effects: &crate::sync::record_import::central_stage::InitialEffects,
+    ) -> Result<(), AppError> {
+        self.check_identity_locked(env, keys, life)?;
+        effects.matches(self.projection(), self.operation())?;
+        self.loaded.package.files.require_unchanged_after_initial(
+            env,
+            self.loaded.package.state.legacy_v1_backup.as_deref(),
+            &self.loaded.outputs,
+            effects,
+        )
     }
 }
 pub(super) fn prepare(

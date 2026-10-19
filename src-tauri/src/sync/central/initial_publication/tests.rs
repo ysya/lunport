@@ -245,3 +245,118 @@ fn changed_source_or_missing_consent_blocks_reserved_staging_before_file_or_mast
             .exists());
     }
 }
+
+#[test]
+fn exact_reserved_stage_outputs_are_the_only_new_files_accepted_by_source_validation() {
+    use std::{fs, path::Path};
+    let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+        .unwrap();
+    let effects =
+        crate::sync::record_import::central_stage::initial_effects(&env, &prepared, &keys).unwrap();
+    assert!(effects
+        .files()
+        .all(|(p, _)| p.starts_with(Path::new("data/imports").join(prepared.operation()))));
+    assert!(
+        !record_runtime::snapshot(&env)
+            .unwrap()
+            .0
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .control
+            .cutover
+    );
+    fs::write(
+        env.state_path.parent().unwrap().join("sync-state.new-B"),
+        b"new B",
+    )
+    .unwrap();
+    assert!(
+        crate::sync::record_import::central_stage::initial_effects(&env, &prepared, &keys).is_err()
+    );
+}
+#[test]
+fn unknown_owned_entries_or_modified_source_copies_never_become_exclusions() {
+    use std::fs;
+    for unknown in [true, false] {
+        let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
+        let env = d.env();
+        make_private(&env);
+        let prepared = prepare(&env, verified, &keys).unwrap();
+        crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+            .unwrap();
+        let directory = env
+            .state_path
+            .parent()
+            .unwrap()
+            .join("imports")
+            .join(prepared.operation());
+        let path = directory.join(if unknown {
+            "unknown-private-source"
+        } else {
+            "original-state.json"
+        });
+        fs::write(&path, b"source B").unwrap();
+        assert!(
+            crate::sync::record_import::central_stage::initial_effects(&env, &prepared, &keys)
+                .is_err()
+        );
+        assert!(fs::read(path).is_ok());
+    }
+}
+
+#[test]
+fn exact_additive_vault_replacement_is_proved_without_masking_a_new_source_or_activating_core() {
+    use std::fs;
+    let (d, keys, verified) = migration_dispatch::verified_material_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let before = record_runtime::snapshot(&env).unwrap();
+    let vault = crate::vault::store::vault_path(&env.state_path);
+    let original = fs::read(&vault).unwrap();
+    let staged =
+        crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+            .unwrap();
+    assert_eq!(staged.mapping().len(), 1);
+    assert!(
+        crate::sync::record_import::central_stage::initial_effects(&env, &prepared, &keys)
+            .unwrap()
+            .replacement()
+            .is_none()
+    );
+    let path = env
+        .state_path
+        .parent()
+        .unwrap()
+        .join("imports")
+        .join(prepared.operation())
+        .join("vault.json");
+    let proposed = fs::read(path).unwrap();
+    assert_ne!(proposed, original);
+    // Model the exact vault rename before its phase write. Core still contains the old source.
+    fs::write(&vault, &proposed).unwrap();
+    let effects =
+        crate::sync::record_import::central_stage::initial_effects(&env, &prepared, &keys).unwrap();
+    let (_, old, new) = effects.replacement().unwrap();
+    assert_eq!(old.unwrap(), original);
+    assert_eq!(new, proposed);
+    assert_eq!(record_runtime::snapshot(&env).unwrap(), before);
+    fs::write(
+        env.state_path
+            .parent()
+            .unwrap()
+            .join("sync-state.unrelated-B"),
+        b"unrelated B",
+    )
+    .unwrap();
+    assert!(
+        crate::sync::record_import::central_stage::initial_effects(&env, &prepared, &keys).is_err()
+    );
+    assert_eq!(fs::read(vault).unwrap(), proposed);
+}

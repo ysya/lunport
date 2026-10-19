@@ -186,6 +186,58 @@ impl Files {
         }
         Ok(())
     }
+    /// The exception is constructed only by the exact reserved stage's full native readback.
+    pub fn require_unchanged_after_initial(
+        &self,
+        env: &SyncEnv,
+        backup: Option<&str>,
+        outputs: &super::source_archive::Outputs,
+        effects: &crate::sync::record_import::central_stage::InitialEffects,
+    ) -> Result<(), AppError> {
+        let mut fresh = BTreeMap::new();
+        for (path, bytes) in outputs.files() {
+            match self.bytes.get(path) {
+                Some(before) if before.as_slice() == bytes => {}
+                Some(_) => return Err(invalid()),
+                None => {
+                    fresh.insert(path.to_owned(), bytes);
+                }
+            }
+        }
+        for (path, bytes) in effects.files() {
+            if self.bytes.contains_key(path) || fresh.insert(path.to_owned(), bytes).is_some() {
+                return Err(invalid());
+            }
+        }
+        let replacement = effects.replacement();
+        if let Some((path, before, after)) = replacement {
+            if self.bytes.get(path).map(|b| b.as_slice()) != before
+                || fresh.insert(path.to_owned(), after).is_some()
+            {
+                return Err(invalid());
+            }
+        }
+        let latest = Self::capture_checked(env, backup, fresh)?;
+        let replaced = replacement.map(|(path, _, _)| path);
+        let expected =
+            self.bytes.len() - usize::from(replaced.is_some_and(|p| self.bytes.contains_key(p)));
+        if latest.bytes.len() != expected
+            || self.bytes.iter().any(|(path, bytes)| {
+                Some(path.as_path()) != replaced && latest.bytes.get(path) != Some(bytes)
+            })
+            || !self.directories.is_subset(&latest.directories)
+            || latest
+                .directories
+                .difference(&self.directories)
+                .any(|path| {
+                    path != Path::new("data/central-source-archives")
+                        && !effects.directories().contains(path)
+                })
+        {
+            return Err(crate::sync::runtime::superseded());
+        }
+        Ok(())
+    }
     pub fn require_unchanged_after_archive(
         &self,
         env: &SyncEnv,
