@@ -20,6 +20,12 @@ mod migration_progress;
 mod migration_journal;
 mod migration_request;
 mod migration_verify;
+mod initial_projection;
+pub(super) use initial_projection::Candidate as InitialProjection;
+#[cfg(test)]
+pub(super) use initial_projection::fixture_for_stage as initial_projection_for_test;
+#[cfg(test)]
+pub(super) use initial_projection::empty_fixture_for_stage as initial_empty_projection_for_test;
 mod migration_library;
 mod migration_sources;
 mod migration_materials;

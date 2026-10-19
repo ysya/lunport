@@ -340,6 +340,11 @@ pub(crate) fn publish(
         serde_json::from_slice(&bounded_read(&paths.journal, MAX_JOURNAL_BYTES)?)
             .map_err(|_| failure("central stage journal is unreadable"))?;
     validate_header(&journal, operation)?;
+    if journal.initial.is_some() {
+        return Err(failure(
+            "initial migration needs its own verified cutover transaction; stage retained",
+        ));
+    }
     let (before, _) = record_runtime::snapshot(env)?;
     if completed(&before, &journal)? {
         if journal.phase != Phase::Active {
@@ -355,8 +360,8 @@ pub(crate) fn publish(
     }
     checked_session(env, &before)?;
     let delta = LibraryDelta::prepare(&before, keys, env.now())?;
-    saved_source(env, &delta)?;
-    execute(env, &paths, &mut journal, &delta)?;
+    saved_source(env, Input::Library(&delta))?;
+    execute(env, &paths, &mut journal, Input::Library(&delta))?;
     let scoped = ScopedKeychain {
         inner: env.keychain,
         import_id: operation,
@@ -378,7 +383,7 @@ pub(crate) fn publish(
     let (before, generation) = record_runtime::snapshot(env)?;
     let session = checked_session(env, &before)?;
     let delta = LibraryDelta::prepare(&before, keys, env.now())?;
-    verify_delta(&journal, &delta)?;
+    verify_delta(&journal, Input::Library(&delta))?;
     let vault = validate_vault(&store::vault_path(&env.state_path), env.keychain)?;
     let verified = delta.finish(
         &vault,

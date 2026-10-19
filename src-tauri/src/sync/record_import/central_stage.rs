@@ -58,6 +58,8 @@ struct Journal {
     vault: String,
     checkpoint: Checkpoint,
     at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial: Option<input::InitialBinding>,
     source_state_digest: Option<String>,
     source_vault_digest: Option<String>,
     staged_vault_digest: Option<String>,
@@ -65,10 +67,15 @@ struct Journal {
     bindings: BTreeMap<String, Binding>,
     phase: Phase,
 }
+#[cfg(test)]
+mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
+mod input;
+use input::Input;
+pub(crate) use input::{prepare as prepare_initial, resume as resume_initial};
 mod publication;
-pub(crate) use publication::{publish, Publication};
 pub(super) use publication::publish_vault_image;
+pub(crate) use publication::{publish, Publication};
 
 pub(crate) struct Staged {
     journal: Journal,
@@ -138,6 +145,9 @@ pub(super) fn pending(
 }
 fn validate_header(j: &Journal, id: &str) -> Result<(), AppError> {
     j.profile.profile()?;
+    if let Some(initial) = &j.initial {
+        initial.validate()?;
+    }
     j.device.keys.validate()?;
     if j.anchor.origin != j.profile.origin
         || !hex(&j.anchor.account_id, 64)
@@ -229,10 +239,7 @@ fn source(state: &SyncStateV3) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn saved_source(
-    env: &SyncEnv,
-    delta: &LibraryDelta,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+fn saved_source(env: &SyncEnv, input: Input<'_>) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -252,12 +259,12 @@ fn saved_source(
         }
     }
     let (live, _) = record_runtime::snapshot(env)?;
-    if &live != delta.before() {
+    if &live != input.source() {
         return Err(failure(
             "central source changed; rebuild from the latest library before staging",
         ));
     }
-    source(&live)?;
+    input.validate_source(&live)?;
     let bytes = bounded_read(&env.state_path, record_runtime::MAX_STATE_BYTES)?;
     let disk: SyncStateV3 = serde_json::from_slice(&bytes)
         .map_err(|_| failure("cannot validate saved central source"))?;
@@ -326,7 +333,9 @@ fn save(paths: &Paths, journal: &Journal) -> Result<(), AppError> {
     }
     durable(paths, &paths.journal, &bytes)
 }
-fn verify_delta(j: &Journal, delta: &LibraryDelta) -> Result<(), AppError> {
+fn verify_delta(j: &Journal, input: Input<'_>) -> Result<(), AppError> {
+    input.verify_binding(j.initial.as_ref())?;
+    let delta = input.delta();
     let state = delta.before();
     source(state)?;
     let owner = state.local.central.as_ref().unwrap();
@@ -367,6 +376,10 @@ fn verify_delta(j: &Journal, delta: &LibraryDelta) -> Result<(), AppError> {
 }
 /// Inert staging only. No active vault promotion, public repository write, session switch or HTTP.
 pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, AppError> {
+    prepare_input(env, Input::Library(delta))
+}
+fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
+    let delta = input.delta();
     if !cfg!(unix) {
         return Err(failure(
             "central material staging is not verified on this platform",
@@ -379,13 +392,13 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _publication = env.runtime.format_publication.lock().unwrap();
-    drop(saved_source(env, delta)?);
+    drop(saved_source(env, input)?);
     if !super::pending_imports(env)?.is_empty() {
         return Err(failure(
             "resume the existing pending import or central stage before creating another",
         ));
     }
-    if !delta.has_changes() {
+    if !delta.has_changes() && !matches!(input, Input::Initial(_)) {
         return Err(failure("no central library delta needs publication"));
     }
     let original_path = store::vault_path(&env.state_path);
@@ -456,6 +469,7 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
         vault: owner.replica.as_ref().unwrap().vault.clone(),
         checkpoint: owner.replica.as_ref().unwrap().checkpoint.clone(),
         at_ms: env.now(),
+        initial: input.binding()?,
         source_state_digest: None,
         source_vault_digest: original.as_ref().map(|b| digest(b)),
         staged_vault_digest: None,
@@ -465,38 +479,44 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
     };
     save(&paths, &journal)?;
     super::step(super::PublishStep::JournalPrepared)?;
-    execute(env, &paths, &mut journal, delta)?;
+    execute(env, &paths, &mut journal, input)?;
     Ok(Staged { journal, paths })
 }
 fn execute(
     env: &SyncEnv,
     paths: &Paths,
     journal: &mut Journal,
-    delta: &LibraryDelta,
+    input: Input<'_>,
 ) -> Result<(), AppError> {
-    verify_delta(journal, delta)?;
+    verify_delta(journal, input)?;
+    let delta = input.delta();
     if journal.source_state_digest.is_none() {
         let original_state = if paths.original_state.exists() {
             bounded_read(&paths.original_state, record_runtime::MAX_STATE_BYTES)?
         } else {
             // No material/credential effects occur before this durable source snapshot. A new
             // unrelated B can be supplied by a rebuilt Delta on retry under the same operation.
-            let bytes = saved_source(env, delta)?;
+            let bytes = saved_source(env, input)?;
             durable(paths, &paths.original_state, &bytes)?;
             bytes
         };
         let archived: SyncStateV3 = serde_json::from_slice(&original_state)
             .map_err(|_| failure("central stage source snapshot is unreadable"))?;
-        source(&archived)?;
-        let owner = archived.local.central.as_ref().unwrap();
+        input.validate_source(&archived)?;
+        let owner = if journal.initial.is_some() {
+            delta.before().local.central.as_ref().unwrap()
+        } else {
+            archived.local.central.as_ref().unwrap()
+        };
         if owner.control.profile != journal.profile
             || owner.control.anchor.as_ref() != Some(&journal.anchor)
             || owner.control.device != journal.device
             || owner.identity_slot != journal.identity_slot
-            || journal
-                .bindings
-                .iter()
-                .any(|(id, b)| archived.local.keys.get(id) != b.old_material.as_ref())
+            || journal.initial.is_none()
+                && journal
+                    .bindings
+                    .iter()
+                    .any(|(id, b)| archived.local.keys.get(id) != b.old_material.as_ref())
         {
             return Err(failure(
                 "central stage source snapshot has a different owner or material",
@@ -651,6 +671,9 @@ pub(crate) fn resume(
     operation: &str,
     delta: &LibraryDelta,
 ) -> Result<Staged, AppError> {
+    resume_input(env, operation, Input::Library(delta))
+}
+fn resume_input(env: &SyncEnv, operation: &str, input: Input<'_>) -> Result<Staged, AppError> {
     if !cfg!(unix) {
         return Err(failure(
             "central material staging is not verified on this platform",
@@ -663,13 +686,13 @@ pub(crate) fn resume(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _publication = env.runtime.format_publication.lock().unwrap();
-    saved_source(env, delta)?;
+    saved_source(env, input)?;
     let paths = Paths::new(env, operation)?;
     let mut journal: Journal =
         serde_json::from_slice(&bounded_read(&paths.journal, MAX_JOURNAL_BYTES)?)
             .map_err(|_| failure("central stage journal is unreadable"))?;
     validate_header(&journal, operation)?;
-    execute(env, &paths, &mut journal, delta)?;
+    execute(env, &paths, &mut journal, input)?;
     Ok(Staged { journal, paths })
 }
 
