@@ -34,6 +34,8 @@ export const centralSignIn = (service: string, method?: "passkey" | "oidc") =>
     service,
     ...(method ? { method } : {}),
   });
+export const centralChangeServer = (service: string) =>
+  tauriInvoke<void>("central_change_server", { service });
 export const centralCancelSignIn = () =>
   tauriInvoke<void>("central_cancel_sign_in");
 export const centralRefresh = () =>

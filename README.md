@@ -55,15 +55,13 @@ Existing Legacy workspaces keep their OpenSSH files. Use the offered migration r
 
 ## Self-host sync
 
-Run the encrypted relay on Cloudflare Workers or your own server with Docker Compose. The [relay guide](relay/README.md) covers setup, and [Updating your relay](relay/README.md#updating-your-relay) covers existing deployments.
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/lunport/tree/main/relay)
+Public installers start with a blank Server URL. Deploy your own encrypted sync service with [Cloudflare Workers](relay/security/README.md) or [Docker Compose](relay/selfhost/central/README.md), then enter its HTTPS URL in Sync. See [server configuration](docs/central-server-configuration.md) for first sign-in and changing servers.
 
 ## Learn more
 
 - [User guide](docs/usage.md) — connections, keys, sync, MCP and Legacy mode.
 - [Development and release workflow](docs/development.md) — local setup, profile isolation, checks and publishing.
-- [Self-host the sync relay](relay/README.md) — Cloudflare Workers or Docker Compose.
+- [Self-host encrypted sync](docs/central-server-configuration.md) — Cloudflare Workers or Docker Compose. The server URL starts blank; use your own deployment.
 - [Release notes](https://github.com/ysya/lunport/releases) and [changelog](CHANGELOG.md).
 - [Rename and upgrade compatibility](src-tauri/installers/README.md).
 

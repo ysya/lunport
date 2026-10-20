@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
 import type { DuplicateAlias } from "@/bindings/DuplicateAlias";
@@ -15,8 +14,6 @@ import type { MoveIntoVaultResult } from "@/bindings/MoveIntoVaultResult";
 import type { NewKeyResult } from "@/bindings/NewKeyResult";
 import type { NewSpaceGroup } from "@/bindings/NewSpaceGroup";
 import type { PendingApprovalView } from "@/bindings/PendingApprovalView";
-import type { ReviewOutcome } from "@/bindings/ReviewOutcome";
-import type { ReviewedVersion } from "@/bindings/ReviewedVersion";
 import type { SlotMode } from "@/bindings/SlotMode";
 import type { SyncOverview } from "@/bindings/SyncOverview";
 import { tauriInvoke } from "@/lib/ipc";
@@ -37,30 +34,6 @@ export const syncUnmovableKey = ["config", "syncUnmovable"] as const;
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** Cloudflare's one-click deploy of this repository's relay/ folder — the README buttons' link. */
-export const RELAY_DEPLOY_URL = "https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/lunport/tree/main/relay";
-
-/** The relay README's "Updating your relay" section — linked wherever the app says the relay can be updated. */
-export const RELAY_UPDATE_URL = "https://github.com/ysya/lunport/blob/main/relay/README.md#updating-your-relay";
-
-async function openInBrowser(url: string): Promise<void> {
-  try {
-    await openUrl(url);
-  } catch (e) {
-    toast.error("Could not open your browser", { description: errorMessage(e) });
-  }
-}
-
-/** Open the relay deploy flow in the default browser. */
-export function openRelayDeploy(): Promise<void> {
-  return openInBrowser(RELAY_DEPLOY_URL);
-}
-
-/** Open "Updating your relay" in the default browser. */
-export function openRelayUpdateGuide(): Promise<void> {
-  return openInBrowser(RELAY_UPDATE_URL);
 }
 
 /** After anything that changes the sync account or its spaces: refetch the overview, every config view and the approvals. */
@@ -124,28 +97,6 @@ function useOverviewMutation<TVars>(
 }
 
 const noArgs = () => ({});
-
-/**
- * Leave on this computer; `deleteRemote` also deletes the account and every space
- * from the relay (offered on the last computer only). Some errors arrive after
- * this computer already left (the relay part, a sync code change that can never
- * finish, the keychain or the state file), so a failure re-reads the overview as well.
- */
-export function useLeaveAccount() {
-  return useOverviewMutation<{ deleteRemote: boolean }>("sync_leave_account", leaveFailureTitle, ({ deleteRemote }) => ({ deleteRemote }), true);
-}
-
-/**
- * The title of a failed leave. Some errors come after this computer already left:
- * the account was not deleted from the relay (its sync code was changed on another
- * computer), a sync code change can never finish, or the sync code or the saved
- * state could not be cleaned up. All of them start with "left the sync account";
- * the errors of a leave that did not happen start differently ("could not keep…",
- * "the sync account was deleted…", "a sync code change is in progress…").
- */
-export function leaveFailureTitle(message: string): string {
-  return message.startsWith("left the sync account") ? "Left the sync account on this computer" : "Could not leave the sync account";
-}
 
 export function useSetRelayUrl() {
   return useOverviewMutation<{ url: string }>("sync_set_relay_url", "Could not update the relay URL", ({ url }) => ({ url }));
@@ -223,42 +174,6 @@ export function useUnselectSpace() {
 /** The space's data vanished from the relay: upload this computer's copy again. */
 export function useRebuildSpace() {
   return useOverviewMutation<{ spaceId: string }>("sync_rebuild_space", "Could not rebuild the space", ({ spaceId }) => ({ spaceId }));
-}
-
-/**
- * Approve exactly the versions the review showed: each `{ alias, digest }` comes
- * from `PendingApprovalView`. A host whose waiting version changed meanwhile is left
- * alone and comes back in `ReviewOutcome.changed`.
- */
-export function approveVersions(spaceId: string, approvals: ReviewedVersion[]): Promise<ReviewOutcome> {
-  return tauriInvoke<ReviewOutcome>("sync_approve", { spaceId, approvals });
-}
-
-/** Reject exactly the versions the review showed; same rules as `approveVersions`. */
-export function rejectVersions(spaceId: string, approvals: ReviewedVersion[]): Promise<ReviewOutcome> {
-  return tauriInvoke<ReviewOutcome>("sync_reject", { spaceId, approvals });
-}
-
-/** A review decision: prime the overview from the outcome, then refetch the config views and the approval list. */
-function useReviewMutation(review: typeof approveVersions, failure: string) {
-  const queryClient = useQueryClient();
-  return useMutation<ReviewOutcome, unknown, { spaceId: string; approvals: ReviewedVersion[] }>({
-    mutationFn: ({ spaceId, approvals }) => review(spaceId, approvals),
-    onSuccess: (outcome) => {
-      queryClient.setQueryData(syncOverviewKey, outcome.overview);
-      void queryClient.invalidateQueries({ queryKey: ["config"] });
-      void queryClient.invalidateQueries({ queryKey: syncApprovalsKey });
-    },
-    onError: (error) => toast.error(failure, { description: errorMessage(error) }),
-  });
-}
-
-export function useApproveHosts() {
-  return useReviewMutation(approveVersions, "Could not apply the approved hosts");
-}
-
-export function useRejectHosts() {
-  return useReviewMutation(rejectVersions, "Could not reject the hosts");
 }
 
 /** Clears `SyncOverview.notices[index]`. */
@@ -469,30 +384,4 @@ export function applyNewKey(queryClient: QueryClient, overview: SyncOverview): v
   queryClient.setQueryData(syncOverviewKey, overview);
   void queryClient.invalidateQueries({ queryKey: ["config"] });
   void queryClient.invalidateQueries({ queryKey: ["keys"] });
-}
-
-/*
- * Sync-code calls deliberately bypass TanStack Query: `useMutation` keeps
- * `variables` and `data` in its cache, so the words would linger in memory long
- * after the dialog closed. Callers hold them in component state only, drop them
- * when the dialog closes, and never put them in a toast or a log.
- */
-
-/** Create a sync account with the default space "Personal"; resolves to the 24-word sync code. */
-export function createAccount(deviceName: string): Promise<string> {
-  return tauriInvoke<string>("sync_create_account", { deviceName });
-}
-
-/** Join with a sync code. Selects no space: the user picks them next. */
-export function joinAccount(words: string, deviceName: string): Promise<SyncOverview> {
-  return tauriInvoke<SyncOverview>("sync_join_account", { words, deviceName });
-}
-
-/** After the sync code changed on another computer: continue with the new code, keeping spaces, file names and unsent edits. */
-export function rejoinAccount(words: string): Promise<SyncOverview> {
-  return tauriInvoke<SyncOverview>("sync_rejoin_account", { words });
-}
-
-export function showWords(): Promise<string> {
-  return tauriInvoke<string>("sync_show_words");
 }

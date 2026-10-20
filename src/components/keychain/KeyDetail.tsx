@@ -97,11 +97,8 @@ export function SlotKeyDetailView({
     </Button>
   );
   const slotButtons = [
-    actions.syncThis && button("sync", "Sync to your computers"),
-    actions.syncNew && button("syncNew", "Sync the new key"),
     actions.useSynced && button("useSynced", "Use the synced key"),
     actions.pick && button("pick", actions.pick === "pick" ? "Pick a key on this computer…" : "Change…"),
-    actions.stopSyncing && button("stop", "Stop syncing", { ghost: true }),
     actions.deleteCopy && button("delete", "Delete copy", { ghost: true, destructive: true }),
     actions.deleteKey && button("deleteKey", "Delete key…", { ghost: true, destructive: true }),
   ].filter(Boolean);

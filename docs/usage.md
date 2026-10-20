@@ -86,19 +86,19 @@ An existing synced library retains its device approval, recovery and migration c
 
 Passkey account sync is available on macOS, Windows and Linux.
 
-Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**, and choose **Sign in with Passkey**. Official installers include the account service URL. For self-hosting, enter your own HTTPS account service; Passkey needs no external identity provider. OIDC remains an optional server configuration.
+Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**. The account-service URL starts blank: deploy your own Cloudflare or Docker service, enter its HTTPS URL and choose **Sign in with Passkey**. Local use needs no account. Passkey needs no external identity provider; OIDC remains optional.
 
 On the first device, set up the encrypted Vault, save its offline recovery kit outside the device, and finish Vault setup. Choose **Prepare library review**, review the complete library and approve **Confirm library sync**. Hosts, Groups, tunnel rules and managed SSH private keys are included. The server stores encrypted library content.
 
 On another device, sign in to the same account, reveal its pairing code and approve it from an already trusted device. Then review its local library before merging; imported host references and tunnel rules are remapped together. Passkey sign-in alone does not decrypt an existing Vault. Use your recovery kit if no approved device remains.
 
-For an existing sync-code library, use **Set up automatic sync** in Keys to open the Passkey account setup, then review and migrate the complete library. **Older sync-code libraries** remains available in Sync to inspect or recover the previous setup. The central migration retains original files and historical versions, verifies the complete source, and retires old cloud access only through the reviewed migration. Interrupted operations retain their verified progress and resume; unresolved old backups stay blocked until history reconciliation finishes.
+The former sync-code controls are removed. To change an already selected service, edit its URL and choose **Change server and restart**. This opens a separate empty local library and closes terminal sessions. Reimport your SSH config explicitly; old account, Vault and backup contents are not silently uploaded to the new service. First-time sign-in from a local library keeps that library.
 
 New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys are included after the whole-library review. The relay receives ciphertext; server passwords remain local.
 
-**Forget device** removes a device from the list. A computer that still holds the sync code may keep syncing. If a device is lost, use **Change sync code** and reconnect the computers you keep. A relay update may be required for code rotation.
+Use the account device controls to revoke a lost device. Revocation blocks subsequent authenticated sync; it does not erase content already decrypted on that device. Keep an offline recovery kit so you can recover the Vault if no approved device remains.
 
-The relay can run on Cloudflare Workers or your own server with Docker Compose. See [relay setup and updates](../relay/README.md). Relay URLs require HTTPS; localhost HTTP is allowed for development.
+The relay can run on Cloudflare Workers or your own server with Docker Compose. See [server configuration and deployment guides](central-server-configuration.md). Relay URLs require HTTPS; localhost HTTP is allowed for development.
 
 ## AI access through MCP
 

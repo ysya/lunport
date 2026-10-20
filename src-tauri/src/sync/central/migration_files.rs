@@ -107,21 +107,23 @@ impl Files {
                 return Err(invalid());
             }
         }
-        if let Some(ssh) = Directory::open(ssh_dir)? {
-            // Only the caller's SSH base may resolve platform aliases. App-owned components
-            // must be opened relative to that descriptor without following a redirected parent.
-            if let Some(app) = ssh.optional_directory("sshelter")? {
-                if let Some(root) = app.optional_directory("keys")? {
-                    result.count()?;
-                    result.directories.insert("keys".into());
-                    for name in root.names()? {
-                        result.walk(&root, &name, &Path::new("keys").join(&name), 0, &mut owned)?;
+        if !super::server_change::is_fresh_workspace(state_path) {
+            if let Some(ssh) = Directory::open(ssh_dir)? {
+                // Only the caller's SSH base may resolve platform aliases. App-owned components
+                // must be opened relative to that descriptor without following a redirected parent.
+                if let Some(app) = ssh.optional_directory("sshelter")? {
+                    if let Some(root) = app.optional_directory("keys")? {
+                        result.count()?;
+                        result.directories.insert("keys".into());
+                        for name in root.names()? {
+                            result.walk(&root, &name, &Path::new("keys").join(&name), 0, &mut owned)?;
+                        }
+                        root.unchanged()?;
                     }
-                    root.unchanged()?;
+                    app.unchanged()?;
                 }
-                app.unchanged()?;
+                ssh.unchanged()?;
             }
-            ssh.unchanged()?;
         }
         if !owned.is_empty() {
             return Err(crate::sync::runtime::superseded());
@@ -644,6 +646,25 @@ mod tests {
     fn write(path: &Path, value: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, value).unwrap();
+    }
+    #[test]
+    fn fresh_server_inventory_cannot_resurrect_an_old_vault_or_managed_key_archive() {
+        let device=device(); let mut env=device.env();
+        let old=env.state_path.clone();
+        write(&old,b"old account");
+        write(&old.with_file_name("vault.json"),b"old protected material");
+        write(&env.ssh_dir.join("sshelter/keys/retired"),b"old managed key");
+        let folder=old.parent().unwrap().join(format!("server-workspace-{}","a".repeat(32)));
+        env.state_path=folder.join("sync-state.json");
+        write(&env.state_path,b"fresh local state");
+        let captured=Files::capture(&env,None).unwrap();
+        assert_eq!(captured.bytes.len(),1);
+        assert_eq!(captured.bytes[Path::new("data/sync-state.json")].as_slice(),b"fresh local state");
+        write(&env.ssh_dir.join("sshelter/keys/new-old-key"),b"another old key");
+        captured.require_unchanged(&env,None).unwrap();
+        write(&env.state_path.with_file_name("vault.json"),b"new workspace vault");
+        assert!(captured.require_unchanged(&env,None).is_err());
+        assert_eq!(Files::capture(&env,None).unwrap().bytes.len(),2);
     }
     #[test]
     fn captures_every_designated_source_and_unknown_entry_without_reading_unmanaged_ssh_files() {

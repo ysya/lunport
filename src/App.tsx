@@ -39,11 +39,6 @@ import { SidebarSwitch } from "@/components/keychain/SidebarSwitch";
 import { KnownHostsDialog } from "@/components/KnownHostsDialog";
 import { DeployKeyDialog } from "@/components/DeployKeyDialog";
 import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
-import { SyncMigrationDialog } from "@/components/SyncMigrationDialog";
-import { SyncUpgradeDialog } from "@/components/SyncUpgradeDialog";
-import { SyncApprovalDialog } from "@/components/SyncApprovalDialog";
-import { SyncKeyDialog } from "@/components/SyncKeyDialog";
-import { KeysNeededDialog } from "@/components/KeysNeededDialog";
 import { UpdateIndicator } from "@/components/UpdatesPane";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
@@ -297,11 +292,6 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
         <SettingsDialog />
         <DeployKeyDialog />
         <NewConfigFileDialog />
-        <SyncMigrationDialog />
-        <SyncUpgradeDialog />
-        <SyncApprovalDialog />
-        <SyncKeyDialog />
-        <KeysNeededDialog />
         <McpApprovalDialog />
       </div>
     </TooltipProvider>
@@ -404,7 +394,7 @@ function App() {
               overview={status.data!.overview!}
               reload={() => void status.refetch()}
             />
-            <McpApprovalDialog />
+          <McpApprovalDialog />
           </>
         )}
       />

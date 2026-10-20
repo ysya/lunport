@@ -92,12 +92,9 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         authorization_epoch: ws.map(|w| w.control.auth_epoch.to_string()),
         configured: ws.is_some(),
         phase: phase.into(),
-        service: ws.map(|w| w.control.profile.origin.clone()).or_else(|| {
-            let built_in = crate::sync::state::DEFAULT_RELAY_URL;
-            built_in
-                .starts_with("https://")
-                .then(|| built_in.to_owned())
-        }),
+        // A service is selected by the user, never inherited from a distributor's build URL.
+        service: ws.map(|w| w.control.profile.origin.clone())
+            .or_else(|| super::server_change::service_for(&env.state_path)),
         account_id: ws.map(|w| w.control.account_id.clone()),
         device_id: ws.map(|w| w.control.device.id.clone()),
         has_session: core
