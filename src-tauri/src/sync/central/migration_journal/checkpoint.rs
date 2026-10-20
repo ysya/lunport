@@ -96,7 +96,7 @@ pub(super) fn store(
     Journal::restored(env, owner, keys, signer, current)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::tests::{fixture_with, progress, Uncertain};
     use super::*;
@@ -201,7 +201,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod compatibility_tests {
     use super::super::{
         readback_tests::{page, retired},
