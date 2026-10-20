@@ -374,6 +374,23 @@ fn protected_key(
     }
     Ok(key)
 }
+/// A closed source archive root cannot accept new output beside unrecognized
+/// files or abandoned temporaries. Existing bytes remain available for review.
+fn require_namespace(directory: &ArchiveDirectory) -> Result<(), AppError> {
+    for name in directory.names()? {
+        let recognized = if let Some(operation) = name.strip_suffix("-key.sha256") {
+            hex(operation, 32)
+        } else {
+            name.strip_suffix(".lpsource")
+                .and_then(|stem| stem.split_once('-'))
+                .is_some_and(|(operation, snapshot)| hex(operation, 32) && hex(snapshot, 32))
+        };
+        if !recognized {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
 fn write(
     env: &SyncEnv,
     profile: &Profile,
@@ -386,6 +403,7 @@ fn write(
         return Err(invalid());
     }
     let directory = ArchiveDirectory::open(env, Kind::Source)?;
+    require_namespace(&directory)?;
     let name = context.filename()?;
     let existing = directory.read(&name)?;
     let marker = directory.read(&context.marker())?;

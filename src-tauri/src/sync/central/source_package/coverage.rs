@@ -94,6 +94,7 @@ mod tests {
                 fs::create_dir_all(&absolute).unwrap();
             } else {
                 fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+                crate::sync::testkit::private_directory(absolute.parent().unwrap());
                 fs::write(&absolute, b"unique retained source").unwrap();
             }
             package.files = Files::capture(&env, None).unwrap();

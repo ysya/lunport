@@ -2535,7 +2535,13 @@ fn staged_replacement_uses_one_core_and_independent_recovery_authorities_through
     let external_bytes=serde_json::to_vec_pretty(&external).unwrap();let changed_bytes=external_bytes.clone();
     let archive=super::replacement_archive::prepare(&d.env(),&_lifecycle,&latest,generation,&operation).unwrap();
     let result=record_runtime::with_replacement_write_hook(Box::new(move |stage,path| {
-        if stage==record_runtime::ReplacementWriteStage::SourceRecheck {crate::fsutil::atomic_write(path,&changed_bytes,0o600)?;}Ok(())
+        if stage==record_runtime::ReplacementWriteStage::SourceRecheck {
+            #[cfg(windows)]
+            crate::sync::central_files_windows::write(path,&changed_bytes,true)?;
+            #[cfg(not(windows))]
+            crate::fsutil::atomic_write(path,&changed_bytes,0o600)?;
+        }
+        Ok(())
     }),||record_runtime::publish_replacement(&d.env(),&authority,archive));
     assert!(result.is_err());assert_eq!(std::fs::read(&d.env().state_path).unwrap(),external_bytes);
     assert_eq!(record_runtime::snapshot(&d.env()).unwrap(),(latest.clone(),generation));

@@ -171,6 +171,7 @@ impl Initial {
         }
         let profile = owner.control.profile.profile()?;
         let directory = ArchiveDirectory::open(env, Kind::Source)?;
+        require_namespace(&directory)?;
         let marker = directory.read(&self.context.marker())?;
         let existing = directory.read(&self.context.filename()?)?;
         if marker.is_none() && existing.is_some() {

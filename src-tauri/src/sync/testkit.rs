@@ -40,6 +40,18 @@ pub(crate) fn private_directory(path: &Path) {
     crate::sync::slot_files_windows::restrict_to_owner(path, true).unwrap();
 }
 
+/// An explicit inherited read ACE keeps Windows ACL regressions meaningful even
+/// when the runner's temporary root already grants access only to its owner.
+#[cfg(windows)]
+pub(crate) fn inherited_windows_directory(path: &Path) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-5-18:(OI)(CI)R"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "cannot prepare inherited ACL fixture");
+}
+
 /// A real opted-in account, grouped library and durable state for native startup regressions.
 /// Only the encrypted/public state may be exported; credentials stay in MemKeychain.
 pub(crate) fn synced_library_fixture() -> Arc<TestDevice> {
