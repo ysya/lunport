@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.8.0](https://github.com/ysya/lunport/compare/v1.7.1...v1.8.0) (2026-10-20)
+
+The sync server starts blank: enter the HTTPS URL of your own deployed service. Local use remains available without an account. The client now uses central Passkey account sync; old sync-code setup and per-key sync controls have been removed.
+
+Changing an existing server requires an explicit restart and opens a new empty local workspace. It does not carry old accounts, keys or sync history into the new service. Original files remain on disk; use SSH-config import to populate the new library.
+
+Keys now offer deletion, including explicit forced deletion when hosts or Groups reference a key. Windows native authentication/key dropdown options now use the selected theme colors.
+
+
+### Features
+
+* use self-hosted central sync and editable server settings ([#57](https://github.com/ysya/lunport/issues/57)) ([68bd3d0](https://github.com/ysya/lunport/commit/68bd3d07db66cf952986b230a91cb7287cff39e5))
+
+
+### Bug Fixes
+
+* add reviewed SSH key deletion and forced removal ([#56](https://github.com/ysya/lunport/issues/56)) ([c28af68](https://github.com/ysya/lunport/commit/c28af68e24e707a7b18439e30dc6c12600100155))
+
 ## [1.7.1](https://github.com/ysya/lunport/compare/v1.7.0...v1.7.1) (2026-10-20)
 
 Automatic encrypted key sync uses one whole-library setup. Open Keys → Set up automatic sync, sign in with Passkey, finish Vault/device setup and approve the complete library review. Managed SSH private keys, including later imports and generated keys, then sync automatically to approved devices. Per-key sync switches and private-key download steps have been removed.
