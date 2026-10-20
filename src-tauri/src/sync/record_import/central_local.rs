@@ -606,6 +606,50 @@ pub(crate) fn rename(
     env.events.wake();
     Ok(result)
 }
+pub(crate) fn delete(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    id: &str,
+    expected: &KeySlotPayload,
+    reviewed: &str,
+    force: bool,
+    expected_generation: u64,
+) -> Result<crate::sync::record_commands::RecordOverview, AppError> {
+    let life = env.runtime.lifecycle.lock().unwrap();
+    let vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let publication = env.runtime.format_publication.lock().unwrap();
+    let (before, generation) = record_runtime::snapshot(env)?;
+    check_request(&before, generation, Some(invocation))?;
+    if generation != expected_generation {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let proposed = crate::sync::record_repository::delete_key(
+        &before,
+        id,
+        expected,
+        reviewed,
+        force,
+        env.now(),
+    )
+    .map_err(crate::sync::record_keys::delete_error)?;
+    let context = Context::load(env, &before)?;
+    let candidate = central::capture_public(&proposed, &context.keys, &context.identity.keys)?;
+    step(PublishStep::BeforeStateSave)?;
+    context.verify(env, &before)?;
+    record_runtime::commit_candidate(env, generation, candidate)?;
+    drop(publication);
+    drop(vault);
+    drop(life);
+    let result = crate::sync::record_commands::overview(env)?;
+    env.events.status();
+    env.events.wake();
+    Ok(result)
+}
+
 #[cfg(all(test, any(unix, windows)))]
 #[path = "central_local_tests.rs"]
 pub(in crate::sync) mod tests;

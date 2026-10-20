@@ -1045,6 +1045,34 @@ pub async fn records_key_rename(
     }).await.map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
+pub async fn records_key_delete(
+    app: AppHandle,
+    key_id: String,
+    expected: KeySlotPayload,
+    snapshot_token: String,
+    force: bool,
+    generation: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
+) -> Result<RecordOverview, AppError> {
+    let generation = token_number(&generation)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sync::engine::with_env(&app, |env| {
+            crate::sync::record_keys::delete_scoped(
+                env,
+                &key_id,
+                &expected,
+                &snapshot_token,
+                force,
+                generation,
+                invocation.as_ref(),
+            )
+        })?
+    })
+    .await
+    .map_err(crate::sync::engine::join_error)?
+}
+
+#[tauri::command]
 pub async fn records_key_download(
     app: AppHandle,
     key_id: String,

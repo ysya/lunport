@@ -160,6 +160,9 @@ export async function resumeImport(
 export function keyActionError(error: unknown, fallback = "The key action could not be completed. Refresh the workspace and retry."): string {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   switch (message) {
+    case "This key is still used by hosts or Groups. Confirm force deletion to continue.":
+    case "Key deletion review changed or is blocked. Refresh the workspace and try again.":
+      return message;
     case "This key has no material on this device.":
     case "The key material is unavailable on this device.":
       return "The key reference exists, but its private key is missing on this device. Complete encrypted library sync, or import the matching private key and select it for the host.";
