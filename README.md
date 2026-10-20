@@ -45,7 +45,7 @@ For the historical SSHelter 1.0.0 app, use `/Applications/SSHelter.app` instead.
 
 The in-app terminal ships first on the **Beta** channel. Choose **Settings → Updates → Release channel → Beta** to try it.
 
-1. Open the app. A new Records library works without an existing `~/.ssh/config`.
+1. Open the app and use it locally without signing in or creating an account. A new Records library works without an existing `~/.ssh/config`.
 2. Add a host, or open **Import** to review and copy entries from an existing SSH configuration.
 3. Open **Keys → Import private key → From a file** to choose a key. Pasting a supported OpenSSH private key is also available.
 4. Select the host's login key, verify its server fingerprint against a trusted source and double-click the host to connect. Choose **Lunport (in app)** in **Settings → Connections** to use session tabs; existing terminal preferences are preserved.

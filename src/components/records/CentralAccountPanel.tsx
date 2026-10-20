@@ -71,7 +71,7 @@ const phaseText: Record<CentralStatus["phase"], string> = {
   active: "Your encrypted library is connected.",
   rekey: "Your encrypted library is waiting for key rotation.",
   revoked: "This device no longer has account access.",
-  signed_out: "Sign in through your system browser to manage your account.",
+  signed_out: "Sign in through your system browser when you want to enable encrypted sync.",
 };
 export function CentralAccountPanel({
   status,

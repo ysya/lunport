@@ -74,6 +74,14 @@ Central library sync includes managed SSH private keys by default after you appr
 
 Lunport's SSH agent provides vault keys to compatible local SSH clients while the app is running and asks before a program uses a key. Keep the app running, or enable launch at login when you need that integration. Exporting a private key creates an ordinary key file outside the vault; other programs can then use that copy independently.
 
+## Local use without an account
+
+New installations open a local library immediately. Add and edit hosts, manage keys, import SSH configuration and connect to your servers without signing in. These actions do not enroll the device or upload your library to the sync service. SSH connections still need access to their destination servers.
+
+Sync is optional. Open **Sync** when you want to connect your devices; signing in alone does not enable library sync. Finish Vault setup and approve the whole-library review before upload begins. Until then, locally managed SSH private keys remain in the encrypted local vault. Once library sync is enabled, managed keys join the encrypted library by default.
+
+An existing synced library retains its device approval, recovery and migration checks. Local use does not bypass a revoked device or an unfinished safety review.
+
 ## Sync your library
 
 Passkey account sync is available on macOS, Windows and Linux.
@@ -86,7 +94,7 @@ On another device, sign in to the same account, reveal its pairing code and appr
 
 For an existing sync-code library, expand **Older sync-code libraries** to inspect the previous setup. The central migration retains original files and historical versions, verifies the complete source, and retires old cloud access only through the reviewed migration. Interrupted operations retain their verified progress and resume; unresolved old backups stay blocked until history reconciliation finishes.
 
-New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Each private key retains its own sharing decision. The relay receives ciphertext; server passwords remain local.
+New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys are included after the whole-library review. The relay receives ciphertext; server passwords remain local.
 
 **Forget device** removes a device from the list. A computer that still holds the sync code may keep syncing. If a device is lost, use **Change sync code** and reconnect the computers you keep. A relay update may be required for code rotation.
 

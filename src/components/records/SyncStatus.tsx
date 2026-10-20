@@ -38,7 +38,7 @@ export function RecordSyncStatus({
         ) : pending ? (
           "Sync setup pending"
         ) : !connected ? (
-          "Sync not set up"
+          "Local library · Sync not set up"
         ) : conflicts > 0 ? (
           `${conflicts} saved sync conflicts need review`
         ) : pendingChanges > 0 ? (
