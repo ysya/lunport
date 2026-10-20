@@ -27,12 +27,12 @@ use windows_sys::Win32::{
         INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_USER,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, CreateFileW, FindClose, FindFirstStreamW, FindNextStreamW,
-        FindStreamInfoStandard, GetFileInformationByHandle, MoveFileExW,
-        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
-        FILE_SHARE_READ, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, WIN32_FIND_STREAM_DATA,
-        WRITE_DAC,
+        CreateDirectoryW, CreateFileW, FileRenameInfo, FindClose, FindFirstStreamW,
+        FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandle,
+        SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, DELETE,
+        FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_RENAME_INFO, FILE_SHARE_READ,
+        WIN32_FIND_STREAM_DATA, WRITE_DAC,
     },
     System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
 };
@@ -540,7 +540,7 @@ impl Temporary {
         let handle = unsafe {
             CreateFileW(
                 wide(&path).as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                GENERIC_READ | GENERIC_WRITE | DELETE,
                 FILE_SHARE_READ,
                 &descriptor.attributes(),
                 CREATE_NEW,
@@ -575,29 +575,43 @@ impl Temporary {
     }
     pub(crate) fn commit(&mut self, replace: bool) -> Result<(), AppError> {
         check_destination(&self.destination)?;
-        self.file.take();
-        let flags = MOVEFILE_WRITE_THROUGH
-            | if replace {
-                MOVEFILE_REPLACE_EXISTING
-            } else {
-                0
-            };
+        let name: Vec<u16> = self
+            .destination
+            .file_name()
+            .ok_or_else(invalid)?
+            .encode_wide()
+            .collect();
+        let size = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * 2;
+        let mut storage = vec![0u64; size.div_ceil(8)];
+        let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
+        unsafe {
+            (*info).Anonymous.ReplaceIfExists = replace;
+            // A simple name with a null root renames within this open file's actual parent.
+            // Full-path MoveFileEx reopens that parent for write and conflicts with its guard.
+            (*info).RootDirectory = ptr::null_mut();
+            (*info).FileNameLength = (name.len() * 2) as u32;
+            ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+        }
         if unsafe {
-            MoveFileExW(
-                wide(&self.path).as_ptr(),
-                wide(&self.destination).as_ptr(),
-                flags,
+            SetFileInformationByHandle(
+                self.as_file().as_raw_handle(),
+                FileRenameInfo,
+                info.cast(),
+                size as u32,
             )
         } == 0
         {
             let error = io::Error::last_os_error();
             return Err(io::Error::new(
                 error.kind(),
-                format!("Cannot publish Windows temporary: {error}"),
+                format!("Cannot publish Windows temporary by handle: {error}"),
             )
             .into());
         }
+        // No fallible action after rename: the caller first records publication, then flushes
+        // the exact new image through a write-through handle, blocking Core if that is uncertain.
         self.moved = true;
+        self.file.take();
         Ok(())
     }
 }
