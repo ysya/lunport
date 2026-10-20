@@ -5,7 +5,7 @@ export type TerminalHost = { id: string } | { alias: string };
 
 export type TerminalEvent =
   | { type: "opened"; session_id: string }
-  | { type: "event"; event: "connected" | "disconnected" | "error" | "banner"; text?: string; reason?: string }
+  | { type: "event"; event: "connected" | "disconnected" | "error" | "banner"; kind?: string; text?: string; reason?: string }
   | { type: "question"; text: string }
   | { type: "exited"; code: number | null; signal: string | null }
   | { type: "closed" }
@@ -21,6 +21,8 @@ export class EmbeddedTerminal {
   private received = 0;
   private acknowledged = 0;
   private acking = false;
+  private opening: Promise<void> | null = null;
+  private closing: Promise<void> | null = null;
   private output = new Channel<ArrayBuffer>();
   private dimensions: { cols: number; rows: number } | null = null;
 
@@ -48,12 +50,13 @@ export class EmbeddedTerminal {
     };
   }
   async start(host: TerminalHost, cols: number, rows: number) {
+    if (this.disposed) return;
     this.dimensions = { cols, rows };
+    this.opening = tauriInvoke("terminal_open", { id: this.id, host, cols, rows, output: this.output });
     try {
-      await tauriInvoke("terminal_open", { id: this.id, host, cols, rows, output: this.output });
-      // StrictMode/unmount can happen while the native open is still pending.
-      if (this.disposed) await tauriInvoke("terminal_close", { id: this.id });
+      await this.opening;
     } catch (error) { this.fail(error); }
+    finally { this.opening = null; }
   }
   private async acknowledge() {
     if (this.acking || this.disposed) return;
@@ -93,9 +96,17 @@ export class EmbeddedTerminal {
     this.close();
   }
   close() {
-    if (this.disposed) return;
+    if (this.closing) return this.closing;
     this.disposed = true;
     this.opened = false;
-    void tauriInvoke("terminal_close", { id: this.id }).catch(() => {});
+    const opening = this.opening;
+    const stop = () => tauriInvoke<void>("terminal_close", { id: this.id }).catch(() => {});
+    this.closing = (async () => {
+      await stop();
+      // An open still registering on the native worker must finish and be closed
+      // before a replacement consumes the same workspace's session budget.
+      if (opening) { await opening.catch(() => {}); await stop(); }
+    })();
+    return this.closing;
   }
 }

@@ -49,7 +49,9 @@ describe("embedded SSH transport", () => {
     let resolve!: () => void;
     mocks.invoke.mockImplementation((name) => name === "terminal_open" ? new Promise<void>((done) => { resolve = done; }) : Promise.resolve());
     const output = vi.fn(); const terminal = new EmbeddedTerminal(output, vi.fn());
-    const opening = terminal.start({ id: "host" }, 80, 24); terminal.close(); resolve(); await opening;
+    const opening = terminal.start({ id: "host" }, 80, 24);
+    const closing = terminal.close(); expect(terminal.close()).toBe(closing);
+    resolve(); await Promise.all([opening, closing]);
     expect(mocks.invoke.mock.calls.filter(([name]) => name === "terminal_close")).toHaveLength(2);
     packet(0, Uint8Array.of(65)); expect(output).not.toHaveBeenCalled();
   });
