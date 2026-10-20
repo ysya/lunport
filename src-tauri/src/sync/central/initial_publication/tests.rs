@@ -4,12 +4,7 @@ use crate::sync::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 fn make_private(env: &SyncEnv) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        env.state_path.parent().unwrap(),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    crate::sync::testkit::private_directory(env.state_path.parent().unwrap());
 }
 
 #[test]

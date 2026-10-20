@@ -503,7 +503,6 @@ pub(in crate::sync) fn edit_error() -> AppError {
 mod tests {
     use super::*;
     use crate::sync::{central::migration_files::Files, record_keys};
-    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn stale_account_scope_blocks_status_prepare_confirm_and_continue_before_any_effect() {
         let (d, _, _) = super::super::source_capture::tests::fixture(false);
@@ -596,11 +595,7 @@ mod tests {
         let (d, keys, verified) =
             super::super::migration_dispatch::verified_material_fixture_for_test();
         let env = d.env();
-        std::fs::set_permissions(
-            env.state_path.parent().unwrap(),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        crate::sync::testkit::private_directory(env.state_path.parent().unwrap());
         let expected = Scope::from_state(&record_runtime::snapshot(&env).unwrap().0).unwrap();
         initial_publication::prepare(&env, verified, &keys).unwrap();
         assert_eq!(advance(&env, &expected).unwrap().phase, "complete");

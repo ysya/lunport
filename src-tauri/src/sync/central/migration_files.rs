@@ -875,4 +875,57 @@ mod tests {
         fs::set_permissions(root.join("vault.json"), fs::Permissions::from_mode(0o666)).unwrap();
         assert!(Files::capture(&env, None).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn windows_full_128_mib_source_roundtrip_and_overflow_keep_every_original_file() {
+        let device = device();
+        let env = device.env();
+        let root = env.state_path.parent().unwrap();
+        fs::create_dir_all(root).unwrap();
+        for name in ["vault-a", "vault-b"] {
+            let path = root.join(name);
+            fs::write(&path, b"SYNTHETIC-ORIGINAL").unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(MAX_TOTAL_BYTES / 2)
+                .unwrap();
+        }
+        let captured = Files::capture(&env, None).unwrap();
+        assert_eq!(captured.total, MAX_TOTAL_BYTES);
+        let encoded = captured.encode_local().unwrap();
+        let restored = Files::decode_local(&encoded).unwrap();
+        assert!(captured.bytes == restored.bytes);
+        assert!(captured.directories == restored.directories);
+        drop((captured, encoded, restored));
+        let overflow = root.join("vault-b");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&overflow)
+            .unwrap()
+            .set_len(MAX_TOTAL_BYTES / 2 + 1)
+            .unwrap();
+        assert!(Files::capture(&env, None).is_err());
+        assert_eq!(
+            fs::metadata(&overflow).unwrap().len(),
+            MAX_TOTAL_BYTES / 2 + 1
+        );
+        let mut prefix = [0u8; 18];
+        use std::io::Read;
+        fs::File::open(&overflow)
+            .unwrap()
+            .read_exact(&mut prefix)
+            .unwrap();
+        assert_eq!(&prefix, b"SYNTHETIC-ORIGINAL");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&overflow)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(Files::capture(&env, None).is_err());
+        assert_eq!(fs::metadata(&overflow).unwrap().len(), MAX_FILE_BYTES + 1);
+    }
+
 }

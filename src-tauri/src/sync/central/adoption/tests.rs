@@ -14,7 +14,7 @@ use crate::sync::{
     testkit::{TestClock, TestDevice},
 };
 use serde_json::{json, Value};
-use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex};
+use std::{fs,sync::Mutex};
 struct Fixture {
     first: TestDevice,
     peer: TestDevice,
@@ -61,11 +61,7 @@ fn fixture_legacy(local: bool, empty_minimum: bool, legacy: bool) -> Fixture {
     let rows = verified.loaded.plan.rows.clone();
     let manifest = verified.loaded.plan.manifest.clone();
     let first_owner = verified.loaded.plan.before().clone();
-    fs::set_permissions(
-        first.env().state_path.parent().unwrap(),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
     let prepared =
         super::super::initial_publication::prepare(&first.env(), verified, &keys).unwrap();
     crate::sync::record_import::central_stage::prepare_initial_reserved(
@@ -79,11 +75,7 @@ fn fixture_legacy(local: bool, empty_minimum: bool, legacy: bool) -> Fixture {
     let peer = TestDevice::new("peer", &FakeRelay::new(), &TestClock::new());
     let env = peer.env();
     fs::create_dir_all(env.state_path.parent().unwrap()).unwrap();
-    fs::set_permissions(
-        env.state_path.parent().unwrap(),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
+    crate::sync::testkit::private_directory(env.state_path.parent().unwrap());
     let probe = record_runtime::probe_startup(&env.state_path, "peer");
     record_runtime::activate_probe(&mut peer.runtime.core.lock().unwrap(), probe).unwrap();
     if local {
@@ -658,7 +650,7 @@ fn empty_reserved_stage_is_recovered_but_unknown_contents_are_retained() {
         let dir = root.join(op);
         fs::remove_file(dir.join("journal.json")).unwrap();
         for p in [&root, &dir] {
-            fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::sync::testkit::private_directory(p);
         }
         let unknown = dir.join("unrecognized-source");
         fs::write(&unknown, b"SYNTHETIC-RETAINED").unwrap();

@@ -27,6 +27,19 @@ use crate::sync::state_v2::{AccountState, SpaceState, SyncNotice, SyncStateV2};
 /// 測試裡的 relay URL(假 relay 不看它,只拒絕空字串)。
 pub const RELAY_URL: &str = "https://relay.test";
 
+/// Prepare an owned private fixture directory using this test platform's permission model.
+/// No real home or credential store is involved.
+pub(crate) fn private_directory(path: &Path) {
+    crate::fsutil::ensure_dir_secure(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    crate::sync::slot_files_windows::restrict_to_owner(path, true).unwrap();
+}
+
 /// A real opted-in account, grouped library and durable state for native startup regressions.
 /// Only the encrypted/public state may be exported; credentials stay in MemKeychain.
 pub(crate) fn synced_library_fixture() -> Arc<TestDevice> {
