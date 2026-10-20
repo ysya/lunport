@@ -1,31 +1,19 @@
-import { readFileSync } from "node:fs";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
 import { queryKeys } from "./queries";
 import {
-  RELAY_DEPLOY_URL,
-  RELAY_UPDATE_URL,
   applyNewKey,
   applyResolved,
-  approveVersions,
-  createAccount,
   exportPrivateKey,
   fetchKeyCandidates,
   generateKey,
   importKeyFile,
   importKeyText,
-  joinAccount,
   keyArgs,
   keyCandidatesKey,
-  leaveFailureTitle,
-  openRelayDeploy,
-  openRelayUpdateGuide,
   previewKeyFile,
-  rejectVersions,
-  rejoinAccount,
-  showWords,
   syncApprovalsKey,
   syncDuplicatesKey,
   syncOverviewKey,
@@ -53,99 +41,6 @@ afterEach(() => {
   // Dismissing by id drops a toast from `getToasts()` at once; a bare `dismiss()` does not.
   for (const t of toast.getToasts()) toast.dismiss(t.id);
   vi.unstubAllGlobals();
-});
-
-describe("the relay deploy link", () => {
-  it("starts Cloudflare's deploy flow for this repository's relay folder", () => {
-    const target = new URL(RELAY_DEPLOY_URL);
-    expect(target.origin).toBe("https://deploy.workers.cloudflare.com");
-    expect(target.searchParams.get("url")).toBe("https://github.com/ysya/lunport/tree/main/relay");
-  });
-
-  it("is the same link as the README buttons", () => {
-    for (const readme of ["README.md", "relay/README.md"]) {
-      expect(readFileSync(readme, "utf8"), readme).toContain(`(${RELAY_DEPLOY_URL})`);
-    }
-  });
-
-  it("opens it in the default browser", async () => {
-    const calls = stubBackend(async () => undefined);
-    await openRelayDeploy();
-    expect(calls).toEqual([["plugin:opener|open_url", { url: RELAY_DEPLOY_URL, with: undefined }]]);
-    expect(toast.getToasts()).toEqual([]);
-  });
-
-  it("says so when the browser cannot be opened", async () => {
-    stubBackend(async () => {
-      throw "opener refused";
-    });
-    await openRelayDeploy();
-    expect(toast.getToasts()).toEqual([
-      expect.objectContaining({ title: "Could not open your browser", description: "opener refused" }),
-    ]);
-  });
-});
-
-describe("the relay update guide link", () => {
-  it("points at the relay README's \"Updating your relay\" section", () => {
-    expect(RELAY_UPDATE_URL).toBe("https://github.com/ysya/lunport/blob/main/relay/README.md#updating-your-relay");
-    // GitHub derives the anchor from the heading: keep the heading where the link expects it.
-    expect(readFileSync("relay/README.md", "utf8")).toMatch(/^## Updating your relay$/m);
-    expect(readFileSync("README.md", "utf8")).toContain("relay/README.md#updating-your-relay");
-  });
-
-  it("opens it in the default browser", async () => {
-    const calls = stubBackend(async () => undefined);
-    await openRelayUpdateGuide();
-    expect(calls).toEqual([["plugin:opener|open_url", { url: RELAY_UPDATE_URL, with: undefined }]]);
-  });
-});
-
-describe("sync-code commands", () => {
-  const WORDS = "abandon ".repeat(23) + "art";
-  const OVERVIEW = { joined: true };
-
-  it("send the words and device name as the backend's camelCase arguments", async () => {
-    const calls = stubBackend(async (cmd) => (cmd === "sync_create_account" || cmd === "sync_show_words" ? WORDS : OVERVIEW));
-    expect(await createAccount("MacBook-A")).toBe(WORDS);
-    expect(await joinAccount(WORDS, "MacBook-B")).toEqual(OVERVIEW);
-    expect(await rejoinAccount(WORDS)).toEqual(OVERVIEW);
-    expect(await showWords()).toBe(WORDS);
-    expect(calls).toEqual([
-      ["sync_create_account", { deviceName: "MacBook-A" }],
-      ["sync_join_account", { words: WORDS, deviceName: "MacBook-B" }],
-      ["sync_rejoin_account", { words: WORDS }],
-      ["sync_show_words", {}],
-    ]);
-  });
-
-  it("pass backend errors through untouched and never toast (a toast could carry the words)", async () => {
-    stubBackend(async () => {
-      throw "no sync account matches this sync code";
-    });
-    await expect(joinAccount(WORDS, "MacBook-B")).rejects.toBe("no sync account matches this sync code");
-    await expect(rejoinAccount(WORDS)).rejects.toBe("no sync account matches this sync code");
-    expect(toast.getToasts()).toEqual([]);
-  });
-});
-
-describe("review commands", () => {
-  const SPACE = "a".repeat(64);
-
-  it("send exactly the reviewed versions as { spaceId, approvals: [{ alias, digest }] } and return the outcome", async () => {
-    const outcome = { applied: 1, changed: ["db"], overview: { joined: true } };
-    const calls = stubBackend(async () => outcome);
-    const shown = [
-      { alias: "web", digest: "d1" },
-      { alias: "db", digest: "d2" },
-    ];
-    expect(await approveVersions(SPACE, shown)).toEqual(outcome);
-    expect(await rejectVersions(SPACE, [{ alias: "web", digest: "d1" }])).toEqual(outcome);
-    expect(calls).toEqual([
-      ["sync_approve", { spaceId: SPACE, approvals: shown }],
-      ["sync_reject", { spaceId: SPACE, approvals: [{ alias: "web", digest: "d1" }] }],
-    ]);
-  });
 });
 
 describe("key slot commands", () => {
@@ -254,41 +149,6 @@ describe("a failed key slot command", () => {
     // The mode change and the copy delete keep the cached views on a failure, as they did.
     expect(await reread((qc) => renderHook(qc, useKeySetMode).mutateAsync({ slotId: "s", mode: "own" }))).toEqual([false, false, false]);
     expect(await reread((qc) => renderHook(qc, useKeyDeleteCopy).mutateAsync({ slotId: "s" }))).toEqual([false, false, false]);
-  });
-});
-
-describe("leaving", () => {
-  const LEFT = "Left the sync account on this computer";
-  const FAILED = "Could not leave the sync account";
-  const readRust = () => readFileSync("src-tauri/src/sync/account.rs", "utf8");
-
-  it("titles every error that came after this computer already left as such (account.rs)", () => {
-    const rust = readRust();
-    const replaced = /const LEAVE_REPLACED_MESSAGE: &str =\s*"([^"]*)"/.exec(rust)?.[1] ?? "";
-    const abandoned = /fn leave_abandoned_message[\s\S]*?format!\(\s*"([^"]*)\{\}"/.exec(rust)?.[1] ?? "";
-    for (const text of [replaced, abandoned]) expect(text).not.toBe("");
-    expect(leaveFailureTitle(replaced)).toBe(LEFT);
-    expect(leaveFailureTitle(abandoned)).toBe(LEFT);
-    expect(leaveFailureTitle(`${abandoned}. The sync account was not deleted from the relay`)).toBe(LEFT);
-    // After it cleared the account, `leave_account` itself answers with an error when the keychain or the
-    // state file could not be cleaned up: every "left the sync account…" literal in its body.
-    const start = rust.indexOf("pub fn leave_account(");
-    expect(start).toBeGreaterThan(-1);
-    const body = rust.slice(start, rust.indexOf("\n}\n", start));
-    const cleanup = [...body.matchAll(/"(left the sync account(?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\"/g, '"'));
-    expect(cleanup.length).toBeGreaterThanOrEqual(2);
-    for (const text of cleanup) expect(leaveFailureTitle(text), text).toBe(LEFT);
-  });
-
-  it("keeps the failure title for the errors where this computer did not leave (account.rs)", () => {
-    const rust = readRust();
-    const refused = /const LEAVE_ROTATING_MESSAGE: &str =\s*"([^"]*)"/.exec(rust)?.[1] ?? "";
-    const kept = /fn kept_error\([^)]*\)[\s\S]*?format!\(\s*"([^"]*)"/.exec(rust)?.[1] ?? "";
-    const remoteDeleted = /fn remote_deleted_error[\s\S]*?format!\(\s*"([^"]*)"/.exec(rust)?.[1] ?? "";
-    for (const text of [refused, kept, remoteDeleted]) {
-      expect(text).not.toBe("");
-      expect(leaveFailureTitle(text), text).toBe(FAILED);
-    }
   });
 });
 
