@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/ysya/lunport/compare/v1.7.0...v1.7.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **keys:** unify automatic account sync and report vault failures ([#54](https://github.com/ysya/lunport/issues/54)) ([022e78d](https://github.com/ysya/lunport/commit/022e78d940c97314a7fbcc3b02f520010d7c1f09))
+
 ## [1.7.0](https://github.com/ysya/lunport/compare/v1.6.0...v1.7.0) (2026-10-20)
 
 Use hosts, keys and SSH locally without an account. Passkey sign-in and encrypted multi-device sync are optional.
