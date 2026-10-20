@@ -450,7 +450,14 @@ fn save_active_with_authority(
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::NotFound => {
-                    crate::fsutil::atomic_write(&backup, &source, 0o600)?
+                    #[cfg(windows)]
+                    if state.local.central.is_some() {
+                        crate::sync::central_files_windows::write(&backup, &source, false)?;
+                    } else {
+                        crate::fsutil::atomic_write(&backup, &source, 0o600)?;
+                    }
+                    #[cfg(not(windows))]
+                    crate::fsutil::atomic_write(&backup, &source, 0o600)?;
                 }
                 Err(e) => return Err(e.into()),
             }

@@ -1295,12 +1295,16 @@ fn stage(
                     None => staged
                         .as_ref()
                         .ok_or_else(|| {
-                            failure("local key material was not durably staged; provide it again")
+                            failure(
+                                "local key material was not durably staged; provide it again",
+                            )
                         })?
                         .get(&journal.keys[id].vault_id)
                         .map_err(|_| failure("staged local key material is not readable"))?
                         .ok_or_else(|| {
-                            failure("local key material was not durably staged; provide it again")
+                            failure(
+                                "local key material was not durably staged; provide it again",
+                            )
                         })?,
                 };
                 entry.added_at_ms = journal.at_ms;
@@ -1365,18 +1369,40 @@ fn stage(
             .map_err(|_| failure("cannot open validated staged vault"))?;
         let mut batch = BTreeMap::new();
         for (id, entry) in entries {
-            if batch.insert(journal.keys[&id].vault_id.clone(),entry).is_some() {
-                return Err(failure("import maps multiple keys onto the same protected vault ID"));
+            if batch
+                .insert(journal.keys[&id].vault_id.clone(), entry)
+                .is_some()
+            {
+                return Err(failure(
+                    "import maps multiple keys onto the same protected vault ID",
+                ));
             }
         }
-        vault.put_new_batch(&scoped,&batch)
-            .map_err(|_| failure("cannot save material batch in staged vault; original retained"))?;
+        vault.put_new_batch(&scoped, &batch).map_err(|_| {
+            failure("cannot save material batch in staged vault; original retained")
+        })?;
         let staged = validate_vault(&paths.vault, &scoped)?;
         journal.staged_key_account = Some(staged.key_account().into());
         journal.staged_vault_digest = Some(digest(&bounded_read(
             &paths.vault,
             store::MAX_READ_ONLY_VAULT_BYTES,
         )?));
+    }
+    #[cfg(windows)]
+    if journal.central_intent.is_some() {
+        // The additive legacy writer may have created these inert snapshots. Re-publish
+        // their exact bytes with write-through before claiming the central stage is durable.
+        for (path, limit) in [
+            (&paths.original_state, record_runtime::MAX_STATE_BYTES),
+            (&paths.original_vault, store::MAX_READ_ONLY_VAULT_BYTES),
+            (&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES),
+            (&paths.masters, MAX_JOURNAL_BYTES),
+        ] {
+            if let Some(bytes) = crate::sync::central_files_windows::optional(path, limit)? {
+                let bytes = Zeroizing::new(bytes);
+                central_stage::durable(paths, path, &bytes)?;
+            }
+        }
     }
     step(PublishStep::VaultStaged)?;
     journal.phase = Phase::Staged;
@@ -1458,11 +1484,21 @@ fn execute(
         return Ok(journal.receipt());
     }
     if journal.phase == Phase::Active {
-        return Err(failure("active import has no matching durable state receipt"));
+        return Err(failure(
+            "active import has no matching durable state receipt",
+        ));
     }
     let central_context = match prepared_context {
         Some(context) => Some(context),
         None => central_local::context(env, &snapshot_for_write(env)?.0, journal)?,
+    };
+    #[cfg(windows)]
+    let _central_stage_directory = if central_context.is_some() {
+        Some(crate::sync::central_files_windows::Directory::private(
+            &paths.dir, false,
+        )?)
+    } else {
+        None
     };
     if journal.phase == Phase::Prepared {
         if provided.is_none() {
@@ -1495,25 +1531,52 @@ fn execute(
             let current = optional_bytes(&main, store::MAX_READ_ONLY_VAULT_BYTES)?
                 .as_ref()
                 .map(|b| digest(b));
-            if current != journal.original_vault_digest && current != journal.staged_vault_digest {
+            if current != journal.original_vault_digest
+                && current != journal.staged_vault_digest
+            {
                 return Err(failure(
                     "original vault changed; import retained for recovery",
                 ));
             }
             if let Some(context) = central_context.as_ref() {
-                central_local::before_vault(env, &snapshot_for_write(env)?.0, journal, paths, context)?;
+                central_local::before_vault(
+                    env,
+                    &snapshot_for_write(env)?.0,
+                    journal,
+                    paths,
+                    context,
+                )?;
             }
             scoped.promote(staged.key_account())?;
             if let Some(context) = central_context.as_ref() {
-                central_local::before_vault(env, &snapshot_for_write(env)?.0, journal, paths, context)?;
+                central_local::before_vault(
+                    env,
+                    &snapshot_for_write(env)?.0,
+                    journal,
+                    paths,
+                    context,
+                )?;
             }
             step(PublishStep::MasterPromoted)?;
             if let Some(context) = central_context.as_ref() {
-                central_local::before_vault(env, &snapshot_for_write(env)?.0, journal, paths, context)?;
+                central_local::before_vault(
+                    env,
+                    &snapshot_for_write(env)?.0,
+                    journal,
+                    paths,
+                    context,
+                )?;
             }
             if central_context.is_some() {
-                central_stage::publish_vault_image(env, paths, &journal.original_vault_digest,
-                    journal.staged_vault_digest.as_deref().ok_or_else(|| failure("central local vault receipt is missing"))?)?;
+                central_stage::publish_vault_image(
+                    env,
+                    paths,
+                    &journal.original_vault_digest,
+                    journal
+                        .staged_vault_digest
+                        .as_deref()
+                        .ok_or_else(|| failure("central local vault receipt is missing"))?,
+                )?;
             } else if current != journal.staged_vault_digest {
                 fsutil::atomic_write(&main, &bytes, 0o600)?;
             }

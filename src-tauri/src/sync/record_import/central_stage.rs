@@ -552,6 +552,10 @@ fn execute(
     journal: &mut Journal,
     input: Input<'_>,
 ) -> Result<(), AppError> {
+    #[cfg(windows)]
+    let _stage_directory =
+        crate::sync::central_files_windows::Directory::private(&paths.dir, false)?;
+
     verify_delta(journal, input)?;
     let delta = input.delta();
     if journal.source_state_digest.is_none() {
