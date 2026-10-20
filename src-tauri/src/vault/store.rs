@@ -323,6 +323,16 @@ impl Vault {
         if serde_json::to_vec_pretty(&candidate.file).map_err(|_|readonly_vault_error("cannot encode staged vault"))?.len() as u64 > MAX_READ_ONLY_VAULT_BYTES {
             return Err(readonly_vault_limit_error());
         }
+        // Central stagers pin their directory without write/delete sharing. The
+        // ordinary Win32 path-based rename cannot publish under those guards.
+        #[cfg(windows)]
+        {
+            let bytes = serde_json::to_vec_pretty(&candidate.file)
+                .map_err(|_| readonly_vault_error("cannot encode staged vault"))?;
+            crate::sync::central_files_windows::write(&candidate.path, &bytes, true)
+                .map_err(VaultError::Other)?;
+        }
+        #[cfg(not(windows))]
         candidate.save()?;
         *self = candidate;
         Ok(())

@@ -1221,18 +1221,24 @@ impl Keychain for ScopedKeychain<'_> {
             None => BTreeSet::new(),
         };
         accounts.insert(account.into());
-        fsutil::atomic_write(
-            self.receipts,
-            &serde_json::to_vec(&accounts)
-                .map_err(|_| failure("cannot serialize staged master receipt"))?,
-            0o600,
-        )?;
+        let receipt = serde_json::to_vec(&accounts)
+            .map_err(|_| failure("cannot serialize staged master receipt"))?;
+        #[cfg(windows)]
+        crate::sync::central_files_windows::write(self.receipts, &receipt, true)?;
+        #[cfg(not(windows))]
+        fsutil::atomic_write(self.receipts, &receipt, 0o600)?;
         self.inner
             .set(&scoped, secret)
             .map_err(|_| failure("cannot save staged vault master credential"))?;
-        if self.inner.get(&scoped)
+        if self
+            .inner
+            .get(&scoped)
             .map_err(|_| failure("cannot verify staged vault master credential"))?
-            .map(Zeroizing::new).as_ref().map(|saved|saved.as_str()) != Some(secret) {
+            .map(Zeroizing::new)
+            .as_ref()
+            .map(|saved| saved.as_str())
+            != Some(secret)
+        {
             return Err(failure("staged vault master credential was not retained"));
         }
         Ok(())
@@ -1250,6 +1256,20 @@ fn validate_vault(path: &Path, keychain: &dyn Keychain) -> Result<store::ReadOnl
             .map_err(|_| failure("vault entry is not readable; original retained"))?;
     }
     Ok(vault)
+}
+fn write_staged_image(
+    paths: &Paths,
+    journal: &Journal,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    #[cfg(windows)]
+    if journal.central_intent.is_some() {
+        return central_stage::durable(paths, path, bytes);
+    }
+    #[cfg(not(windows))]
+    let _ = (paths, journal);
+    fsutil::atomic_write(path, bytes, 0o600)
 }
 fn stage(
     env: &SyncEnv,
@@ -1340,7 +1360,7 @@ fn stage(
     let original_state = optional_bytes(&env.state_path, record_runtime::MAX_STATE_BYTES)?;
     if !paths.original_state.exists() {
         match original_state {
-            Some(bytes) => fsutil::atomic_write(&paths.original_state, &bytes, 0o600)?,
+            Some(bytes) => write_staged_image(paths, journal, &paths.original_state, &bytes)?,
             // A key import can be the first action on a fresh installation. Preserve the
             // actual in-memory baseline too, so later complete migration can admit it.
             None => record_runtime::save_active(&paths.original_state, &state)?,
@@ -1348,7 +1368,7 @@ fn stage(
     }
     if let Some(bytes) = &original {
         if !paths.original_vault.exists() {
-            fsutil::atomic_write(&paths.original_vault, bytes, 0o600)?;
+            write_staged_image(paths, journal, &paths.original_vault, bytes)?;
         }
     }
     record_runtime::save_active(&paths.state, &candidate)?;
@@ -1362,7 +1382,7 @@ fn stage(
         if paths.vault.exists() {
             validate_vault(&paths.vault, &scoped)?;
         } else if let Some(bytes) = &original {
-            fsutil::atomic_write(&paths.vault, bytes, 0o600)?;
+            write_staged_image(paths, journal, &paths.vault, bytes)?;
             validate_vault(&paths.vault, &scoped)?;
         }
         let mut vault = Vault::open(&paths.vault, &scoped, journal.at_ms)
