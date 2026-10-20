@@ -114,6 +114,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows central second-device publication failed' }
           cargo test --locked --lib sync::central::adoption::tests::empty_reserved_stage_is_recovered_but_unknown_contents_are_retained -- --exact --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Windows central empty reservation recovery failed' }
+          cargo test --locked --lib cli::real_console_tests::a_real_console_works_as_the_keys_reader_needs -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Windows real console contract failed' }
 
       - name: Complete safe Rust suite
         env:
