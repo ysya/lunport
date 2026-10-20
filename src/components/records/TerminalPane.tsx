@@ -4,11 +4,12 @@ import { GhosttyCore } from "@wterm/ghostty";
 import ghosttyWasm from "@wterm/ghostty/ghostty-vt.wasm?url";
 import "@wterm/dom/css";
 import "./terminal.css";
-import { ArrowDown, ArrowUp, Check, CircleAlert, Copy, LoaderCircle, Minus, MoreHorizontal, Plus, RotateCw, Search, Type, Unplug, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, CircleAlert, Copy, KeyRound, LoaderCircle, Minus, MoreHorizontal, Plus, RotateCw, Search, Type, Unplug, X } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "@/components/ui/button";
 import { TerminalSession, type TerminalStatus } from "@/lib/terminal-session";
 import { RECONNECT_TERMINAL_OUTPUT } from "@/lib/terminal-reconnect";
+import { terminalRecoveryMessage } from "@/lib/terminal-recovery";
 import { toast } from "sonner";
 import { useSettingsStore } from "@/stores/settings";
 import { useTerminalStore, type TerminalTab } from "@/stores/terminals";
@@ -19,7 +20,7 @@ import { isImeKey } from "@/lib/ime";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
-export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolean }) {
+export function TerminalPane({ tab, active, openKeys }: { tab: TerminalTab; active: boolean; openKeys?: () => void }) {
   const element = useRef<HTMLDivElement>(null);
   const terminal = useRef<WTerm | null>(null);
   const connection = useRef<TerminalSession | null>(null);
@@ -37,11 +38,12 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
   const [searchStatus, setSearchStatus] = useState({ count: 0, activeIndex: -1, searching: false, limited: false });
   const [connectionState, setConnectionState] = useState<TerminalStatus>({ kind: "connecting", text: "Loading terminal…", autoReconnect: true });
   const { kind: state, text: status, retry } = connectionState;
+  const recovery = terminalRecoveryMessage(connectionState);
   const [size, setSize] = useState({ cols: 80, rows: 24 });
   const activeRef = useRef(active);
   activeRef.current = active;
   const modifierLabel = typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
-  const statusLabel = state === "error" ? "Connection failed" : connectionState.question ? "Authentication required" : status;
+  const statusLabel = state === "error" ? recovery.title : connectionState.question ? "Authentication required" : status;
   const restoreFocus = useCallback(() => {
     if (!activeRef.current || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
     if (searchInput.current) searchInput.current.focus();
@@ -178,14 +180,18 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
     </div>}
     <div ref={element} className="embedded-terminal" data-cursor-blink={cursorBlink} style={{ fontSize, "--term-font-size": `${fontSize}px`, "--term-row-height": `${fontSize * 1.4}px` } as React.CSSProperties} />
     {(state === "ended" || state === "error" || retry) && <div className="embedded-recovery" role="region" aria-label="Terminal reconnection">
-      {retry ? <LoaderCircle className="size-4 motion-safe:animate-spin" /> : <Unplug className="size-4" />}
-      <div><strong>{retry ? "Reconnecting automatically" : "Session ended"}</strong><p>{retry ? `Attempt ${retry} of 5 · Enter to retry now` : status}</p><p>Previous output stays here. Reconnect opens a new shell.</p></div>
-      <div className="embedded-recovery-actions"><Button size="sm" onClick={reconnect}><RotateCw />{retry ? "Retry now" : "Reconnect"}</Button>{retry && <Button size="sm" variant="outline" onClick={() => connection.current?.disconnect()}>Stop retrying</Button>}</div>
+      {retry ? <LoaderCircle className="size-4 motion-safe:animate-spin" /> : recovery.needsKey ? <KeyRound className="size-4" /> : state === "error" ? <CircleAlert className="size-4" /> : <Unplug className="size-4" />}
+      <div><strong>{recovery.title}</strong><p>{recovery.text}</p><p>{recovery.hint}</p></div>
+      <div className="embedded-recovery-actions">
+        {recovery.needsKey && openKeys && <Button size="sm" onClick={openKeys}><KeyRound />Open Keys</Button>}
+        <Button size="sm" variant={recovery.needsKey && openKeys ? "outline" : "default"} onClick={reconnect}><RotateCw />{retry ? "Retry now" : state === "error" ? "Try again" : "Reconnect"}</Button>
+        {retry && <Button size="sm" variant="outline" onClick={() => connection.current?.disconnect()}>Stop retrying</Button>}
+      </div>
     </div>}
     <footer className="embedded-statusbar">
       <div className="embedded-connection">
         <span className="embedded-address" title={tab.address}>{tab.address}</span>
-        <span className="embedded-connection-status" role="status" data-state={state} title={status}>
+        <span className="embedded-connection-status" role="status" data-state={state} title={state === "error" ? recovery.text : status}>
           {state === "connecting" ? <LoaderCircle className="size-3 motion-safe:animate-spin" /> : state === "error" ? <CircleAlert className="size-3" /> : state === "open" ? <Check className="size-3" /> : <Unplug className="size-3" />}
           <span>{statusLabel}</span>
         </span>

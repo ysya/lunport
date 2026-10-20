@@ -8,7 +8,7 @@ import { isImeKey } from "@/lib/ime";
 import "./terminal.css";
 const TerminalPane = lazy(() => import("./TerminalPane").then((module) => ({ default: module.TerminalPane })));
 
-export function TerminalWorkspace({ children, renderHeader }: { children: ReactNode; renderHeader?: (tabs: ReactNode) => ReactNode }) {
+export function TerminalWorkspace({ children, renderHeader, openKeys }: { children: ReactNode; renderHeader?: (tabs: ReactNode) => ReactNode; openKeys?: () => void }) {
   const tabs = useTerminalStore((state) => state.tabs);
   const activeId = useTerminalStore((state) => state.activeId);
   const activate = useTerminalStore((state) => state.activate);
@@ -67,7 +67,7 @@ export function TerminalWorkspace({ children, renderHeader }: { children: ReactN
     {renderHeader ? renderHeader(tabBar) : tabBar}
     <div id="terminal-library" className="terminal-library" role={tabs.length ? "tabpanel" : undefined} aria-labelledby={tabs.length ? "terminal-tab-library" : undefined} hidden={!!activeId}>{children}</div>
     <Suspense fallback={activeId ? <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading terminal…</div> : null}>
-      {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id} />)}
+      {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id} openKeys={openKeys} />)}
     </Suspense>
     <Dialog open={closing !== null} onOpenChange={(open) => { if (!open) setClosing(null); }}>
       <DialogContent onCloseAutoFocus={(event) => {

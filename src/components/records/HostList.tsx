@@ -53,6 +53,7 @@ export function RecordHostList({
   dismiss,
   selectGroup,
   edit,
+  duplicate,
   create,
   createGroup,
   disabled = false,
@@ -74,6 +75,7 @@ export function RecordHostList({
   inspect?: (id: string) => void;
   dismiss?: () => void;
   edit?: (id: string) => void;
+  duplicate?: (id: string) => void;
   selectGroup?: (id: string) => void;
   selectScope?: (scope: HostScope) => void;
   create?: () => void;
@@ -369,6 +371,7 @@ export function RecordHostList({
                   connectDisabled={blocked || !!connectingId}
                   connect={connect ? () => connectHost(host) : undefined}
                   edit={edit ? () => edit(host.id) : undefined}
+                  duplicate={duplicate ? () => duplicate(host.id) : undefined}
                   inspect={inspect ? () => inspect(host.id) : undefined}
                   accept={accept}
                   onBusy={onBusy}

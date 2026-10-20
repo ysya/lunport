@@ -37,6 +37,20 @@ beforeEach(() => {
 afterEach(() => { session.dispose(); vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe("terminal reconnect lifecycle", () => {
+  it("retains a missing-key error through EOF without retrying, and clears its cause on manual retry", async () => {
+    await session.start(80, 24);
+    const text = "simple needs key fc3f11fff708a1229b4e877f447dbf7f material on this device.";
+    current().event({ type: "event", event: "error", kind: "host", text });
+    end();
+    expect(status()).toMatchObject({ kind: "error", failureKind: "host", text });
+    session.networkRestored();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(mocks.transports).toHaveLength(1);
+    await session.reconnect();
+    expect(status().failureKind).toBeUndefined();
+    open();
+    expect(status()).toMatchObject({ kind: "open", text: "Connected" });
+  });
   it("replaces the transport in the same renderer, retaining output and ignoring old callbacks", async () => {
     await session.start(100, 40); open();
     const old = current(); old.output(Uint8Array.of(65));

@@ -1,7 +1,7 @@
 import { EmbeddedTerminal, type TerminalEvent, type TerminalHost } from "./embedded-terminal";
 import type { TerminalState } from "@/stores/terminals";
 
-export type TerminalStatus = { kind: TerminalState; text: string; retry?: number; question?: boolean; autoReconnect: boolean };
+export type TerminalStatus = { kind: TerminalState; text: string; failureKind?: string; retry?: number; question?: boolean; autoReconnect: boolean };
 const RETRY_DELAYS = [2000, 5000, 10000, 20000, 30000];
 const STABLE_CONNECTION_MS = 10000;
 
@@ -79,7 +79,7 @@ export class TerminalSession {
           this.update({ kind: "connecting", text: event.text, question: true });
         } else if (event.type === "event" && (event.event === "error" || event.event === "disconnected")) {
           retryable = event.event === "disconnected" || event.kind === "connect" || event.kind === "input";
-          this.update({ kind: "error", text: event.text ?? event.reason ?? "Connection failed" });
+          this.update({ kind: "error", text: event.text ?? event.reason ?? "Connection failed", failureKind: event.event === "error" ? event.kind : undefined });
         } else if (event.type === "bridge_error") {
           finished = true;
           this.recovery = false;

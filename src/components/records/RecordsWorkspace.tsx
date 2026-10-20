@@ -185,6 +185,14 @@ export function RecordsWorkspace({
     setInspectedId(null);
     requestSelection({ kind: "host", id });
   };
+  const duplicateHost = (id: string) => {
+    const source = selectHost(overview.hosts, id);
+    if (!source || (source.scope.kind === "space" && overview.shared_writes_blocked)) return;
+    setPanel("hosts");
+    setSelectedHostId(id);
+    setInspectedId(null);
+    requestSelection({ kind: "new", nonce: ++nonce.current, duplicateSource: structuredClone(source) });
+  };
   const connect = async (id: string) => {
     if (connectInFlight.current || editorBusy) return;
     connectInFlight.current = true;
@@ -314,7 +322,11 @@ export function RecordsWorkspace({
         />
       </div>
       <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col">
-        <TerminalWorkspace renderHeader={(tabs) => (
+        <TerminalWorkspace openKeys={() => {
+          setActiveTerminal(null);
+          setPanel("keys");
+          requestAnimationFrame(() => document.getElementById(KEYS_SEARCH_INPUT_ID)?.focus());
+        }} renderHeader={(tabs) => (
         <header
           data-tauri-drag-region
           className="library-titlebar"
@@ -434,6 +446,7 @@ export function RecordsWorkspace({
                 setInspectedId(null);
               }}
               edit={editHost}
+              duplicate={duplicateHost}
               selectGroup={(id) => requestSelection({ kind: "group", id })}
               create={createHost}
               createGroup={createGroup}
@@ -597,7 +610,7 @@ export function RecordsWorkspace({
           {!isGroupEditor && (
             <>
               <DialogTitle className="sr-only">
-                {selection.kind === "new" ? "New host" : "Edit host"}
+                {selection.kind === "new" ? selection.duplicateSource ? "Duplicate host" : "New host" : "Edit host"}
               </DialogTitle>
               <DialogDescription className="sr-only">
                 Update connection settings, then save your changes.
@@ -651,6 +664,8 @@ export function RecordsWorkspace({
                   initialGroupId={
                     selection.kind === "new" ? selection.groupId : undefined
                   }
+                  duplicateSource={selection.kind === "new" ? selection.duplicateSource : undefined}
+                  onDuplicate={selectedId ? () => duplicateHost(selectedId) : undefined}
                   host={selected}
                   hostId={selectedId}
                   overview={overview}

@@ -48,6 +48,24 @@ const editor = (
     />,
   );
 describe("records host controls", () => {
+  it("presents a duplicate as an editable new host without the source identity or credential status", () => {
+    const source = hostView({ payload: hostPayload({ alias: "template", hostname: "template.invalid", user: "ops" }) });
+    const html = render(<RecordHostEditor
+      host={null} hostId={null} duplicateSource={source}
+      overview={recordOverview({ hosts: [source] })}
+      terminalId={null} newTab={false} accept={value => value}
+      onSaved={() => {}} onDeleted={() => {}} onDirty={() => {}}
+    />);
+    expect(text(html)).toContain("Duplicate host");
+    expect(html).toContain('value="template-copy"');
+    expect(html).toContain('value="template.invalid"');
+    expect(html).toContain('value="ops"');
+    expect(text(html)).toContain("Copied settings from template.");
+    expect(text(html)).toContain("Enter a password again");
+    expect(text(html)).not.toContain("Server identity");
+    expect(() => buttonTag(html, "Connect")).toThrow("no Connect button");
+    expect(buttonTag(html, "Create host")).not.toContain(DISABLED);
+  });
   it("uses progress rather than failure styling while setup is active", () => {
     const html = render(
       <RecordsAccountPanel
