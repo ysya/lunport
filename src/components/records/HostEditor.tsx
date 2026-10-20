@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Server, X } from "lucide-react";
+import { CopyPlus, Server, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +18,7 @@ import {
 import { revealHidden } from "@/lib/sync-approvals";
 import {
   beginEditor,
+  beginDuplicateEditor,
   changeEditor,
   editorProblem,
   refreshEditor,
@@ -55,6 +56,8 @@ export function RecordHostEditor({
   connectHost,
   initialScope = { kind: "local" },
   initialGroupId = null,
+  duplicateSource,
+  onDuplicate,
 }: {
   host: RecordHostView | null;
   hostId: string | null;
@@ -70,6 +73,8 @@ export function RecordHostEditor({
   connectHost?: (id: string) => Promise<void>;
   initialScope?: HostScope;
   initialGroupId?: string | null;
+  duplicateSource?: RecordHostView;
+  onDuplicate?: () => void;
 }) {
   const [state, setState] = useState(() =>
     hostId && !host
@@ -81,6 +86,8 @@ export function RecordHostEditor({
         }
       : host
         ? beginEditor(host)
+        : duplicateSource
+          ? beginDuplicateEditor(duplicateSource, overview.hosts)
         : {
             ...beginEditor(null),
             scope: structuredClone(initialScope),
@@ -227,7 +234,7 @@ export function RecordHostEditor({
         icon={<Server className="size-5" />}
         title={
           <h1 className="truncate">
-            {state.id ? revealHidden(state.payload.alias) : "New host"}
+            {state.id ? revealHidden(state.payload.alias) : duplicateSource ? "Duplicate host" : "New host"}
           </h1>
         }
         description={
@@ -254,6 +261,12 @@ export function RecordHostEditor({
         )}
       />
       <div className="app-editor-body">
+        {duplicateSource && !state.id && (
+          <p className="text-xs text-muted-foreground">
+            Copied settings from {revealHidden(duplicateSource.payload.alias)}.
+            {preview.payload.auth === "password" && " Enter a password again when connecting or save one below."}
+          </p>
+        )}
         {state.dirty && editorProblem(state) && (
           <p role="status" className="text-sm text-muted-foreground">
             {editorProblem(state)}
@@ -334,6 +347,7 @@ export function RecordHostEditor({
               <RecordField label="Alias">
                 <Input
                   data-host-alias
+                  autoFocus={!!duplicateSource}
                   autoComplete="off"
                   placeholder="e.g. production-web"
                   value={state.payload.alias}
@@ -599,7 +613,18 @@ export function RecordHostEditor({
         {state.id && (
           <details className="rounded-lg border p-4">
             <summary className="text-sm font-medium">Manage host</summary>
-            <section className="mt-4 space-y-3">
+            <section className="mt-4 flex flex-col items-start gap-3">
+              {onDuplicate && (
+                <Button
+                  variant="outline"
+                  disabled={busy || dirty || state.unavailable || sharedBlocked}
+                  title={dirty ? "Save or discard changes before duplicating this host." : undefined}
+                  onClick={onDuplicate}
+                >
+                  <CopyPlus className="size-4" />
+                  Duplicate host…
+                </Button>
+              )}
               {askingDelete ? (
                 <div className="flex items-center gap-3">
                   <p className="text-sm">
