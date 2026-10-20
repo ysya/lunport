@@ -134,3 +134,15 @@ tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 # Optimize the existing curve implementation as for RSA above; release builds are unchanged.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
+
+# Migration validates and clears complete encrypted historical snapshots under the
+# same real deadlines as release builds. Keep these existing crypto primitives
+# optimized in development as well, without changing requests or timeout limits.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.zeroize]
+opt-level = 3

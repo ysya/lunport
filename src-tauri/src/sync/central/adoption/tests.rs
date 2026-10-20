@@ -440,13 +440,17 @@ fn prepared(f: &Fixture) -> (Scope, String) {
     (scope, ticket)
 }
 fn finish(f: &Fixture, scope: &Scope) {
+    let mut last = None;
     for _ in 0..30 {
-        if migration_flow::advance(&f.peer.env(), scope).unwrap().phase == "complete" {
+        let progress = migration_flow::advance(&f.peer.env(), scope).unwrap();
+        if progress.phase == "complete" {
             return;
         }
+        last = Some((progress.phase, progress.staged, progress.verified));
     }
-    panic!("adoption failed to complete");
+    panic!("adoption failed to complete; last phase/staged/verified: {last:?}");
 }
+
 fn reopen(d: &TestDevice) {
     let session = controller::context(&d.env()).unwrap();
     let probe = record_runtime::probe_startup(&d.env().state_path, "reopened");
