@@ -2,6 +2,16 @@
 
 ## [1.7.1](https://github.com/ysya/lunport/compare/v1.7.0...v1.7.1) (2026-10-20)
 
+Automatic encrypted key sync uses one whole-library setup. Open Keys → Set up automatic sync, sign in with Passkey, finish Vault/device setup and approve the complete library review. Managed SSH private keys, including later imports and generated keys, then sync automatically to approved devices. Per-key sync switches and private-key download steps have been removed.
+
+The reviewed migration retains existing hosts, private-key sources and history, and preserves host/key relationships. Updating does not reset your library. Local SSH and key management remain available without signing in.
+
+SSH key errors now distinguish missing private material, unreadable OpenSSH data, identity mismatch, passphrase metadata mismatch and an outdated encrypted account copy. This improves diagnosis; it does not bypass validation or claim to repair data that is genuinely missing.
+
+To test on two devices, update both to 1.7.1, enable complete library sync on the first, sign into the same account on the second, approve its pairing and complete its library merge. Reconnect to an existing host after sync completes.
+
+Device adoption now avoids replaying the same verified history at every local publication check. This reduces repeated work before writing the completed library on slower devices, while retaining the existing request/time bounds and live authorization and source-file checks.
+
 
 ### Bug Fixes
 
