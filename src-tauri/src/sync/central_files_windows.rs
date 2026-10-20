@@ -15,9 +15,12 @@ use std::{
     ptr,
     sync::Arc,
 };
+use windows_sys::Wdk::Storage::FileSystem::{
+    FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+};
 use windows_sys::Win32::{
     Foundation::{LocalFree, ERROR_HANDLE_EOF, ERROR_SUCCESS, INVALID_HANDLE_VALUE},
-    Foundation::{GENERIC_READ, GENERIC_WRITE},
+    Foundation::{RtlNtStatusToDosError, GENERIC_READ, GENERIC_WRITE},
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -27,14 +30,16 @@ use windows_sys::Win32::{
         INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_USER,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, CreateFileW, FileRenameInfo, FindClose, FindFirstStreamW,
-        FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandle,
-        SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, DELETE,
-        FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_RENAME_INFO, FILE_SHARE_READ,
+        CreateDirectoryW, CreateFileW, FindClose, FindFirstStreamW, FindNextStreamW,
+        FindStreamInfoStandard, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+        DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ,
         WIN32_FIND_STREAM_DATA, WRITE_DAC,
     },
-    System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
+    System::{
+        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
+        IO::IO_STATUS_BLOCK,
+    },
 };
 use zeroize::Zeroizing;
 fn invalid() -> AppError {
@@ -581,31 +586,30 @@ impl Temporary {
             .ok_or_else(invalid)?
             .encode_wide()
             .collect();
-        let size = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * 2;
+        let size = std::mem::size_of::<FILE_RENAME_INFORMATION>() + name.len() * 2;
         let mut storage = vec![0u64; size.div_ceil(8)];
-        let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
+        let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFORMATION;
         unsafe {
             (*info).Anonymous.ReplaceIfExists = replace;
-            // Resolve the name against the verified directory handle, never the process CWD.
-            (*info).RootDirectory = self
-                ._directory
-                .pins
-                .last()
-                .ok_or_else(invalid)?
-                .as_raw_handle();
+            // Native same-directory rename resolves a simple leaf against the source's
+            // existing parent, with no Win32 CWD normalization or directory reopen.
+            (*info).RootDirectory = ptr::null_mut();
             (*info).FileNameLength = (name.len() * 2) as u32;
             ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
         }
-        if unsafe {
-            SetFileInformationByHandle(
+        let mut result = IO_STATUS_BLOCK::default();
+        let status = unsafe {
+            NtSetInformationFile(
                 self.as_file().as_raw_handle(),
-                FileRenameInfo,
+                &mut result,
                 info.cast(),
                 size as u32,
+                FileRenameInformation,
             )
-        } == 0
-        {
-            let error = io::Error::last_os_error();
+        };
+        if status < 0 {
+            let error =
+                io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32);
             return Err(io::Error::new(
                 error.kind(),
                 format!("Cannot publish Windows temporary by handle: {error}"),

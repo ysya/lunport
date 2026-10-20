@@ -7,7 +7,7 @@ publish = false
 # The same versions already locked by the desktop app. This isolated probe avoids
 # rebuilding Tauri to exercise actual Windows handle/ACL semantics.
 [dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_System_IO", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
 zeroize = "=1.9.1"
 
 [dev-dependencies]
