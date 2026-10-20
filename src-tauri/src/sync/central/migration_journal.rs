@@ -630,10 +630,10 @@ impl Loaded {
 
 pub(super) mod review;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod readback_tests;
 
 #[cfg(all(test, unix))]

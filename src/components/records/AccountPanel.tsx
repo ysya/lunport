@@ -192,7 +192,7 @@ export function RecordsAccountPanel({
   return (
     <div className="app-workflow-page space-y-6">
       {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} restoreFocus={() => (libraryTrigger.current ?? libraryHeading.current)?.focus()} />}
-      <PageHeader title="Sync" description="Sign in with a Passkey to sync your hosts, keys, Groups and tunnel rules with end-to-end encryption." />
+      <PageHeader title="Sync" description="Manage sync for your hosts, keys, Groups and tunnel rules." />
       <CentralAccountSection disabled={settingsBusy || lifecycleBusy || conflictBusy || draft.busy || !!overview.syncing} onBusyChange={setCentralBusy} />
       <details open={!!overview.pending_account} className="space-y-4">
         <summary className="cursor-pointer text-sm font-medium">Older sync-code libraries</summary>

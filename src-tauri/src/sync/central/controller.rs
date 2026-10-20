@@ -47,7 +47,15 @@ pub struct Status {
     pub error: Option<String>,
 }
 pub fn enabled() -> bool {
-    cfg!(any(test, feature = "central-sync"))
+    // Durable archive and protected publication currently have verified macOS/Linux backends.
+    // Keep pure protocol tests portable without advertising unsupported desktop capabilities.
+    cfg!(any(
+        test,
+        all(
+            feature = "central-sync",
+            any(target_os = "macos", target_os = "linux")
+        )
+    ))
 }
 pub fn require_enabled() -> Result<(), AppError> {
     if enabled() {

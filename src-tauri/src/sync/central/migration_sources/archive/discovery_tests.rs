@@ -294,6 +294,7 @@ fn discovery_cannot_be_reapplied_or_replace_a_known_child_credential() {
     drop(child);
 }
 
+#[cfg(unix)]
 #[test]
 fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_child_keys() {
     use crate::sync::central::source_package::Package;

@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect, vi } from "vitest";
-import { CentralAccountPanel } from "./CentralAccountPanel";
-import type { CentralStatus } from "@/lib/central-sync";
+import { CentralAccountPanel, CentralAccountSection } from "./CentralAccountPanel";
+import { centralStatusKey, type CentralStatus } from "@/lib/central-sync";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
 const base: CentralStatus = {
   available: true,
@@ -85,4 +85,13 @@ it("offers the built-in Passkey service immediately without a preview switch", (
   expect(buttonTag(html, "Sign in with Passkey")).not.toContain(DISABLED);
   expect(text(html)).toContain("Account and encrypted sync");
   expect(text(html)).not.toContain("Preview");
+});
+
+it("explains unavailable platform support without offering a broken sign-in flow", () => {
+  const client = new QueryClient();
+  client.setQueryData(centralStatusKey, { ...base, available: false, configured: false });
+  const html = renderToStaticMarkup(<QueryClientProvider client={client}><CentralAccountSection /></QueryClientProvider>);
+  expect(text(html)).toContain("Central account sync is unavailable in this build");
+  expect(text(html)).toContain("Older sync-code libraries");
+  expect(text(html)).not.toContain("Sign in with Passkey");
 });

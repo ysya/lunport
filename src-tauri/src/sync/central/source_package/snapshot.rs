@@ -683,6 +683,7 @@ impl StateSnapshot {
 #[cfg(test)]
 mod order_tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn complete_replacement_snapshot_binds_all_groups_and_keeps_single_state_compatibility() {
         let (device, _keys, session) = super::super::super::source_capture::tests::fixture(false);

@@ -1047,5 +1047,5 @@ pub(in crate::sync::central) mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod retained_tests;

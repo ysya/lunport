@@ -73,7 +73,7 @@ fn unsupported() -> AppError {
     AppError::Other("A captured recovery or migration source needs supported normalization before central synchronization. Every original file is retained.".into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

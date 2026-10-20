@@ -430,6 +430,7 @@ mod tests {
             );
         }
     }
+    #[cfg(unix)]
     #[test]
     fn captured_active_backup_survives_old_identity_removal_without_restoring_any_authority() {
         use super::super::{source_capture, source_package::Package};
@@ -502,6 +503,7 @@ mod tests {
             .is_err());
         assert_eq!(fs::read(&path).unwrap(), serde_json::to_vec(&old).unwrap());
     }
+    #[cfg(unix)]
     #[test]
     fn replacement_archive_retains_signed_history_before_old_identity_is_deleted() {
         use super::super::{replacement_archive, source_capture, source_package::Package};
@@ -905,6 +907,7 @@ mod tests {
         }
         assert!(read(&state, &identity(&before, &signer)).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn an_already_lost_identity_keeps_the_original_opaque_archive_and_a_later_available_identity_adds_history_without_replacing_it(
     ) {

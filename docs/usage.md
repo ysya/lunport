@@ -76,6 +76,8 @@ Lunport's SSH agent provides vault keys to compatible local SSH clients while th
 
 ## Sync your library
 
+Passkey account sync is available on macOS and Linux. Windows currently retains the older sync-code flow; its central migration and secure archive backend are not yet supported.
+
 Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**, and choose **Sign in with Passkey**. Official installers include the account service URL. For self-hosting, enter your own HTTPS account service; Passkey needs no external identity provider. OIDC remains an optional server configuration.
 
 On the first device, set up the encrypted Vault, save its offline recovery kit outside the device, and finish Vault setup. Choose **Prepare library review**, review the complete library and approve **Confirm library sync**. Hosts, Groups, tunnel rules and managed SSH private keys are included. The server stores encrypted library content.

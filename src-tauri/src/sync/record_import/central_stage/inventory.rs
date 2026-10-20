@@ -247,7 +247,7 @@ pub(in crate::sync::record_import) fn read_operation(
         central_floors: vec![j.checkpoint],
     }))
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::sync::record_import::inventory;

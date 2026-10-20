@@ -49,7 +49,10 @@ export function CentralAccountSection({
       void pending.then((unlisten) => unlisten()).catch(() => {});
     };
   }, [client]);
-  if (!query.data?.available) return null;
+  if (!query.data) return null;
+  if (!query.data.available) {
+    return <p className="text-sm text-muted-foreground">Central account sync is unavailable in this build. Open Older sync-code libraries below to use existing sync.</p>;
+  }
   return (
     <CentralAccountPanel
       status={query.data}

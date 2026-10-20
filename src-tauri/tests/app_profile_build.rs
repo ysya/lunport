@@ -38,8 +38,9 @@ fn the_normal_library_uses_the_compiled_legacy_ssh_boundary() {
 
 #[test]
 fn the_normal_library_exposes_the_shipped_central_sync_capability() {
-    assert!(
+    assert_eq!(
         sshelter_lib::central_sync_available(),
-        "Standard desktop builds must ship central account sync without preview flags."
+        cfg!(feature = "central-sync") && cfg!(any(target_os = "macos", target_os = "linux")),
+        "Standard desktop builds advertise central sync only where secure publication is supported."
     );
 }

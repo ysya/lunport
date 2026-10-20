@@ -67,7 +67,7 @@ struct Journal {
     bindings: BTreeMap<String, Binding>,
     phase: Phase,
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
 pub(in crate::sync::record_import) mod inventory;
@@ -712,7 +712,7 @@ fn resume_input(env: &SyncEnv, operation: &str, input: Input<'_>) -> Result<Stag
     Ok(Staged { journal, paths })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::sync::{

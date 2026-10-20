@@ -171,6 +171,7 @@ fn unfinished_missing_unknown_or_changed_evidence_never_becomes_admitted_import_
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn actual_completed_central_local_intent_normalizes_ciphertext_without_replaying_publication() {
     use crate::sync::{record_import::central_local, record_keys};

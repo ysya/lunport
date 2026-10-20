@@ -415,7 +415,7 @@ pub(crate) fn publish(
     Ok(summary(&journal))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) mod tests {
     use super::super::tests::{delta, fixture};
     use super::*;
@@ -574,7 +574,7 @@ pub(super) mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod fault_tests {
     use super::super::tests::{delta, fixture};
     use super::tests::session;

@@ -73,7 +73,7 @@ The 2.11.2 runtime has a narrow [context ownership patch](../src-tauri/vendor/ta
 
 ## Central account builds
 
-Central sync is enabled in normal desktop builds through the default `central-sync` feature. The old `central-sync-preview` name remains a compatibility alias. Release CI injects `SSHELTER_RELAY_URL` into the native build; fresh account setup uses that HTTPS service while an existing pinned account keeps its original service. Self-hosted builds may leave it unset and enter a service in Sync.
+Central sync is enabled in normal macOS and Linux desktop builds through the default `central-sync` feature. Windows keeps the feature unavailable until its durable archive and protected publication backend is implemented and verified; Unix filesystem tests are compiled only on Unix, while protocol and cryptographic tests remain portable. The old `central-sync-preview` name remains a compatibility alias. Release CI injects `SSHELTER_RELAY_URL` into the native build; fresh account setup uses that HTTPS service while an existing pinned account keeps its original service. Self-hosted builds may leave it unset and enter a service in Sync.
 
 The ordinary-library `app_profile_build` integration test checks the shipped capability outside `cfg(test)`. Central tests use isolated in-memory credentials; never run credential-service tests against a real user Keychain as a general release check.
 

@@ -667,7 +667,7 @@ impl Loaded {
     }
 }
 mod captured;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 pub(super) fn is_frame(bytes: &[u8]) -> bool {
