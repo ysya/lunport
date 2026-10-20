@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.0](https://github.com/ysya/lunport/compare/v1.7.1...v1.8.0) (2026-10-20)
+
+
+### Features
+
+* use self-hosted central sync and editable server settings ([#57](https://github.com/ysya/lunport/issues/57)) ([68bd3d0](https://github.com/ysya/lunport/commit/68bd3d07db66cf952986b230a91cb7287cff39e5))
+
+
+### Bug Fixes
+
+* add reviewed SSH key deletion and forced removal ([#56](https://github.com/ysya/lunport/issues/56)) ([c28af68](https://github.com/ysya/lunport/commit/c28af68e24e707a7b18439e30dc6c12600100155))
+
 ## [1.7.1](https://github.com/ysya/lunport/compare/v1.7.0...v1.7.1) (2026-10-20)
 
 Automatic encrypted key sync uses one whole-library setup. Open Keys → Set up automatic sync, sign in with Passkey, finish Vault/device setup and approve the complete library review. Managed SSH private keys, including later imports and generated keys, then sync automatically to approved devices. Per-key sync switches and private-key download steps have been removed.
