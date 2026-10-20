@@ -241,7 +241,7 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
           {row("All hosts", <Server className="size-4" />, panel === "hosts" && (filter.kind === "all" || collapsed && ["group", "tag", "ungrouped"].includes(filter.kind)), () => choose({ kind: "all" }), overview.hosts.length)}
           {row("Recent", <Clock3 className="size-4" />, panel === "hosts" && filter.kind === "recent", () => choose({ kind: "recent" }))}
           {row("Needs attention", <AlertCircle className="size-4" />, panel === "hosts" && filter.kind === "attention", () => choose({ kind: "attention" }), attention || undefined)}
-          {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.length)}
+          {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.filter((key) => key.status !== "deleted").length)}
           {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
         </nav>
         <div

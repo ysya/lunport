@@ -76,6 +76,7 @@ pub enum RepositoryError {
     EndpointChanged(String),
     PinConflict(String),
     KeyNotFound(String),
+    KeyInUse(String),
     OrderingOverflow(String),
 }
 impl From<RecordValidationError> for RepositoryError {
@@ -591,6 +592,84 @@ pub fn rename_key(
     if let Some(local) = next.local.keys.get_mut(id) {
         local.public.name = name.into();
     }
+    Ok(next)
+}
+
+/// Delete the library identity; retained encrypted material/history grants no active reference.
+/// Force permits referenced keys, while leaving every host and Group configuration intact.
+pub fn delete_key(
+    state: &SyncStateV3,
+    id: &str,
+    expected: &KeySlotPayload,
+    reviewed_snapshot: &str,
+    force: bool,
+    now_ms: u64,
+) -> Result<SyncStateV3, RepositoryError> {
+    let key = resolve_key(state, id)?;
+    if matches!(key.status, KeyStatus::Conflict | KeyStatus::Deleted)
+        || key.public.as_ref() != Some(expected)
+        || crate::sync::record_groups::deletion_snapshot_token(&snapshot(state)?)?
+            != reviewed_snapshot
+    {
+        return Err(invalid(
+            "key",
+            id,
+            "key deletion review changed; refresh and retry",
+        ));
+    }
+    if key.authority == KeyAuthority::Account
+        && (account_writes_blocked(state) || state.rotation.is_some())
+    {
+        return Err(RepositoryError::ReadOnlyAccount);
+    }
+    fn references(value: &serde_json::Value, id: &str) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().any(|(name, value)| {
+                name == "key_id" && value.as_str() == Some(id) || references(value, id)
+            }),
+            serde_json::Value::Array(values) => values.iter().any(|value| references(value, id)),
+            _ => false,
+        }
+    }
+    let used = state
+        .local
+        .hosts
+        .values()
+        .chain(state.local.groups.values())
+        .chain(
+            state
+                .spaces
+                .values()
+                .flat_map(|space| space.records.values()),
+        )
+        .any(|row| !row.record.deleted && references(&row.record.payload, id));
+    if used && !force {
+        return Err(RepositoryError::KeyInUse(id.into()));
+    }
+    let mut next = state.clone();
+    if key.authority == KeyAuthority::Account {
+        let cache_key = record_key(RecordKind::KeySlot, id);
+        let previous = &state.account.as_ref().unwrap().records[&cache_key];
+        let mut record = ordered_record(
+            state,
+            id,
+            serde_json::Value::Null,
+            true,
+            now_ms,
+            &[&previous.record],
+        )?;
+        record.kind = RecordKind::KeySlot;
+        next.account.as_mut().unwrap().records.insert(
+            cache_key,
+            LocalRecord {
+                record,
+                seq: previous.seq,
+                dirty: true,
+            },
+        );
+    }
+    next.local.keys.remove(id);
+    validate_state(&next)?;
     Ok(next)
 }
 

@@ -223,6 +223,21 @@ describe("explicit import consent and key/account controls", () => {
       if (status === "conflict") expect(rendered).toContain("metadata conflict");
     }
   });
+  it("offers deletion for usable and missing key material while retaining write gates", () => {
+    const publicKey = { schema: 2 as const, name: "work", public_key: "ssh-ed25519 fixture", fingerprint: "SHA256:fixture", key_type: "ssh-ed25519", has_passphrase: false, created_at_ms: 1, origin_device_id: "d".repeat(32) };
+    for (const status of ["available", "needs_material"] as const) {
+      const keys = [{ id: "a".repeat(32), authority: "account" as const, synced: true, public: publicKey, status }];
+      const available = render(<SelectedKeysPanel overview={recordOverview({ keys })} />);
+      expect(buttonTag(available, "Delete key")).not.toContain(DISABLED);
+      const blocked = render(<SelectedKeysPanel overview={recordOverview({ keys, shared_writes_blocked: true })} />);
+      expect(buttonTag(blocked, "Delete key")).toContain(DISABLED);
+    }
+  });
+  it("hides synced key tombstones from the collection", () => {
+    const html = render(<SelectedKeysPanel overview={recordOverview({ keys: [{ id: "a".repeat(32), authority: "account", synced: true, public: null, status: "deleted" }] })} />);
+    expect(html).not.toContain('data-key-id=');
+    expect(html).not.toContain("Key details");
+  });
   it("retains account-free key creation and import without starting automatic sync", () => {
     const html = render(<RecordsKeysPanel overview={recordOverview({ account: null, keys: [] })} openSync={vi.fn()} />);
     expect(buttonTag(html, "Generate key")).not.toContain(DISABLED);

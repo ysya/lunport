@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { KeyRound, Search, Plus, Upload, ArrowUpRight, Copy, PencilLine } from "lucide-react";
+import { KeyRound, Search, Plus, Upload, ArrowUpRight, Copy, PencilLine, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -9,7 +9,7 @@ import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
-import { applyRecordOverview, recordKeyDestinationKey, renameRecordKey, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
+import { applyRecordOverview, recordKeyDestinationKey, renameRecordKey, deleteRecordKey, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
@@ -45,6 +45,9 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
   const [renameError, setRenameError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<{ id: string; expected: KeySlotPayload; snapshot: string; generation: string } | null>(null);
+  const [forceDelete, setForceDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const destination = recordKeyDestinationKey(overview);
   const lifetime = useRef({ destination, version: 0 });
   if (lifetime.current.destination !== destination) lifetime.current = { destination, version: lifetime.current.version + 1 };
@@ -64,7 +67,7 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
     mounted.current = true;
     inFlight.current = false;
     reset(); setSelectedId(null); setDeployKeyId(null); setRenaming(null);
-    setRenameName(""); setRenameError(null); setBusy(false); setError(null); setSearch("");
+    setRenameName(""); setRenameError(null); setDeleting(null); setForceDelete(false); setDeleteError(null); setBusy(false); setError(null); setSearch("");
     return () => { mounted.current = false; };
   }, [destination]);
   const requestClose = () => {
@@ -122,8 +125,25 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
       if (current()) setRenameError("Could not rename this key. It may have changed on another device. Refresh the workspace and try again.");
     } finally { if (current()) { inFlight.current = false; setBusy(false); } }
   };
-  const key = overview.keys.find((item) => item.id === selectedId);
-  const visible = overview.keys.filter((item) => `${item.public?.name ?? item.id} ${item.public?.fingerprint ?? ""} ${item.public?.key_type ?? ""}`.toLowerCase().includes(search.toLowerCase().trim()));
+  const remove = async () => {
+    const current = lease();
+    if (!current() || inFlight.current || !deleting) return;
+    inFlight.current = true;
+    setBusy(true); setDeleteError(null);
+    try {
+      const result = await deleteRecordKey(deleting.id, deleting.expected, deleting.snapshot, forceDelete, deleting.generation, overview.key_scope);
+      if (!current() || recordKeyDestinationKey(result) !== destination) return;
+      applyRecordOverview(client, result);
+      setDeleting(null); setSelectedId(null);
+      requestAnimationFrame(() => { if (current()) document.getElementById(KEYS_SEARCH_INPUT_ID)?.focus(); });
+    } catch (error) {
+      if (current()) setDeleteError(keyActionError(error));
+    } finally { if (current()) { inFlight.current = false; setBusy(false); } }
+  };
+  const activeKeys = overview.keys.filter((item) => item.status !== "deleted");
+  const key = activeKeys.find((item) => item.id === selectedId);
+  const deleteHosts = overview.hosts.filter((host) => host.effective_payload.key_id === deleting?.id);
+  const visible = activeKeys.filter((item) => `${item.public?.name ?? item.id} ${item.public?.fingerprint ?? ""} ${item.public?.key_type ?? ""}`.toLowerCase().includes(search.toLowerCase().trim()));
   const closeDetails = () => {
     const id = selectedId;
     setSelectedId(null);
@@ -146,7 +166,7 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
         <PageHeader
           className="library-page-header"
           title="Keys"
-          count={overview.keys.length}
+          count={activeKeys.length}
           actions={<>
             <Button
               variant="outline"
@@ -246,6 +266,16 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
           >
             <PencilLine className="size-3.5" />
             Rename</Button>}
+          {key.public && (key.status === "available" || key.status === "needs_material") && <Button
+            variant="outline"
+            disabled={busy || draft.busy || (key.authority === "account" && overview.shared_writes_blocked)}
+            onClick={() => {
+              setDeleting({ id: key.id, expected: key.public!, snapshot: overview.group_deletion_token, generation: overview.generation });
+              setForceDelete(false); setDeleteError(null);
+            }}
+          >
+            <Trash2 className="size-3.5" />
+            Delete key</Button>}
           {key.status === "available" && key.public && <Button variant="outline" disabled={busy || draft.busy} onClick={() => setDeployKeyId(key.id)}>
             <ArrowUpRight className="size-3.5" />
             Deploy public key</Button>}
@@ -301,6 +331,30 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
           {!overview.hosts.some((host) => host.effective_payload.key_id === key.id) && <p className="text-muted-foreground">No hosts use this key yet.</p>}
         </section>
       </DetailPane> : null}</DetailPresence>
+      <Dialog open={deleting !== null} onOpenChange={(open) => { if (!open && !inFlight.current) setDeleting(null); }}>
+        <DialogContent className="sm:max-w-md" showCloseButton={!busy}
+          onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}>
+          <form onSubmit={(event) => { event.preventDefault(); void remove(); }}>
+            <DialogHeader>
+              <DialogTitle>Delete key</DialogTitle>
+              <DialogDescription>Remove “{revealHidden(deleting?.expected.name ?? "") }” from your library. With encrypted library sync enabled, this deletion also syncs to your approved devices.</DialogDescription>
+            </DialogHeader>
+            <TaskDialogBody className="space-y-3">
+              <p className="text-sm">Hosts and Groups are kept. Those using this key will need a different key before connecting.</p>
+              {deleteHosts.length > 0 && <div className="text-sm"><p>Hosts currently using this key:</p><ul>{deleteHosts.map((host) => <li key={host.id}>{revealHidden(host.payload.alias)}</li>)}</ul></div>}
+              <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={forceDelete} disabled={busy} onChange={(event) => setForceDelete(event.target.checked)} />
+                Force deletion even if hosts or Groups use this key, including other libraries.
+              </label>
+              <p className="text-xs text-muted-foreground">Imported source files, retained encrypted history and backups are kept. This does not remove the public key from your servers.</p>
+              {deleteError && <p role="alert" className="app-task-error">{deleteError}</p>}
+            </TaskDialogBody>
+            <DialogFooter>
+              <Button type="button" variant="outline" disabled={busy} onClick={() => setDeleting(null)}>Cancel</Button>
+              <Button type="submit" variant="destructive" disabled={busy || (deleteHosts.length > 0 && !forceDelete)}>{busy ? "Deleting…" : forceDelete ? "Force delete key" : "Delete key"}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       <Dialog open={renaming !== null} onOpenChange={(open) => { if (!open && !inFlight.current) setRenaming(null); }}>
         <DialogContent
           className="sm:max-w-md"

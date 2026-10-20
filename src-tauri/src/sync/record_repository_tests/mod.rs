@@ -1,6 +1,7 @@
 use super::*;
 mod host_key_forget;
 mod key_rename;
+mod key_delete;
 use crate::sync::state_v2::AccountState;
 const ID: &str = "0000000000000001";
 const OTHER: &str = "0000000000000002";

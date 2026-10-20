@@ -329,6 +329,9 @@ export async function generateRecordKey(name: string, invocation?: RecordKeyInvo
 export async function renameRecordKey(keyId: string, expected: KeySlotPayload, name: string, invocation?: RecordKeyInvocation): Promise<RecordOverview> {
   return tauriInvoke("records_key_rename", { keyId, expected, name, ...(invocation ? { invocation } : {}) });
 }
+export async function deleteRecordKey(keyId: string, expected: KeySlotPayload, snapshotToken: string, force: boolean, generation: string, invocation?: RecordKeyInvocation): Promise<RecordOverview> {
+  return tauriInvoke("records_key_delete", { keyId, expected, snapshotToken, force, generation, ...(invocation ? { invocation } : {}) });
+}
 export async function createRecordAccount(
   deviceName: string,
   upgradeConfirmed?: boolean,

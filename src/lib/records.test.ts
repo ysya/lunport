@@ -10,6 +10,14 @@ import {
 import * as api from "./records";
 afterEach(() => vi.unstubAllGlobals());
 describe("records native client", () => {
+  it("binds key deletion consent to the reviewed snapshot and exact native generation", async () => {
+    const overview = recordOverview();
+    const calls = stubBackend(async () => overview);
+    const expected: api.KeySlotPayload = { schema: 2, name: "work", public_key: "ssh-ed25519 fixture", fingerprint: "SHA256:fixture", key_type: "ssh-ed25519", has_passphrase: false, created_at_ms: 1, origin_device_id: "d".repeat(32) };
+    await api.deleteRecordKey("a".repeat(32), expected, "reviewed-hosts", true, "18446744073709551614");
+    expect(calls).toEqual([["records_key_delete", { keyId: "a".repeat(32), expected, snapshotToken: "reviewed-hosts", force: true, generation: "18446744073709551614" }]]);
+  });
+
   it("keeps large optimistic tokens intact and sends exact host CRUD arguments", async () => {
     const overview = recordOverview();
     const calls = stubBackend(async () => overview);

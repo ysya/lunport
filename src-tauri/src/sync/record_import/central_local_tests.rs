@@ -801,3 +801,99 @@ fn rename_failure_or_changed_request_preserves_current_name_and_ciphertext() {
         assert_eq!(state(&d), before);
     }
 }
+
+#[test]
+fn offline_delete_captures_signed_tombstone_and_preserves_encrypted_sources() {
+    let d = fixture();
+    let receipt = create(&d, test_keys::plain());
+    let before = state(&d);
+    let vault_before = fs::read(store::vault_path(&d.env().state_path)).unwrap();
+    let overview = crate::sync::record_commands::overview(&d.env()).unwrap();
+    let view = serde_json::to_value(&overview).unwrap();
+    let reviewed = view["group_deletion_token"].as_str().unwrap();
+    let generation = view["generation"].as_str().unwrap().parse().unwrap();
+    delete(
+        &d.env(),
+        &scope(&d),
+        &receipt.key_id,
+        &receipt.public,
+        reviewed,
+        false,
+        generation,
+    )
+    .unwrap();
+    let after = state(&d);
+    assert_eq!(
+        before.local.central_projection,
+        after.local.central_projection
+    );
+    assert_eq!(
+        vault_before,
+        fs::read(store::vault_path(&d.env().state_path)).unwrap()
+    );
+    assert_eq!(
+        crate::sync::record_repository::resolve_key(&after, &receipt.key_id)
+            .unwrap()
+            .status,
+        crate::sync::record_repository::KeyStatus::Deleted
+    );
+    let context = Context::load(&d.env(), &after).unwrap();
+    let pending = &after
+        .local
+        .central
+        .as_ref()
+        .unwrap()
+        .replica
+        .as_ref()
+        .unwrap()
+        .pending;
+    let tombstone = &pending
+        .values()
+        .find(|p| p.latest.envelope.header.kind == "keyslot")
+        .unwrap()
+        .latest;
+    assert!(tombstone.envelope.header.deleted);
+    let plain = tombstone
+        .envelope
+        .verify(&context.identity.keys.public().signing)
+        .unwrap()
+        .open(&context.keys)
+        .unwrap();
+    assert!(matches!(
+        central::payload::admit(&context.keys, &tombstone.envelope.header, &plain)
+            .unwrap()
+            .data,
+        central::payload::Data::Deleted
+    ));
+    assert!(d.relay.calls().is_empty());
+    let probe = record_runtime::probe_startup(&d.env().state_path, "central-local");
+    record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();
+    assert_eq!(
+        crate::sync::record_repository::resolve_key(&state(&d), &receipt.key_id)
+            .unwrap()
+            .status,
+        crate::sync::record_repository::KeyStatus::Deleted
+    );
+}
+#[test]
+fn stale_delete_generation_keeps_the_key_and_ciphertext() {
+    let d = fixture();
+    let receipt = create(&d, test_keys::plain());
+    let before = state(&d);
+    let token = crate::sync::record_groups::deletion_snapshot_token(
+        &crate::sync::record_repository::snapshot(&before).unwrap(),
+    )
+    .unwrap();
+    let invocation = scope(&d);
+    assert!(delete(
+        &d.env(),
+        &invocation,
+        &receipt.key_id,
+        &receipt.public,
+        &token,
+        true,
+        0
+    )
+    .is_err());
+    assert_eq!(state(&d), before);
+}
