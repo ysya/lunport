@@ -114,14 +114,8 @@ jobs:
               raise
           PY
 
-      - name: Profile selection in the normal library
-        env:
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
-          CARGO_PROFILE_RELEASE_LTO: "false"
-        run: |
-          cargo test --locked --test app_profile_build
-          cargo test --locked --release --test app_profile_build
-          cargo test --locked --release --features development-profile --test app_profile_build
+      - name: Debug profile selection in the normal library
+        run: cargo test --locked --test app_profile_build
 
   linux:
     name: Rust, SSH and PAM (Linux)
@@ -176,14 +170,8 @@ jobs:
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
         run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
 
-      - name: Profile selection in the normal library
-        env:
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
-          CARGO_PROFILE_RELEASE_LTO: "false"
-        run: |
-          cargo test --locked --test app_profile_build
-          cargo test --locked --release --test app_profile_build
-          cargo test --locked --release --features development-profile --test app_profile_build
+      - name: Debug profile selection in the normal library
+        run: cargo test --locked --test app_profile_build
       - name: Group ordering remains compatible with the published 1.2.0 client
         run: |
           git fetch --depth=1 origin tag v1.2.0
@@ -201,3 +189,43 @@ jobs:
       - name: What the container logged
         if: failure()
         run: docker logs sshelter-pam-sshd || true
+
+  profiles:
+    name: Production and Development boundaries (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: src-tauri
+    # These tests exercise the actual app library and vault export in both release
+    # profiles. Run alongside the full debug suite, rather than adding another
+    # dependency graph and two app links to the end of every native job.
+    env:
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - name: Placeholder frontend
+        run: |
+          mkdir -p ../dist
+          echo '<!doctype html>' > ../dist/index.html
+      - name: Production library and write boundary
+        run: cargo test --locked --release --test app_profile_build
+      - name: Development release library and write boundary
+        run: cargo test --locked --release --features development-profile --test app_profile_build
