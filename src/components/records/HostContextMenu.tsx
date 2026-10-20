@@ -2,6 +2,7 @@ import { useRef, useState, type ReactElement } from "react";
 import {
   ArrowUpRight,
   Copy,
+  CopyPlus,
   FolderInput,
   Pencil,
   Info,
@@ -42,6 +43,7 @@ export function HostContextMenu({
   connectDisabled,
   connect,
   edit,
+  duplicate,
   inspect,
   accept,
   onBusy,
@@ -55,6 +57,7 @@ export function HostContextMenu({
   connectDisabled: boolean;
   connect?: () => void;
   edit?: () => void;
+  duplicate?: () => void;
   inspect?: () => void;
   accept?: (next: RecordOverview) => unknown;
   onBusy?: (busy: boolean) => void;
@@ -179,6 +182,18 @@ export function HostContextMenu({
             <Pencil />
             Edit host…
           </ContextMenuItem>
+          {duplicate && (
+            <ContextMenuItem
+              disabled={disabled || (host.scope.kind === "space" && overview.shared_writes_blocked)}
+              onSelect={() => {
+                openingDialog.current = true;
+                duplicate();
+              }}
+            >
+              <CopyPlus />
+              Duplicate host…
+            </ContextMenuItem>
+          )}
           {inspect && (
             <ContextMenuItem disabled={disabled} onSelect={() => {
               openingDialog.current = true;

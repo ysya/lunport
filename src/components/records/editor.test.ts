@@ -8,6 +8,7 @@ import {
 } from "./fixtures";
 import {
   beginEditor,
+  beginDuplicateEditor,
   changeEditor,
   refreshEditor,
   buildEditorPayload,
@@ -18,6 +19,57 @@ import {
 } from "./editor";
 afterEach(() => vi.unstubAllGlobals());
 describe("record editor", () => {
+  it("duplicates connection settings into an independent unpinned create draft", async () => {
+    const source = hostView({
+      scope: { kind: "space", space_id: "a".repeat(64) },
+      payload: hostPayload({
+        schema: 3,
+        group_id: "0000000000000010",
+        inherit: ["port", "user"],
+        port: 2222,
+        user: "admin",
+        auth: "key",
+        key_id: "b".repeat(32),
+        jump: ["0000000000000002"],
+        keepalive_secs: 60,
+        keepalive_max_missed: 5,
+        connect_timeout_secs: 25,
+        tags: ["production"],
+        notes: "Connection template",
+        host_key: {
+          algorithm: "ssh-ed25519", public_key: "fixture", fingerprint: "SHA256:fixture",
+          pinned_at_ms: 1, pinned_by_device_id: "d".repeat(32),
+        },
+        imported: { source: "/fixture/config", at_ms: 1, unsupported: [{ keyword: "Match", value: "review", requires_review: true }] },
+      }),
+    });
+    const before = structuredClone(source);
+    const calls = stubBackend(async () => recordOverview());
+    const draft = beginDuplicateEditor(source, [source]);
+    expect(draft).toMatchObject({ id: null, revision: null, dirty: true, reviewed: false, scope: source.scope });
+    expect(draft.originalScope).toBeUndefined();
+    expect(draft.payload).toEqual({ ...source.payload, alias: "web-copy", host_key: null });
+    expect(calls).toEqual([]);
+    await submitEditor(draft);
+    expect(calls).toEqual([["records_host_create", { scope: source.scope, payload: draft.payload }]]);
+    draft.payload.jump.push(source.id);
+    draft.payload.tags.push("copy");
+    draft.payload.inherit!.push("jump");
+    draft.payload.imported!.unsupported[0].value = "changed in copy";
+    expect(source).toEqual(before);
+  });
+  it("chooses an unused copy name across scopes and keeps a duplicate draft after refresh", () => {
+    const source = hostView();
+    const hosts = [source,
+      hostView({ id: "0000000000000002", payload: hostPayload({ alias: "web-copy" }) }),
+      hostView({ id: "0000000000000003", scope: { kind: "space", space_id: "a".repeat(64) }, payload: hostPayload({ alias: "web-copy-2" }) }),
+    ];
+    const draft = beginDuplicateEditor(source, hosts);
+    expect(draft.payload.alias).toBe("web-copy-3");
+    expect(refreshEditor(draft, null)).toEqual(draft);
+    expect(refreshEditor(draft, hostView({ payload: hostPayload({ hostname: "changed.invalid" }) }))).toEqual(draft);
+    expect(editorProblem(draft)).toBeNull();
+  });
   it("retains a Group move draft while detecting actual external scope changes", () => {
     const saved = hostView();
     const draft = {

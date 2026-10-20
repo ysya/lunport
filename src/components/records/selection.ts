@@ -5,6 +5,7 @@ export type HostSelection =
       nonce: number;
       groupId?: string;
       scope?: import("@/lib/records").HostScope;
+      duplicateSource?: import("@/lib/records").RecordHostView;
     }
   | {
       kind: "new_group";

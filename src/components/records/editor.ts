@@ -57,6 +57,21 @@ export function beginEditor(host: RecordHostView | null): EditorState {
     error: null,
   };
 }
+export function beginDuplicateEditor(
+  host: RecordHostView,
+  hosts: RecordHostView[],
+): EditorState {
+  const aliases = new Set(hosts.map((value) => value.payload.alias));
+  const base = `${host.payload.alias}-copy`;
+  let alias = base;
+  for (let suffix = 2; aliases.has(alias); suffix++) alias = `${base}-${suffix}`;
+  return {
+    ...beginEditor(null),
+    scope: structuredClone(host.scope),
+    payload: structuredClone({ ...host.payload, alias, host_key: null }),
+    dirty: true,
+  };
+}
 export function changeEditor(
   state: EditorState,
   patch: Partial<HostPayload>,
