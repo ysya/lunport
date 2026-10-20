@@ -2,6 +2,8 @@
 
 ## [1.7.0](https://github.com/ysya/lunport/compare/v1.6.0...v1.7.0) (2026-10-20)
 
+Use hosts, keys and SSH locally without an account. Passkey sign-in and encrypted multi-device sync are optional.
+
 
 ### Features
 
