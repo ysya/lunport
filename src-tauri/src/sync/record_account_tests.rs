@@ -576,6 +576,60 @@ fn explicit_synced_download_activates_validated_vault_material_without_plaintext
         .contains("BEGIN OPENSSH PRIVATE KEY"));
 }
 #[test]
+fn synced_restore_repairs_missing_or_mismatched_material_without_changing_host_binding() {
+    use crate::sync::record_repository as repo;
+    use crate::vault::store::{read_vault, vault_path, EntryOrigin, Vault};
+    for missing in [true, false] {
+        let (d, keys) = joined();
+        let private = crate::sync::slot_rules::test_keys::plain();
+        let id = "a".repeat(32);
+        put_incoming_key(&d, &keys, &id, &private);
+        download_key(&d.env(), &id).unwrap();
+        let other = crate::sync::record_keys::import_local(
+            &d.env(), "unrelated", zeroize::Zeroizing::new(crate::sync::slot_rules::test_keys::ecdsa()), EntryOrigin::Imported,
+        ).unwrap();
+        record_runtime::mutate_records(&d.env(), |state| {
+            let host = repo::get_host(state, HOST).unwrap();
+            let mut payload = host.host.payload;
+            payload.auth = records_v3::AuthKind::Key;
+            payload.key_id = Some(id.clone());
+            repo::update_host(state, HOST, &host.revision, payload, 10).map_err(|e| failure(&e.to_string()))
+        }).unwrap();
+        let before = state(&d);
+        let old_vault_id = before.local.keys[&id].vault_id.clone();
+        let path = vault_path(&d.env().state_path);
+        let original = read_vault(&path, &d.keychain).unwrap();
+        let unrelated = original.get(&other.key_id).unwrap().unwrap();
+        let mut vault = Vault::open(&path, &d.keychain, 10).unwrap();
+        if missing {
+            vault.remove(&old_vault_id).unwrap();
+        } else {
+            vault.put(&d.keychain, &old_vault_id, &unrelated).unwrap();
+        }
+        let key = repo::resolve_key(&before, &id).unwrap();
+        assert_eq!(key.status, repo::KeyStatus::Available, "index presence alone is not proof of private material");
+        let broken = read_vault(&path, &d.keychain).unwrap();
+        let broken_entry = broken.get(&old_vault_id).unwrap();
+        assert!(!crate::session::record_material::available(&key, broken_entry.as_ref()).unwrap_or(false));
+        download_key(&d.env(), &id).unwrap();
+        let after = state(&d);
+        assert_eq!(after.local.hosts, before.local.hosts);
+        assert_eq!(after.local.keys[&other.key_id], before.local.keys[&other.key_id]);
+        assert_ne!(after.local.keys[&id].vault_id, old_vault_id);
+        let repaired = read_vault(&path, &d.keychain).unwrap();
+        assert_eq!(repaired.get(&other.key_id).unwrap().as_ref(), Some(&unrelated));
+        assert_eq!(repaired.get(&old_vault_id).unwrap(), broken_entry, "recovery retains old vault entries");
+        let entry = repaired.get(&after.local.keys[&id].vault_id).unwrap().unwrap();
+        assert!(crate::session::record_material::matches(&repo::resolve_key(&after, &id).unwrap(), &entry));
+        let material = crate::vault::material::open(&entry.private_key, None).unwrap();
+        let bytes = material.sign(b"restored SSH authentication", 0).unwrap();
+        use signature::Verifier;
+        use ssh_encoding::Decode;
+        let signature = ssh_key::Signature::decode(&mut &bytes[..]).unwrap();
+        material.key_data().verify(b"restored SSH authentication", &signature).unwrap();
+    }
+}
+#[test]
 fn synced_download_refuses_a_local_public_identity_conflict_without_creating_a_vault() {
     let (d, keys) = joined();
     let private = crate::sync::slot_rules::test_keys::plain();

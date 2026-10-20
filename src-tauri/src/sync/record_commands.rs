@@ -1089,11 +1089,8 @@ fn material_for_sync(
         .get(vault_id)
         .map_err(|_| AppError::Other("The vault key cannot be read.".into()))?
         .ok_or_else(|| AppError::Other("The key material is unavailable on this device.".into()))?;
-    if !crate::session::record_material::matches(&key, &entry) {
-        return Err(AppError::Other(
-            "The vault key does not match its authoritative public identity.".into(),
-        ));
-    }
+    crate::session::record_material::verify(&key, &entry)
+        .map_err(|message| AppError::Other(message.into()))?;
     Ok((
         key.public
             .ok_or_else(|| AppError::Other("The key has no public identity.".into()))?,

@@ -211,25 +211,24 @@ describe("explicit import consent and key/account controls", () => {
     expect(html).not.toContain("<aside");
     expect(html).toContain('aria-pressed="false"');
   });
-  it("offers an explicit synced-key download and refuses conflicting material", () => {
-    const key = {
-      id: "a".repeat(32),
-      authority: "account" as const,
-      synced: true,
-      public: null,
-      status: "needs_material" as const,
-    };
-    const html = render(
-      <SelectedKeysPanel overview={recordOverview({ keys: [key] })} />,
-    );
-    expect(text(html)).toContain("Download synced key");
-    const conflict = render(
-      <SelectedKeysPanel
-        overview={recordOverview({ keys: [{ ...key, status: "conflict" }] })}
-      />,
-    );
-    expect(text(conflict)).not.toContain("Download synced key");
-    expect(text(conflict)).toContain("metadata conflict");
+  it("routes every older key state to whole-library account setup without per-key sync or downloads", () => {
+    for (const synced of [true, false, null]) for (const status of ["available", "needs_material", "conflict", "deleted"] as const) {
+      const key = { id: "a".repeat(32), authority: "account" as const, synced, public: null, status };
+      const html = render(<SelectedKeysPanel overview={recordOverview({ keys: [key], account: { chain_id: "b".repeat(64), device_name: "Laptop" } })} openSync={vi.fn()} />);
+      const rendered = text(html);
+      expect(buttonTag(html, "Set up automatic sync")).not.toContain(DISABLED);
+      expect(rendered).toContain("All managed SSH private keys then sync automatically");
+      expect(rendered).toContain("existing library is reviewed and preserved");
+      for (const legacy of ["Download synced key", "Restore synced key", "Sync key", "Stop syncing", "Confirm sync", "Confirm stop"]) expect(rendered).not.toContain(legacy);
+      if (status === "conflict") expect(rendered).toContain("metadata conflict");
+    }
+  });
+  it("retains account-free key creation and import without starting automatic sync", () => {
+    const html = render(<RecordsKeysPanel overview={recordOverview({ account: null, keys: [] })} openSync={vi.fn()} />);
+    expect(buttonTag(html, "Generate key")).not.toContain(DISABLED);
+    expect(buttonTag(html, "Import private key")).not.toContain(DISABLED);
+    expect(text(html)).toContain("keep using your keys locally without signing in");
+    expect(text(html)).not.toContain("Stop syncing");
   });
   it("uses automatic key sync after central cutover without legacy download or sharing controls", () => {
     const key = { id: "a".repeat(32), authority: "account" as const, synced: false, public: null, status: "needs_material" as const };
@@ -251,73 +250,6 @@ describe("explicit import consent and key/account controls", () => {
       expect(text(html)).not.toContain("Download synced key");
       expect(html).not.toContain('data-attention="true"');
     }
-  });
-  it("hides a stale per-key confirmation when the overview switches to central mode", () => {
-    const key = { id: "a".repeat(32), authority: "account" as const, synced: false, public: null, status: "available" as const };
-    vi.mocked(useState).mockReturnValueOnce([key.id, vi.fn()]).mockReturnValueOnce(["", vi.fn()]).mockReturnValueOnce([null, vi.fn()]).mockReturnValueOnce([null, vi.fn()]).mockReturnValueOnce([{}, vi.fn()]).mockReturnValueOnce([false, vi.fn()]).mockReturnValueOnce([{ id: key.id, enabled: true }, vi.fn()]);
-    const html = render(<RecordsKeysPanel overview={recordOverview({ central_mode: true, keys: [key], account: { chain_id: "a".repeat(64), device_name: "Synthetic" } })} />);
-    expect(text(html)).not.toContain("Confirm sync");
-    expect(text(html)).not.toContain("Sync this key to your other computers");
-  });
-  it("offers sync again when account metadata survives an unpublished private key", () => {
-    const key = {
-      id: "a".repeat(32),
-      authority: "account" as const,
-      synced: false,
-      public: null,
-      status: "available" as const,
-    };
-    const html = render(
-      <SelectedKeysPanel
-        overview={recordOverview({
-          keys: [key],
-          account: { chain_id: "b".repeat(64), device_name: "Laptop" },
-        })}
-      />,
-    );
-    expect(buttonTag(html, "Sync key")).not.toContain(DISABLED);
-    expect(text(html)).not.toContain("Stop syncing");
-    expect(text(html)).toContain("Account key");
-    expect(text(html)).not.toContain("Synced key");
-  });
-  it("disables sync toggling when authenticated sync status is unknown", () => {
-    const key = {
-      id: "a".repeat(32),
-      authority: "account" as const,
-      synced: null,
-      public: null,
-      status: "available" as const,
-    };
-    const html = render(
-      <SelectedKeysPanel
-        overview={recordOverview({
-          keys: [key],
-          account: { chain_id: "b".repeat(64), device_name: "Laptop" },
-        })}
-      />,
-    );
-    expect(buttonTag(html, "Sync state unavailable")).toContain(DISABLED);
-    expect(text(html)).not.toContain("Stop syncing");
-  });
-  it("offers stop only for an explicitly enabled key without implying relay delivery", () => {
-    const key = {
-      id: "a".repeat(32),
-      authority: "account" as const,
-      synced: true,
-      public: null,
-      status: "available" as const,
-    };
-    const html = render(
-      <SelectedKeysPanel
-        overview={recordOverview({
-          keys: [key],
-          account: { chain_id: "b".repeat(64), device_name: "Laptop" },
-        })}
-      />,
-    );
-    expect(buttonTag(html, "Stop syncing")).not.toContain(DISABLED);
-    expect(text(html)).toContain("Sync enabled");
-    expect(text(html)).toContain("waiting for the relay");
   });
   it("keeps shared account controls disabled while shared writes are gated", () => {
     const html = render(
