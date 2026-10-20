@@ -69,7 +69,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.native == 'true'
     runs-on: windows-latest
-    timeout-minutes: 45
+    # Includes default sync, production/development profile builds and actual GUI/SSH checks.
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: src-tauri
@@ -111,6 +112,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows central ciphertext publication failed' }
           cargo test --locked --lib sync::central::adoption::tests::approved_empty_device_reviews_and_materializes_the_existing_managed_library_then_retries_safely -- --exact --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Windows central second-device publication failed' }
+          cargo test --locked --lib sync::central::adoption::tests::empty_reserved_stage_is_recovered_but_unknown_contents_are_retained -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Windows central empty reservation recovery failed' }
 
       - name: Complete safe Rust suite
         env:

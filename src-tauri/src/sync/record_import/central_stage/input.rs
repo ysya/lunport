@@ -135,10 +135,15 @@ pub(crate) fn prepare_reserved(
                         .dir
                         .parent()
                         .ok_or_else(|| failure("reserved stage has no root"))?;
+                    #[cfg(unix)]
                     fs::File::open(root)?.sync_all()?;
                     if !prepared.original_import_root() {
                         fs::remove_dir(root)?;
                     }
+                    // Windows recreates this same protected reservation immediately.
+                    // The native journal write flushes its new metadata before any
+                    // material effects; a crash here can only retain an empty stage.
+                    #[cfg(unix)]
                     fs::File::open(
                         root.parent()
                             .ok_or_else(|| failure("reserved stage has no parent"))?,
