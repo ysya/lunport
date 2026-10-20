@@ -79,6 +79,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-on-failure: true
       # tauri::generate_context! reads frontendDist (../dist) at compile time and fails when it is missing.
       # This job only runs Rust tests, so a placeholder page is enough.
       - name: Placeholder frontend
@@ -106,6 +107,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows central filesystem security boundary failed' }
           cargo test --locked --lib sync::central::migration_files -- --test-threads=2
           if ($LASTEXITCODE -ne 0) { throw 'Windows central source capture and archive codec failed' }
+          cargo test --locked --lib sync::central::active_dispatch::pull::tests::valid_page_advances_only_ciphertext_and_never_activates_public_or_private_cache -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Windows central ciphertext publication failed' }
+          cargo test --locked --lib sync::central::adoption::tests::approved_empty_device_reviews_and_materializes_the_existing_managed_library_then_retries_safely -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Windows central second-device publication failed' }
 
       - name: Complete safe Rust suite
         env:
