@@ -99,6 +99,21 @@ impl Terminals {
             .cloned()
             .ok_or_else(|| "Terminal session has ended".into())
     }
+    fn close(&self, id: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(terminal) = entries.remove(id) {
+            terminal.stop();
+        }
+    }
+    fn forget(&self, id: &str, owner: &Arc<Terminal>) {
+        let mut entries = self.entries.lock().unwrap();
+        if entries
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, owner))
+        {
+            entries.remove(id);
+        }
+    }
     fn open(
         self: &Arc<Self>,
         id: String,
@@ -197,7 +212,7 @@ impl Terminals {
                 }
                 let _ = control(&sink, serde_json::json!({"type":"closed"}));
                 reader_owner.stop();
-                registry.entries.lock().unwrap().remove(&reader_id);
+                registry.forget(&reader_id, &reader_owner);
             });
         if let Err(error) = result {
             terminal.stop();
@@ -370,9 +385,7 @@ pub fn terminal_close(
     id: String,
 ) -> Result<(), String> {
     main_only(&window)?;
-    if let Ok(terminal) = app.state::<AppState>().session.embedded.get(&id) {
-        terminal.stop();
-    }
+    app.state::<AppState>().session.embedded.close(&id);
     Ok(())
 }
 
@@ -410,6 +423,39 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("reloaded"));
         assert!(registry.entries.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn reconnect_releases_its_slot_before_the_old_reader_finishes() {
+        let registry = Arc::new(Terminals::default());
+        for index in 0..MAX_SESSIONS {
+            registry
+                .entries
+                .lock()
+                .unwrap()
+                .insert(index.to_string(), Arc::new(terminal()));
+        }
+        let old = registry.get("0").unwrap();
+        registry.close("0");
+        assert!(old.closed.load(Ordering::Acquire));
+        let (client, _peer) = UnixStream::pair().unwrap();
+        registry
+            .open(
+                "0".into(),
+                HostQuery::Alias("web".into()),
+                80,
+                24,
+                client,
+                Arc::new(|_| Ok(())),
+                0,
+            )
+            .unwrap();
+        assert_eq!(registry.entries.lock().unwrap().len(), MAX_SESSIONS);
+        registry.forget("0", &old);
+        assert!(
+            registry.get("0").is_ok(),
+            "old cleanup must not remove the replacement"
+        );
+        registry.close_all();
     }
     #[test]
     fn output_budget_requires_consumption_and_close_wakes_a_blocked_reader() {

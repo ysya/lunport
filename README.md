@@ -13,7 +13,7 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 ## A workspace for your connections
 
 - **Hosts and Groups** — organize connections with nested Groups, shared defaults and tags. Search the library, revisit recent hosts and connect from the command palette.
-- **SSH terminal in the app** — open session tabs in Lunport or your preferred external terminal, search retained output, adjust terminal text size, verify server fingerprints and enter passwords or authentication codes in Lunport. Save host passwords in this device's system credential store when desired. Jump hosts use `ProxyJump`.
+- **SSH terminal in the app** — open session tabs in Lunport or your preferred external terminal, reconnect dropped sessions in the same tab while keeping previous output, search retained output, adjust terminal text size, verify server fingerprints and enter passwords or authentication codes in Lunport. Save host passwords in this device's system credential store when desired. Jump hosts use `ProxyJump`.
 - **SSH tunnels** — save Local, Remote and SOCKS5 forwarding rules. Rules sync with your account; each device starts and stops its own connections.
 - **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Key sharing has separate controls.
 - **Encrypted library sync** — connect your computers with a private 24-word code. Hosts and Groups travel together; passwords stay on each device, and private keys sync only when explicitly shared. The relay stores ciphertext and can be self-hosted.
