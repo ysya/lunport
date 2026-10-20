@@ -536,7 +536,7 @@ pub(super) fn require_selected(
     protected(env, owner, current)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(in crate::sync::central) mod tests {
     use super::*;
     use crate::sync::{

@@ -499,7 +499,7 @@ pub(in crate::sync) fn edit_error() -> AppError {
     AppError::Other("Library changes are paused while this device completes its encrypted migration. Continue library setup; original data and saved progress are retained.".into())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::sync::{central::migration_files::Files, record_keys};

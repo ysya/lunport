@@ -748,7 +748,7 @@ fn section<'a>(input: &mut &'a [u8], max: usize) -> Result<&'a [u8], AppError> {
     Ok(value)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(in crate::sync::central) mod tests {
     use super::*;
     use crate::{
@@ -1047,5 +1047,5 @@ pub(in crate::sync::central) mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod retained_tests;

@@ -262,7 +262,7 @@ pub(in crate::sync::central) fn confirm(
         accepted(env, loaded)?.require_current(env, loaded)
     })
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;
 
 pub(in crate::sync::central) fn is_approved(

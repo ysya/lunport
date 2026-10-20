@@ -99,7 +99,18 @@ fn from_stage(
                 }
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        for directory in [
+            paths.dir.as_path(),
+            paths
+                .dir
+                .parent()
+                .ok_or_else(|| failure("reserved stage binding is invalid"))?,
+        ] {
+            crate::sync::central_files_windows::Directory::private(directory, false)?
+                .check_private()?;
+        }
+        #[cfg(not(any(unix, windows)))]
         return Err(failure(
             "empty reserved stages require the verified secure file implementation",
         ));
@@ -183,7 +194,8 @@ fn from_stage(
         drop(Zeroizing::new(central::crypto::decode(&key, 32, 32)?));
     }
     let staged_bytes = optional_bytes(&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES)?;
-    if journal.source_state_digest.is_none() && (staged_bytes.is_some() || master_bytes.is_some())
+    if journal.source_state_digest.is_none()
+        && (staged_bytes.is_some() || master_bytes.is_some())
         || journal
             .staged_vault_digest
             .as_ref()
@@ -241,8 +253,9 @@ fn from_stage(
                 return Err(failure("initial staged material provenance changed"));
             }
             let material = &initial.delta().plan().materials()[id];
-            let private =
-                central::payload::PrivateMaterial::new(Zeroizing::new(entry.private_key.clone()))?;
+            let private = central::payload::PrivateMaterial::new(Zeroizing::new(
+                entry.private_key.clone(),
+            ))?;
             private.validate_against(id, &material.metadata)?;
             crate::sync::records_v3::key_material_matches(
                 &material.metadata.public,
@@ -263,7 +276,8 @@ fn from_stage(
     let replacement = if active.as_ref().map(|b| b.as_slice()) != original_vault {
         if journal.phase == Phase::Prepared
             || journal.staged_vault_digest.is_none()
-            || active.as_ref().map(|b| b.as_slice()) != staged_bytes.as_ref().map(|b| b.as_slice())
+            || active.as_ref().map(|b| b.as_slice())
+                != staged_bytes.as_ref().map(|b| b.as_slice())
         {
             return Err(failure("initial active vault has an unbound replacement"));
         }
@@ -362,5 +376,5 @@ pub(in crate::sync) fn read_locked(
     Ok(effects)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

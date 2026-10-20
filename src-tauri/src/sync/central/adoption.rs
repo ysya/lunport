@@ -1426,7 +1426,7 @@ pub(super) fn complete_saved(env: &SyncEnv) -> Result<(), AppError> {
     crate::sync::record_import::central_stage::complete_initial_saved(env, &state.operation)?;
     Ok(())
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;
 
 #[derive(Deserialize)]

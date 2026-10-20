@@ -6,6 +6,16 @@ use crate::sync::{
 };
 use std::sync::Arc;
 
+#[cfg(windows)]
+fn bounded_read(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    Ok(Zeroizing::new(crate::sync::central_files_windows::read(
+        path, limit,
+    )?))
+}
+#[cfg(windows)]
+fn optional_bytes(path: &Path, limit: u64) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
+    Ok(crate::sync::central_files_windows::optional(path, limit)?.map(Zeroizing::new))
+}
 /// Public expected destination, never a credential or private material reference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +106,7 @@ impl Context {
     }
     pub fn load(env: &SyncEnv, state: &SyncStateV3) -> Result<Self, AppError> {
         central::controller::require_enabled()?;
-        if !cfg!(unix) {
+        if !cfg!(any(unix, windows)) {
             return Err(failure(
                 "central material publication is not verified on this platform",
             ));
@@ -121,6 +131,13 @@ impl Context {
             }
         }
 
+        #[cfg(windows)]
+        let _directory = crate::sync::central_files_windows::Directory::private(
+            env.state_path
+                .parent()
+                .ok_or_else(|| failure("central local data has no directory"))?,
+            false,
+        )?;
         let saved = record_runtime::read_saved_records(&env.state_path)?;
         if &saved != state {
             return Err(failure(
@@ -423,7 +440,29 @@ fn confirm_staged_durability(paths: &Paths, j: &Journal) -> Result<(), AppError>
         }
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        for path in [
+            &paths.journal,
+            &paths.vault,
+            &paths.state,
+            &paths.original_state,
+            &paths.original_vault,
+            &paths.masters,
+        ] {
+            match crate::sync::central_files_windows::confirm(path) {
+                Ok(()) => {}
+                Err(AppError::Io(e))
+                    if e.kind() == ErrorKind::NotFound
+                        && (path == &paths.masters
+                            || path == &paths.original_vault
+                                && j.original_vault_digest.is_none()) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (paths, j);
         Err(failure(
@@ -567,6 +606,6 @@ pub(crate) fn rename(
     env.events.wake();
     Ok(result)
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 #[path = "central_local_tests.rs"]
 pub(in crate::sync) mod tests;

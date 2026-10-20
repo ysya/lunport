@@ -331,7 +331,7 @@ fn initialize(
     initialize_checked(env, life, owner, ordinal, plain, |_| Ok(()))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;
 
 /// Any reserved source capture freezes ordinary edits, including an interrupted first write.

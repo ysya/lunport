@@ -260,19 +260,19 @@ pub(super) fn advance(
         }
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(super) fn verified_for_test(env: &SyncEnv, keys: &VaultKeys) -> Verified {
     tests::verified(env, keys)
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(super) fn verified_fixture_for_test() -> (crate::sync::testkit::TestDevice, VaultKeys, Verified)
 {
     tests::verified_fixture()
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(super) fn verified_material_fixture_for_test(
 ) -> (crate::sync::testkit::TestDevice, VaultKeys, Verified) {
     tests::material_verified_fixture()
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

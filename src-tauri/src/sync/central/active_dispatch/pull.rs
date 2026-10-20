@@ -202,5 +202,5 @@ pub(in crate::sync::central) fn with_reply(
         reply.decode()
     })
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

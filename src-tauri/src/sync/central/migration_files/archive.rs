@@ -22,13 +22,18 @@ fn path(value: &str, directory: bool) -> Result<PathBuf, AppError> {
     }
     Ok(parts.iter().collect())
 }
-fn encoded_path(value: &Path, directory: bool) -> Result<&str, AppError> {
-    let value_str = value.to_str().ok_or_else(invalid)?;
-    if path(value_str, directory)? != value {
+fn encoded_path(value: &Path, directory: bool) -> Result<String, AppError> {
+    let text = value.to_str().ok_or_else(invalid)?;
+    #[cfg(windows)]
+    let encoded = text.replace('\\', "/");
+    #[cfg(not(windows))]
+    let encoded = text.to_owned();
+    if path(&encoded, directory)? != value {
         return Err(invalid());
     }
-    Ok(value_str)
+    Ok(encoded)
 }
+
 fn parent_present(value: &Path, dirs: &BTreeSet<PathBuf>) -> bool {
     value
         .parent()
@@ -70,11 +75,11 @@ impl Files {
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&(self.directories.len() as u32).to_be_bytes());
         for directory in &self.directories {
-            write_path(&mut out, encoded_path(directory, true)?);
+            write_path(&mut out, &encoded_path(directory, true)?);
         }
         out.extend_from_slice(&(self.bytes.len() as u32).to_be_bytes());
         for (file, bytes) in &self.bytes {
-            write_path(&mut out, encoded_path(file, false)?);
+            write_path(&mut out, &encoded_path(file, false)?);
             out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
             out.extend_from_slice(bytes);
         }

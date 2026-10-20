@@ -136,7 +136,7 @@ pub(in crate::sync::central) fn read_all(
     Ok(result)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::sync::{

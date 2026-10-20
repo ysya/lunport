@@ -148,5 +148,5 @@ pub(super) fn ensure(
     source_complete::check(env, &state, generation, &session, keys)?;
     Ok(planned)
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

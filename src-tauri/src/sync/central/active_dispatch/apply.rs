@@ -89,5 +89,5 @@ pub(in crate::sync::central) fn once(env: &SyncEnv) -> Result<Report, AppError> 
         keys: result.key_count,
     })
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

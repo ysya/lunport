@@ -194,14 +194,36 @@ pub fn probe_startup(path: &Path, device_name: &str) -> StartupProbe {
 }
 /// Native read-only saved-state evidence. Missing/changed/future data is never repaired here.
 pub(crate) fn read_saved_records(path: &Path) -> Result<SyncStateV3, AppError> {
-    let mut options = OpenOptions::new(); options.read(true);
-    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK); }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() { return Err(AppError::Other("saved state must be a regular file".into())); }
-    let mut bytes = Vec::new(); file.take(MAX_STATE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_STATE_BYTES { return Err(AppError::Other("saved state exceeds the supported limit".into())); }
-    let state: SyncStateV3 = serde_json::from_slice(&bytes).map_err(|_| AppError::Other("saved state is unreadable; reload before synchronization".into()))?;
-    validate_state(&state).map_err(|_| AppError::Other("saved state is invalid; reload before synchronization".into()))?;
+    #[cfg(windows)]
+    let bytes = crate::sync::central_files_windows::read(path, MAX_STATE_BYTES)?;
+    #[cfg(not(windows))]
+    let bytes = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(AppError::Other("saved state must be a regular file".into()));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_STATE_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_STATE_BYTES {
+            return Err(AppError::Other(
+                "saved state exceeds the supported limit".into(),
+            ));
+        }
+        bytes
+    };
+    let state: SyncStateV3 = serde_json::from_slice(&bytes).map_err(|_| {
+        AppError::Other("saved state is unreadable; reload before synchronization".into())
+    })?;
+    validate_state(&state).map_err(|_| {
+        AppError::Other("saved state is invalid; reload before synchronization".into())
+    })?;
     Ok(state)
 }
 /// Shape validation allows valid remote relationship conflicts to remain available for repair.
@@ -279,10 +301,14 @@ fn save_active_with_authority(
     projection: Option<&ProjectionSave<'_>>,
 ) -> Result<(), AppError> {
     if replacement.is_some() && projection.is_some() {
-        return Err(AppError::Other("central publication authorities cannot be combined".into()));
+        return Err(AppError::Other(
+            "central publication authorities cannot be combined".into(),
+        ));
     }
     if projection.is_some() && !path.exists() {
-        return Err(AppError::Other("The saved central projection source is missing; stage retained.".into()));
+        return Err(AppError::Other(
+            "The saved central projection source is missing; stage retained.".into(),
+        ));
     }
     validate_state(state)
         .map_err(|_| AppError::Other("cannot save invalid record state".into()))?;
@@ -293,6 +319,16 @@ fn save_active_with_authority(
             "record state exceeds the supported size limit".into(),
         ));
     }
+    #[cfg(windows)]
+    let _central_directory = if state.local.central.is_some() {
+        Some(crate::sync::central_files_windows::Directory::private(
+            path.parent()
+                .ok_or_else(|| AppError::Other("central state has no directory".into()))?,
+            true,
+        )?)
+    } else {
+        None
+    };
     match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
             return Err(AppError::Other("sync state must be a regular file".into()));
@@ -300,7 +336,12 @@ fn save_active_with_authority(
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    if replacement.is_some() && !path.exists(){return Err(AppError::Other("The archived source state is missing. Local data and identities are retained.".into()));}
+    if replacement.is_some() && !path.exists() {
+        return Err(AppError::Other(
+            "The archived source state is missing. Local data and identities are retained."
+                .into(),
+        ));
+    }
     if path.exists() {
         use sha2::{Digest, Sha256};
         let mut options = OpenOptions::new();
@@ -318,19 +359,37 @@ fn save_active_with_authority(
         file.take(MAX_STATE_BYTES + 1).read_to_end(&mut source)?;
         let value: serde_json::Value = serde_json::from_slice(&source)
             .map_err(|_| AppError::Other("cannot read format upgrade source".into()))?;
-        let previous_version = value.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let initial_projection=projection.is_some_and(|p|p.authority.is_initial());
-        if replacement.is_none() && projection.is_none() && state.local.central_projection.is_some() && value.get("local").and_then(|v|v.get("central_projection")).is_none_or(|v|v.is_null()) {
+        let previous_version = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let initial_projection = projection.is_some_and(|p| p.authority.is_initial());
+        if replacement.is_none()
+            && projection.is_none()
+            && state.local.central_projection.is_some()
+            && value
+                .get("local")
+                .and_then(|v| v.get("central_projection"))
+                .is_none_or(|v| v.is_null())
+        {
             return Err(AppError::Other("First central library activation requires its verified initial publication transaction. Original data is retained.".into()));
         }
-        if projection.is_some() && previous_version != u64::from(state.version) && !initial_projection {
+        if projection.is_some()
+            && previous_version != u64::from(state.version)
+            && !initial_projection
+        {
             return Err(AppError::Other("The saved central source format changed. Source and stage are retained; reload before publishing.".into()));
         }
         if initial_projection {
-            let previous:SyncStateV3=serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate initial central source.".into()))?;
-            validate_state(&previous).map_err(|_|AppError::Other("Cannot validate initial central source.".into()))?;
-            let authority=&projection.unwrap().authority;
-            authority.verify_records(&previous,state,authority.generation())?;
+            let previous: SyncStateV3 =
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    AppError::Other("Cannot validate initial central source.".into())
+                })?;
+            validate_state(&previous).map_err(|_| {
+                AppError::Other("Cannot validate initial central source.".into())
+            })?;
+            let authority = &projection.unwrap().authority;
+            authority.verify_records(&previous, state, authority.generation())?;
             authority.verify_vault(path)?;
         } else if previous_version >= crate::sync::records_v3::CENTRAL_STATE_VERSION as u64 {
             if previous_version > state.version as u64 {
@@ -338,14 +397,33 @@ fn save_active_with_authority(
             }
             let previous: SyncStateV3 = serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
             validate_state(&previous).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
-            if (previous.local.central_projection != state.local.central_projection || previous.local.central_cache_source != state.local.central_cache_source) && projection.is_none() && replacement.is_none() {
+            if (previous.local.central_projection != state.local.central_projection
+                || previous.local.central_cache_source != state.local.central_cache_source)
+                && projection.is_none()
+                && replacement.is_none()
+            {
                 return Err(AppError::Other("Central library projection needs its verified publication transaction. Original data is retained.".into()));
             }
-            if let Some(replacement)=replacement {
-                replacement.authority.verify_records(&previous,state,replacement.archive,replacement.generation)?;
+            if let Some(replacement) = replacement {
+                replacement.authority.verify_records(
+                    &previous,
+                    state,
+                    replacement.archive,
+                    replacement.generation,
+                )?;
             } else {
-                crate::sync::central::workspace::verify_publication(previous.local.central.as_ref(),state.local.central.as_ref())?;
-                if let Some(projection)=projection {projection.authority.verify_records(&previous,state,projection.authority.generation())?;projection.authority.verify_vault(path)?;}
+                crate::sync::central::workspace::verify_publication(
+                    previous.local.central.as_ref(),
+                    state.local.central.as_ref(),
+                )?;
+                if let Some(projection) = projection {
+                    projection.authority.verify_records(
+                        &previous,
+                        state,
+                        projection.authority.generation(),
+                    )?;
+                    projection.authority.verify_vault(path)?;
+                }
             }
         }
         if let Some(source_version) = value
@@ -356,8 +434,8 @@ fn save_active_with_authority(
             .filter(|v| !initial_projection && *v >= 3 && *v < state.version as u64)
         {
             let digest = format!("{:x}", Sha256::digest(&source));
-            let backup =
-                path.with_file_name(format!("sync-state-v{source_version}-{digest}.backup.json"));
+            let backup = path
+                .with_file_name(format!("sync-state-v{source_version}-{digest}.backup.json"));
             match fs::symlink_metadata(&backup) {
                 Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
                     return Err(AppError::Other(
@@ -378,9 +456,24 @@ fn save_active_with_authority(
             }
         }
     }
-    if let Some(replacement)=replacement {write_replacement_atomic(path,&bytes,state,replacement)}
-    else if let Some(projection)=projection {write_central_atomic(path,&bytes,&projection.published,|previous|{projection.authority.verify_records(previous,state,projection.authority.generation())?;projection.authority.verify_vault(path)})}
-    else {crate::fsutil::atomic_write(path, &bytes, 0o600)}
+    if let Some(replacement) = replacement {
+        write_replacement_atomic(path, &bytes, state, replacement)
+    } else if let Some(projection) = projection {
+        write_central_atomic(path, &bytes, &projection.published, |previous| {
+            projection.authority.verify_records(
+                previous,
+                state,
+                projection.authority.generation(),
+            )?;
+            projection.authority.verify_vault(path)
+        })
+    } else {
+        #[cfg(windows)]
+        if state.local.central.is_some() {
+            return crate::sync::central_files_windows::write(path, &bytes, true);
+        }
+        crate::fsutil::atomic_write(path, &bytes, 0o600)
+    }
 }
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,31 +500,83 @@ pub(crate) fn replacement_write_stage(stage: ReplacementWriteStage, path: &Path)
 fn write_replacement_atomic(path:&Path,bytes:&[u8],state:&SyncStateV3,replacement:&ReplacementSave<'_>)->Result<(),AppError>{
     write_central_atomic(path,bytes,&replacement.published,|previous|replacement.authority.verify_records(previous,state,replacement.archive,replacement.generation))
 }
-fn write_central_atomic(path:&Path,bytes:&[u8],published:&std::cell::Cell<bool>,verify:impl Fn(&SyncStateV3)->Result<(),AppError>)->Result<(),AppError>{
+fn write_central_atomic(
+    path: &Path,
+    bytes: &[u8],
+    published: &std::cell::Cell<bool>,
+    verify: impl Fn(&SyncStateV3) -> Result<(), AppError>,
+) -> Result<(), AppError> {
     use std::io::Write;
     crate::fsutil::check_write(path)?;
-    let parent=path.parent().ok_or_else(||AppError::Other("sync state has no parent".into()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Other("sync state has no parent".into()))?;
     crate::fsutil::ensure_dir_secure(parent)?;
-    let mut temp=tempfile::NamedTempFile::new_in(parent)?;
-    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;}
+    #[cfg(not(windows))]
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(windows)]
+    let mut temp = crate::sync::central_files_windows::Temporary::new(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
     temp.write_all(bytes)?;
-    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::FileSync,path)?;
+    #[cfg(test)]
+    replacement_write_stage(ReplacementWriteStage::FileSync, path)?;
     temp.as_file().sync_all()?;
-    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::SourceRecheck,path)?;
-    let mut options=OpenOptions::new();options.read(true);
-    #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);}
-    let source=options.open(path)?;
-    if !source.metadata()?.is_file(){return Err(AppError::Other("sync source must be a regular file".into()));}
-    let mut original=Vec::new();source.take(MAX_STATE_BYTES+1).read_to_end(&mut original)?;
-    if original.len() as u64>MAX_STATE_BYTES{return Err(AppError::Other("sync source exceeds the supported limit".into()));}
-    let previous:SyncStateV3=serde_json::from_slice(&original).map_err(|_|AppError::Other("Cannot validate archived source state.".into()))?;
-    validate_state(&previous).map_err(|_|AppError::Other("Cannot validate archived source state.".into()))?;
+    #[cfg(test)]
+    replacement_write_stage(ReplacementWriteStage::SourceRecheck, path)?;
+    #[cfg(windows)]
+    let original = crate::sync::central_files_windows::read(path, MAX_STATE_BYTES)?;
+    #[cfg(not(windows))]
+    let original = {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let source = options.open(path)?;
+        if !source.metadata()?.is_file() {
+            return Err(AppError::Other("sync source must be a regular file".into()));
+        }
+        let mut original = Vec::new();
+        source
+            .take(MAX_STATE_BYTES + 1)
+            .read_to_end(&mut original)?;
+        if original.len() as u64 > MAX_STATE_BYTES {
+            return Err(AppError::Other(
+                "sync source exceeds the supported limit".into(),
+            ));
+        }
+        original
+    };
+    let previous: SyncStateV3 = serde_json::from_slice(&original)
+        .map_err(|_| AppError::Other("Cannot validate archived source state.".into()))?;
+    validate_state(&previous)
+        .map_err(|_| AppError::Other("Cannot validate archived source state.".into()))?;
     verify(&previous)?;
-    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::Rename,path)?;
-    temp.persist(path).map_err(|error|AppError::Io(error.error))?;
+    #[cfg(test)]
+    replacement_write_stage(ReplacementWriteStage::Rename, path)?;
+    #[cfg(not(windows))]
+    temp.persist(path)
+        .map_err(|error| AppError::Io(error.error))?;
+    #[cfg(windows)]
+    temp.commit(true)?;
     published.set(true);
-    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::DirectorySync,path)?;
-    #[cfg(unix)] {fs::File::open(parent)?.sync_all()?;}
+    #[cfg(test)]
+    replacement_write_stage(ReplacementWriteStage::DirectorySync, path)?;
+    #[cfg(unix)]
+    {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(windows)]
+    {
+        crate::sync::central_files_windows::confirm(path)?;
+    }
     Ok(())
 }
 

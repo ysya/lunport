@@ -385,7 +385,7 @@ pub(super) fn resume(
     }
     Ok(prepared)
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;
 
 /// Recover only the selected saved operation identifier; the metadata completer validates its

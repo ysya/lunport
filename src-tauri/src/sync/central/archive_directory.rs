@@ -321,9 +321,51 @@ impl ArchiveDirectory {
         Ok(())
     }
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) struct ArchiveDirectory {
+    directory: crate::sync::central_files_windows::Directory,
+    kind: Kind,
+}
+#[cfg(windows)]
+impl ArchiveDirectory {
+    pub fn open(env: &SyncEnv, kind: Kind) -> Result<Self, AppError> {
+        let parent = env.state_path.parent().ok_or_else(invalid)?;
+        let _base = crate::sync::central_files_windows::Directory::private(parent, true)?;
+        let directory = crate::sync::central_files_windows::Directory::private(
+            &parent.join(kind.name()),
+            true,
+        )?;
+        Ok(Self { directory, kind })
+    }
+    pub fn names(&self) -> Result<Vec<String>, AppError> {
+        self.directory.check_private()?;
+        self.directory.list()
+    }
+    pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>, AppError> {
+        filename(name)?;
+        self.directory.check_private()?;
+        match self.directory.read_private(name, self.kind.maximum()) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(AppError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn publish(&self, name: &str, bytes: &[u8]) -> Result<(), AppError> {
+        filename(name)?;
+        if bytes.len() as u64 > self.kind.maximum() {
+            return Err(invalid());
+        }
+        self.directory.check_private()?;
+        crate::sync::central_files_windows::write(&self.directory.path().join(name), bytes, false)?;
+        self.sync()
+    }
+    pub fn sync(&self) -> Result<(), AppError> {
+        self.directory.check_private()
+    }
+}
+#[cfg(not(any(unix, windows)))]
 pub(super) struct ArchiveDirectory;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl ArchiveDirectory {
     pub fn open(_: &SyncEnv, _: Kind) -> Result<Self, AppError> {
         Err(AppError::Other("This platform build cannot yet guarantee durable device-recovery archives. Original data is retained.".into()))

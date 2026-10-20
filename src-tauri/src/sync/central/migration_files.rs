@@ -579,9 +579,36 @@ mod platform {
         }
     }
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+use windows::Directory;
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    pub(super) struct Directory(crate::sync::central_files_windows::Directory);
+    impl Directory {
+    pub fn open(path: &Path) -> Result<Option<Self>, AppError> {
+        Ok(crate::sync::central_files_windows::Directory::open(path)?.map(Self))
+    }
+    pub fn names(&self) -> Result<Vec<String>, AppError> {
+        self.0.names()
+    }
+    pub fn optional_directory(&self, name: &str) -> Result<Option<Self>, AppError> {
+        Ok(self.0.optional_directory(name)?.map(Self))
+    }
+    pub fn child(&self, name: &str) -> Result<Option<Self>, AppError> {
+        Ok(self.0.child(name)?.map(Self))
+    }
+    pub fn read(&self, name: &str, limit: u64) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        Ok(Zeroizing::new(self.0.read(name, limit)?))
+    }
+    pub fn unchanged(&self) -> Result<(), AppError> {
+        self.0.unchanged()
+    }
+    }
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 struct Directory;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 impl Directory {
     fn open(_: &Path) -> Result<Option<Self>, AppError> {
         Err(invalid())
@@ -603,7 +630,7 @@ impl Directory {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux", windows)))]
 mod tests {
     use super::*;
     use crate::sync::{
@@ -705,6 +732,7 @@ mod tests {
         fs::rename(root.join("imports/empty-A"), root.join("imports/empty-B")).unwrap();
         assert!(captured.require_unchanged(&env, None).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn source_symlinks_special_files_and_open_directory_replacement_fail_closed() {
         use std::os::unix::fs::symlink;
@@ -746,6 +774,7 @@ mod tests {
         assert!(opened.unchanged().is_err());
         assert!(opened.read("file", 1024).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn linked_managed_parent_and_dangling_source_roots_cannot_redirect_or_hide_sources() {
         use std::os::unix::fs::symlink;
@@ -777,6 +806,7 @@ mod tests {
         symlink(root.with_file_name("missing-data"), root).unwrap();
         assert!(Files::capture(&env, None).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn missing_referenced_backup_invalid_names_and_redirected_key_roots_cannot_be_skipped() {
         use std::os::unix::fs::symlink;
@@ -799,6 +829,7 @@ mod tests {
         assert!(Files::capture(&env, None).is_err());
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
+    #[cfg(unix)]
     #[test]
     fn file_aggregate_depth_and_directory_name_changes_stop_before_a_partial_snapshot_is_accepted()
     {

@@ -80,3 +80,6 @@ pub mod state_v2;
 pub mod testkit;
 pub mod upgrade;
 pub mod tunnel_rules;
+
+#[cfg(windows)]
+pub(crate) mod central_files_windows;

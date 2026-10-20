@@ -139,5 +139,5 @@ pub(super) fn ensure(env: &SyncEnv, keys: &VaultKeys) -> Result<Option<Completed
         outputs,
     }))
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

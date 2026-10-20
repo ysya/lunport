@@ -1,7 +1,7 @@
 //! Central-only inert protected staging, using the existing import paths/credential namespace.
 //! Does not publish the active vault, ledger, keys, owner or session. Final typed publication follows.
 use super::{
-    bounded_read, digest, failure, optional_bytes, validate_vault, Paths, PendingImport,
+    digest, failure, validate_vault, Paths, PendingImport,
     ScopedKeychain, MAX_JOURNAL_BYTES,
 };
 use crate::{
@@ -26,6 +26,21 @@ use std::{
     fs,
     path::Path,
 };
+#[cfg(not(windows))]
+use super::{bounded_read,optional_bytes};
+#[cfg(windows)]
+fn bounded_read(path: &Path, limit: u64) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+    Ok(zeroize::Zeroizing::new(
+        crate::sync::central_files_windows::read(path, limit)?,
+    ))
+}
+#[cfg(windows)]
+fn optional_bytes(
+    path: &Path,
+    limit: u64,
+) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, AppError> {
+    Ok(crate::sync::central_files_windows::optional(path, limit)?.map(zeroize::Zeroizing::new))
+}
 const FORMAT: &str = "lunport-central-library-stage-v1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,7 +82,7 @@ struct Journal {
     bindings: BTreeMap<String, Binding>,
     phase: Phase,
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
 pub(in crate::sync::record_import) mod inventory;
@@ -247,7 +262,10 @@ fn source(state: &SyncStateV3) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn saved_source(env: &SyncEnv, input: Input<'_>) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+fn saved_source(
+    env: &SyncEnv,
+    input: Input<'_>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -266,6 +284,13 @@ fn saved_source(env: &SyncEnv, input: Input<'_>) -> Result<zeroize::Zeroizing<Ve
             ));
         }
     }
+    #[cfg(windows)]
+    let _directory = crate::sync::central_files_windows::Directory::private(
+        env.state_path
+            .parent()
+            .ok_or_else(|| failure("central state has no data directory"))?,
+        false,
+    )?;
     let (live, _) = record_runtime::snapshot(env)?;
     if &live != input.source() {
         return Err(failure(
@@ -286,10 +311,15 @@ fn saved_source(env: &SyncEnv, input: Input<'_>) -> Result<zeroize::Zeroizing<Ve
 /// Only stage/journal files use this helper. The active-state writer must separately handle
 /// uncertain post-rename errors by blocking Core/session; this function grants no such authority.
 pub(super) fn durable(paths: &Paths, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (paths, path, bytes);
         return Err(failure("central material staging needs the verified secure file implementation on this platform"));
+    }
+    #[cfg(windows)]
+    {
+        let _ = paths;
+        return crate::sync::central_files_windows::write(path, bytes, true);
     }
     #[cfg(unix)]
     {
@@ -389,9 +419,16 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
 fn prepare_input(env: &SyncEnv, input: Input<'_>) -> Result<Staged, AppError> {
     prepare_with_reservation(env,input,None)
 }
-fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&dyn central::InitialTransaction,&central::crypto::VaultKeys)>)->Result<Staged,AppError>{
+fn prepare_with_reservation(
+    env: &SyncEnv,
+    input: Input<'_>,
+    reservation: Option<(
+        &dyn central::InitialTransaction,
+        &central::crypto::VaultKeys,
+    )>,
+) -> Result<Staged, AppError> {
     let delta = input.delta();
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Err(failure(
             "central material staging is not verified on this platform",
         ));
@@ -403,9 +440,15 @@ fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&dy
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _publication = env.runtime.format_publication.lock().unwrap();
-    if let Some((prepared,keys))=reservation {
-        if !matches!(input,Input::Initial(_)) || input.binding()?!=Input::Initial(prepared.projection()).binding()? {return Err(failure("initial stage reservation does not match its projection"));}
-        prepared.check_locked(env,keys,&_lifecycle)?;
+    if let Some((prepared, keys)) = reservation {
+        if !matches!(input, Input::Initial(_))
+            || input.binding()? != Input::Initial(prepared.projection()).binding()?
+        {
+            return Err(failure(
+                "initial stage reservation does not match its projection",
+            ));
+        }
+        prepared.check_locked(env, keys, &_lifecycle)?;
     }
     drop(saved_source(env, input)?);
     if !super::pending_imports(env)?.is_empty() {
@@ -426,7 +469,10 @@ fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&dy
     {
         return Err(failure("source vault changed during preflight"));
     }
-    let operation = match reservation {Some((prepared,_))=>prepared.operation().to_string(),None=>central::crypto::random_id(16)?};
+    let operation = match reservation {
+        Some((prepared, _)) => prepared.operation().to_string(),
+        None => central::crypto::random_id(16)?,
+    };
     let paths = Paths::new(env, &operation)?;
     if paths.dir.exists() {
         return Err(failure("central stage ID is already occupied"));
@@ -492,7 +538,9 @@ fn prepare_with_reservation(env:&SyncEnv,input:Input<'_>,reservation:Option<(&dy
         bindings,
         phase: Phase::Prepared,
     };
-    if let Some((prepared,keys))=reservation {prepared.check_locked(env,keys,&_lifecycle)?;}
+    if let Some((prepared, keys)) = reservation {
+        prepared.check_locked(env, keys, &_lifecycle)?;
+    }
     save(&paths, &journal)?;
     super::step(super::PublishStep::JournalPrepared)?;
     execute(env, &paths, &mut journal, input)?;
@@ -690,7 +738,7 @@ pub(crate) fn resume(
     resume_input(env, operation, Input::Library(delta))
 }
 fn resume_input(env: &SyncEnv, operation: &str, input: Input<'_>) -> Result<Staged, AppError> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Err(failure(
             "central material staging is not verified on this platform",
         ));
@@ -712,7 +760,7 @@ fn resume_input(env: &SyncEnv, operation: &str, input: Input<'_>) -> Result<Stag
     Ok(Staged { journal, paths })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::sync::{

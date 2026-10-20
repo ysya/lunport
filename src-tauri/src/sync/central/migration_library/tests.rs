@@ -177,7 +177,7 @@ fn missing_collections_or_unresolved_source_conflicts_never_return_a_partial_his
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn an_archived_source_material_candidate_preserves_original_encryption_and_passes_history_encryption_validation(
 ) {
@@ -209,7 +209,7 @@ fn an_archived_source_material_candidate_preserves_original_encryption_and_passe
     assert!(!encrypted.rows.is_empty());
     assert!(package.encode_local().unwrap().as_slice() == before.as_slice());
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn mutating_a_package_state_without_its_captured_image_cannot_create_record_inputs_or_history() {
     let (_device, mut package, keys, _, _) = crate::sync::central::source_package::tests::fixture();
@@ -218,7 +218,7 @@ fn mutating_a_package_state_without_its_captured_image_cannot_create_record_inpu
     assert!(package.structured_history(&keys, &BTreeMap::new()).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn final_key_metadata_and_container_use_current_material_after_retained_names_and_same_key_variants(
 ) {
@@ -324,7 +324,7 @@ fn final_key_metadata_and_container_use_current_material_after_retained_names_an
     assert_eq!(std::fs::read(&vault_path).unwrap(), before);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn a_known_null_navigation_tombstone_remains_an_explicit_empty_order() {
     let (_device, package, keys, _, _) = crate::sync::central::source_package::tests::fixture();
@@ -423,7 +423,7 @@ fn current_legacy_text_is_not_silently_treated_as_a_complete_structured_source()
     assert!(prepare(&state, &known, materials).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn retained_only_hosts_and_key_metadata_cannot_reappear_as_current_after_migration() {
     use crate::sync::{

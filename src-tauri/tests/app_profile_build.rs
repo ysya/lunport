@@ -39,8 +39,8 @@ fn the_normal_library_uses_the_compiled_legacy_ssh_boundary() {
 #[test]
 fn the_normal_library_exposes_the_shipped_central_sync_capability() {
     assert_eq!(
-        sshelter_lib::central_sync_available(),
-        cfg!(feature = "central-sync") && cfg!(any(target_os = "macos", target_os = "linux")),
-        "Standard desktop builds advertise central sync only where secure publication is supported."
-    );
+    sshelter_lib::central_sync_available(),
+    cfg!(feature = "central-sync") && cfg!(any(target_os = "macos", target_os = "linux", windows)),
+    "Standard desktop builds advertise central sync only where secure publication is supported."
+);
 }

@@ -241,6 +241,8 @@ pub(in crate::sync::record_import) fn publish_vault_image(
                 options.open(&destination)?.sync_all()?;
                 fs::File::open(destination.parent().unwrap())?.sync_all()?;
             }
+            #[cfg(windows)]
+            crate::sync::central_files_windows::confirm(&destination)?;
             Ok(())
         })();
         if result.is_err() {
@@ -260,7 +262,10 @@ pub(in crate::sync::record_import) fn publish_vault_image(
         let parent = destination
             .parent()
             .ok_or_else(|| failure("active vault has no directory"))?;
+        #[cfg(not(windows))]
         let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        #[cfg(windows)]
+        let mut temp = crate::sync::central_files_windows::Temporary::new(&destination)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -291,8 +296,11 @@ pub(in crate::sync::record_import) fn publish_vault_image(
             record_runtime::ReplacementWriteStage::Rename,
             &destination,
         )?;
+        #[cfg(not(windows))]
         temp.persist(&destination)
             .map_err(|e| AppError::Io(e.error))?;
+        #[cfg(windows)]
+        temp.commit(true)?;
         published.set(true);
         #[cfg(test)]
         record_runtime::replacement_write_stage(
@@ -301,6 +309,8 @@ pub(in crate::sync::record_import) fn publish_vault_image(
         )?;
         #[cfg(unix)]
         fs::File::open(parent)?.sync_all()?;
+        #[cfg(windows)]
+        crate::sync::central_files_windows::confirm(&destination)?;
         if digest(&bounded_read(
             &destination,
             store::MAX_READ_ONLY_VAULT_BYTES,
@@ -323,7 +333,7 @@ pub(crate) fn publish(
     operation: &str,
     keys: &central::crypto::VaultKeys,
 ) -> Result<PendingImport, AppError> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Err(failure(
             "central publication is not verified on this platform",
         ));
@@ -415,7 +425,7 @@ pub(crate) fn publish(
     Ok(summary(&journal))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(super) mod tests {
     use super::super::tests::{delta, fixture};
     use super::*;
@@ -574,7 +584,7 @@ pub(super) mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod fault_tests {
     use super::super::tests::{delta, fixture};
     use super::tests::session;
