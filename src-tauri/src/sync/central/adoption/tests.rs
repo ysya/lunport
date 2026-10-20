@@ -632,6 +632,59 @@ fn staged_and_vault_published_adoptions_resume_after_a_cold_reopen() {
     }
 }
 #[test]
+fn publication_rechecks_live_metadata_after_staging_even_with_a_verified_history() {
+    use crate::sync::record_import::{with_test_step, PublishStep};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let f = fixture(false);
+    let mut s = service(&f);
+    let changed = Arc::new(AtomicBool::new(false));
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        let env = f.peer.env();
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        let source = fs::read(&env.state_path).unwrap();
+        let vault_path = crate::vault::store::vault_path(&env.state_path);
+        let original_vault = fs::read(&vault_path).ok();
+        let owner = record_runtime::snapshot(&env).unwrap().0.local.central.unwrap();
+        let vault = owner.control.personal_vault.unwrap();
+        let head = f.proof.verify(owner.control.anchor.as_ref().unwrap(), None)
+            .unwrap().current().head().to_string();
+        let data = s.rows.clone();
+        let state = changed.clone();
+        let metadata = s.server.mock("GET", format!("/v2/vaults/{vault}/metadata").as_str())
+            .expect_at_least(2)
+            .with_body_from_request(move |_| {
+                let rows = data.lock().unwrap();
+                json!({
+                    "vault": vault, "epoch": 1, "membership_head": head,
+                    "authorization_epoch": "3",
+                    "phase": if state.load(Ordering::SeqCst) { "rekey" } else { "ready" },
+                    "sequence": rows.len().to_string(),
+                    "history_hash": rows.last().map(|r| r.history_hash.clone())
+                        .unwrap_or_else(|| "0".repeat(64))
+                }).to_string().into_bytes()
+            }).create();
+        let state = changed.clone();
+        assert!(with_test_step(move |step| {
+            if step == PublishStep::VaultStaged {
+                state.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }, || migration_flow::advance(&env, &scope)).is_err());
+        assert!(changed.load(Ordering::SeqCst));
+        metadata.assert();
+        assert_eq!(fs::read(&env.state_path).unwrap(), source);
+        assert_eq!(fs::read(&vault_path).ok(), original_vault);
+        assert!(!record_runtime::snapshot(&env).unwrap().0.local.central.unwrap().can_upload());
+        assert!(env.state_path.parent().unwrap().join("imports")
+            .join(load(&env).unwrap().unwrap().state.operation).exists());
+        changed.store(false, Ordering::SeqCst);
+        finish(&f, &scope);
+        assert!(record_runtime::snapshot(&env).unwrap().0.local.central.unwrap().can_upload());
+        assert_eq!(*s.rows.lock().unwrap(), f.rows);
+    });
+}
+#[test]
 fn empty_reserved_stage_is_recovered_but_unknown_contents_are_retained() {
     let f = fixture(false);
     let s = service(&f);

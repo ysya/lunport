@@ -94,6 +94,8 @@ pub(super) struct Prepared {
     loaded: Loaded,
     initial: Candidate,
     proof: Transcript,
+    // One immutable completed read for this attempt only; cold reentry verifies it anew.
+    read: super::active_read::VerifiedLibrary,
 }
 pub(super) fn target(
     env: &SyncEnv,
@@ -1206,12 +1208,16 @@ fn publish(
             &selections,
         )?
     };
+    if let Some(legacy) = loaded.legacy_evidence(env)? {
+        legacy.require_read(&final_read, &transcript)?;
+    }
     let prepared = Prepared {
         loaded,
         initial,
         proof: transcript,
+        read: final_read,
     };
-    let keys = final_read.keys();
+    let keys = prepared.read.keys();
     migration_flow::cached(env, scope, progress(&prepared.loaded, total, "publishing"))?;
     fence(env, scope, &prepared, budget)?;
     crate::sync::record_import::central_stage::prepare_initial_reserved(env, &prepared, keys)?;
@@ -1298,18 +1304,11 @@ impl InitialTransaction for Prepared {
         {
             return Err(invalid());
         }
-        let read = self.proof.verify(
-            self.loaded.owner()?,
-            self.loaded.session.identity.as_ref().ok_or_else(invalid)?,
-            Some(&self.loaded.state.floor),
-        )?;
-        self.loaded
-            .package
-            .require_historical_read(&read, &self.proof)?;
-        if let Some(legacy) = self.loaded.legacy_evidence(env)? {
-            legacy.require_read(&read, &self.proof)?;
-        }
-        read.keys().verify_same(keys)?;
+        // This private capability keeps the immutable transcript's completed verification.
+        // Replaying its full history at every file/identity fence can exhaust the round
+        // before publication on slower devices. current() above still rechecks the live
+        // source, generation, session and protected reservation; file checks remain live.
+        self.read.keys().verify_same(keys)?;
         Ok(())
     }
     fn check_locked(
@@ -1459,19 +1458,7 @@ fn fence(
                 drop(crate::sync::record_import::central_stage::initial_effects(
                     env,
                     prepared,
-                    prepared
-                        .proof
-                        .verify(
-                            prepared.loaded.owner()?,
-                            prepared
-                                .loaded
-                                .session
-                                .identity
-                                .as_ref()
-                                .ok_or_else(invalid)?,
-                            Some(&prepared.loaded.state.floor),
-                        )?
-                        .keys(),
+                    prepared.read.keys(),
                 )?);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => prepared.loaded.check(env)?,

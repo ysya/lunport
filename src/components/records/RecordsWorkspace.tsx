@@ -486,7 +486,7 @@ export function RecordsWorkspace({
               className={cn("library-tools-main app-main min-h-0 min-w-0 flex-1", panel === "keys" ? "flex flex-col overflow-hidden" : "overflow-y-auto")}
               aria-label="Workspace content"
             >
-              {panel === "keys" && <RecordsKeysPanel overview={overview} />}
+              {panel === "keys" && <RecordsKeysPanel overview={overview} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
               {panel === "account" && (
                 <RecordsAccountPanel

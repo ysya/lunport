@@ -184,6 +184,7 @@ export function CentralAccountPanel({
         <p className="mt-1 text-sm text-muted-foreground">
           {phaseText[status.phase]}
         </p>
+        <p className="mt-1 text-sm text-muted-foreground">Enable library sync once to automatically sync all managed SSH private keys with your approved devices. Newly imported or generated keys are included automatically.</p>
       </div>
       <RecordField label="Account service">
         <Input

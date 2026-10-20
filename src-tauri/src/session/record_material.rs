@@ -2,30 +2,45 @@
 use crate::sync::record_repository::{KeyStatus, KeyView};
 use crate::vault::store::VaultEntry;
 
+/// Presence and identity are different failures. Never suggest fetching a missing key when
+/// bytes exist but fail the authoritative identity check, and never modify those bytes here.
+pub const IDENTITY_MISMATCH: &str = "The saved SSH private key does not match this key reference.";
+pub fn available(key: &KeyView, entry: Option<&VaultEntry>) -> Result<bool, &'static str> {
+    entry.map_or(Ok(false), |entry| verify(key, entry).map(|()| true))
+}
+
+#[cfg(test)]
 pub fn matches(key: &KeyView, entry: &VaultEntry) -> bool {
+    verify(key, entry).is_ok()
+}
+
+/// Fixed diagnostics only: parser errors may contain private input and must never cross IPC.
+pub fn verify(key: &KeyView, entry: &VaultEntry) -> Result<(), &'static str> {
     if key.status != KeyStatus::Available {
-        return false;
+        return Err("This key reference is unavailable or needs review.");
     }
     if key.expected_material_hash.as_ref().is_some_and(|expected| {
         crate::sync::central::crypto::hash(entry.private_key.as_bytes()) != *expected
     }) {
-        return false;
+        return Err("The saved private key differs from the encrypted account copy.");
     }
-    let Some(public) = &key.public else {
-        return false;
-    };
-    if crate::sync::records_v3::key_material_matches(public, &entry.public_key, &entry.fingerprint)
-        .is_err()
-    {
-        return false;
+    let public = key
+        .public
+        .as_ref()
+        .ok_or("This key has no public identity.")?;
+    crate::sync::records_v3::key_material_matches(public, &entry.public_key, &entry.fingerprint)
+        .map_err(|_| IDENTITY_MISMATCH)?;
+    let private = crate::vault::material::parse(&entry.private_key)
+        .ok_or("The saved SSH private key could not be parsed.")?;
+    let identity =
+        crate::vault::material::public_key_data(&public.public_key).ok_or(IDENTITY_MISMATCH)?;
+    if private.public_key().key_data() != &identity {
+        return Err(IDENTITY_MISMATCH);
     }
-    let Some(private) = crate::vault::material::parse(&entry.private_key) else {
-        return false;
-    };
-    let Some(identity) = crate::vault::material::public_key_data(&public.public_key) else {
-        return false;
-    };
-    private.public_key().key_data() == &identity && private.is_encrypted() == public.has_passphrase
+    if private.is_encrypted() != public.has_passphrase {
+        return Err("The saved private key's passphrase state does not match this key reference.");
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -62,6 +77,69 @@ mod tests {
             added_at_ms: 1,
         };
         (key, entry)
+    }
+    #[test]
+    fn all_supported_vault_key_formats_keep_their_public_identity() {
+        for text in [
+            test_keys::plain(),
+            test_keys::encrypted(),
+            test_keys::rsa(),
+            test_keys::ecdsa(),
+            test_keys::ecdsa_short_p256(),
+            test_keys::ecdsa_short_p256_encrypted(),
+            test_keys::ecdsa_short_p384(),
+            test_keys::ecdsa_short_p521(),
+            test_keys::ecdsa_full_p256(),
+        ] {
+            let private = crate::vault::material::parse(&text).unwrap();
+            let (mut key, mut entry) = fixture();
+            entry.private_key = text;
+            entry.public_key = private.public_key().to_openssh().unwrap();
+            entry.fingerprint = private
+                .public_key()
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string();
+            let public = key.public.as_mut().unwrap();
+            public.public_key = entry.public_key.clone();
+            public.fingerprint = entry.fingerprint.clone();
+            public.key_type = private.public_key().algorithm().as_str().into();
+            public.has_passphrase = private.is_encrypted();
+            let kind = public.key_type.clone();
+            let encrypted = public.has_passphrase;
+            assert!(
+                matches(&key, &entry),
+                "usable {kind} key was rejected (encrypted: {encrypted})"
+            );
+        }
+    }
+    #[test]
+    fn missing_material_and_an_existing_mismatched_key_have_distinct_results() {
+        let (mut key, mut entry) = fixture();
+        assert_eq!(available(&key, None), Ok(false));
+        assert_eq!(available(&key, Some(&entry)), Ok(true));
+        entry.private_key = test_keys::ecdsa();
+        assert_eq!(available(&key, Some(&entry)), Err(IDENTITY_MISMATCH));
+        entry.private_key = test_keys::plain();
+        key.expected_material_hash = Some("0".repeat(64));
+        assert_eq!(
+            available(&key, Some(&entry)),
+            Err("The saved private key differs from the encrypted account copy.")
+        );
+    }
+    #[test]
+    fn verification_reports_safe_reasons_without_parser_details() {
+        let (mut key, mut entry) = fixture();
+        entry.private_key = "PRIVATE fixture invalid OpenSSH data".into();
+        assert_eq!(
+            verify(&key, &entry),
+            Err("The saved SSH private key could not be parsed.")
+        );
+        entry.private_key = test_keys::plain();
+        key.public.as_mut().unwrap().has_passphrase = true;
+        assert_eq!(
+            verify(&key, &entry),
+            Err("The saved private key's passphrase state does not match this key reference.")
+        );
     }
     #[test]
     fn coherent_unencrypted_or_encrypted_material_is_usable_without_a_passphrase_prompt() {

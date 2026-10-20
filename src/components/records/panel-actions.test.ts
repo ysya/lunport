@@ -5,6 +5,7 @@ import { recordKeyDestinationKey, recordsStatusKey } from "@/lib/records";
 import {
   clearAccountDraft,
   clearKeyDraft,
+  keyActionError,
   submitAccountDraft,
   submitImportConsent,
   submitKeyDraft,
@@ -311,5 +312,22 @@ describe("key destination fence", () => {
       { invocation: keyInvocation, destination: recordKeyDestinationKey(overview), current: () => true })).toBe(false);
     expect(update).not.toHaveBeenCalledWith({ privateText: "", name: "", path: null });
     expect(cacheText(cache)).not.toContain(wrong.key_scope!.device);
+  });
+});
+
+describe("safe key action diagnostics", () => {
+  it("distinguishes missing material, mismatched identity and credential access", () => {
+    expect(keyActionError("The key material is unavailable on this device.")).toContain("private key is missing");
+    expect(keyActionError(new Error("The vault key does not match its authoritative public identity."))).toContain("does not match");
+    expect(keyActionError("The vault is unavailable; its original file was retained.")).toContain("credential store");
+    expect(keyActionError("The saved SSH private key could not be parsed.")).toContain("not readable OpenSSH");
+    expect(keyActionError("The saved private key's passphrase state does not match this key reference.")).toContain("passphrase state");
+    expect(keyActionError("record account is not writable")).toContain("Account sync is blocked");
+    expect(keyActionError("synced private material is unavailable")).toContain("no synced private copy");
+  });
+  it("never reflects unexpected messages or private input", () => {
+    for (const error of ["PRIVATE fixture content", new Error("PRIVATE fixture content"), { message: "PRIVATE fixture content" }, null]) {
+      expect(keyActionError(error)).toBe("The key action could not be completed. Refresh the workspace and retry.");
+    }
   });
 });

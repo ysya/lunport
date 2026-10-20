@@ -9,11 +9,11 @@ import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
-import { applyRecordOverview, recordKeyDestinationKey, downloadRecordKey, renameRecordKey, setRecordKeySync, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
+import { applyRecordOverview, recordKeyDestinationKey, renameRecordKey, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
-import { clearKeyDraft, hasKeyImportSource, submitKeyDraft } from "./panel-actions";
+import { clearKeyDraft, hasKeyImportSource, keyActionError, submitKeyDraft } from "./panel-actions";
 import { basename } from "@/lib/utils";
 import { KeyImportFields } from "./KeyImportFields";
 import { RecordField } from "./form";
@@ -28,10 +28,10 @@ function keyStatusLabel(key: RecordKeyView, central: boolean) {
     if (central && key.status === "needs_material") return key.storage === "hardware" ? "Hardware key required" : key.storage === "external_agent" ? "SSH agent required" : "Sync pending";
     return key.status.replace(/_/g, " ");
   }
-  return central ? "Ready" : typeof key.synced !== "boolean" ? "Sharing unknown" : key.synced ? "Sync enabled" : "This device only";
+  return central ? "Ready" : "Local library";
 }
 
-export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
+export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverview; openSync?: () => void }) {
   const central = overview.central_mode === true;
   const client = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -40,7 +40,6 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const [mode, setMode] = useState<"import" | "generate" | null>(null);
   const [draft, setDraft] = useState(clearKeyDraft);
   const [discarding, setDiscarding] = useState(false);
-  const [confirming, setConfirming] = useState<{ id: string; enabled: boolean } | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; expected: KeySlotPayload } | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -64,7 +63,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   useLayoutEffect(() => {
     mounted.current = true;
     inFlight.current = false;
-    reset(); setSelectedId(null); setDeployKeyId(null); setConfirming(null); setRenaming(null);
+    reset(); setSelectedId(null); setDeployKeyId(null); setRenaming(null);
     setRenameName(""); setRenameError(null); setBusy(false); setError(null); setSearch("");
     return () => { mounted.current = false; };
   }, [destination]);
@@ -105,7 +104,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
     inFlight.current = true;
     setBusy(true); setError(null);
     try { await action(current); }
-    catch { if (current()) setError("The key action could not be completed. Refresh the workspace and retry."); }
+    catch (error) { if (current()) setError(keyActionError(error)); }
     finally { if (current()) { inFlight.current = false; setBusy(false); } }
   };
   const rename = async () => {
@@ -127,7 +126,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const visible = overview.keys.filter((item) => `${item.public?.name ?? item.id} ${item.public?.fingerprint ?? ""} ${item.public?.key_type ?? ""}`.toLowerCase().includes(search.toLowerCase().trim()));
   const closeDetails = () => {
     const id = selectedId;
-    setSelectedId(null); setConfirming(null);
+    setSelectedId(null);
     requestAnimationFrame(() => {
       const target = collection.current?.querySelector<HTMLButtonElement>(`[data-key-id="${CSS.escape(id ?? "")}"]`);
       (target ?? document.getElementById(KEYS_SEARCH_INPUT_ID))?.focus();
@@ -181,6 +180,12 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
           {error && <p role="alert" className="app-task-error mb-4">
             {error}
           </p>}
+          {!central && <section className="app-notice mb-4 space-y-3" aria-label="Automatic key sync">
+            <h2 className="font-medium">Sync all keys automatically</h2>
+            <p className="text-sm text-muted-foreground">Sign in with Passkey and enable encrypted library sync once. All managed SSH private keys then sync automatically to your approved devices. Your existing library is reviewed and preserved during setup.</p>
+            <p className="text-sm text-muted-foreground">You can keep using your keys locally without signing in.</p>
+            {openSync && <Button variant="outline" disabled={busy || draft.busy} onClick={openSync}>Set up automatic sync</Button>}
+          </section>}
           <div className="library-key-list">
             {visible.map((item) => <button
               type="button"
@@ -190,7 +195,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
               aria-pressed={item.id === selectedId}
               disabled={busy || draft.busy}
 
-              onClick={() => { setSelectedId(item.id); setConfirming(null); }}
+              onClick={() => { setSelectedId(item.id); }}
             >
               <KeyRound className="size-4" />
               <span className="library-key-identity">
@@ -214,7 +219,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
               {search ? "No matching keys" : "No key references yet."}
             </h2>
             <p>
-              {search ? "Try another name, fingerprint or key type." : central ? "Generate or import a key to sync it automatically with your approved devices." : "Generate a key or import one into this device. New keys stay here until you choose to sync them."}
+              {search ? "Try another name, fingerprint or key type." : central ? "Generate or import a key to sync it automatically with your approved devices." : "Generate a key or import one into this device. Enable encrypted library sync to include all managed keys automatically."}
             </p>
             {search && <Button variant="outline" onClick={() => setSearch("")}>Clear search</Button>}
           </div>}
@@ -227,7 +232,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
         <p className="library-preview-address">
           {key.authority === "account" ? "Account key" : "Local key"}
           {" · "}
-          {central ? keyStatusLabel(key, true) : key.status.replace(/_/g, " ")}
+          {keyStatusLabel(key, central)}
         </p>
         <div className="library-preview-buttons flex-wrap">
           {key.public && (key.status === "available" || key.status === "needs_material") && <Button
@@ -251,12 +256,8 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
           >
             <Copy className="size-3.5" />
             Copy public key</Button>}
-          {!central && key.status === "needs_material" && key.authority === "account" && <Button
-            disabled={busy || draft.busy || overview.shared_writes_blocked}
-            onClick={() => publicAction(async (current) => { const result = await downloadRecordKey(key.id); if (current() && recordKeyDestinationKey(result) === destination) applyRecordOverview(client, result); })}
-          >Download synced key</Button>}
         </div>
-        {key.status === "conflict" && <p role="status" className="app-task-error">{central ? "Review this key’s identity conflict before connecting." : "Local and account key metadata conflict. Connecting and downloading are blocked until the conflict is reviewed."}</p>}
+        {key.status === "conflict" && <p role="status" className="app-task-error">{central ? "Review this key’s identity conflict before connecting." : "Local and account key metadata conflict. Review the key identity before connecting or migrating this library."}</p>}
         {central && key.status === "needs_material" && <p role="status" className="text-sm text-muted-foreground">{key.storage === "hardware" ? "Connect this key’s hardware device to use it on this computer." : key.storage === "external_agent" ? "Connect the SSH agent that holds this key to use it on this computer." : "This key will become available automatically after encrypted sync completes."}</p>}
         {key.status === "deleted" && <p className="text-sm text-muted-foreground">This account key was deleted. A local copy cannot replace its account identity.</p>}
         <section className="library-preview-section">
@@ -271,40 +272,12 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
             <div>
               <dt>Sharing</dt>
               <dd>
-                {central ? (key.storage === "hardware" || key.storage === "external_agent" ? "Key reference syncs automatically" : "Automatic encrypted sync") : typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Sync enabled" : key.authority === "local" ? "This device only" : "Sync disabled"}
+                {central ? (key.storage === "hardware" || key.storage === "external_agent" ? "Key reference syncs automatically" : "Automatic encrypted sync") : "Enable automatic library sync"}
               </dd>
             </div>
           </dl>
           {key.status === "available" && <p className="mt-3 text-muted-foreground">Private key availability is checked when connecting.</p>}
-          {central ? <p className="mt-3 text-muted-foreground">Keys sync automatically to approved devices.</p> : key.authority === "account" && <p className="mt-3 text-muted-foreground">Sync changes may be waiting for the relay.</p>}
-          {!central && key.status === "available" && overview.account && <Button
-            className="mt-3"
-            size="sm"
-            variant="outline"
-            disabled={busy || draft.busy || overview.shared_writes_blocked || typeof key.synced !== "boolean"}
-            onClick={() => { if (typeof key.synced === "boolean") setConfirming({ id: key.id, enabled: !key.synced }); }}
-          >
-            {typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Stop syncing" : "Sync key"}
-          </Button>}
-          {!central && confirming?.id === key.id && <div className="space-y-3 mt-4 border-t pt-3">
-            <p className="text-sm">
-              {confirming.enabled ? "Sync this key to your other computers? The encrypted private key will be uploaded to your account." : "Stop syncing this key? Copies already downloaded on other computers remain there."}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                disabled={busy || draft.busy || overview.shared_writes_blocked || typeof key.synced !== "boolean" || key.status !== "available" || confirming.enabled === key.synced}
-                onClick={() => publicAction(async (current) => {
-                  if (typeof key.synced !== "boolean" || key.status !== "available" || confirming.enabled === key.synced) return;
-                  const result = await setRecordKeySync(key.id, confirming.enabled);
-                  if (!current() || recordKeyDestinationKey(result) !== destination) return;
-                  applyRecordOverview(client, result); setConfirming(null);
-                })}
-              >
-                {confirming.enabled ? "Confirm sync" : "Confirm stop"}
-              </Button>
-              <Button variant="outline" disabled={busy || draft.busy} onClick={() => setConfirming(null)}>Cancel</Button>
-            </div>
-          </div>}
+          {central && <p className="mt-3 text-muted-foreground">All managed keys sync automatically to approved devices.</p>}
         </section>
         {key.public && <>
           <section className="library-preview-section">
@@ -373,7 +346,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                 {mode === "import" ? "Import private key" : "Generate Ed25519 key"}
               </DialogTitle>
               <DialogDescription>
-                {central ? (mode === "import" ? "Copy a private key into your encrypted account vault. The source key stays in place." : "Create an Ed25519 key in your encrypted account vault.") : mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. It stays here until you choose to sync it."}
+                {central ? (mode === "import" ? "Copy a private key into your encrypted account vault. The source key stays in place." : "Create an Ed25519 key in your encrypted account vault.") : mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. Enabling encrypted library sync includes all managed keys automatically."}
               </DialogDescription>
             </DialogHeader>
             <TaskDialogBody><fieldset disabled={draft.busy} className="space-y-4">
