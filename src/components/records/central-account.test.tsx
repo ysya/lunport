@@ -1,9 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect, vi } from "vitest";
 import { CentralAccountPanel, CentralAccountSection } from "./CentralAccountPanel";
 import { centralStatusKey, type CentralStatus } from "@/lib/central-sync";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
+vi.mock("react", async (original) => {
+  const actual = await original<typeof import("react")>();
+  return { ...actual, useState: vi.fn(actual.useState) };
+});
 const base: CentralStatus = {
   available: true,
   configured: true,
@@ -79,10 +84,11 @@ it("offers optional external sign-in only before an account is pinned", () => {
   ).not.toContain("Use external sign-in provider");
 });
 
-it("offers the built-in Passkey service immediately without a preview switch", () => {
-  const html = render({ configured: false, has_session: false, phase: "signed_out", service: "https://sshelter-relay.ysyavv.workers.dev" });
-  expect(html).toContain('value="https://sshelter-relay.ysyavv.workers.dev"');
-  expect(buttonTag(html, "Sign in with Passkey")).not.toContain(DISABLED);
+it("starts with a blank server and requires a user-deployed service before sign-in", () => {
+  const html = render({ configured: false, has_session: false, phase: "signed_out", service: null });
+  expect(html).toContain('value=""');
+  expect(buttonTag(html, "Sign in with Passkey")).toContain(DISABLED);
+  expect(text(html)).toContain("Deploy your own sync server");
   expect(text(html)).toContain("Account and encrypted sync");
   expect(text(html)).not.toContain("Preview");
 });
@@ -92,6 +98,26 @@ it("explains unavailable platform support without offering a broken sign-in flow
   client.setQueryData(centralStatusKey, { ...base, available: false, configured: false });
   const html = renderToStaticMarkup(<QueryClientProvider client={client}><CentralAccountSection /></QueryClientProvider>);
   expect(text(html)).toContain("Central account sync is unavailable in this build");
-  expect(text(html)).toContain("Older sync-code libraries");
+  expect(text(html)).toContain("Your local library remains available without signing in");
+  expect(text(html)).not.toContain("Older sync-code libraries");
   expect(text(html)).not.toContain("Sign in with Passkey");
+});
+
+
+it("requires applying a changed server before login and explains the empty library and restart", () => {
+  vi.mocked(useState).mockReturnValueOnce(["https://other.example.com", vi.fn()]);
+  const html=render();
+  expect(buttonTag(html,"Change server and restart")).not.toContain(DISABLED);
+  expect(buttonTag(html,"Sign in again")).toContain(DISABLED);
+  expect(text(html)).toContain("empty local library");
+  expect(text(html)).toContain("Open terminal sessions will close");
+  expect(text(html)).not.toContain("Join with sync code");
+});
+
+
+it("lets a first-time local library sign in to the typed server without resetting that library", () => {
+  vi.mocked(useState).mockReturnValueOnce(["https://selfhost.example.com", vi.fn()]);
+  const html=render({service:null,configured:false,has_session:false,phase:"signed_out"});
+  expect(buttonTag(html,"Sign in with Passkey")).not.toContain(DISABLED);
+  expect(text(html)).not.toContain("Change server and restart");
 });

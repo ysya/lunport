@@ -1,12 +1,17 @@
 # Lunport sync relay
 
-Encrypted relay for [Lunport](../README.md), your SSH workspace. It carries library changes
-between devices: hosts, Groups and explicitly shared keys. Each chain has one Durable Object,
-storing only ciphertext. It never sees sync codes, host names, private keys or passwords.
+The current desktop client uses central accounts with Passkey sign-in, device approval and end-to-end encrypted library sync. Public installers start with a blank server URL; users deploy their own service. See [client server configuration](../docs/central-server-configuration.md).
 
-See the [user guide](../docs/usage.md#sync-your-library) for setting up devices in the app.
+- [Cloudflare gateway and private core](security/README.md): independent account/device authority and SQLite-backed Durable Object storage.
+- [Central Docker Compose](selfhost/central/README.md): equivalent independent security storage and private application runtime.
 
-## Self-host
+Follow those deployment guides for provisioning, HTTPS and backup/restore verification. The combined legacy relay below does not supply the independent central service required by current clients.
+
+## Legacy relay deployment (older clients)
+
+The following deployment/update instructions and sync-code API are retained for operators of older clients.
+
+### Cloudflare
 
 One click, on the free Workers plan. It covers a few computers syncing a handful of spaces; Cloudflare's free daily
 limits (100,000 Durable Object requests and 100,000 rows written) are the ceiling.
@@ -25,7 +30,7 @@ copy by themselves. Or deploy from a checkout:
 Then point Lunport at your Worker URL: Settings → Sync → Relay URL. The app only accepts
 `https://` relays (plain `http://` is allowed for `localhost` / `127.0.0.1` during development).
 
-## Self-host with Docker Compose
+### Docker Compose
 
 To run the relay on your own server instead of Cloudflare, `selfhost/` runs the same Worker on
 [workerd](https://github.com/cloudflare/workerd), Cloudflare's open-source Workers runtime, behind
@@ -54,7 +59,7 @@ service first.
 - `selfhost/check-config.mjs` fails the image build if `selfhost/workerd.capnp` drifts from `wrangler.jsonc` (compatibility
   date, Durable Object classes). `selfhost/smoke-test.mjs` checks a running relay end to end, and CI runs both.
 
-## Updating your relay
+### Updating your legacy relay
 
 Lunport tells you in *Settings → Sync* when your relay is missing something the app can use.
 
@@ -85,7 +90,7 @@ Lunport tells you in *Settings → Sync* when your relay is missing something th
 - **GitLab:** download the `relay/` folder of the release you want, replace your repository's files with it (keep the
   `name` in `wrangler.jsonc`), and push.
 
-## API
+### Legacy API
 
 Besides the per-chain endpoints (`PUT`/`DELETE /v1/chains/{id}`, `GET`/`POST /v1/chains/{id}/records`):
 

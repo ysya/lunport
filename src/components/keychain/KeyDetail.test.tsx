@@ -62,13 +62,11 @@ describe("a key slot's detail", () => {
       ...COPY_EXPORT,
       "Export private key…": "exportPrivate",
       "Change…": "pick",
-      "Stop syncing": "stop",
     });
     expect(pressEach(keySlot({ file_for_now: true }))).toEqual({
       ...COPY_EXPORT,
       "Move into Lunport": "move",
       "Change…": "pick",
-      "Stop syncing": "stop",
     });
   });
 
@@ -81,20 +79,16 @@ describe("a key slot's detail", () => {
     expect(pressEach(keySlot({ ...own, in_vault: true }))).toEqual({
       ...COPY_EXPORT,
       "Export private key…": "exportPrivate",
-      "Sync to your computers": "sync",
       "Change…": "pick",
     });
     expect(pressEach(keySlot({ status: { kind: "synced_available", file: "/f" } }))).toEqual({
       ...COPY_EXPORT,
       "Use the synced key": "useSynced",
       "Change…": "pick",
-      "Stop syncing": "stop",
     });
     expect(pressEach(keySlot({ status: { kind: "source_changed", file: "/f" } }))).toEqual({
       ...COPY_EXPORT,
-      "Sync the new key": "syncNew",
       "Change…": "pick",
-      "Stop syncing": "stop",
     });
     expect(pressEach(keySlot({ ...own, in_account: false, status: { kind: "not_in_use", file: "/f" } }))).toEqual({
       ...COPY_EXPORT,
@@ -114,7 +108,7 @@ describe("a key slot's detail", () => {
 
   it("turns the actions off while one runs, and Copy, Export to host and Add a host off without a key here", () => {
     const slot = keySlot({ status: { kind: "synced_available", file: "/f" } });
-    for (const label of ["Use the synced key", "Change…", "Stop syncing", "Copy public key", "Export to host…", "Add a host for this key…"]) {
+    for (const label of ["Use the synced key", "Change…", "Copy public key", "Export to host…", "Add a host for this key…"]) {
       expect(buttonTag(slotDetail(slot, { busy: true }), label)).toContain(DISABLED);
       expect(buttonTag(slotDetail(slot), label)).not.toContain(DISABLED);
     }

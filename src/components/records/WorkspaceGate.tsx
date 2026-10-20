@@ -55,8 +55,7 @@ export function WorkspaceGate({
         {paused && (
           <>
             <p className="text-sm text-muted-foreground">
-              Continuing enables the existing SSH configuration workspace and
-              its sync behavior.
+              Continuing enables the existing SSH configuration workspace for local use.
             </p>
             <Button disabled={resuming} onClick={useLegacy}>
               Use existing SSH configuration

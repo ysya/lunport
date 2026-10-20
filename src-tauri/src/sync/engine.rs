@@ -277,44 +277,12 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
             return;
         }
         while rx.try_recv().is_ok() {}
-        let background_only = app
-            .state::<AppState>()
-            .background_credentials_only
-            .load(Ordering::SeqCst);
-        if !background_only {
-            if let Ok(next) = with_env(&app, |env| {
-                let (format, legacy, cutover) = {
-                    let core = env.runtime.core.lock().unwrap();
-                    (
-                        core.format,
-                        core.format == crate::sync::record_runtime::RuntimeFormat::Legacy
-                            && !core.legacy_paused
-                            && core.save_blocked.is_none(),
-                        core.records
-                            .as_ref()
-                            .and_then(|r| r.local.central.as_ref())
-                            .is_some_and(|w| w.control.cutover),
-                    )
-                };
-                if legacy {
-                    let _ = round::sync_once(env);
-                } else if format == crate::sync::record_runtime::RuntimeFormat::Records && !cutover
-                {
-                    let _ = crate::sync::record_round::sync_once(env);
-                }
-                (
-                    round::next_delay(env),
-                    round::backoff_window(env),
-                    format == crate::sync::record_runtime::RuntimeFormat::Records,
-                )
-            }) {
-                (delay, backoff, records) = next;
-            }
-        } else {
-            delay = crate::sync::relay::IDLE_POLL_INTERVAL;
-            backoff = Duration::ZERO;
-            records = false;
-        }
+        // The desktop client uses central account sync exclusively. Legacy readers remain
+        // available to explicit migration, but never run a background push/pull round.
+        delay = crate::sync::relay::IDLE_POLL_INTERVAL;
+        backoff = Duration::ZERO;
+        records = app.state::<AppState>().sync.core.lock().unwrap().format
+            == crate::sync::record_runtime::RuntimeFormat::Records;
         if let Ok(Some((central_delay, central_backoff))) =
             with_background_account_env(&app, |env| {
                 if !crate::sync::central::round::configured(env) {
@@ -505,18 +473,29 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
     use crate::sync::record_runtime::{self, StartupProbe};
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
+    let mut selected_server = None;
     let (probe, lock) = startup_probe_with_lock(
-        || match v1_state::state_path() {
-            Ok(path) => record_runtime::probe_startup(&path, &default_device_name()),
-            Err(_) => StartupProbe::Blocked {
-                kind: record_runtime::StartupErrorKind::Io,
-                reason: "cannot locate sync state".into(),
-            },
+        || {
+            selected_server = None;
+            match crate::sync::central::server_change::load() {
+                Ok(active) => {
+                    let probe = record_runtime::probe_startup(&active.path, &default_device_name());
+                    selected_server = Some(active);
+                    probe
+                }
+                Err(_) => StartupProbe::Blocked {
+                    kind: record_runtime::StartupErrorKind::Io,
+                    reason: "cannot locate sync state".into(),
+                },
+            }
         },
         || fsutil::app_data_root()
             .map_err(|e| engine_lock_error(&e))
             .and_then(|root| acquire_engine_lock(&root)),
     );
+    if let Some(active) = selected_server {
+        crate::sync::central::server_change::bind(active);
+    }
     match lock {
         Ok(file) => { let _=ENGINE_LOCK.set(file); ENGINE_ACTIVE.store(true,Ordering::SeqCst); }
         Err(reason) => {

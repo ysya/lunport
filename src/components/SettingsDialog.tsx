@@ -79,7 +79,7 @@ import {
 } from "@/components/ui/select";
 import { searchSettings, settingsDestinations, type SettingsMode } from "@/lib/settings-navigation";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
-import { SyncPane } from "@/components/SyncPane";
+import { CentralAccountSection } from "@/components/records/CentralAccountPanel";
 import { revealHidden } from "@/lib/sync-approvals";
 import { chooseMcpMode } from "@/lib/mcp-flow";
 import { McpAttribution } from "@/components/McpAttribution";
@@ -137,19 +137,19 @@ export function SettingsCategoryPane({
   if (category === "sync")
     return recordOverview ? (
       <Section
-        title="Sync chain"
-        description="Manage your relay, sync code and shared spaces in the Sync workspace."
+        title="Encrypted sync"
+        description="Manage your account, approved devices and sync server in the Sync workspace."
       >
         <Button variant="outline" onClick={onOpenSync}>
           Open sync workspace
         </Button>
       </Section>
     ) : (
-      <SyncPane />
+      <CentralAccountSection />
     );
   return <>
     <DiagnosticsPane />
-    {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Hosts and keys stay local unless you explicitly share them into a sync chain.">
+    {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
       <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect individually allowed hosts and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Group defaults never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
     </Section> : <AdvancedPane />}
   </>;

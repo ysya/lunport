@@ -17,9 +17,27 @@ pub async fn central_status(app: AppHandle) -> Result<Status, AppError> {
         .await
         .map_err(engine::join_error)?
 }
+/// The selected path is process-pinned. Restart, rather than replacing a live runtime,
+/// so an in-flight save can never cross into the new server's workspace.
+#[tauri::command]
+pub async fn central_change_server(app: AppHandle, service: String) -> Result<(), AppError> {
+    controller::require_enabled()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _lifecycle = state.sync.lifecycle.lock().unwrap();
+        if !engine::engine_active() {
+            return Err(AppError::Other("This workspace is read-only. Close other Lunport instances before changing servers.".into()));
+        }
+        super::server_change::select(service.trim())?;
+        app.restart();
+    })
+    .await
+    .map_err(engine::join_error)?
+}
 #[tauri::command]
 pub async fn central_sign_in(app: AppHandle, service: String, method: Option<super::authentication::Method>) -> Result<Status, AppError> {
     controller::require_enabled()?;
+    if super::server_change::service().is_some_and(|selected|selected!=service) {return Err(AppError::Other("Apply the new server and restart before signing in.".into()));}
     let operation = crypto::random_id(16)?;
     {
         let state = app.state::<AppState>();

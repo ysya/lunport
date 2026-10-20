@@ -66,7 +66,7 @@ describe("records host controls", () => {
     expect(() => buttonTag(html, "Connect")).toThrow("no Connect button");
     expect(buttonTag(html, "Create host")).not.toContain(DISABLED);
   });
-  it("uses progress rather than failure styling while setup is active", () => {
+  it("does not revive the old sync-code setup while its journal is active", () => {
     const html = render(
       <RecordsAccountPanel
         overview={recordOverview({
@@ -80,13 +80,14 @@ describe("records host controls", () => {
         })}
       />,
     );
-    expect(text(html)).toContain("Setting up sync…");
+    expect(text(html)).toContain("Sync is optional");
+    expect(text(html)).not.toContain("Setting up sync…");
     expect(text(html)).not.toContain("Sync changes are paused");
     expect(html).not.toContain('role="alert"');
-    expect(buttonTag(html, "Working…")).toContain(DISABLED);
+    expect(text(html)).not.toContain("Create sync chain");
     expect(text(html)).not.toContain("Sync code for recovery");
   });
-  it("offers resumable setup without marking the journal itself as a failure", () => {
+  it("keeps local use available without offering legacy setup resumption", () => {
     const html = render(
       <RecordsAccountPanel
         overview={recordOverview({
@@ -99,8 +100,8 @@ describe("records host controls", () => {
         })}
       />,
     );
-    expect(text(html)).toContain("Finish sync setup");
-    expect(text(html)).toContain("Resume sync setup");
+    expect(text(html)).toContain("Manage hosts, keys, Groups and tunnel rules locally without an account");
+    expect(text(html)).not.toContain("Resume sync setup");
     expect(html).not.toContain('role="alert"');
   });
   it("starts new hosts in the library and offers creation before connection", () => {
@@ -266,14 +267,14 @@ describe("explicit import consent and key/account controls", () => {
       expect(html).not.toContain('data-attention="true"');
     }
   });
-  it("keeps shared account controls disabled while shared writes are gated", () => {
+  it("removes the legacy account controls even when old shared writes are gated", () => {
     const html = render(
       <RecordsAccountPanel
         overview={recordOverview({ shared_writes_blocked: true })}
       />,
     );
-    expect(buttonTag(html, "Create sync chain")).toContain(DISABLED);
-    expect(buttonTag(html, "Join with sync code")).toContain(DISABLED);
-    expect(text(html)).toContain("Sync changes are paused");
+    expect(text(html)).not.toContain("Create sync chain");
+    expect(text(html)).not.toContain("Join with sync code");
+    expect(text(html)).toContain("Sync is optional");
   });
 });

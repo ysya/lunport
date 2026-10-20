@@ -9,7 +9,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::error::AppError;
-use crate::fsutil;
 use crate::sync::record::{Envelope, LocalRecord};
 #[cfg(test)]
 use crate::sync::record::SCHEMA_VERSION;
@@ -105,7 +104,7 @@ impl SyncState {
 }
 
 pub fn state_path() -> Result<PathBuf, AppError> {
-    Ok(fsutil::app_data_root()?.join("sync-state.json"))
+    crate::sync::central::server_change::state_path()
 }
 
 #[cfg(test)]

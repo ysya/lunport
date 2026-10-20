@@ -16,6 +16,7 @@ import {
   centralStatus,
   centralStatusKey,
   centralSignIn,
+  centralChangeServer,
   centralCancelSignIn,
   centralRefresh,
   centralSignOut,
@@ -51,7 +52,7 @@ export function CentralAccountSection({
   }, [client]);
   if (!query.data) return null;
   if (!query.data.available) {
-    return <p className="text-sm text-muted-foreground">Central account sync is unavailable in this build. Open Older sync-code libraries below to use existing sync.</p>;
+    return <p className="text-sm text-muted-foreground">Central account sync is unavailable in this build. Your local library remains available without signing in.</p>;
   }
   return (
     <CentralAccountPanel
@@ -173,6 +174,8 @@ export function CentralAccountPanel({
     migrationBusy ||
     disabled;
   const login = signingIn || status.login_pending;
+  const serviceOrigin = service.trim().replace(/\/$/, "");
+  const serverChanged = !!status.service && serviceOrigin !== status.service;
   const backup = status.phase === "backup_required";
   return (
     <section
@@ -194,19 +197,24 @@ export function CentralAccountPanel({
           placeholder="https://sync.example.com"
           autoComplete="off"
           spellCheck={false}
-          disabled={blocked || status.configured || login}
+          disabled={blocked || login}
         />
       </RecordField>
+      {!status.service && <p className="text-sm text-muted-foreground">Deploy your own sync server with Cloudflare Workers or Docker, then enter its HTTPS URL. You can keep using Lunport locally without an account.</p>}
+      {serverChanged && <div className="space-y-2">
+        <p className="text-sm text-muted-foreground">Changing servers restarts Lunport and opens an empty local library. Sign in on the new server, then import your SSH config. Existing SSH files are not changed. Open terminal sessions will close.</p>
+        <Button disabled={blocked || login || !service.trim()} onClick={() => void run(async () => { await centralChangeServer(serviceOrigin); })}>Change server and restart</Button>
+      </div>}
       <div className="flex flex-wrap gap-2">
         {!login && (
           <Button
-            disabled={blocked || !service.trim()}
+            disabled={blocked || serverChanged || !service.trim()}
             onClick={() =>
               void run(async () => {
                 setSigningIn(true);
                 await updateAfter(
                   centralSignIn(
-                    service.trim(),
+                    serviceOrigin,
                     status.configured ? undefined : "passkey",
                   ),
                 );
@@ -219,11 +227,11 @@ export function CentralAccountPanel({
         {!status.configured && !login && (
           <Button
             variant="outline"
-            disabled={blocked || !service.trim()}
+            disabled={blocked || serverChanged || !service.trim()}
             onClick={() =>
               void run(async () => {
                 setSigningIn(true);
-                await updateAfter(centralSignIn(service.trim(), "oidc"));
+                await updateAfter(centralSignIn(serviceOrigin, "oidc"));
               })
             }
           >

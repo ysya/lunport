@@ -27,7 +27,7 @@ export function LegacyMigrationLanding({
         </Button>
         <p className="text-sm text-muted-foreground">
           Using the existing workspace enables its SSH configuration editor and
-          sync behavior.
+          local editing.
         </p>
         <div className="flex flex-wrap justify-center gap-2">
           <Button variant="outline" disabled={busy} onClick={useLegacy}>
