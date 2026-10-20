@@ -250,7 +250,15 @@ fn opened(path: &Path, write: bool, acl_write: bool) -> Result<File, AppError> {
                 | FILE_FLAG_OPEN_REPARSE_POINT
                 | if write { FILE_FLAG_WRITE_THROUGH } else { 0 },
         );
-    let file = options.open(path)?;
+    let file = options.open(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Cannot open pinned Windows path {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
     stamp(&file)?;
     Ok(file)
 }
@@ -381,7 +389,12 @@ impl Directory {
         if private {
             // Existing app directories may have safe inherited SYSTEM/admin ACEs. Tighten
             // only this owned directory, never propagate changes into user key hard links.
-            super::slot_files_windows::restrict_to_owner(path, true)?;
+            super::slot_files_windows::restrict_to_owner(path, true).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Cannot apply private Windows directory permissions: {error}"),
+                )
+            })?;
             security(file, true)?;
         }
         let observed = stamp(file)?;
@@ -536,7 +549,12 @@ impl Temporary {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error().into());
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(
+                error.kind(),
+                format!("Cannot create private Windows temporary: {error}"),
+            )
+            .into());
         }
         let file = unsafe { File::from_raw_handle(handle) };
         if let Err(error) = security(&file, true) {
@@ -572,7 +590,12 @@ impl Temporary {
             )
         } == 0
         {
-            return Err(io::Error::last_os_error().into());
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(
+                error.kind(),
+                format!("Cannot publish Windows temporary: {error}"),
+            )
+            .into());
         }
         self.moved = true;
         Ok(())

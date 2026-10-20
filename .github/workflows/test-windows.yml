@@ -102,7 +102,7 @@ jobs:
       # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the three real OS credential tests are explicitly excluded.
       - name: Central sync Windows filesystem security boundary
         run: |
-          cargo test --locked --lib sync::central_files_windows -- --test-threads=2 --nocapture
+          cargo test --locked --manifest-path windows-sync-check/Cargo.toml -- --test-threads=2 --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Windows central filesystem security boundary failed' }
           cargo test --locked --lib sync::central::migration_files -- --test-threads=2
           if ($LASTEXITCODE -ne 0) { throw 'Windows central source capture and archive codec failed' }
