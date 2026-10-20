@@ -10,6 +10,7 @@ import { HostKeyCard } from "@/components/HostKeyWindow";
 import { ApprovalCard } from "@/components/AgentApprovalWindow";
 import { AuthenticationCardView } from "@/components/AuthenticationWindow";
 import { groupView, hostPayload, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
+import type { CentralStatus, CentralRecoveryProgress } from "@/lib/central-sync";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
 import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
 import { useTerminalStore } from "@/stores/terminals";
@@ -108,7 +109,18 @@ else {
           console.info("Fixture connection requested", String(args.hostId));
           return;
         }
-        if (command === "app_platform") return "macos";
+        if (command === "central_status" && scenario === "sync-layout") return {
+          available: true, configured: true, phase: "setup", service: "https://sync.example.com",
+          account_id: "a".repeat(64), device_id: "b".repeat(32), root_fingerprint: null,
+          membership_head: null, authorization_epoch: "1", has_session: true, login_pending: false,
+          needs_recovery: false, replacement_pending: false, needs_reconciliation: false,
+          can_sync: false, pending: 0, conflicts: 0, error: null,
+        } satisfies CentralStatus;
+        if (command === "central_recovery_status" && scenario === "sync-layout") return {
+          phase: "idle", operation: null, backup_confirmed: false, verified: 0, total: 0, root_fingerprint: null,
+        } satisfies CentralRecoveryProgress;
+        if (command === "central_cancel_account_recovery" && scenario === "sync-layout") return;
+        if (command === "app_platform") return new URLSearchParams(window.location.search).get("platform") === "windows" ? "windows" : "macos";
         if (command === "app_is_development") return true;
         if (command === "app_home_dir") return "/fixture";
         if (command === "connect_list_terminals") return [{ id: "fixture", label: "Example terminal with a long display name", supports_new_tab: true }];

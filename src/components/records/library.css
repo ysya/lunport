@@ -28,7 +28,16 @@
   overflow: hidden;
   padding: 0 1.15rem;
 }
-.is-macos .library-sidebar-header { padding-left: 5rem; }
+/* Keep branding on its own row below the native window controls. */
+.is-macos .library-sidebar-header {
+  min-height: 6rem;
+  align-items: flex-end;
+  padding-bottom: 0.85rem;
+}
+.library-shell.is-macos[data-sidebar-collapsed="true"] .library-sidebar-header {
+  min-height: 3.2rem;
+  padding-bottom: 0;
+}
 .library-app-name { white-space: nowrap; }
 .library-app-name svg { flex-shrink: 0; }
 .library-app-name > span { transition: opacity var(--motion-feedback) var(--ease-enter); }
