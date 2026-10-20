@@ -115,6 +115,19 @@ impl Cache {
             group_order: vec![],
             key_storage: BTreeMap::new(),
         };
+        for rule in &catalogue.tunnels {
+            let id = crate::sync::tunnel_rules::wire_id(&rule.id);
+            cache.account.records.insert(
+                record_key(RecordKind::Meta, &id),
+                row(
+                    RecordKind::Meta,
+                    &id,
+                    serde_json::json!({"schema":1,"rule":rule}),
+                    catalogue_receipt,
+                    observed,
+                ),
+            );
+        }
         for order in &catalogue.group_orders {
             match &order.scope {
                 HostScope::Local => cache.group_order = order.ids.clone(),
@@ -242,6 +255,7 @@ mod tests {
             Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":name,"hostname":"fixture.invalid","auth":"password"})).unwrap())
         };
         let catalogue = Catalog {
+            tunnels: vec![],
             collections: vec![Collection {
                 id: collection.clone(),
                 name: "Private collection".into(),

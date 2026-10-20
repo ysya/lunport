@@ -150,6 +150,7 @@ fn public(row: &KnownInput) -> Result<Option<serde_json::Value>, AppError> {
             serde_json::json!({"schema":value.schema,"name":value.name,"slug":value.slug,"created_at_ms":value.created_at_ms,"previous_id":value.previous_id})
         }
         KnownData::Navigation(value) => serde_json::to_value(value).map_err(|_| invalid())?,
+        KnownData::Tunnel(value) => serde_json::to_value(value).map_err(|_| invalid())?,
         KnownData::LegacyHost(_) | KnownData::LegacySlot(_) => return Err(failure()),
         _ => return Ok(None),
     };
@@ -173,12 +174,17 @@ fn canonical(record: &Record) -> Result<serde_json::Value, AppError> {
         RecordKind::Meta if record.id == crate::sync::group_order::RECORD_ID => {
             value::<crate::sync::group_order::GroupOrder>(&record.payload)
         }
+        RecordKind::Meta if crate::sync::tunnel_rules::is_id(&record.id) => {
+            value::<crate::sync::tunnel_rules::Payload>(&record.payload)
+        }
         _ => Err(invalid()),
     }
 }
 fn supported_public(row: &KnownInput) -> bool {
     matches!(row.kind.as_str(), "host" | "group" | "keyslot" | "space")
-        || row.kind == "meta" && row.id == crate::sync::group_order::RECORD_ID
+        || row.kind == "meta"
+            && (row.id == crate::sync::group_order::RECORD_ID
+                || crate::sync::tunnel_rules::is_id(&row.id))
 }
 fn normalized(
     state: &SyncStateV3,
@@ -233,6 +239,9 @@ fn normalized(
             Scope::Local => match kind {
                 RecordKind::Host => &mut next.local.hosts,
                 RecordKind::Group => &mut next.local.groups,
+                RecordKind::Meta if crate::sync::tunnel_rules::is_id(&row.id) => {
+                    &mut next.local.tunnel_rules
+                }
                 _ => return Err(invalid()),
             },
             Scope::Account(_) => &mut next.account.as_mut().ok_or_else(invalid)?.records,
@@ -404,6 +413,7 @@ pub(super) fn prepare(
     let storage = materials.storage.clone();
     let next = normalized(state, known, &active)?;
     let empty = Catalog {
+        tunnels: vec![],
         collections: vec![],
         group_orders: vec![GroupOrder {
             scope: HostScope::Local,
@@ -436,7 +446,10 @@ pub(super) fn prepare(
                 .rev()
                 .find_map(|(identity, value)| match value {
                     Data::Key(private)
-                        if identity.id == *id && private.validate_against(id, slot).is_ok() => Some(private),
+                        if identity.id == *id && private.validate_against(id, slot).is_ok() =>
+                    {
+                        Some(private)
+                    }
                     _ => None,
                 })
                 .ok_or_else(invalid)?;
@@ -481,15 +494,32 @@ pub(super) fn prepare(
             KnownData::Collection(value) => {
                 let mut version = catalog.clone();
                 version.collections.retain(|c| c.id != row.id);
-                version
-                    .group_orders
-                    .retain(|o| !matches!(&o.scope,HostScope::Space{space_id}if space_id==&row.id));
+                version.group_orders.retain(
+                    |o| !matches!(&o.scope,HostScope::Space{space_id}if space_id==&row.id),
+                );
                 if !row.deleted {
                     version.collections.push(Collection {
                         id: row.id.clone(),
                         name: value.name.clone(),
                     });
                 }
+                history.append(catalog_id(), Data::Catalog(version), false)?;
+            }
+            KnownData::Tunnel(value) => {
+                let mut version = catalog.clone();
+                version.tunnels.retain(|r| r.id != value.rule.id);
+                if !row.deleted {
+                    version.tunnels.push(value.rule.clone());
+                }
+                history.append(catalog_id(), Data::Catalog(version), false)?;
+            }
+            KnownData::Deleted
+                if row.kind == "meta" && crate::sync::tunnel_rules::is_id(&row.id) =>
+            {
+                let mut version = catalog.clone();
+                version
+                    .tunnels
+                    .retain(|r| crate::sync::tunnel_rules::wire_id(&r.id) != row.id);
                 history.append(catalog_id(), Data::Catalog(version), false)?;
             }
             KnownData::Navigation(value) => {
@@ -507,9 +537,9 @@ pub(super) fn prepare(
             KnownData::Deleted if row.kind == "space" => {
                 let mut version = catalog.clone();
                 version.collections.retain(|c| c.id != row.id);
-                version
-                    .group_orders
-                    .retain(|o| !matches!(&o.scope,HostScope::Space{space_id}if space_id==&row.id));
+                version.group_orders.retain(
+                    |o| !matches!(&o.scope,HostScope::Space{space_id}if space_id==&row.id),
+                );
                 history.append(catalog_id(), Data::Catalog(version), false)?;
             }
             KnownData::Deleted

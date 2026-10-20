@@ -6,6 +6,7 @@ mod agent;
 pub mod askpass;
 pub mod cli;
 mod sync;
+pub use sync::central::controller::enabled as central_sync_available;
 mod config;
 mod connect;
 mod connection_probe;
@@ -20,8 +21,12 @@ mod keys;
 mod known_hosts;
 #[cfg(target_os = "macos")]
 pub mod macos_health;
+#[cfg(target_os = "macos")]
+pub mod macos_install;
 pub mod mcp;
+mod mcp_setup;
 mod process;
+mod prompt_window;
 mod quick_connect;
 mod secrets;
 mod session;
@@ -241,6 +246,8 @@ fn run_app(host: bool, start_hidden: bool) {
         .manage(tray::TrayState::default())
         .manage(quick_connect::QuickConnect::default())
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            macos_install::repair_login();
             diagnostics::stage(diagnostics::Stage::Setup);
             app.state::<state::AppState>().background_credentials_only.store(host && start_hidden,std::sync::atomic::Ordering::SeqCst);
             // Publish the initial native tray before any worker can request an update.
@@ -275,7 +282,16 @@ fn run_app(host: bool, start_hidden: bool) {
             diagnostics::stage(diagnostics::Stage::Ready);
             Ok(())
         })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                // A reloaded workspace cannot own the old JavaScript terminal handles.
+                webview.app_handle().state::<state::AppState>().session.embedded.close_all();
+            }
+        })
         .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.app_handle().state::<state::AppState>().session.embedded.close_all();
+            }
             // SSH agent 的核准視窗(金鑰保管庫 spec §7.4):關掉它就是拒絕等待中的請求;它的焦點與同步的輪詢無關。
             if window.label() == agent::prompt::APPROVAL_WINDOW {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -317,6 +333,10 @@ fn run_app(host: bool, start_hidden: bool) {
             app_platform,
             diagnostics::app_open_diagnostics,
             app_is_development,
+            #[cfg(target_os = "macos")]
+            macos_install::app_installation_status,
+            #[cfg(target_os = "macos")]
+            macos_install::app_finish_rename,
             quick_connect::app_set_global_hotkey,
             quick_connect::app_take_quick_connect,
             app_home_dir,
@@ -427,6 +447,16 @@ fn run_app(host: bool, start_hidden: bool) {
             config_list_backups,
             config_restore_backup,
             connect_list_terminals,
+            session::embedded::terminal_open,
+            session::tunnels::tunnels_list,
+            session::tunnels::tunnels_save,
+            session::tunnels::tunnels_delete,
+            session::tunnels::tunnels_start,
+            session::tunnels::tunnels_stop,
+            session::embedded::terminal_write,
+            session::embedded::terminal_resize,
+            session::embedded::terminal_ack,
+            session::embedded::terminal_close,
             connect_launch,
             keys_list,
             keys_agent_status,
@@ -451,6 +481,9 @@ fn run_app(host: bool, start_hidden: bool) {
             settings_export,
             settings_import,
             mcp_status,
+            mcp_setup::mcp_setup_overview,
+            mcp_setup::mcp_setup_add,
+            mcp_setup::mcp_setup_export,
             mcp_set_approval_mode,
             session::auth_window::auth_pending,
             session::auth_window::auth_resolve,

@@ -2187,3 +2187,35 @@ fn replacement_history_requires_retirement_for_original_legacy_books_and_keeps_t
         assert!(s.rows.lock().unwrap().starts_with(&f.rows));
     });
 }
+
+#[test]
+fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
+    use crate::sync::tunnel_rules::{self, TunnelRule};
+    let f = fixture(true);
+    let rule: TunnelRule = serde_json::from_value(json!({"id":"d".repeat(16),"name":"Imported database","host_id":"a".repeat(16),"forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"imported-db.internal","target_port":5432}})).unwrap();
+    crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
+        tunnel_rules::set(s, None, &rule.id, None, Some(rule.clone()), now)
+            .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let service = service(&f);
+    api::with_test_transport(&f.origin, &service.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let state = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        let rules = tunnel_rules::view(&state);
+        assert_eq!(rules.len(), 1);
+        assert_ne!(rules[0].rule.id, rule.id);
+        assert_ne!(rules[0].rule.host_id, rule.host_id);
+        assert_eq!(rules[0].rule.forward, rule.forward);
+        assert!(state
+            .spaces
+            .values()
+            .flat_map(|s| s.records.values())
+            .any(|r| r.record.id == rules[0].rule.host_id
+                && !r.record.deleted
+                && r.record.payload["alias"] == "peer-local-host"));
+        assert!(state.local.tunnel_rules.is_empty());
+    });
+}

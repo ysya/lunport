@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type PointerEvent } from "react";
 import {
   Clock3, Folder, FolderOpen, Hash, KeyRound, Plus,
-  AlertCircle, Server, ChevronRight, ArrowUp, ArrowDown, ArrowDownAZ, MoreHorizontal,
+  AlertCircle, Server, ChevronRight, ArrowUp, ArrowDown, ArrowDownAZ, MoreHorizontal, ArrowLeftRight,
 } from "lucide-react";
 import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
@@ -23,7 +23,7 @@ type GroupOrdering = {
   move: (siblings: string[], id: string, target: string, side: "before" | "after") => void;
 };
 
-export type WorkspacePanel = "hosts" | "keys" | "account" | "import";
+export type WorkspacePanel = "hosts" | "keys" | "account" | "import" | "tunnels";
 export const LIBRARY_NAVIGATION_ID = "library-navigation";
 
 function NavigationItem({ label, icon, active, action, count, collapsed = false }: {
@@ -242,6 +242,7 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
           {row("Recent", <Clock3 className="size-4" />, panel === "hosts" && filter.kind === "recent", () => choose({ kind: "recent" }))}
           {row("Needs attention", <AlertCircle className="size-4" />, panel === "hosts" && filter.kind === "attention", () => choose({ kind: "attention" }), attention || undefined)}
           {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.length)}
+          {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
         </nav>
         <div
           className="library-nav-collections min-h-0 flex-1 overflow-y-auto"

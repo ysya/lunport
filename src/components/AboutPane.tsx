@@ -4,9 +4,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import product from "@/brand/product.json";
+import terminalNotices from "@/lib/terminal-notices.txt?raw";
 import { BrandMark } from "@/components/app/BrandMark";
 import { Button } from "@/components/ui/button";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
+import { InstallationRenameRepair } from "@/components/InstallationRename";
 
 export function AboutPane() {
   const [installed, setInstalled] = useState<{ name: string; version: string } | null>(null);
@@ -35,6 +37,7 @@ export function AboutPane() {
       </div>
     </div>
     <p className="max-w-lg text-sm leading-relaxed text-muted-foreground">{product.description}</p>
+    <InstallationRenameRepair />
     <Section title="Project & support">
       <SettingsGroup>
         <SettingsRow label="Project" description="Source code and the getting started guide."><Button variant="outline" size="sm" onClick={() => void open("")}>GitHub<ExternalLink className="size-3.5" /></Button></SettingsRow>
@@ -44,5 +47,6 @@ export function AboutPane() {
       </SettingsGroup>
     </Section>
     <p className="text-xs leading-relaxed text-muted-foreground">{product.copyright}<br />Formerly SSHelter.</p>
+    <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Terminal credits and licenses</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-[11px]">{terminalNotices}</pre></details>
   </div>;
 }

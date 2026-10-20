@@ -117,6 +117,7 @@ fn fixture_with_service(mut service: Service) -> Fixture {
         scope: None,
     };
     let catalog = Data::Catalog(Catalog {
+        tunnels: vec![],
         collections: vec![],
         group_orders: vec![GroupOrder {
             scope: HostScope::Local,
@@ -645,4 +646,58 @@ fn actual_active_takeover_rotates_then_reconciles_its_unsent_key_through_backgro
         );
         assert!(f.d.keychain.get(&profile.slot("device")).unwrap().is_none());
     });
+}
+
+#[test]
+fn tunnel_catalog_edits_upload_read_back_materialize_and_delete_without_plaintext_or_resurrection(
+) {
+    use crate::sync::tunnel_rules::{self, TunnelRule};
+    let f = fixture();
+    round::sync_once(&f.d.env()).unwrap();
+    let rule: TunnelRule = serde_json::from_value(json!({"id":"e".repeat(16),"name":"Private database","host_id":"f".repeat(16),"forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"private-db.internal","target_port":5432}})).unwrap();
+    crate::sync::record_commands::edit_records(&f.d.env(), |s, now| {
+        tunnel_rules::set(s, None, &rule.id, None, Some(rule.clone()), now)
+            .map_err(|e| crate::error::AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    round::sync_once(&f.d.env()).unwrap();
+    let current = state(&f.d);
+    let ledger = current.local.central_projection.as_ref().unwrap();
+    assert_eq!(ledger.catalog.tunnels, vec![rule.clone()]);
+    let plan = Plan::current(current.local.central.clone().unwrap(), &f.keys).unwrap();
+    let cache = Cache::initial(&plan, 200, &BTreeMap::new()).unwrap();
+    let mut peer = current.clone();
+    peer.account = Some(cache.account);
+    peer.local.tunnel_rules.clear();
+    assert_eq!(tunnel_rules::view(&peer)[0].rule, rule);
+    assert!(peer
+        .account
+        .as_ref()
+        .unwrap()
+        .records
+        .values()
+        .filter(|r| tunnel_rules::is_id(&r.record.id))
+        .all(|r| !r.dirty));
+    crate::sync::record_commands::edit_records(&f.d.env(), |s, now| {
+        tunnel_rules::set(s, None, &rule.id, Some(&rule), None, now)
+            .map_err(|e| crate::error::AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    round::sync_once(&f.d.env()).unwrap();
+    let after = state(&f.d);
+    assert!(after
+        .local
+        .central_projection
+        .as_ref()
+        .unwrap()
+        .catalog
+        .tunnels
+        .is_empty());
+    assert!(tunnel_rules::view(&after).is_empty());
+    let plan = Plan::current(after.local.central.clone().unwrap(), &f.keys).unwrap();
+    let cache = Cache::initial(&plan, 300, &BTreeMap::new()).unwrap();
+    peer.account = Some(cache.account);
+    assert!(tunnel_rules::view(&peer).is_empty());
+    let wire = serde_json::to_string(&f.service.state.lock().unwrap().history).unwrap();
+    assert!(!wire.contains("private-db.internal") && !wire.contains("Private database"));
 }

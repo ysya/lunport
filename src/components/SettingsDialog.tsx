@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import {
   Bot,
   Info,
-  Copy,
   FolderCog,
   Monitor,
   Moon,
@@ -32,7 +31,6 @@ import { tauriInvoke } from "@/lib/ipc";
 import { useUpdaterState, updateInProgress } from "@/lib/updater";
 import { UpdatesPane } from "@/components/UpdatesPane";
 import { AboutPane } from "@/components/AboutPane";
-import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import {
   exportSettings,
@@ -45,6 +43,8 @@ import {
   LINT_RULES,
   quickConnectLabel,
   terminalSupportsNewTab,
+  IN_APP_TERMINAL,
+  clampTerminalFontSize,
   type ThemePref,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
@@ -68,7 +68,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -88,6 +87,7 @@ import { groupPath } from "@/components/records/group-tree";
 import type { RecordOverview } from "@/lib/records";
 import { KnownHostsManager } from "@/components/records/KnownHostsManager";
 import { ColorThemePicker } from "@/components/ColorThemePicker";
+import { McpClientSetup } from "@/components/McpClientSetup";
 
 export function SettingsCategoryPane({
   category,
@@ -557,7 +557,7 @@ function AppearancePane() {
   const motion = useSettingsStore((s) => s.motion);
   const setMotion = useSettingsStore((s) => s.setMotion);
   return (
-    <><Section title="Color theme" description="Choose a palette for Lunport. Terminal colors are controlled by your terminal app.">
+    <><Section title="Color theme" description="Choose a palette for Lunport and its in-app terminal. External terminals keep their own themes.">
       <SettingsGroup>
         <SettingsRow label="Appearance" description="System follows your OS light or dark mode.">
           <ThemeSegmented value={theme} onChange={setTheme} />
@@ -621,13 +621,17 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const setNewTabConnect = useSettingsStore((s) => s.setNewTabConnect);
   const terminals = useTerminals();
+  const terminalFontSize = useSettingsStore((s) => clampTerminalFontSize(s.terminalFontSize));
+  const setTerminalFontSize = useSettingsStore((s) => s.setTerminalFontSize);
+  const cursorBlink = useSettingsStore((s) => s.terminalCursorBlink !== false);
+  const setCursorBlink = useSettingsStore((s) => s.setTerminalCursorBlink);
 
   const supportsNewTab = terminalSupportsNewTab(terminalId, terminals.data ?? []);
 
   return (
     <><Section
       title="Terminal"
-      description="Where Lunport opens a connection. “System default” uses your OS default terminal (or the first detected)."
+      description="Connect inside Lunport or open an external terminal. Existing terminal sessions stay connected when you switch views."
     >
       <SettingsGroup>
         <SettingsRow id="set-terminal" label="Default terminal">
@@ -639,6 +643,7 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={IN_APP_TERMINAL}>Lunport (in app)</SelectItem>
               <SelectItem value={TERMINAL_DEFAULT}>System default</SelectItem>
               {(terminals.data ?? []).map((t) => (
                 <SelectItem key={t.id} value={t.id}>
@@ -652,19 +657,33 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
           id="set-new-tab"
           label="Open connections in a new tab"
           description={
-            supportsNewTab
+            terminalId === IN_APP_TERMINAL
+              ? "Lunport opens each connection in its own session tab."
+              : supportsNewTab
               ? "Opens a tab in an existing window instead of a new window."
               : "The selected terminal doesn’t support opening new tabs."
           }
         >
           <Switch
             id="set-new-tab"
-            checked={newTabConnect}
+            checked={terminalId === IN_APP_TERMINAL || newTabConnect}
             onCheckedChange={setNewTabConnect}
             disabled={!supportsNewTab}
           />
         </SettingsRow>
       </SettingsGroup>
+    </Section>
+    <Section title="In-app terminal" description="Colors follow Appearance. Search with ⌘F / Ctrl+F, switch sessions with Ctrl+Tab, and zoom with ⌘ / Ctrl + or −. Closing a running session asks for confirmation.">
+      <SettingsGroup>
+        <SettingsRow id="set-terminal-font" label="Terminal text size" description="Applies to all in-app terminal tabs without reconnecting.">
+          <Select value={String(terminalFontSize)} onValueChange={(value) => setTerminalFontSize(Number(value))}>
+            <SelectTrigger id="set-terminal-font" className="settings-select"><SelectValue /></SelectTrigger>
+            <SelectContent>{Array.from({ length: 15 }, (_, i) => i + 10).map((size) => <SelectItem key={size} value={String(size)}>{size} px</SelectItem>)}</SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow id="set-terminal-cursor" label="Blink cursor" description="Reduced-motion preferences take priority."><Switch id="set-terminal-cursor" checked={cursorBlink} onCheckedChange={setCursorBlink} /></SettingsRow>
+      </SettingsGroup>
+      <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Switching tabs keeps SSH connected. Closing a tab, reloading the workspace, quitting or installing an update ends its session. Reconnect starts a new shell.</p>
     </Section>
     {recordOverview && <Section title="Known hosts" description="Inspect trusted server fingerprints and manage local OpenSSH host keys.">
       <SettingsGroup><SettingsRow label="Saved server identities" description="Review fingerprints, verify a server again, or forget an old identity."><KnownHostsManager overview={recordOverview} /></SettingsRow></SettingsGroup>
@@ -773,13 +792,6 @@ function FilesPane({ onDirtyChange, onBusyChange }: { onDirtyChange?: (dirty: bo
   );
 }
 
-function shellQuoted(value: string, platform: string | undefined): string {
-  if (platform === "windows") {
-    return `"${value.replace(/"/g, '`"')}"`;
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 function LegacyMcpPane() {
   const query = useHostsQuery();
   return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
@@ -790,7 +802,6 @@ export function McpPane({ hosts, records = false }: {
   records?: boolean;
 }) {
   const status = useMcpStatus(2_000);
-  const platform = usePlatform();
   const setEnabled = useSetMcpEnabled();
   const setHostAllowed = useSetMcpHostAllowed();
   const setMode = useSetMcpApprovalMode();
@@ -806,31 +817,21 @@ export function McpPane({ hosts, records = false }: {
   const allowed = new Set(status.data?.allowed_hosts ?? []);
   const [hostSearch, setHostSearch] = useState("");
   const matchingHosts = hosts.filter((host) => `${host.alias} ${host.hostname ?? ""} ${host.user ?? ""} ${host.id} ${host.groupPath ?? ""}`.toLowerCase().includes(hostSearch.trim().toLowerCase()));
-  const setupCommand = status.data
-    ? `codex mcp add sshelter -- ${shellQuoted(status.data.executable, platform.data)} --mcp`
-    : "";
-
-  const copySetup = async () => {
-    try {
-      await copyText(setupCommand);
-      toast.success("Codex setup command copied");
-    } catch (error) {
-      toast.error("Could not copy setup command", { description: String(error) });
-    }
-  };
 
   return (
     <>
-      <Section
-        title="MCP access"
-        description={records ? "AI clients can propose new connections for your review. Existing hosts require individual permission before inspection, fingerprint verification or command execution." : "Let local AI clients request SSH actions through Lunport. Remote commands require an Allow once decision here."}
-      >
+      <McpClientSetup fallbackExecutable={status.data?.executable} connectionNote={
+        !status.data ? undefined : !status.data.enabled ? "AI access is off. Turn it on when you’re ready to use connected tools."
+          : !status.data.bridge_active ? "The local AI service is unavailable. Restart Lunport and refresh the tool’s setup."
+          : status.data.last_client_at_ms ? `Last AI tool activity ${new Date(status.data.last_client_at_ms).toLocaleString()}`
+          : "Ready for a local AI tool to connect."
+      } accessControl={
         <SettingsGroup>
           {status.isError && <div role="alert" className="space-y-2 p-3"><p className="text-sm text-destructive">AI access status is unavailable.</p><Button size="sm" variant="outline" onClick={() => void status.refetch()}>Retry</Button></div>}
           <SettingsRow
             id="set-mcp-enabled"
             label="Enable AI access"
-            description="Disabling immediately denies every pending request."
+            description="Only individually allowed hosts are available. Turning this off cancels pending requests."
           >
             <Switch
               id="set-mcp-enabled"
@@ -839,20 +840,8 @@ export function McpPane({ hosts, records = false }: {
               onCheckedChange={(enabled) => setEnabled.mutate(enabled)}
             />
           </SettingsRow>
-          <SettingsRow
-            label={records ? "Local MCP broker" : "Local approval bridge"}
-            description={
-              status.data?.last_client_at_ms
-                ? `Last MCP activity ${new Date(status.data.last_client_at_ms).toLocaleString()}`
-                : "Waiting for a local MCP client."
-            }
-          >
-            <Badge variant={status.data?.bridge_active ? "secondary" : "outline"}>
-              {status.data?.bridge_active ? "Ready" : "Unavailable"}
-            </Badge>
-          </SettingsRow>
         </SettingsGroup>
-      </Section>
+      } />
 
       {records ? (
         <Section
@@ -927,28 +916,6 @@ export function McpPane({ hosts, records = false }: {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <Section
-        title="Connect Codex"
-        description="Run this once in a terminal. Codex will launch or reconnect to the Lunport approval center when needed."
-      >
-        <div className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2">
-          <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap px-1 font-mono text-xs">
-            {setupCommand || "Loading…"}
-          </code>
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon"
-            className="size-7 shrink-0"
-            aria-label="Copy Codex setup command"
-            disabled={!setupCommand}
-            onClick={copySetup}
-          >
-            <Copy className="size-3.5" />
-          </Button>
-        </div>
-      </Section>
 
       <Section
         title="Allowed hosts"

@@ -6,6 +6,7 @@ import {
   compareVersions,
   inspectChannelRelease,
   parseVersion,
+  publicDownloadManifest,
   shouldReplace,
   skipMessage,
   validateBetaVersion,
@@ -114,7 +115,7 @@ describe("validateManifest", () => {
     expect(() => validateManifest(onlySpecific, "v0.16.0")).not.toThrow();
   });
 
-  it("promotes Tauri Action v1 asset API URLs with universal aliases unchanged", () => {
+  it("validates Action v1 source manifests before normalizing URLs, retaining universal aliases", () => {
     const legacy = latestJson("1.6.0");
     const manifest = structuredClone(legacy);
     for (const [index, entry] of Object.values(manifest.platforms).entries()) {
@@ -157,6 +158,39 @@ describe("validateManifest", () => {
     expect(() => validateManifest({ version: "0.16.0" }, "v0.16.0")).toThrow(
       "no entry for linux-x86_64, linux-aarch64, windows-x86_64, darwin- (it lists: nothing)",
     );
+  });
+});
+
+describe("publicDownloadManifest", () => {
+  function fixture() {
+    const manifest = latestJson("1.7.0-1");
+    const assets = Object.entries(manifest.platforms).map(([platform, entry], index) => {
+      entry.url = `https://api.github.com/repos/ysya/lunport/releases/assets/${100 + index}`;
+      return { url: entry.url, browser_download_url: `https://github.com/ysya/lunport/releases/download/v1.7.0-1/${platform}.bin`, size: 123 };
+    });
+    for (const arch of ["aarch64", "x86_64"]) manifest.platforms[`darwin-${arch}-app`] = manifest.platforms["darwin-universal"];
+    return { manifest, release: { tag_name: "v1.7.0-1", assets } };
+  }
+  it("replaces API URLs for every platform and universal alias, preserving signatures and release data", () => {
+    const { manifest, release } = fixture();
+    const original = structuredClone(manifest);
+    const result = publicDownloadManifest(manifest, release);
+    expect(manifest).toEqual(original);
+    expect({ ...result, platforms: undefined }).toEqual({ ...original, platforms: undefined });
+    for (const [platform, entry] of Object.entries(result.platforms)) {
+      expect(entry.url).toMatch(/^https:\/\/github\.com\/ysya\/lunport\/releases\/download\/v1\.7\.0-1\//);
+      expect(entry.signature).toBe(original.platforms[platform].signature);
+    }
+    expect(result.platforms["darwin-aarch64-app"]).toEqual(result.platforms["darwin-universal"]);
+    expect(publicDownloadManifest(result, release)).toEqual(result);
+  });
+  it("refuses unknown URLs, missing or empty assets, and mismatched releases before publishing", () => {
+    const { manifest, release } = fixture();
+    expect(() => publicDownloadManifest(manifest, { ...release, tag_name: "v1.6.0" })).toThrow(/does not match/);
+    expect(() => publicDownloadManifest(manifest, { ...release, assets: [] })).toThrow(/No public release asset/);
+    expect(() => publicDownloadManifest(manifest, { ...release, assets: release.assets.map(asset => ({ ...asset, size: 0 })) })).toThrow(/No public release asset/);
+    manifest.platforms["linux-x86_64"].url = "https://api.github.com/repos/another/repo/releases/assets/100";
+    expect(() => publicDownloadManifest(manifest, release)).toThrow(/No public release asset/);
   });
 });
 

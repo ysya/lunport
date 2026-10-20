@@ -307,6 +307,7 @@ pub(super) mod tests {
         (
             identity("meta", "catalog"),
             Data::Catalog(Catalog {
+                tunnels: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),

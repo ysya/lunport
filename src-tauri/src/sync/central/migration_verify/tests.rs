@@ -28,6 +28,7 @@ fn fixture(large: bool) -> (Plan, VaultKeys, DeviceKeys, Known) {
                     scope: None,
                 },
                 Data::Catalog(Catalog {
+                    tunnels: vec![],
                     collections: vec![],
                     group_orders: vec![],
                 }),

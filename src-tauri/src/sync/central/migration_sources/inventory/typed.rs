@@ -85,6 +85,7 @@ pub(in crate::sync::central) enum KnownData {
     Device(LegacyDevice),
     Account(MetaPayloadV3),
     Navigation(crate::sync::group_order::GroupOrder),
+    Tunnel(crate::sync::tunnel_rules::Payload),
     Rotation(Rotation),
     LegacySpaceKey,
 }
@@ -183,6 +184,9 @@ fn identity(scope: &Scope, view: &View<'_>) -> Result<(), AppError> {
         "space" | "spacekey" => account && hex(view.id, 64),
         "password" => account,
         "meta" if view.id == crate::sync::group_order::RECORD_ID => true,
+        "meta" if crate::sync::tunnel_rules::is_id(view.id) => {
+            matches!(scope, Scope::Local | Scope::Account(_))
+        }
         "meta" if view.id == crate::sync::record::ACCOUNT_META_ID => account,
         "meta" => {
             account
@@ -332,6 +336,16 @@ fn admit(scope: &Scope, view: &View<'_>) -> Result<KnownData, AppError> {
                 return Err(invalid());
             }
             Ok(KnownData::Navigation(value))
+        }
+        "meta" if crate::sync::tunnel_rules::is_id(view.id) => {
+            let value: crate::sync::tunnel_rules::Payload = parse(raw)?;
+            if value.schema != 1
+                || crate::sync::tunnel_rules::wire_id(&value.rule.id) != view.id
+                || value.rule.validate().is_err()
+            {
+                return Err(invalid());
+            }
+            Ok(KnownData::Tunnel(value))
         }
         "meta" if view.id == crate::sync::record::ACCOUNT_META_ID => {
             let value: MetaPayloadV3 = parse(raw)?;

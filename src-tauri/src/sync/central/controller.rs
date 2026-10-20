@@ -47,7 +47,7 @@ pub struct Status {
     pub error: Option<String>,
 }
 pub fn enabled() -> bool {
-    cfg!(any(test, feature = "central-sync-preview"))
+    cfg!(any(test, feature = "central-sync"))
 }
 pub fn require_enabled() -> Result<(), AppError> {
     if enabled() {
@@ -85,7 +85,12 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         authorization_epoch: ws.map(|w| w.control.auth_epoch.to_string()),
         configured: ws.is_some(),
         phase: phase.into(),
-        service: ws.map(|w| w.control.profile.origin.clone()),
+        service: ws.map(|w| w.control.profile.origin.clone()).or_else(|| {
+            let built_in = crate::sync::state::DEFAULT_RELAY_URL;
+            built_in
+                .starts_with("https://")
+                .then(|| built_in.to_owned())
+        }),
         account_id: ws.map(|w| w.control.account_id.clone()),
         device_id: ws.map(|w| w.control.device.id.clone()),
         has_session: core

@@ -174,10 +174,10 @@ export function CentralAccountPanel({
   return (
     <section
       className="app-notice space-y-4"
-      aria-label="Central account preview"
+      aria-label="Sync account"
     >
       <div>
-        <h2 className="font-medium">Central account · Preview</h2>
+        <h2 className="font-medium">Account and encrypted sync</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           {phaseText[status.phase]}
         </p>

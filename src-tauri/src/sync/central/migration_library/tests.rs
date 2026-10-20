@@ -12,6 +12,9 @@ use crate::sync::{
 use crate::vault::store;
 use serde_json::json;
 fn fixture() -> (SyncStateV3, Known, Materials) {
+    fixture_with_tunnels(false)
+}
+fn fixture_with_tunnels(tunnels: bool) -> (SyncStateV3, Known, Materials) {
     let (owner, keys, _) = migration_history::tests::initial();
     let parent = ChainKeys::generate().unwrap();
     let child = ChainKeys::generate().unwrap();
@@ -27,8 +30,10 @@ fn fixture() -> (SyncStateV3, Known, Materials) {
             updated_at_ms: 1,
             device_id: state.device_id.clone(),
             deleted: false,
-            payload: serde_json::to_value(crate::sync::record::SpaceKeyPayload::from_keys(&child))
-                .unwrap(),
+            payload: serde_json::to_value(crate::sync::record::SpaceKeyPayload::from_keys(
+                &child,
+            ))
+            .unwrap(),
         },
         1,
     )
@@ -76,6 +81,36 @@ fn fixture() -> (SyncStateV3, Known, Materials) {
     );
     state.spaces.insert(child.chain_id, shared);
     state.account = Some(account);
+    if tunnels {
+        let rule = |id: &str, name: &str| json!({"schema":1,"rule":{"id":id,"name":name,"host_id":"1111111111111111","forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"migration-db.internal","target_port":5432}}});
+        let local = row(
+            RecordKind::Meta,
+            "tunnel:3333333333333333",
+            rule("3333333333333333", "Current tunnel"),
+            2,
+        );
+        state
+            .local
+            .tunnel_rules
+            .insert(record_key(RecordKind::Meta, &local.record.id), local);
+        let prior = row(
+            RecordKind::Meta,
+            "tunnel:4444444444444444",
+            rule("4444444444444444", "Historical tunnel"),
+            1,
+        );
+        let mut deleted = prior.clone();
+        deleted.record.version = 2;
+        deleted.record.deleted = true;
+        deleted.record.payload = serde_json::Value::Null;
+        let account = state.account.as_mut().unwrap();
+        let key = record_key(RecordKind::Meta, &prior.record.id);
+        account.records.insert(key.clone(), deleted);
+        account
+            .recovery
+            .bases
+            .insert(key, RecordVersion::Public(prior));
+    }
     let sources = Sources::discover(&state, Some(&parent)).unwrap();
     let known = Inventory::from_state(&sources, &state)
         .unwrap()
@@ -530,4 +565,28 @@ fn retained_only_hosts_and_key_metadata_cannot_reappear_as_current_after_migrati
         &history,
     )
     .unwrap();
+}
+
+#[test]
+fn migration_retains_local_tunnels_and_deleted_tunnel_history_without_reactivating_it() {
+    let (state, known, materials) = fixture_with_tunnels(true);
+    let before = serde_json::to_vec(&state).unwrap();
+    let rows = prepare(&state, &known, materials).unwrap().into_rows();
+    let catalogs: Vec<_> = rows
+        .iter()
+        .filter_map(|(_, d)| {
+            if let Data::Catalog(c) = d {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(catalogs
+        .iter()
+        .any(|c| c.tunnels.iter().any(|r| r.name == "Historical tunnel")));
+    let current = catalogs.last().unwrap();
+    assert_eq!(current.tunnels.len(), 1);
+    assert_eq!(current.tunnels[0].name, "Current tunnel");
+    assert_eq!(serde_json::to_vec(&state).unwrap(), before);
 }

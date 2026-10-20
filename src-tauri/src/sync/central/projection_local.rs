@@ -30,10 +30,12 @@ pub fn public_rows(
         } else {
             match row.record.kind {
                 RecordKind::Host => Data::Host(
-                    serde_json::from_value(row.record.payload.clone()).map_err(|_| invalid())?,
+                    serde_json::from_value(row.record.payload.clone())
+                        .map_err(|_| invalid())?,
                 ),
                 RecordKind::Group => Data::Group(
-                    serde_json::from_value(row.record.payload.clone()).map_err(|_| invalid())?,
+                    serde_json::from_value(row.record.payload.clone())
+                        .map_err(|_| invalid())?,
                 ),
                 _ => return Err(invalid()),
             }
@@ -63,7 +65,8 @@ pub fn public_rows(
             if row.record.kind == RecordKind::Meta
                 && row.record.id == crate::sync::group_order::RECORD_ID
             {
-                let order = crate::sync::group_order::decode(&row.record).ok_or_else(invalid)?;
+                let order =
+                    crate::sync::group_order::decode(&row.record).ok_or_else(invalid)?;
                 orders.insert(scope.clone(), order.ids);
             } else {
                 append(row, scope.clone())?;
@@ -79,7 +82,8 @@ pub fn public_rows(
         match row.record.kind {
             RecordKind::Space if !row.record.deleted => {
                 let value: crate::sync::record::SpacePayload =
-                    serde_json::from_value(row.record.payload.clone()).map_err(|_| invalid())?;
+                    serde_json::from_value(row.record.payload.clone())
+                        .map_err(|_| invalid())?;
                 if value.schema != 1 || !state.spaces.contains_key(&row.record.id) {
                     return Err(invalid());
                 }
@@ -116,6 +120,7 @@ pub fn public_rows(
                 payload::encode(&identity, &data)?;
                 rows.push((identity, data));
             }
+            RecordKind::Meta if crate::sync::tunnel_rules::is_id(&row.record.id) => {}
             RecordKind::Meta if row.record.id == crate::sync::record::ACCOUNT_META_ID => {}
             RecordKind::Meta if row.record.id == crate::sync::group_order::RECORD_ID => {
                 orders.insert(
@@ -142,7 +147,8 @@ pub fn public_rows(
     next_collections.extend(collections.into_values());
     let mut next_orders = vec![];
     for old in &original.group_orders {
-        if matches!(&old.scope,HostScope::Space{space_id} if !state.spaces.contains_key(space_id)) {
+        if matches!(&old.scope,HostScope::Space{space_id} if !state.spaces.contains_key(space_id))
+        {
             continue;
         }
         next_orders.push(GroupOrder {
@@ -156,7 +162,37 @@ pub fn public_rows(
             .filter(|(_, ids)| !ids.is_empty())
             .map(|(scope, ids)| GroupOrder { scope, ids }),
     );
+    let mut tunnels = BTreeMap::new();
+    for row in state
+        .local
+        .tunnel_rules
+        .values()
+        .chain(account.records.values().filter(|r| {
+            r.record.kind == RecordKind::Meta && crate::sync::tunnel_rules::is_id(&r.record.id)
+        }))
+    {
+        if !crate::sync::tunnel_rules::valid(&row.record) {
+            return Err(invalid());
+        }
+        let id = row
+            .record
+            .id
+            .strip_prefix(crate::sync::tunnel_rules::PREFIX)
+            .ok_or_else(invalid)?;
+        tunnels.remove(id);
+        if let Some(rule) = crate::sync::tunnel_rules::decode(&row.record) {
+            tunnels.insert(rule.id.clone(), rule);
+        }
+    }
+    let mut next_tunnels = vec![];
+    for old in &original.tunnels {
+        if let Some(rule) = tunnels.remove(&old.id) {
+            next_tunnels.push(rule);
+        }
+    }
+    next_tunnels.extend(tunnels.into_values());
     let catalog = Catalog {
+        tunnels: next_tunnels,
         collections: next_collections,
         group_orders: next_orders,
     };

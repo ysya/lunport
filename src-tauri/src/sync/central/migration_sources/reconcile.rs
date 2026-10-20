@@ -69,6 +69,9 @@ fn equivalent(a: &Item, b: &Item) -> Result<bool, AppError> {
         "meta" if a.id == crate::sync::group_order::RECORD_ID => {
             public::<crate::sync::group_order::GroupOrder>(left, right)
         }
+        "meta" if crate::sync::tunnel_rules::is_id(a.id) => {
+            public::<crate::sync::tunnel_rules::Payload>(left, right)
+        }
         _ => false, // Secret payloads never pass through a public JSON value or semantic coercion.
     })
 }
@@ -265,6 +268,9 @@ impl Reconciliation {
                     }
                     RecordKind::Group => {
                         state.local.groups.insert(key, local);
+                    }
+                    RecordKind::Meta if crate::sync::tunnel_rules::is_id(&row.id) => {
+                        state.local.tunnel_rules.insert(key, local);
                     }
                     _ => return Err(invalid()),
                 },

@@ -79,3 +79,4 @@ pub mod state_v2;
 #[cfg(test)]
 pub mod testkit;
 pub mod upgrade;
+pub mod tunnel_rules;

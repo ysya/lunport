@@ -78,3 +78,11 @@ it("offers optional external sign-in only before an account is pinned", () => {
     text(render({ configured: false, login_pending: true })),
   ).not.toContain("Use external sign-in provider");
 });
+
+it("offers the built-in Passkey service immediately without a preview switch", () => {
+  const html = render({ configured: false, has_session: false, phase: "signed_out", service: "https://sshelter-relay.ysyavv.workers.dev" });
+  expect(html).toContain('value="https://sshelter-relay.ysyavv.workers.dev"');
+  expect(buttonTag(html, "Sign in with Passkey")).not.toContain(DISABLED);
+  expect(text(html)).toContain("Account and encrypted sync");
+  expect(text(html)).not.toContain("Preview");
+});

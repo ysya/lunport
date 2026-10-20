@@ -149,6 +149,7 @@ fn resumed_ciphertext_batches_can_start_mid_page_without_changing_any_envelope()
                 scope: None,
             },
             Data::Catalog(Catalog {
+                tunnels: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),

@@ -266,7 +266,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
         return;
     }
     if app.get_webview_window(AUTH_WINDOW).is_none() {
-        let _ = WebviewWindowBuilder::new(
+        match WebviewWindowBuilder::new(
             app,
             AUTH_WINDOW,
             WebviewUrl::App("index.html".into()),
@@ -275,8 +275,12 @@ pub(crate) fn present(app: &tauri::AppHandle) {
         .inner_size(480.0, 360.0)
         .resizable(true)
         .always_on_top(true)
-        .center()
-        .build();
+        .visible(false)
+        .build()
+        {
+            Ok(window) => crate::prompt_window::show(&window),
+            Err(error) => eprintln!("[session] cannot open the authentication window: {error}"),
+        }
     }
     let _ = app.emit_to(AUTH_WINDOW, AUTH_EVENT, &requests);
 }

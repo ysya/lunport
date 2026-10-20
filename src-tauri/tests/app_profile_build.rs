@@ -35,3 +35,11 @@ fn the_normal_library_uses_the_compiled_legacy_ssh_boundary() {
         AppProfile::Production => assert!(CURRENT.require_legacy_ssh().is_ok()),
     }
 }
+
+#[test]
+fn the_normal_library_exposes_the_shipped_central_sync_capability() {
+    assert!(
+        sshelter_lib::central_sync_available(),
+        "Standard desktop builds must ship central account sync without preview flags."
+    );
+}

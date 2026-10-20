@@ -8,6 +8,8 @@ import { enable as autostartEnable, isEnabled as autostartIsEnabled } from "@tau
 import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
 import { useSettingsStore } from "@/stores/settings";
+import { useTerminalStore } from "@/stores/terminals";
+import { IN_APP_TERMINAL } from "@/lib/settings-logic";
 import { applyOrderToHosts } from "@/lib/reorder";
 import { revealHidden } from "@/lib/sync-approvals";
 import type { LoadResult } from "@/bindings/LoadResult";
@@ -424,19 +426,27 @@ export function useTerminals() {
  */
 export function useConnect() {
   return useMutation<
-    void,
+    boolean,
     unknown,
     { alias: string; terminalOverride?: string | null; newTab?: boolean | null }
   >({
-    mutationFn: ({ alias, terminalOverride, newTab }) =>
-      tauriInvoke<void>("connect_launch", {
+    mutationFn: async ({ alias, terminalOverride, newTab }) => {
+      const destination = terminalOverride === undefined ? useSettingsStore.getState().terminalId : terminalOverride;
+      if (destination === IN_APP_TERMINAL) {
+        useTerminalStore.getState().open({ host: { alias }, name: alias, address: alias, historyKey: alias });
+        return true;
+      }
+      await tauriInvoke<void>("connect_launch", {
         alias,
-        terminalOverride: terminalOverride ?? null,
+        terminalOverride: destination ?? null,
         // Only honored by terminals with `supports_new_tab` — callers gate via
         // `effectiveNewTab()` so this is false for unsupported terminals.
         newTab: newTab ?? null,
-      }),
-    onSuccess: (_data, { alias }) => {
+      });
+      return false;
+    },
+    onSuccess: (embedded, { alias }) => {
+      if (embedded) return;
       // Feeds the ⌘K "Recent" group; read via getState so this stays a plain fn.
       useSettingsStore.getState().recordConnection(alias);
       toast.success(`Launching ${alias}…`);
@@ -616,7 +626,7 @@ export function useDeployKey() {
       tauriInvoke<void>("keys_deploy", {
         alias,
         publicPath,
-        terminalOverride: terminalOverride ?? null,
+        terminalOverride: terminalOverride === IN_APP_TERMINAL ? null : terminalOverride ?? null,
       }),
     onError: (e) =>
       toast.error("Failed to deploy key", { description: errMessage(e) }),

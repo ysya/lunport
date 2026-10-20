@@ -164,6 +164,8 @@ pub struct GroupOrder {
 pub struct Catalog {
     pub collections: Vec<Collection>,
     pub group_orders: Vec<GroupOrder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunnels: Vec<crate::sync::tunnel_rules::TunnelRule>,
 }
 impl Catalog {
     pub fn validate(&self) -> Result<(), AppError> {
@@ -182,6 +184,15 @@ impl Catalog {
             {
                 return Err(invalid());
             }
+        }
+        let mut tunnel_ids = BTreeSet::new();
+        if self.tunnels.len() > 256
+            || self
+                .tunnels
+                .iter()
+                .any(|r| r.validate().is_err() || !tunnel_ids.insert(&r.id))
+        {
+            return Err(invalid());
         }
         let mut groups = 0;
         for order in &self.group_orders {
@@ -537,11 +548,13 @@ mod tests {
             name: "Work".into(),
         };
         let catalog = Catalog {
+            tunnels: vec![],
             collections: vec![c.clone(), c],
             group_orders: vec![],
         };
         assert!(catalog.validate().is_err());
         let catalog = Catalog {
+            tunnels: vec![],
             collections: vec![],
             group_orders: vec![GroupOrder {
                 scope: HostScope::Space {
@@ -552,4 +565,34 @@ mod tests {
         };
         assert!(catalog.validate().is_err());
     }
+    #[test]
+    fn tunnel_catalog_is_backward_compatible_and_rejects_duplicates_invalid_rules_and_overflow() {
+        let legacy = r#"{"collections":[],"group_orders":[]}"#;
+        let mut catalog: Catalog = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&catalog).unwrap(), legacy);
+        let rule: crate::sync::tunnel_rules::TunnelRule = serde_json::from_value(json!({"id":"a".repeat(16),"name":"Database","host_id":"b".repeat(16),"forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"db.internal","target_port":5432}})).unwrap();
+        catalog.tunnels.push(rule.clone());
+        let keys = VaultKeys::generate().unwrap();
+        let id = identity("meta");
+        let bytes = encode(&id, &Data::Catalog(catalog.clone())).unwrap();
+        let Data::Catalog(restored) = admit(&keys, &header(&id, &keys), &bytes).unwrap().data
+        else {
+            panic!()
+        };
+        assert_eq!(restored, catalog);
+        catalog.tunnels.push(rule.clone());
+        assert!(catalog.validate().is_err());
+        catalog.tunnels = (0..257)
+            .map(|i| {
+                let mut r = rule.clone();
+                r.id = format!("{i:016x}");
+                r
+            })
+            .collect();
+        assert!(catalog.validate().is_err());
+        catalog.tunnels = vec![rule];
+        catalog.tunnels[0].forward.bind_address = "public.invalid".into();
+        assert!(catalog.validate().is_err());
+    }
+
 }

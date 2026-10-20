@@ -5993,6 +5993,7 @@ dependencies = [
  "libc",
  "mockito",
  "openidconnect",
+ "plist",
  "rand_core 0.6.4",
  "reqwest",
  "rsa 0.9.10",
@@ -6021,6 +6022,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml_edit 0.25.12+spec-1.1.0",
  "ts-rs",
  "windows-sys 0.61.2",
  "zeroize",
@@ -6950,6 +6952,7 @@ dependencies = [
  "indexmap 2.14.0",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.3",
 ]
 

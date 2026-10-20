@@ -111,7 +111,8 @@ fn catalog(
         let previous = account.records.get(&key);
         let body = if let Some(previous) = previous.filter(|r| !r.record.deleted) {
             let mut metadata: crate::sync::record::SpacePayload =
-                serde_json::from_value(previous.record.payload.clone()).map_err(|_| invalid())?;
+                serde_json::from_value(previous.record.payload.clone())
+                    .map_err(|_| invalid())?;
             metadata.name = collection.name.clone();
             serde_json::to_value(metadata).map_err(|_| invalid())?
         } else {
@@ -135,6 +136,33 @@ fn catalog(
                 ..Default::default()
             });
     }
+    let previous_tunnels: BTreeMap<_, _> = account
+        .records
+        .iter()
+        .filter(|(_, r)| {
+            r.record.kind == RecordKind::Meta && crate::sync::tunnel_rules::is_id(&r.record.id)
+        })
+        .map(|(k, r)| (k.clone(), r.clone()))
+        .collect();
+    account.records.retain(|_, r| {
+        !(r.record.kind == RecordKind::Meta && crate::sync::tunnel_rules::is_id(&r.record.id))
+    });
+    for rule in &value.tunnels {
+        let id = crate::sync::tunnel_rules::wire_id(&rule.id);
+        let key = record_key(RecordKind::Meta, &id);
+        account.records.insert(
+            key.clone(),
+            fresh(
+                previous_tunnels.get(&key),
+                RecordKind::Meta,
+                &id,
+                serde_json::json!({"schema":1,"rule":rule}),
+                receipt,
+                observed,
+            )?,
+        );
+    }
+    state.local.tunnel_rules.clear();
     state.local.group_order = value
         .group_orders
         .iter()

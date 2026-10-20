@@ -34,7 +34,12 @@ fn revision(read: &VerifiedLibrary, row: &RecordEnvelope) -> Result<u64, AppErro
         .get(&row.header.record_id)
         .map_or(Ok(0), |r| number(&r.version.revision, false))
 }
-fn partition(mut c: Catalog, owned: &std::collections::BTreeSet<String>) -> Catalog {
+fn partition(
+    mut c: Catalog,
+    owned: &std::collections::BTreeSet<String>,
+    owned_tunnels: &std::collections::BTreeSet<String>,
+) -> Catalog {
+    c.tunnels.retain(|r| owned_tunnels.contains(&r.id));
     c.collections.retain(|v| owned.contains(&v.id));
     c.group_orders
         .retain(|v| matches!(&v.scope,HostScope::Space{space_id} if owned.contains(space_id)));
@@ -85,7 +90,8 @@ impl merge::Plan {
             .structured_history(read.keys(), &BTreeMap::new())?
             .into_rows();
         let owned = merge::owned_collections(&source, &self.operation)?;
-        let current = partition(catalog(read)?, &owned);
+        let owned_tunnels = merge::owned_tunnels(&source, &self.operation)?;
+        let current = partition(catalog(read)?, &owned, &owned_tunnels);
         let previous = match self
             .rows
             .iter()
@@ -100,11 +106,12 @@ impl merge::Plan {
                     .ok_or_else(invalid)?;
                 let plain = row.verify(&author.signing)?.open(read.keys())?;
                 match payload::admit(read.keys(), &row.header, &plain)?.data {
-                    Data::Catalog(c) => partition(c, &owned),
+                    Data::Catalog(c) => partition(c, &owned, &owned_tunnels),
                     _ => return Err(invalid()),
                 }
             }
             None => Catalog {
+                tunnels: vec![],
                 collections: vec![],
                 group_orders: vec![],
             },

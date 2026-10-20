@@ -192,8 +192,10 @@ export function RecordsAccountPanel({
   return (
     <div className="app-workflow-page space-y-6">
       {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} restoreFocus={() => (libraryTrigger.current ?? libraryHeading.current)?.focus()} />}
-      <PageHeader title="Sync" description="Your host library and Groups sync across devices with a private code. Keys have their own sharing controls." />
+      <PageHeader title="Sync" description="Sign in with a Passkey to sync your hosts, keys, Groups and tunnel rules with end-to-end encryption." />
       <CentralAccountSection disabled={settingsBusy || lifecycleBusy || conflictBusy || draft.busy || !!overview.syncing} onBusyChange={setCentralBusy} />
+      <details open={!!overview.pending_account} className="space-y-4">
+        <summary className="cursor-pointer text-sm font-medium">Older sync-code libraries</summary>
       <WorkflowSteps steps={["Relay", "Device", "Library sync"]} current={pending ? 1 : overview.account ? 2 : overview.relay_url ? 1 : 0} complete={!!overview.account && overview.library_enabled && !pending && !overview.shared_writes_blocked && !draft.createdWords} />
       <RecordConflictPanel conflicts={overview.conflicts ?? []} disabled={active || !!overview.pending_account} onBusyChange={setConflictBusy} />
       {draft.createdWords && (
@@ -504,6 +506,7 @@ export function RecordsAccountPanel({
         onBusyChange={setLifecycleBusy}
         recoveryVersion={recoveryVersion}
       />
+      </details>
     </div>
   );
 }

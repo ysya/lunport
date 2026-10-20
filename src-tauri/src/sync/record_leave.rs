@@ -786,6 +786,11 @@ pub(crate) fn resume_locked(env: &SyncEnv) -> Result<(), AppError> {
                 n.version = n.version.max(records_v3::NAVIGATION_STATE_VERSION);
             }
             n.account = None;
+            let host_ids = op.leave.as_ref().unwrap().hosts.iter().map(|host| {
+                (host.mapping.source_host_id.clone(), host.mapping.local_host_id.clone())
+            }).collect();
+            crate::sync::tunnel_rules::preserve_on_leave(latest, &mut n, &host_ids, env.now())
+                .map_err(|e| error(&e.to_string()))?;
             n.spaces.clear();
             n.rotation = None;
             n.migration_gate = None;

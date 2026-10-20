@@ -124,11 +124,23 @@ pub(super) fn history(
         .structured_history(read.keys(), &BTreeMap::new())?
         .into_rows();
     let owned = owned_collections(&original, operation)?;
+    let owned_rules = owned_tunnels(&original, operation)?;
+    let mut host_scopes: BTreeMap<String, std::collections::BTreeSet<HostScope>> =
+        BTreeMap::new();
+    for (id, _) in &original {
+        if id.kind == "host" {
+            host_scopes
+                .entry(id.id.clone())
+                .or_default()
+                .insert(id.scope.clone().ok_or_else(invalid)?);
+        }
+    }
+    remote.tunnels.retain(|r| !owned_rules.contains(&r.id));
     remote.collections.retain(|c| !owned.contains(&c.id));
     remote
         .group_orders
         .retain(|o| !matches!(&o.scope,HostScope::Space{space_id} if owned.contains(space_id)));
-    if original.iter().all(|(id, _)| id.kind == "meta") {
+    if original.iter().all(|(id, _)| id.kind == "meta") && owned_rules.is_empty() {
         return Ok(vec![]);
     }
     let has_local = original
@@ -196,6 +208,16 @@ pub(super) fn history(
                             .map(|v| group(operation, &order.scope, v))
                             .collect::<Result<_, _>>()?,
                     });
+                }
+                for old in &value.tunnels {
+                    let mut rule = old.clone();
+                    rule.id = named(operation, "tunnel", None, &old.id, 16)?;
+                    rule.host_id = match host_scopes.get(&old.host_id) {
+                    Some(scopes) if scopes.len() == 1 => host(operation, scopes.first().ok_or_else(invalid)?, &old.host_id)?,
+                    Some(_) => return Err(AppError::Other("A retained tunnel has an ambiguous host identity. Original data is retained; resolve its host before merging.".into())),
+                    None => named(operation, "orphan-tunnel-host", None, &old.host_id, 16)?,
+                };
+                    merged.tunnels.push(rule);
                 }
                 merged.validate()?;
                 *value = merged;
@@ -375,6 +397,21 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+pub(super) fn owned_tunnels(
+    history: &[(Identity, Data)],
+    operation: &str,
+) -> Result<std::collections::BTreeSet<String>, AppError> {
+    let mut owned = std::collections::BTreeSet::new();
+    for (_, data) in history {
+        if let Data::Catalog(catalog) = data {
+            for rule in &catalog.tunnels {
+                owned.insert(named(operation, "tunnel", None, &rule.id, 16)?);
+            }
+        }
+    }
+    Ok(owned)
 }
 
 pub(super) fn owned_collections(

@@ -138,6 +138,7 @@ fn large_staged_history_still_emits_no_more_than_thirty_two_existing_envelopes()
                 scope: None,
             },
             Data::Catalog(Catalog {
+                tunnels: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),

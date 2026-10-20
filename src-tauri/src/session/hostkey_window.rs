@@ -242,7 +242,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
             .inner_size(480.0, 320.0)
             .resizable(false)
             .always_on_top(true)
-            .center()
+            .visible(false)
             .build()
         {
             Ok(window) => (Some(window), true),
@@ -254,9 +254,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
     };
     if let Some(window) = window {
         if built || new_head {
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
+            crate::prompt_window::show(&window);
         }
     }
     let _ = app.emit_to(HOSTKEY_WINDOW, HOSTKEY_EVENT, &pending);

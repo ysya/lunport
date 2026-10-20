@@ -135,6 +135,7 @@ impl Inventory {
             .hosts
             .values()
             .chain(state.local.groups.values())
+            .chain(state.local.tunnel_rules.values())
         {
             result.public(
                 Scope::Local,

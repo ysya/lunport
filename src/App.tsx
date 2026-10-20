@@ -1,6 +1,8 @@
 import { Dialog, DialogTitle } from "@/components/ui/dialog";
 import { TaskDialogContent } from "@/components/app/TaskDialog";
 import { useRef, useState } from "react";
+import { TerminalWorkspace } from "@/components/records/TerminalWorkspace";
+import { useTerminalStore } from "@/stores/terminals";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Bot, KeyRound, RotateCw, Settings, ServerCog } from "lucide-react";
@@ -47,6 +49,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { McpApprovalDialog } from "@/components/McpApprovalDialog";
+import { InstallationRenameNotice } from "@/components/InstallationRename";
 import { SidebarResizeHandle } from "@/components/SidebarResizeHandle";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
@@ -238,6 +241,8 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
         <div className="flex min-h-0 flex-1">
           {/* Resizable by its edge (SidebarResizeHandle); half the window at most, so the editor keeps room. */}
           <aside
+            onClickCapture={() => useTerminalStore.getState().activate(null)}
+            onKeyDownCapture={(event) => { if (!event.metaKey && !event.ctrlKey && !event.altKey && ["Enter", " ", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) useTerminalStore.getState().activate(null); }}
             ref={sidebarRef}
             className="app-sidebar flex min-h-0 shrink-0 flex-col overflow-hidden border-r"
             style={{ width: `${sidebarWidth}rem`, maxWidth: "50vw" }}
@@ -267,6 +272,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
            * narrow. We give it a generous cap (~1100px) and keep it LEFT-aligned
            * so it reads full at ~1600px without stretching absurdly ultra-wide.
            */}
+          <TerminalWorkspace>
           <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
             {/* Hosts stays mounted (hidden) while the Keychain shows: the editor keeps its unsaved edits. */}
             <MainPaneContent
@@ -284,6 +290,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
               keyDetail={<KeyDetailPane />}
             />
           </main>
+          </TerminalWorkspace>
         </div>
 
         <CommandPalette />
@@ -413,6 +420,7 @@ function App() {
         </div>
       )}
       <Toaster />
+      <InstallationRenameNotice />
     </>
   );
 }

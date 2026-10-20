@@ -58,6 +58,8 @@ pub struct LocalState {
     /// Passive cache awaiting native reconciliation. The old ledger stays in this exact archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub central_cache_source: Option<Box<crate::sync::central::replacement_archive::Receipt>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tunnel_rules: BTreeMap<String, LocalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -355,6 +357,13 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             "invalid navigation format",
         ));
     }
+    if !state.local.tunnel_rules.is_empty() && state.version < crate::sync::tunnel_rules::STATE_VERSION {
+        return Err(state_invalid("tunnel", "local", "invalid tunnel state version"));
+    }
+    for (key, row) in &state.local.tunnel_rules {
+        validate_cache_key(key, row)?;
+        if !crate::sync::tunnel_rules::valid(&row.record) { return Err(state_invalid("tunnel", &row.record.id, "invalid tunnel metadata")); }
+    }
     read_hosts(&state.local.hosts, HostScope::Local)?;
     for (key, row) in &state.local.groups {
         validate_cache_key(key, row)?;
@@ -438,6 +447,9 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                             "invalid navigation metadata",
                         ));
                     }
+                }
+                RecordKind::Meta if crate::sync::tunnel_rules::is_id(&record.id) => {
+                    if !crate::sync::tunnel_rules::valid(record) { return Err(state_invalid("tunnel", &record.id, "invalid tunnel metadata")); }
                 }
                 RecordKind::Meta if record.id == ACCOUNT_META_ID && !record.deleted => {
                     let meta: MetaPayload = serde_json::from_value(record.payload.clone())

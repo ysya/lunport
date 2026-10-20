@@ -53,7 +53,7 @@ import {
   type RecordsStatus,
 } from "@/lib/records";
 import { usePlatform, useTerminals } from "@/lib/queries";
-import { effectiveNewTab, terminalSupportsNewTab } from "@/lib/settings-logic";
+import { effectiveNewTab, IN_APP_TERMINAL, terminalSupportsNewTab } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
 import { cn } from "@/lib/utils";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -73,6 +73,9 @@ import type { LibraryFilter } from "./library-view";
 import { HostPreview } from "./HostPreview";
 import { DetailPresence } from "@/components/app/DetailPresence";
 import { connectSavedHost } from "./operations";
+import { TerminalWorkspace } from "./TerminalWorkspace";
+import { useTerminalStore } from "@/stores/terminals";
+import { TunnelsPanel } from "./TunnelsPanel";
 
 export function RecordsWorkspace({
   overview,
@@ -94,6 +97,8 @@ export function RecordsWorkspace({
   };
   const client = useQueryClient();
   const [panel, setPanel] = useState<WorkspacePanel>("hosts");
+  const activeTerminal = useTerminalStore((state) => state.activeId);
+  const setActiveTerminal = useTerminalStore((state) => state.activate);
   const [filter, setFilter] = useState<LibraryFilter>({ kind: "all" });
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
@@ -197,22 +202,24 @@ export function RecordsWorkspace({
   };
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (activeTerminal) return;
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
         return;
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
       if (
         isTypingContext(event.target) &&
-        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID].includes((event.target as HTMLElement).id)
+        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID, "tunnels-search"].includes((event.target as HTMLElement).id)
       )
         return;
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
-        if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
+        if (panel === "tunnels") document.getElementById("new-tunnel-button")?.click();
+        else if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
         else createHost();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
-        const searchId = panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
-        if (panel !== "keys") setPanel("hosts");
+        const searchId = panel === "tunnels" ? "tunnels-search" : panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
+        if (panel !== "keys" && panel !== "tunnels") setPanel("hosts");
         window.requestAnimationFrame(() => {
           const input = document.getElementById(searchId);
           if (input instanceof HTMLInputElement) {
@@ -224,7 +231,7 @@ export function RecordsWorkspace({
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [requestSelection, panel]);
+  }, [requestSelection, panel, activeTerminal]);
   const onSaved = useCallback((id: string | null) => {
     setPanel("hosts");
     setSelection({ kind: "none" });
@@ -268,10 +275,9 @@ export function RecordsWorkspace({
   const inspected = inspectedId
     ? selectHost(overview.hosts, inspectedId)
     : null;
-  const terminalName =
-    terminals.data?.find((terminal) => terminal.id === terminalId)?.label ??
-    "System default terminal";
-  const shortcut = platform.data === "macos" ? "⌘ K" : "Ctrl K";
+  const terminalName = terminalId === IN_APP_TERMINAL ? "Lunport" :
+    terminals.data?.find((terminal) => terminal.id === terminalId)?.label ?? "System default terminal";
+  const shortcut = platform.data === "macos" ? "⌘ K" : activeTerminal ? "Ctrl Shift K" : "Ctrl K";
   return (
     <div className={cn("app-shell library-shell flex h-screen overflow-hidden", platform.data === "macos" && "is-macos")}
       data-sidebar-collapsed={sidebarCollapsed}>
@@ -286,8 +292,8 @@ export function RecordsWorkspace({
           overview={overview}
           panel={panel}
           filter={filter}
-          navigate={setPanel}
-          changeFilter={changeFilter}
+          navigate={(next) => { setActiveTerminal(null); setPanel(next); }}
+          changeFilter={(next) => { setActiveTerminal(null); changeFilter(next); }}
           createGroup={createGroup}
           reordering={reordering}
           reorder={(ids) => {
@@ -308,15 +314,17 @@ export function RecordsWorkspace({
         />
       </div>
       <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col">
+        <TerminalWorkspace renderHeader={(tabs) => (
         <header
           data-tauri-drag-region
           className="library-titlebar"
+          data-has-sessions={!!tabs}
         >
           <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleSidebar}>
             {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
           </Button>
-          <button
+          {tabs ?? <button
             type="button"
             className="library-quick-connect"
             onClick={() => setPaletteOpen(true)}
@@ -324,13 +332,13 @@ export function RecordsWorkspace({
             <Search className="size-3.5" />
             <span>Quick connect</span>
             <kbd>{shortcut}</kbd>
-          </button>
+          </button>}
           <div className="library-titlebar-actions">
             <UpdateIndicator />
             <Button type="button" variant="ghost" size="sm" title="Sync settings"
-              aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => setPanel("account")}>
+              aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => { setActiveTerminal(null); setPanel("account"); }}>
               <Cloud className="size-4" />
-              Sync
+              <span className="library-sync-label">Sync</span>
             </Button>
             <Button type="button" variant="ghost" size="icon-sm" title="Settings"
               aria-label="Settings" onClick={() => openSettings("general")}>
@@ -360,6 +368,7 @@ export function RecordsWorkspace({
             </DropdownMenu>
           </div>
         </header>
+        )}>
         {overview.shared_writes_blocked && (
           <p role="status" className="library-notice">
             {syncActive
@@ -401,6 +410,7 @@ export function RecordsWorkspace({
           )}
         <div
           className="library-detail-layout flex min-h-0 flex-1"
+          hidden={!!activeTerminal}
           data-inspecting={panel === "hosts" && !!inspected}
         >
           <main
@@ -464,6 +474,7 @@ export function RecordsWorkspace({
               aria-label="Workspace content"
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} />}
+              {panel === "tunnels" && <TunnelsPanel overview={overview} />}
               {panel === "account" && (
                 <RecordsAccountPanel
                   overview={overview}
@@ -474,7 +485,7 @@ export function RecordsWorkspace({
             </main>
           )}
         </div>
-        <footer className="library-statusbar">
+        <footer className="library-statusbar" hidden={!!activeTerminal}>
           <button
             type="button"
             className="library-sync-link"
@@ -525,6 +536,7 @@ export function RecordsWorkspace({
                 value={terminalId ?? ""}
                 onValueChange={(value) => setTerminalId(value || null)}
               >
+                <DropdownMenuRadioItem value={IN_APP_TERMINAL}>Lunport (in app)</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="">
                   System default terminal
                 </DropdownMenuRadioItem>
@@ -539,7 +551,7 @@ export function RecordsWorkspace({
               </DropdownMenuRadioGroup>
               <DropdownMenuSeparator />
               <DropdownMenuCheckboxItem
-                checked={preferNewTab}
+                checked={terminalId === IN_APP_TERMINAL || preferNewTab}
                 disabled={
                   !terminalSupportsNewTab(terminalId, terminals.data ?? [])
                 }
@@ -550,6 +562,7 @@ export function RecordsWorkspace({
             </DropdownMenuContent>
           </DropdownMenu>
         </footer>
+        </TerminalWorkspace>
       </div>
       <Dialog
         open={selection.kind !== "none"}
@@ -627,6 +640,7 @@ export function RecordsWorkspace({
             ) : (
               selection.kind !== "none" && (
                 <RecordHostEditor
+              connectHost={async (id) => { await connectSavedHost(overview, id, terminalId, newTab); setSelection({ kind: "none" }); }}
                   key={
                     selection.kind === "host"
                       ? selection.id
@@ -706,10 +720,12 @@ export function RecordsWorkspace({
         recordOverview={overview}
         onOpenImport={() => {
           setSettingsOpen(false);
+          setActiveTerminal(null);
           setPanel("import");
         }}
         onOpenSync={() => {
           setSettingsOpen(false);
+          setActiveTerminal(null);
           setPanel("account");
         }}
       />

@@ -136,6 +136,7 @@ impl Candidate {
         shadow.local.hosts = cache.hosts;
         shadow.local.groups = cache.groups;
         shadow.local.group_order = cache.group_order;
+        shadow.local.tunnel_rules.clear();
         // All source pointers and files remain in source. A native stage supplies new verified mappings.
         shadow.local.keys.clear();
         shadow.local.credential_approvals.clear();
@@ -336,6 +337,7 @@ pub(in crate::sync) mod tests {
             history.truncate(1);
         }
         history[0].1 = Data::Catalog(Catalog {
+            tunnels: vec![],
             collections: vec![Collection {
                 id: "e".repeat(64),
                 name: "unselected".into(),

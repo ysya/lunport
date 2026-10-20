@@ -451,6 +451,7 @@ pub(super) mod tests {
         (
             identity("meta", "catalog"),
             Data::Catalog(Catalog {
+                tunnels: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),
@@ -609,6 +610,7 @@ pub(super) mod tests {
                 Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":"fixture","hostname":"fixture.invalid","auth":"password"})).unwrap())
             };
             let catalogue = Data::Catalog(Catalog {
+                tunnels: vec![],
                 collections: if named {
                     vec![super::super::payload::Collection {
                         id: collection.clone(),
