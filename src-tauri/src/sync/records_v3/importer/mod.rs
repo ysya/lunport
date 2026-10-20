@@ -1,5 +1,6 @@
 //! Explicit read-only configuration previews. No config repair, credential access or command execution.
 mod resolve;
+mod saved_hosts;
 mod source;
 mod types;
 use std::collections::BTreeMap;
@@ -7,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub use types::*;
 
 pub fn preview_file(source: &Path, options: &ImportOptions) -> Result<ImportPreview, ImportError> {
+    if source.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
+        return saved_hosts::preview(source, options);
+    }
     resolve::resolve(source::load(source, options)?, options)
 }
 

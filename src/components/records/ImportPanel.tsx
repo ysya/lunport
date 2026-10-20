@@ -220,7 +220,7 @@ export function RecordsImportPanel() {
       const path = await open({
         multiple: false,
         directory: false,
-        title: "Choose SSH configuration to import",
+        title: "Choose SSH configuration or saved Lunport hosts",
       });
       if (typeof path === "string" && mounted.current) {
         cancel();
@@ -229,7 +229,7 @@ export function RecordsImportPanel() {
     });
   return (
     <div className="app-workflow-page space-y-6" aria-busy={busy}>
-      <PageHeader title="Import SSH configuration" description="Review an existing file before importing hosts into the local workspace. The source configuration stays in place." />
+      <PageHeader title="Import hosts" description="Review an SSH configuration or an old Lunport sync-state.json. Saved-workspace imports restore host settings only; assign new SSH keys afterward. Source files stay in place." />
       <WorkflowSteps steps={["Choose source", "Review", "Finish"]} current={preview ? 1 : receipt ? 2 : 0} complete={!!receipt && !preview} />
       {error && (
         <p
@@ -249,13 +249,13 @@ export function RecordsImportPanel() {
         </section>
       )}
       {!preview && (
-        <FormSection title={receipt ? "Import another file" : "Source file"} description="Choose your SSH configuration file, then preview the hosts and key references it contains.">
-          <RecordField label="Configuration file">
+        <FormSection title={receipt ? "Import another file" : "Source file"} description="Choose an SSH configuration or a saved sync-state.json, then review the hosts before importing.">
+          <RecordField label="Source file">
             <Input
               ref={sourceInput}
               value={source}
               disabled={busy}
-              placeholder="/path/to/ssh/config"
+              placeholder="/path/to/ssh/config or sync-state.json"
               className="font-mono"
               onChange={(event) => setSource(event.target.value)}
             />

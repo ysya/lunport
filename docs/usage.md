@@ -168,3 +168,9 @@ git config --global core.sshCommand C:/Windows/System32/OpenSSH/ssh.exe
 On macOS, an old `SSHelter.app` installation is renamed to `Lunport.app` when the updated app starts. The old path remains a compatibility link, so existing absolute MCP and CLI commands keep working. An enabled launch-at-login entry is updated to the new path; a disabled entry stays disabled. Credentials and library data retain their existing identity. macOS may request installation permission once. A cancelled or incomplete rename can be retried in **Settings → About → Finish the Lunport rename**, without reinstalling. A conflicting app at the destination is never overwritten.
 
 **Settings → About** contains the Lunport identity, installed version, project, releases, issues and license links. On macOS, **Lunport → About Lunport** also opens the native panel. Local diagnostic logs are available in **Settings → Diagnostics** in Records, or **Discovery & checks** in Legacy.
+
+### Recover host settings from an old local workspace
+
+In **Import**, choose the old Lunport `sync-state.json`, review the hosts, then confirm. On macOS, the original file is `~/Library/Application Support/org.homelab.sshelter/sync-state.json`; switching servers preserves it while the new workspace lives in a separate `server-workspace-*` folder. Choose the original file on any device that still has the host cache. The old relay does not need to be available.
+
+This restores host aliases, addresses, users, ports, jumps, timeouts, tags and notes. Group defaults are applied to each host. The import uses new local host identities and preserves the source file. Assign new SSH keys in the host editor and confirm server fingerprints when connecting; old account state, key material and trust approvals are excluded. After reviewing the local hosts, finish encrypted library setup to sync them to the new account.
