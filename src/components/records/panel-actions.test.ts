@@ -322,6 +322,8 @@ describe("safe key action diagnostics", () => {
     expect(keyActionError("The vault is unavailable; its original file was retained.")).toContain("credential store");
     expect(keyActionError("The saved SSH private key could not be parsed.")).toContain("not readable OpenSSH");
     expect(keyActionError("The saved private key's passphrase state does not match this key reference.")).toContain("passphrase state");
+    expect(keyActionError("This key is still used by hosts or Groups. Confirm force deletion to continue.")).toContain("Confirm force deletion");
+    expect(keyActionError("Key deletion review changed or is blocked. Refresh the workspace and try again.")).toContain("Refresh the workspace");
     expect(keyActionError("record account is not writable")).toContain("Account sync is blocked");
     expect(keyActionError("synced private material is unavailable")).toContain("no synced private copy");
   });

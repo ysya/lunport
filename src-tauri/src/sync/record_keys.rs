@@ -119,6 +119,54 @@ pub fn import_local_file_scoped(
         invocation,
     )
 }
+/// Logical deletion does not open private material or erase retained source files/backups.
+pub fn delete_scoped(
+    env: &SyncEnv,
+    id: &str,
+    expected: &KeySlotPayload,
+    reviewed: &str,
+    force: bool,
+    generation: u64,
+    invocation: Option<&super::record_import::central_local::Invocation>,
+) -> Result<super::record_commands::RecordOverview, AppError> {
+    if let Some(scope) = invocation {
+        return super::record_import::central_local::delete(
+            env, scope, id, expected, reviewed, force, generation,
+        );
+    }
+    let life = env.runtime.lifecycle.lock().unwrap();
+    let (before, current) = super::record_runtime::snapshot(env)?;
+    super::record_import::central_local::check_request(&before, current, None)?;
+    if current != generation {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let candidate =
+        super::record_repository::delete_key(&before, id, expected, reviewed, force, env.now())
+            .map_err(delete_error)?;
+    super::record_runtime::mutate_records(env, |latest| {
+        if latest != &before {
+            return Err(crate::sync::runtime::superseded());
+        }
+        Ok(candidate)
+    })?;
+    drop(life);
+    let result = super::record_commands::overview(env)?;
+    env.events.status();
+    env.events.wake();
+    Ok(result)
+}
+pub(crate) fn delete_error(error: super::record_repository::RepositoryError) -> AppError {
+    AppError::Other(
+        match error {
+            super::record_repository::RepositoryError::KeyInUse(_) => {
+                "This key is still used by hosts or Groups. Confirm force deletion to continue."
+            }
+            _ => "Key deletion review changed or is blocked. Refresh the workspace and try again.",
+        }
+        .into(),
+    )
+}
+
 /// Generation stays in memory; the normal explicit Local publication path stores the result.
 pub fn generate_local(
     env: &SyncEnv,
