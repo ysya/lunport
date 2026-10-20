@@ -510,6 +510,7 @@ export function RecordsWorkspace({
               connected={!!overview.account && overview.library_enabled}
               pending={!!overview.pending_account}
               pendingChanges={overview.pending_changes}
+              conflicts={overview.conflicts?.length ?? 0}
               lastSyncMs={overview.last_sync_ms}
               error={error ?? overview.last_error}
               syncing={syncActive}

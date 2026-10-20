@@ -85,6 +85,10 @@ impl HostDirectory for ProbeDirectory<'_> {
             self.checked().map(|_| ())
         })
     }
+    fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
+        self.checked()?;
+        self.inner.password_authorized(hop, server_key)
+    }
     fn password_account(&self, id: &HostId) -> String {
         self.inner.password_account(id)
     }

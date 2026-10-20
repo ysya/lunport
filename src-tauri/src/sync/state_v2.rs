@@ -127,6 +127,9 @@ pub struct AccountState {
     /// 權杖只在記憶體解開)。tombstone 上傳之後才刪 chain —— 別台先收到 tombstone,不會看到「chain 不見了」。
     #[serde(default)]
     pub chain_deletes: Vec<SealedRecord>,
+    /// Records-mode recovery is local state, never a synchronized payload.
+    #[serde(default, skip_serializing_if = "crate::sync::record_conflicts::RecordRecovery::is_empty")]
+    pub recovery: crate::sync::record_conflicts::RecordRecovery,
 }
 
 impl AccountState {
@@ -140,6 +143,7 @@ impl AccountState {
             records: BTreeMap::new(),
             sealed: BTreeMap::new(),
             chain_deletes: Vec::new(),
+            recovery: Default::default(),
         }
     }
 }

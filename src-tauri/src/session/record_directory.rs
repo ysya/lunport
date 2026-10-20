@@ -94,6 +94,7 @@ impl RecordDirectory {
         if host.group_error.is_some()
             || host.effective_payload.hostname != hop.hostname
             || host.effective_payload.port != hop.port
+            || if host.effective_payload.user.is_empty() { (self.sources.username)()? != hop.user } else { host.effective_payload.user != hop.user }
         {
             return Err(DirectoryError::Failed(format!(
                 "The endpoint of {} changed while connecting; connect again.",
@@ -219,6 +220,9 @@ impl RecordDirectory {
                 .map(pinned_key)
                 .transpose()?
                 .map(|pin| pin.key);
+            if hop.pinned.as_ref().is_some_and(|key| !super::credential_approval::matches(&state, &hop.reference(), key)) {
+                hop.pinned = None;
+            }
             hops.push(hop);
         }
         Ok(Target { hops })
@@ -255,13 +259,13 @@ impl HostDirectory for RecordDirectory {
         self.write_pin(self.host(host)?, Some(previous), key)
     }
     fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
-        self.checked_host(hop)?
-            .host
-            .payload
-            .host_key
-            .as_ref()
-            .map(pinned_key)
-            .transpose()
+        let host = self.checked_host(hop)?;
+        let pin = host.host.payload.host_key.as_ref().map(pinned_key).transpose()?;
+        let state = (self.sources.snapshot)()?;
+        Ok(pin.filter(|pin| super::credential_approval::matches(&state, hop, &pin.key)))
+    }
+    fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
+        Ok(self.pinned_for(hop)?.is_some_and(|pin| Some(&pin.key) == server_key))
     }
     fn pin_for(&self, hop: &HopRef, key: &HostKey) -> Result<(), DirectoryError> {
         self.write_pin(self.checked_host(hop)?, None, key)

@@ -15,8 +15,8 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 - **Hosts and Groups** — organize connections with nested Groups, shared defaults and tags. Search the library, revisit recent hosts and connect from the command palette.
 - **SSH terminal in the app** — open session tabs in Lunport or your preferred external terminal, reconnect dropped sessions in the same tab while keeping previous output, search retained output, adjust terminal text size, verify server fingerprints and enter passwords or authentication codes in Lunport. Save host passwords in this device's system credential store when desired. Jump hosts use `ProxyJump`.
 - **SSH tunnels** — save Local, Remote and SOCKS5 forwarding rules. Rules sync with your account; each device starts and stops its own connections.
-- **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Key sharing has separate controls.
-- **Encrypted library sync** — connect your computers with a private 24-word code. Hosts and Groups travel together; passwords stay on each device, and private keys sync only when explicitly shared. The relay stores ciphertext and can be self-hosted.
+- **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Managed private keys are included when you approve encrypted library sync.
+- **Encrypted library sync** — sign in with a Passkey, approve your devices and sync hosts, Groups, tunnel rules and managed SSH private keys with end-to-end encryption. Keep an offline recovery kit and review the complete library before enabling sync. Passwords stay on each device. Cloudflare and Docker self-hosting are supported; OIDC is optional.
 - **AI access through MCP** — add Codex, Claude Code, Claude Desktop, Cursor or VS Code from Settings, or export configuration for another local agent. Allow individual hosts, review proposed connections and choose Ask or explicitly acknowledged Auto-log for remote commands.
 - **A home for existing OpenSSH setups** — Legacy mode edits your local SSH configuration while preserving comments, ordering and unknown directives. Migration into the Records library requires an explicit review.
 - **Consistent preferences** — searchable settings, six built-in color palettes with independent light/dark/system modes, reduced motion, an animated collapsible sidebar and signed Stable/Beta updates. **Settings → About** collects the installed version, project links and license.
@@ -45,7 +45,7 @@ For the historical SSHelter 1.0.0 app, use `/Applications/SSHelter.app` instead.
 
 The in-app terminal ships first on the **Beta** channel. Choose **Settings → Updates → Release channel → Beta** to try it.
 
-1. Open the app. A new Records library works without an existing `~/.ssh/config`.
+1. Open the app and use it locally without signing in or creating an account. A new Records library works without an existing `~/.ssh/config`.
 2. Add a host, or open **Import** to review and copy entries from an existing SSH configuration.
 3. Open **Keys → Import private key → From a file** to choose a key. Pasting a supported OpenSSH private key is also available.
 4. Select the host's login key, verify its server fingerprint against a trusted source and double-click the host to connect. Choose **Lunport (in app)** in **Settings → Connections** to use session tabs; existing terminal preferences are preserved.

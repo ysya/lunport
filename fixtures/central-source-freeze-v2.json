@@ -1,0 +1,113 @@
+{
+  "fixture": "SYNTHETIC SOURCE FREEZE KEYS ONLY - never use in an account",
+  "canonical_base64": "WyJsdW5wb3J0LW1pZ3JhdGlvbi1mcmVlemUtdjIiLCJodHRwczovL3JlbGF5LmV4YW1wbGUiLCJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiZWQzMjAyOTg5NWQ4NzNhNzVkNzE3YWVjYTVlNzZiYzZiYzVjYTJkZGYyNjIxMDdiNDI0YmNjZTgxMDkzY2NjMCIsImNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCI3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NyIsIjEiLCIxIiwiZWQzMjAyOTg5NWQ4NzNhNzVkNzE3YWVjYTVlNzZiYzZiYzVjYTJkZGYyNjIxMDdiNDI0YmNjZTgxMDkzY2NjMCIsImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmIiwiODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4OCIsIjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMiLCIxIiwiIiwiMiIsIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzIl0=",
+  "first": {
+    "proof": [
+      {
+        "intent": {
+          "body": {
+            "origin": "https://relay.example",
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "migration_id": "77777777777777777777777777777777",
+            "authorization_epoch": "1",
+            "key_epoch": "1",
+            "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "author": "ffffffffffffffffffffffffffffffff",
+            "preview_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "parent_chain": "3333333333333333333333333333333333333333333333333333333333333333",
+            "revision": "1",
+            "previous_digest": "",
+            "chains": [
+              "1111111111111111111111111111111111111111111111111111111111111111",
+              "3333333333333333333333333333333333333333333333333333333333333333"
+            ]
+          },
+          "signature": "ka9p62EV9TKnYwptlm4UZ/bzCqx8l6EOXnPRheIPhYgZ5NM3WdaKGmPsg1tIts0bxmlXkQPdW2IBpnrY4ikNBQ=="
+        },
+        "digest": "108f63afd902872f70642596ab02bcecbe9e059b76470821e58d04bc7e020c15"
+      }
+    ],
+    "sources": [
+      {
+        "chain_id": "3333333333333333333333333333333333333333333333333333333333333333",
+        "sequence": "2",
+        "count": "1",
+        "ciphertext_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    ],
+    "phase": "freezing",
+    "next": [
+      "1111111111111111111111111111111111111111111111111111111111111111"
+    ]
+  },
+  "extended": {
+    "proof": [
+      {
+        "intent": {
+          "body": {
+            "origin": "https://relay.example",
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "migration_id": "77777777777777777777777777777777",
+            "authorization_epoch": "1",
+            "key_epoch": "1",
+            "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "author": "ffffffffffffffffffffffffffffffff",
+            "preview_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "parent_chain": "3333333333333333333333333333333333333333333333333333333333333333",
+            "revision": "1",
+            "previous_digest": "",
+            "chains": [
+              "1111111111111111111111111111111111111111111111111111111111111111",
+              "3333333333333333333333333333333333333333333333333333333333333333"
+            ]
+          },
+          "signature": "ka9p62EV9TKnYwptlm4UZ/bzCqx8l6EOXnPRheIPhYgZ5NM3WdaKGmPsg1tIts0bxmlXkQPdW2IBpnrY4ikNBQ=="
+        },
+        "digest": "108f63afd902872f70642596ab02bcecbe9e059b76470821e58d04bc7e020c15"
+      },
+      {
+        "intent": {
+          "body": {
+            "origin": "https://relay.example",
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "migration_id": "77777777777777777777777777777777",
+            "authorization_epoch": "1",
+            "key_epoch": "1",
+            "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "author": "ffffffffffffffffffffffffffffffff",
+            "preview_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+            "parent_chain": "3333333333333333333333333333333333333333333333333333333333333333",
+            "revision": "2",
+            "previous_digest": "108f63afd902872f70642596ab02bcecbe9e059b76470821e58d04bc7e020c15",
+            "chains": [
+              "1111111111111111111111111111111111111111111111111111111111111111",
+              "2222222222222222222222222222222222222222222222222222222222222222",
+              "3333333333333333333333333333333333333333333333333333333333333333"
+            ]
+          },
+          "signature": "8jigSss5KLfVxDX3x9odsowGm66nxLERQt92GJDQQuETLS3EJ3walaM8PN9AoxwdrLoNLQrl8RUTbbeF/o6oAQ=="
+        },
+        "digest": "142f1a3276aa0e6d697a1d4f174ab9895cb01c829702ef42a97f380db0c3640e"
+      }
+    ],
+    "sources": [
+      {
+        "chain_id": "3333333333333333333333333333333333333333333333333333333333333333",
+        "sequence": "2",
+        "count": "1",
+        "ciphertext_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    ],
+    "phase": "freezing",
+    "next": [
+      "1111111111111111111111111111111111111111111111111111111111111111",
+      "2222222222222222222222222222222222222222222222222222222222222222"
+    ]
+  }
+}

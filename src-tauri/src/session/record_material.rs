@@ -6,6 +6,11 @@ pub fn matches(key: &KeyView, entry: &VaultEntry) -> bool {
     if key.status != KeyStatus::Available {
         return false;
     }
+    if key.expected_material_hash.as_ref().is_some_and(|expected| {
+        crate::sync::central::crypto::hash(entry.private_key.as_bytes()) != *expected
+    }) {
+        return false;
+    }
     let Some(public) = &key.public else {
         return false;
     };
@@ -47,6 +52,7 @@ mod tests {
             }),
             vault_id: Some("b".repeat(32)),
             status: KeyStatus::Available,
+            expected_material_hash: None,
         };
         let entry = VaultEntry {
             private_key: test_keys::plain(),

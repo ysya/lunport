@@ -105,6 +105,9 @@ mod windows_tests;
 
 impl SyncEvents for TauriEvents {
     fn status(&self) {
+        if let Ok(Ok(status)) = with_env(&self.app, crate::sync::central::controller::status) {
+            let _ = self.app.emit("central://status", &status);
+        }
         if let Ok(status)=crate::sync::record_commands::status(&self.app) { let _=self.app.emit("records://status",&status); }
         let records={let state=self.app.state::<AppState>();let core=state.sync.core.lock().unwrap();if core.format==crate::sync::record_runtime::RuntimeFormat::Records{core.records.clone()}else{None}};
         if let Some(records)=records {
@@ -154,9 +157,29 @@ impl SyncEvents for TauriEvents {
 /// 以 app 的狀態、OS keychain、HTTP relay 與系統時鐘組出 `SyncEnv`。
 pub(crate) fn with_env<T>(app: &AppHandle, f: impl FnOnce(&SyncEnv) -> T) -> Result<T, AppError> {
     let state = app.state::<AppState>();
+    let noninteractive = crate::sync::env::NonInteractiveKeychain(&OsKeychain);
+    let credentials: &dyn Keychain = if state.background_credentials_only.load(Ordering::SeqCst) {
+        &noninteractive
+    } else {
+        &OsKeychain
+    };
+    with_keychain(app, credentials, f)
+}
+/// Central renewal permits only verified no-UI credential updates. Legacy adapters remain read-only.
+pub(crate) fn with_background_account_env<T>(
+    app: &AppHandle,
+    f: impl FnOnce(&SyncEnv) -> T,
+) -> Result<T, AppError> {
+    let credentials = crate::sync::central::credentials::Background(&OsKeychain);
+    with_keychain(app, &credentials, f)
+}
+fn with_keychain<T>(
+    app: &AppHandle,
+    credentials: &dyn Keychain,
+    f: impl FnOnce(&SyncEnv) -> T,
+) -> Result<T, AppError> {
+    let state = app.state::<AppState>();
     let events = TauriEvents { app: app.clone() };
-    let noninteractive=crate::sync::env::NonInteractiveKeychain(&OsKeychain);
-    let credentials:&dyn Keychain=if state.background_credentials_only.load(Ordering::SeqCst){&noninteractive}else{&OsKeychain};
     let env = SyncEnv {
         doc: &state.doc,
         backed_up: &state.backed_up,
@@ -208,22 +231,23 @@ struct Wait {
     deadline: Instant,
     /// 退避(連續被限流、relay 出錯,或 keychain 失敗之後,spec §6.4)擋到什麼時候:這之前順便的喚醒(`Wake::Implicit`)不能提早開始一輪。不晚於 `deadline`。
     hold_until: Instant,
+    defer_explicit: bool,
 }
 
 impl Wait {
     /// 啟動:第一輪馬上跑(spec §6.4、§7.6)—— 沒有什麼要先等的。
     fn launch(now: Instant) -> Self {
-        Self { deadline: now, hold_until: now }
+        Self { deadline: now, hold_until: now, defer_explicit: false }
     }
 
     /// 一輪結束之後:`delay` 之後再跑下一輪;`backoff` 是這一輪之後退避還要擋多久(沒有退避 → 0)。
     fn after_round(now: Instant, delay: Duration, backoff: Duration) -> Self {
-        Self { deadline: now + delay, hold_until: now + backoff.min(delay) }
+        Self { deadline: now + delay, hold_until: now + backoff.min(delay), defer_explicit: false }
     }
 
-    /// 在 `now` 收到 `wake`:現在就跑一輪嗎?`Wake::Now` 一律跑;順便的喚醒只在退避結束之後才跑。
+    /// Explicit wakes bypass legacy backoff; Records also defers them until cooldown ends.
     fn runs_on(&self, wake: Wake, now: Instant) -> bool {
-        wake == Wake::Now || now >= self.hold_until
+        (wake == Wake::Now && !self.defer_explicit) || now >= self.hold_until
     }
 }
 
@@ -247,23 +271,70 @@ fn wait_for_round(rx: &Receiver<Wake>, wait: &Wait) -> Result<(), RecvTimeoutErr
 fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
     let (mut delay, mut backoff) = (crate::sync::relay::IDLE_POLL_INTERVAL, Duration::ZERO);
     let mut wait = Wait::launch(Instant::now());
+    let mut records = false;
     loop {
         if wait_for_round(&rx, &wait).is_err() {
             return;
         }
         while rx.try_recv().is_ok() {}
-        if app.state::<AppState>().background_credentials_only.load(Ordering::SeqCst) {
-            wait=Wait::after_round(Instant::now(),crate::sync::relay::IDLE_POLL_INTERVAL,Duration::ZERO);continue;
+        let background_only = app
+            .state::<AppState>()
+            .background_credentials_only
+            .load(Ordering::SeqCst);
+        if !background_only {
+            if let Ok(next) = with_env(&app, |env| {
+                let (format, legacy, cutover) = {
+                    let core = env.runtime.core.lock().unwrap();
+                    (
+                        core.format,
+                        core.format == crate::sync::record_runtime::RuntimeFormat::Legacy
+                            && !core.legacy_paused
+                            && core.save_blocked.is_none(),
+                        core.records
+                            .as_ref()
+                            .and_then(|r| r.local.central.as_ref())
+                            .is_some_and(|w| w.control.cutover),
+                    )
+                };
+                if legacy {
+                    let _ = round::sync_once(env);
+                } else if format == crate::sync::record_runtime::RuntimeFormat::Records && !cutover
+                {
+                    let _ = crate::sync::record_round::sync_once(env);
+                }
+                (
+                    round::next_delay(env),
+                    round::backoff_window(env),
+                    format == crate::sync::record_runtime::RuntimeFormat::Records,
+                )
+            }) {
+                (delay, backoff, records) = next;
+            }
+        } else {
+            delay = crate::sync::relay::IDLE_POLL_INTERVAL;
+            backoff = Duration::ZERO;
+            records = false;
         }
-        if let Ok(next) = with_env(&app, |env| {
-            let (format,legacy) = { let core=env.runtime.core.lock().unwrap(); (core.format,core.format == crate::sync::record_runtime::RuntimeFormat::Legacy && !core.legacy_paused && core.save_blocked.is_none()) };
-            if legacy { let _ = round::sync_once(env); }
-            else if format==crate::sync::record_runtime::RuntimeFormat::Records { let _=crate::sync::record_round::sync_once(env); }
-            (round::next_delay(env), round::backoff_window(env))
-        }) {
-            (delay, backoff) = next;
+        if let Ok(Some((central_delay, central_backoff))) =
+            with_background_account_env(&app, |env| {
+                if !crate::sync::central::round::configured(env) {
+                    return None;
+                }
+                let _ = crate::sync::central::round::sync_once(env);
+                Some((
+                    crate::sync::central::round::next_delay(env),
+                    crate::sync::central::round::cooldown(env),
+                ))
+            })
+        {
+            delay = delay.max(central_delay);
+            backoff = backoff.max(central_backoff);
+            records = true;
         }
         wait = Wait::after_round(Instant::now(), delay, backoff);
+        // Records Sync now coalesces during a failed round's cooldown. It must not
+        // turn a relay rejection into an unbounded stream of manual retries.
+        wait.defer_explicit = records;
     }
 }
 
@@ -1010,6 +1081,16 @@ mod tests {
         let normal = Wait::after_round(now, second(45), Duration::ZERO);
         assert!(normal.runs_on(Wake::Implicit, now + second(1)) && normal.runs_on(Wake::Now, now + second(1)));
         assert!(Wait::launch(now).runs_on(Wake::Implicit, now));
+    }
+
+    #[test]
+    fn records_sync_now_respects_the_existing_failure_cooldown() {
+        let now = Instant::now();
+        let mut wait = Wait::after_round(now, Duration::from_secs(300), Duration::from_secs(90));
+        wait.defer_explicit = true;
+        assert!(!wait.runs_on(Wake::Now, now + Duration::from_secs(1)));
+        assert!(!wait.runs_on(Wake::Implicit, now + Duration::from_secs(89)));
+        assert!(wait.runs_on(Wake::Now, now + Duration::from_secs(90)));
     }
 
     #[test]

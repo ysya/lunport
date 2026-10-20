@@ -358,6 +358,7 @@ mod tests {
     fn an_export_has_only_the_owners_ace_on_windows() {
         use crate::sync::slot_files_windows::ace_count;
         let home = tempfile::tempdir().unwrap();
+        crate::sync::testkit::inherited_windows_directory(home.path());
         // 前提:同一個資料夾裡隨手建立的檔案會繼承好幾條 ACE,否則下面的比較什麼都證明不了。
         let plain = home.path().join("plain");
         std::fs::write(&plain, "x").unwrap();

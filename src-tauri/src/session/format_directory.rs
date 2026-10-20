@@ -89,6 +89,9 @@ impl HostDirectory for FormatDirectory {
             )),
         }
     }
+    fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
+        self.with_active(|d| d.password_authorized(hop, server_key))
+    }
     fn password_account(&self, id: &HostId) -> String {
         self.active()
             .map(|d| d.password_account(id))

@@ -70,17 +70,31 @@ Open **Keys → Import private key → From a file** to choose a supported OpenS
 
 To change a key's name, select it in **Keys**, choose **Rename**, and save the new name. The key ID, fingerprint, private material and host references stay the same. Account key names sync to your other devices; a conflicting or deleted key must be resolved before renaming.
 
-Generating a key, importing it, or adding a host does not by itself enable private-key sync. Review each key's sharing controls separately. Passwords and key passphrases are not synced. Stopping key sync does not erase copies already held by other devices.
+Central library sync includes managed SSH private keys by default after you approve the whole-library review. Generating or importing a key then includes it in that encrypted library. Hardware and external-agent keys keep their private material on their original device. Saved passwords and separately stored key passphrases stay on each device.
 
 Lunport's SSH agent provides vault keys to compatible local SSH clients while the app is running and asks before a program uses a key. Keep the app running, or enable launch at login when you need that integration. Exporting a private key creates an ordinary key file outside the vault; other programs can then use that copy independently.
 
+## Local use without an account
+
+New installations open a local library immediately. Add and edit hosts, manage keys, import SSH configuration and connect to your servers without signing in. These actions do not enroll the device or upload your library to the sync service. SSH connections still need access to their destination servers.
+
+Sync is optional. Open **Sync** when you want to connect your devices; signing in alone does not enable library sync. Finish Vault setup and approve the whole-library review before upload begins. Until then, locally managed SSH private keys remain in the encrypted local vault. Once library sync is enabled, managed keys join the encrypted library by default.
+
+An existing synced library retains its device approval, recovery and migration checks. Local use does not bypass a revoked device or an unfinished safety review.
+
 ## Sync your library
 
-Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**. Enter and save your HTTPS relay URL if one is not built into the app. Create a sync chain on the first computer, save its **24-word sync code**, and choose **Join with sync code** on the others. Anyone holding the code can access and change the encrypted library, so keep it in a password manager.
+Passkey account sync is available on macOS, Windows and Linux.
 
-Creating or joining includes existing hosts and Groups on that device. Previously connected devices enable **Library sync** once from the Sync workspace. Review any naming conflicts and the acknowledgement for a shared Group-format upgrade; update or stop older clients before approving that upgrade. Setup preserves source records and can resume after an interruption.
+Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**, and choose **Sign in with Passkey**. Official installers include the account service URL. For self-hosting, enter your own HTTPS account service; Passkey needs no external identity provider. OIDC remains an optional server configuration.
 
-New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Each private key retains its own sharing decision. The relay receives ciphertext; server passwords remain local.
+On the first device, set up the encrypted Vault, save its offline recovery kit outside the device, and finish Vault setup. Choose **Prepare library review**, review the complete library and approve **Confirm library sync**. Hosts, Groups, tunnel rules and managed SSH private keys are included. The server stores encrypted library content.
+
+On another device, sign in to the same account, reveal its pairing code and approve it from an already trusted device. Then review its local library before merging; imported host references and tunnel rules are remapped together. Passkey sign-in alone does not decrypt an existing Vault. Use your recovery kit if no approved device remains.
+
+For an existing sync-code library, expand **Older sync-code libraries** to inspect the previous setup. The central migration retains original files and historical versions, verifies the complete source, and retires old cloud access only through the reviewed migration. Interrupted operations retain their verified progress and resume; unresolved old backups stay blocked until history reconciliation finishes.
+
+New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys are included after the whole-library review. The relay receives ciphertext; server passwords remain local.
 
 **Forget device** removes a device from the list. A computer that still holds the sync code may keep syncing. If a device is lost, use **Change sync code** and reconnect the computers you keep. A relay update may be required for code rotation.
 

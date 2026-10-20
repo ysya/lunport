@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "@/lib/test-ipc";
-import { recordsStatusKey } from "@/lib/records";
+import { recordKeyDestinationKey, recordsStatusKey } from "@/lib/records";
 import {
   clearAccountDraft,
   clearKeyDraft,
@@ -261,5 +261,55 @@ describe("reviewed file import", () => {
     expect(calls).toEqual([
       ["records_import_resume", { importId: "a".repeat(32) }],
     ]);
+  });
+});
+
+const keyInvocation = {
+  generation: "7",
+  profile: "1".repeat(64), account: "2".repeat(64), genesis: "3".repeat(64),
+  vault: "4".repeat(64), device: "5".repeat(32), identity_slot: null,
+};
+describe("key destination fence", () => {
+  it("sends the exact public destination and caches only a matching reply", async () => {
+    const cache = client();
+    const overview = recordOverview({ central_mode: true, key_scope: keyInvocation });
+    const calls = stubBackend(async () => overview);
+    const update = vi.fn();
+    expect(await submitKeyDraft(cache, { ...clearKeyDraft(), name: "work", source: "paste", privateText: "PRIVATE synthetic input" }, update, false,
+      { invocation: keyInvocation, destination: recordKeyDestinationKey(overview), current: () => true })).toBe(true);
+    expect(calls).toEqual([["records_key_import", { name: "work", privateText: "PRIVATE synthetic input", invocation: keyInvocation }]]);
+    expect(cacheText(cache)).not.toContain("PRIVATE synthetic input");
+    expect(cache.getMutationCache().getAll()).toEqual([]);
+  });
+  it("ignores late success or failure after a form lifetime changes without touching the new draft", async () => {
+    for (const failure of [false, true]) {
+      const cache = client();
+      const overview = recordOverview({ central_mode: true, key_scope: keyInvocation });
+      let settle!: (value: unknown) => void;
+      let reject!: (reason: unknown) => void;
+      stubBackend(() => new Promise((resolve, fail) => { settle = resolve; reject = fail; }));
+      let current = true;
+      const update = vi.fn();
+      const pending = submitKeyDraft(cache, { ...clearKeyDraft(), name: "work", source: "paste", privateText: "PRIVATE old draft" }, update, false,
+        { invocation: keyInvocation, destination: recordKeyDestinationKey(overview), current: () => current });
+      expect(update).toHaveBeenCalledWith({ busy: true, error: null });
+      update.mockClear(); current = false;
+      if (failure) reject("PRIVATE old draft failure"); else settle(overview);
+      expect(await pending).toBe(false);
+      expect(update).not.toHaveBeenCalled();
+      expect(cacheText(cache)).not.toContain(keyInvocation.profile);
+      expect(cacheText(cache)).not.toContain("PRIVATE");
+    }
+  });
+  it("discards a mismatched native reply even before an account change is rendered", async () => {
+    const cache = client();
+    const overview = recordOverview({ central_mode: true, key_scope: keyInvocation });
+    const wrong = recordOverview({ central_mode: true, key_scope: { ...keyInvocation, device: "f".repeat(32) } });
+    stubBackend(async () => wrong);
+    const update = vi.fn();
+    expect(await submitKeyDraft(cache, { ...clearKeyDraft(), name: "work" }, update, true,
+      { invocation: keyInvocation, destination: recordKeyDestinationKey(overview), current: () => true })).toBe(false);
+    expect(update).not.toHaveBeenCalledWith({ privateText: "", name: "", path: null });
+    expect(cacheText(cache)).not.toContain(wrong.key_scope!.device);
   });
 });

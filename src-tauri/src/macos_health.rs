@@ -523,6 +523,7 @@ mod tests {
             host_state.session.host_keys.ask(
                 &Silent,
                 HostKeyRequest {
+                    user: "ops".into(),
                     id: String::new(),
                     alias: "fixture".into(),
                     hostname: "example.invalid".into(),

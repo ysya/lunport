@@ -231,6 +231,34 @@ describe("explicit import consent and key/account controls", () => {
     expect(text(conflict)).not.toContain("Download synced key");
     expect(text(conflict)).toContain("metadata conflict");
   });
+  it("uses automatic key sync after central cutover without legacy download or sharing controls", () => {
+    const key = { id: "a".repeat(32), authority: "account" as const, synced: false, public: null, status: "needs_material" as const };
+    for (const status of ["needs_material", "available", "conflict"] as const) {
+      const html = render(<SelectedKeysPanel overview={recordOverview({ central_mode: true, account: { chain_id: "a".repeat(64), device_name: "Synthetic" }, keys: [{ ...key, status }] })} />);
+      const rendered = text(html);
+      for (const legacy of ["Download synced key", "Sync key", "Stop syncing", "This device only", "Sync disabled", "Sharing unknown"]) expect(rendered).not.toContain(legacy);
+      expect(rendered).toContain("Automatic encrypted sync");
+      if (status === "needs_material") expect(rendered).toContain("will become available automatically");
+      if (status === "conflict") expect(rendered).toContain("identity conflict");
+    }
+  });
+  it("explains hardware and agent references without promising to transfer their private keys", () => {
+    for (const storage of ["hardware", "external_agent"] as const) {
+      const html = render(<SelectedKeysPanel overview={recordOverview({ central_mode: true, keys: [{ id: "a".repeat(32), authority: "account", synced: false, public: null, status: "needs_material", storage }] })} />);
+      expect(text(html)).toContain("Key reference syncs automatically");
+      expect(text(html)).toContain(storage === "hardware" ? "Connect this key’s hardware device" : "Connect the SSH agent");
+      expect(text(html)).not.toContain("will become available automatically");
+      expect(text(html)).not.toContain("Download synced key");
+      expect(html).not.toContain('data-attention="true"');
+    }
+  });
+  it("hides a stale per-key confirmation when the overview switches to central mode", () => {
+    const key = { id: "a".repeat(32), authority: "account" as const, synced: false, public: null, status: "available" as const };
+    vi.mocked(useState).mockReturnValueOnce([key.id, vi.fn()]).mockReturnValueOnce(["", vi.fn()]).mockReturnValueOnce([null, vi.fn()]).mockReturnValueOnce([null, vi.fn()]).mockReturnValueOnce([{}, vi.fn()]).mockReturnValueOnce([false, vi.fn()]).mockReturnValueOnce([{ id: key.id, enabled: true }, vi.fn()]);
+    const html = render(<RecordsKeysPanel overview={recordOverview({ central_mode: true, keys: [key], account: { chain_id: "a".repeat(64), device_name: "Synthetic" } })} />);
+    expect(text(html)).not.toContain("Confirm sync");
+    expect(text(html)).not.toContain("Sync this key to your other computers");
+  });
   it("offers sync again when account metadata survives an unpublished private key", () => {
     const key = {
       id: "a".repeat(32),

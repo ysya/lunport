@@ -8,5 +8,10 @@
     "types": [],
     "lib": ["ES2022"]
   },
-  "include": ["src/**/*.ts", "worker-configuration.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "selfhost/central/control.ts",
+    "worker-configuration.d.ts"
+  ],
+  "exclude": ["src/v2/passkeys/browser.ts"]
 }

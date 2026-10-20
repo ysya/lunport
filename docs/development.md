@@ -71,6 +71,12 @@ MCP client setup in `mcp_setup.rs` uses the existing stdio adapter and grants no
 
 The 2.11.2 runtime has a narrow [context ownership patch](../src-tauri/vendor/tauri-runtime-wry/LUNPORT_PATCH.md). Preserve its provenance and run the handle-only, native tray and actual GUI regressions before updating or removing it. The patch keeps worker handle clones from copying a non-atomic native event-loop reference count.
 
+## Central account builds
+
+Central sync is enabled in normal macOS, Windows and Linux desktop builds through the default `central-sync` feature. Windows uses pinned native filesystem handles, owner-only ACLs, bounded source capture and write-through atomic publication; Unix permission tests remain platform-specific while migration and synchronization fixtures run on every supported platform. The old `central-sync-preview` name remains a compatibility alias. Release CI injects `SSHELTER_RELAY_URL` into the native build; fresh account setup uses that HTTPS service while an existing pinned account keeps its original service. Self-hosted builds may leave it unset and enter a service in Sync.
+
+The ordinary-library `app_profile_build` integration test checks the shipped capability outside `cfg(test)`. Central tests use isolated in-memory credentials; never run credential-service tests against a real user Keychain as a general release check.
+
 ## Release workflow
 
 Stable releases use release-please. A push to `main` opens or updates a release PR; merging that PR creates the version tag and GitHub Release, then builds the platform installers and updater assets. Review the version, changelog and checks before merging a release PR. An ordinary feature or documentation merge does not itself publish an installer.

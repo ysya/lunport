@@ -15,6 +15,7 @@ struct Credentials {
     writes: AtomicUsize,
     deletes: AtomicUsize,
     fail_promotion: AtomicBool,
+    forget_stage: AtomicBool,
 }
 impl Keychain for Credentials {
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
@@ -26,6 +27,7 @@ impl Keychain for Credentials {
         if self.fail_promotion.load(Ordering::SeqCst) && account.starts_with("vault:key") {
             return Err(AppError::Other("promotion denied PRIVATE_SENTINEL".into()));
         }
+        if self.forget_stage.load(Ordering::SeqCst) && account.starts_with("migration:") {return Ok(());}
         self.inner.set(account, secret)
     }
     fn delete(&self, account: &str) -> Result<(), AppError> {
@@ -203,6 +205,23 @@ fn corrupt_and_keyless_original_vaults_remain_original_on_refusal() {
         assert_eq!(fixture.credentials.writes.load(Ordering::SeqCst), 0);
         assert!(fixture.state().local.hosts.is_empty());
     }
+}
+#[test]
+fn a_successful_but_unretained_staged_credential_cannot_publish_vault_or_state_and_same_import_resumes() {
+    let fixture=Fixture::new();
+    let before=fixture.state();let source=fs::read(&fixture.private).unwrap();
+    fixture.credentials.forget_stage.store(true,Ordering::SeqCst);
+    let error=confirm(&fixture.env(),fixture.with_copy()).unwrap_err();
+    assert!(error.to_string().contains("pending"));
+    assert_eq!(fixture.state(),before);
+    assert!(!vault_path(&fixture.env().state_path).exists());
+    assert_eq!(fs::read(&fixture.private).unwrap(),source);
+    let id=fs::read_dir(fixture.imports()).unwrap().next().unwrap().unwrap().file_name().to_string_lossy().into_owned();
+    let paths=Paths::new(&fixture.env(),&id).unwrap();assert!(!paths.vault.exists());
+    fixture.credentials.forget_stage.store(false,Ordering::SeqCst);
+    let receipt=resume(&fixture.env(),&id).unwrap();assert_eq!(receipt.import_id,id);
+    assert_eq!(fixture.state().local.keys.len(),1);
+    assert_eq!(fixture.credentials.deletes.load(Ordering::SeqCst),0);
 }
 #[test]
 fn new_master_promotion_failure_keeps_a_resumable_journal_and_staged_material() {

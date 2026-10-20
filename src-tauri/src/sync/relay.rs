@@ -5,6 +5,7 @@
 //! `RelayError`。引擎經由 `RelayApi` trait 使用它(測試以記憶體假中繼 `fake_relay` 實作同一個 trait)。
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub const MAX_BATCH_PULL: usize = 64;
 /// 一次上傳最多幾筆(relay 的 `MAX_ITEMS_PER_PUSH`)。
 const MAX_PUSH_ITEMS: usize = 200;
+// Wire limits include JSON/envelope overhead, not just the relay's ciphertext quota.
+const MAX_SMALL_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_CHAIN_RESPONSE_BYTES: usize = 1024 * 1024 + 4096 * 512 + 1024;
+// The relay checks its 2 MiB batch budget BEFORE adding the final complete chain.
+const MAX_BATCH_RESPONSE_BYTES: usize = 2 * 1024 * 1024 + MAX_CHAIN_RESPONSE_BYTES + MAX_BATCH_PULL * 256;
 /// cursor 與 relay 序號的上限:relay 以 JavaScript 的 safe integer 檢查 `since`(spec §6.1),序號也不會超過它。
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// `GET /v1/info` 回報的功能名稱(spec §6.3)。
@@ -344,25 +350,37 @@ fn status_error(code: u16) -> RelayError {
     }
 }
 
-/// 先把整個 body 讀完再解析。讀不完(逾時、連線中途斷掉)是連線的問題 → `Unreachable`,呼叫端照「連不上」處理,不會當成
-/// relay 送來壞資料(reqwest 0.13 的 `Response::json` 把這兩種都包成 decode 錯誤,分不出來,所以不用它);讀完了卻不是
-/// 預期的 JSON → `BadResponse`。訊息只有位置,不帶 body 的內容。
-fn read_json<T: serde::de::DeserializeOwned>(resp: reqwest::blocking::Response) -> Result<T, RelayError> {
-    let body = read_body(resp)?;
-    serde_json::from_slice(body.as_ref()).map_err(|e| {
+/// Read only a bounded wire body before allocating/parsing untrusted JSON.
+fn read_json<T: serde::de::DeserializeOwned>(resp: reqwest::blocking::Response, limit: usize) -> Result<T, RelayError> {
+    let body = read_body(resp, limit)?;
+    serde_json::from_slice(&body).map_err(|e| {
         RelayError::BadResponse(format!("the answer is not the expected JSON (line {}, column {})", e.line(), e.column()))
     })
 }
 
-/// 讀完整個 body:讀不完(逾時、連線中途斷掉)→ `Unreachable`(見 `read_json`)。
-fn read_body(resp: reqwest::blocking::Response) -> Result<impl AsRef<[u8]>, RelayError> {
-    resp.bytes().map_err(|e| {
-        RelayError::Unreachable(if e.is_timeout() {
-            "the relay's answer timed out".to_string()
+fn read_body(resp: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>, RelayError> {
+    if resp.content_length().is_some_and(|length| length > limit as u64) {
+        return Err(RelayError::BadResponse("the relay's answer exceeds the response size limit".into()));
+    }
+    // Content-Length is optional and untrusted. Always count the bytes actually read.
+    read_capped(resp, limit)
+}
+
+pub(crate) fn read_capped(reader: impl Read, limit: usize) -> Result<Vec<u8>, RelayError> {
+    let mut body = Vec::new();
+    reader.take(limit as u64 + 1).read_to_end(&mut body).map_err(|error| {
+        let timed_out = error.kind() == std::io::ErrorKind::TimedOut
+            || error.get_ref().and_then(|source| source.downcast_ref::<reqwest::Error>()).is_some_and(reqwest::Error::is_timeout);
+        RelayError::Unreachable(if timed_out {
+            "the relay's answer timed out".into()
         } else {
-            "the connection broke off while reading the relay's answer".to_string()
+            "the connection broke off while reading the relay's answer".into()
         })
-    })
+    })?;
+    if body.len() > limit {
+        return Err(RelayError::BadResponse("the relay's answer exceeds the response size limit".into()));
+    }
+    Ok(body)
 }
 
 /// `since` 必須是 relay 認得的 safe integer(spec §6.1);超出範圍就不送出。
@@ -455,7 +473,7 @@ impl RelayApi for RelayClient {
         let resp = self.http.get(self.url("/v1/info")).send().map_err(unreachable_error)?;
         match resp.status().as_u16() {
             200 => {
-                let wire: WireInfo = read_json(resp)?;
+                let wire: WireInfo = read_json(resp, MAX_SMALL_RESPONSE_BYTES)?;
                 if wire.relay != "sshelter-relay" {
                     return Err(RelayError::BadResponse("this server is not a Lunport relay".to_string()));
                 }
@@ -520,7 +538,7 @@ impl RelayApi for RelayClient {
             .send()
             .map_err(unreachable_error)?;
         match resp.status().as_u16() {
-            200 => checked_seqs(read_json(resp)?),
+            200 => checked_seqs(read_json(resp, MAX_CHAIN_RESPONSE_BYTES)?),
             code => Err(status_error(code)),
         }
     }
@@ -533,7 +551,7 @@ impl RelayApi for RelayClient {
         // 不帶 `Authorization`:每項的權杖在 body 裡(spec §6.1)。
         let resp = self.http.post(self.url("/v1/pull")).json(items).send().map_err(unreachable_error)?;
         match resp.status().as_u16() {
-            200 => batch_entries(items, read_json(resp)?),
+            200 => batch_entries(items, read_json(resp, MAX_BATCH_RESPONSE_BYTES)?),
             // 舊版 relay 沒有這個端點。
             404 => Err(RelayError::Unsupported(FEATURE_PULL_BATCH)),
             code => Err(status_error(code)),
@@ -552,7 +570,7 @@ impl RelayApi for RelayClient {
             .map_err(unreachable_error)?;
         match resp.status().as_u16() {
             200 => {
-                let results = checked_push_results(push_results(read_json(resp)?))?;
+                let results = checked_push_results(push_results(read_json(resp, MAX_CHAIN_RESPONSE_BYTES)?))?;
                 if results.len() != items.len() {
                     return Err(RelayError::BadResponse("the relay answered a push with the wrong number of results".to_string()));
                 }
@@ -560,7 +578,7 @@ impl RelayApi for RelayClient {
             }
             // 凍結的 chain 一律回 `409 { "status": "frozen" }`;其他 409 不認。body 讀不完(逾時、斷線)是連線的問題,
             // 和其他回應一樣是 `Unreachable`。
-            409 => match serde_json::from_slice::<WireStatus>(read_body(resp)?.as_ref()) {
+            409 => match serde_json::from_slice::<WireStatus>(read_body(resp, MAX_SMALL_RESPONSE_BYTES)?.as_ref()) {
                 Ok(body) if body.status == "frozen" => Ok(PushOutcome::Frozen),
                 _ => Err(RelayError::Http(409)),
             },
@@ -573,6 +591,74 @@ impl RelayApi for RelayClient {
 mod tests {
     use super::*;
     use mockito::Matcher;
+
+
+    #[test]
+    fn capped_reader_counts_actual_bytes_and_accepts_the_exact_limit() {
+        use std::io::{Cursor, Read};
+        assert_eq!(read_capped(Cursor::new(b"1234"), 4).unwrap(), b"1234");
+        assert!(matches!(read_capped(Cursor::new(b"12345"), 4), Err(RelayError::BadResponse(_))));
+        // Even an endless response stops after limit + 1, without reading the rest.
+        struct Endless { read: std::sync::Arc<std::sync::atomic::AtomicUsize> }
+        impl Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                buf.fill(b' ');
+                self.read.fetch_add(buf.len(), std::sync::atomic::Ordering::Relaxed);
+                Ok(buf.len())
+            }
+        }
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(matches!(read_capped(Endless { read: count.clone() }, 128), Err(RelayError::BadResponse(_))));
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 129);
+    }
+
+    #[test]
+    fn oversized_info_and_frozen_answers_are_rejected_before_json_parsing() {
+        let mut server = mockito::Server::new();
+        server.mock("GET", "/v1/info").with_status(200)
+            .with_body(" ".repeat(MAX_SMALL_RESPONSE_BYTES + 1)).create();
+        let chain = hex('a');
+        let token = hex('b');
+        server.mock("POST", format!("/v1/chains/{chain}/records").as_str()).with_status(409)
+            .with_body(" ".repeat(MAX_SMALL_RESPONSE_BYTES + 1)).create();
+        let client = RelayClient::new(&server.url()).unwrap();
+        assert!(matches!(client.info(), Err(RelayError::BadResponse(_))));
+        assert!(matches!(client.push(&chain, &token, &[item(&hex('c'), 0)]), Err(RelayError::BadResponse(_))));
+    }
+
+
+    #[test]
+    fn chunked_answers_without_a_declared_length_are_bounded() {
+        let mut server = mockito::Server::new();
+        server.mock("GET", "/v1/info").with_status(200).with_chunked_body(|writer| {
+            for _ in 0..65 { writer.write_all(&[b' '; 1024])?; }
+            Ok(())
+        }).create();
+        assert!(matches!(RelayClient::new(&server.url()).unwrap().info(), Err(RelayError::BadResponse(_))));
+    }
+
+    #[test]
+    fn batch_response_allows_a_complete_chain_after_the_relay_budget() {
+        let mut server = mockito::Server::new();
+        let chains = [hex('a'), hex('b'), hex('c'), hex('d')];
+        let token = hex('1');
+        let mut results = Vec::new();
+        for chain in &chains[..3] {
+            let rows: Vec<_> = (1..=16).map(|seq| serde_json::json!({
+                "idHash": format!("{seq:064x}"), "kind": "host", "seq": seq,
+                "nonce": "A".repeat(32), "ciphertext": "A".repeat(60 * 1024), "deleted": false
+            })).collect();
+            results.push(serde_json::json!({"chain":chain,"status":"ok","records":rows,"latestSeq":16}));
+        }
+        results.push(serde_json::json!({"chain":chains[3],"status":"deferred"}));
+        let body = serde_json::json!({"results":results}).to_string();
+        assert!(body.len() > 2 * 1024 * 1024);
+        server.mock("POST", "/v1/pull").with_status(200).with_body(body).create();
+        let requests: Vec<_> = chains.iter().map(|chain| batch_item(chain,&token,0)).collect();
+        let result = RelayClient::new(&server.url()).unwrap().pull_batch(&requests).unwrap();
+        assert_eq!(result.len(),4);
+        assert!(matches!(result[3].result,BatchPullResult::Deferred));
+    }
 
     fn item(id: &str, base: u64) -> PushItem {
         PushItem {

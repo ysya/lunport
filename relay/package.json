@@ -8,12 +8,30 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p passkey-browser.tsconfig.json",
+    "check:security-config": "node security/check-deployment.mjs",
+    "test:security-config": "node --test security/check-deployment.test.mjs security/prepare-authority-transfer.test.mjs selfhost/central/authority-import.test.mjs",
+    "build:passkey-page": "node scripts/build-passkey-page.mjs",
+    "pretypecheck": "npm run build:passkey-page",
+    "pretest": "npm run build:passkey-page",
+    "predev": "npm run build:passkey-page",
+    "predeploy": "npm run build:passkey-page"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.2.8",
+    "@hpke/chacha20poly1305": "1.8.0",
+    "@hpke/core": "1.9.0",
+    "@hpke/dhkem-x25519": "1.8.0",
+    "@noble/ciphers": "2.4.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11",
-    "wrangler": "^4.141.0"
+    "wrangler": "^4.141.0",
+    "esbuild": "0.28.1"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@simplewebauthn/browser": "14.0.0",
+    "@simplewebauthn/server": "14.0.3",
+    "jose": "6.2.12"
   }
 }

@@ -9,6 +9,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY wrangler.jsonc tsconfig.json ./
 COPY src ./src
+COPY scripts ./scripts
+RUN node scripts/build-passkey-page.mjs
 COPY selfhost/workerd.capnp selfhost/check-config.mjs ./selfhost/
 RUN node selfhost/check-config.mjs
 RUN WRANGLER_SEND_METRICS=false npx wrangler deploy --dry-run --outdir dist

@@ -168,7 +168,7 @@ fn account_gate_and_newer_opaque_order_cannot_be_overwritten() {
 }
 
 #[test]
-fn concurrent_offline_orders_converge_without_losing_group_edits() {
+fn concurrent_offline_orders_keep_both_choices_without_losing_group_edits() {
     let (first, keys) = account();
     let mut second = first.clone();
     second.device_id = "e".repeat(32);
@@ -196,8 +196,12 @@ fn concurrent_offline_orders_converge_without_losing_group_edits() {
     a.account = Some(merged_a.section);
     let mut b = b;
     b.account = Some(merged_b.section);
-    assert_eq!(view(&a).ids, vec![A, B]);
-    assert_eq!(view(&a).ids, view(&b).ids);
+    assert_eq!(view(&a).ids, vec![B, A]);
+    assert_eq!(view(&b).ids, vec![A, B]);
+    for state in [&a, &b] {
+        assert_eq!(state.account.as_ref().unwrap().recovery.conflicts.len(), 1);
+        assert!(record_merge::account_outgoing(state.account.as_ref().unwrap(), &keys).unwrap().is_empty());
+    }
     assert_eq!(a.local.groups, first.local.groups);
     assert_eq!(b.local.groups, first.local.groups);
 }
@@ -337,6 +341,7 @@ fn retained_order_keeps_newer_dirty_edits_and_authenticates_future_format_header
         );
         assert_eq!(merged.gate, record_merge::AccountGate::Compatible);
         current.account = Some(merged.section);
+        crate::sync::record_conflicts::upgrade_state(&mut current);
         validate_state(&current).unwrap();
         let account = current.account.as_ref().unwrap();
         assert!(account.records[&key].dirty);
@@ -352,12 +357,8 @@ fn retained_order_keeps_newer_dirty_edits_and_authenticates_future_format_header
         } else {
             assert_eq!(view(&current).ids, vec![A, B]);
             assert!(account.sealed.is_empty());
-            assert_eq!(
-                record_merge::account_outgoing(account, &keys)
-                    .unwrap()
-                    .len(),
-                1
-            );
+            assert_eq!(account.recovery.conflicts.len(), 1);
+            assert!(record_merge::account_outgoing(account, &keys).unwrap().is_empty());
         }
     }
 }

@@ -21,6 +21,10 @@ pub trait Keychain: Send + Sync {
     fn get_noninteractive(&self, _account:&str)->Result<Option<String>,AppError> {
         Err(AppError::Other("needs interaction: this credential source has no verified noninteractive read".into()))
     }
+    /// Explicit background credential updates may not unlock or prompt either.
+    fn set_noninteractive(&self,_account:&str,_secret:&str)->Result<(),AppError> {
+        Err(AppError::Other("needs interaction: this credential source has no verified noninteractive update".into()))
+    }
     fn set(&self, account: &str, secret: &str) -> Result<(), AppError>;
     /// 不存在也算成功(清理路徑要能重複執行)。
     fn delete(&self, account: &str) -> Result<(), AppError>;
@@ -30,12 +34,8 @@ pub trait Keychain: Send + Sync {
 pub struct OsKeychain;
 
 impl Keychain for OsKeychain {
-    #[cfg(windows)]
-    fn get_noninteractive(&self, account:&str)->Result<Option<String>,AppError>{
-        // keyring 4.1.5's Windows native backend calls CredReadW, never CredUI.
-        // https://learn.microsoft.com/windows/win32/api/wincred/nf-wincred-credreadw
-        crate::secrets::get(account)
-    }
+    fn get_noninteractive(&self,account:&str)->Result<Option<String>,AppError> {crate::secrets::get_noninteractive(account)}
+    fn set_noninteractive(&self,account:&str,secret:&str)->Result<(),AppError> {crate::secrets::set_noninteractive(account,secret)}
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
         crate::secrets::get(account)
     }

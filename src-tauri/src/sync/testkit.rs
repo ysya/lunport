@@ -27,6 +27,31 @@ use crate::sync::state_v2::{AccountState, SpaceState, SyncNotice, SyncStateV2};
 /// 測試裡的 relay URL(假 relay 不看它,只拒絕空字串)。
 pub const RELAY_URL: &str = "https://relay.test";
 
+/// Prepare an owned private fixture directory using this test platform's permission model.
+/// No real home or credential store is involved.
+pub(crate) fn private_directory(path: &Path) {
+    crate::fsutil::ensure_dir_secure(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    crate::sync::slot_files_windows::restrict_to_owner(path, true).unwrap();
+}
+
+/// An explicit inherited read ACE keeps Windows ACL regressions meaningful even
+/// when the runner's temporary root already grants access only to its owner.
+#[cfg(windows)]
+pub(crate) fn inherited_windows_directory(path: &Path) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-5-18:(OI)(CI)R"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "cannot prepare inherited ACL fixture");
+}
+
 /// A real opted-in account, grouped library and durable state for native startup regressions.
 /// Only the encrypted/public state may be exported; credentials stay in MemKeychain.
 pub(crate) fn synced_library_fixture() -> Arc<TestDevice> {
@@ -104,6 +129,7 @@ impl MemKeychain {
 
 impl Keychain for MemKeychain {
     fn get_noninteractive(&self,account:&str)->Result<Option<String>,AppError>{self.get(account)}
+    fn set_noninteractive(&self,account:&str,secret:&str)->Result<(),AppError>{self.set(account,secret)}
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(AppError::Other("keychain error: locked".to_string()));
@@ -230,6 +256,7 @@ pub struct Hooks {
     pub before_create: Option<Hook>,
     pub before_pull: Option<Hook>,
     pub before_delete: Option<Hook>,
+    pub before_push: Option<Hook>,
     pub after_push: Option<Hook>,
     pub after_batch: Option<Hook>,
 }
@@ -295,6 +322,7 @@ impl RelayApi for HookedRelay {
         out
     }
     fn push(&self, chain_id: &str, token: &str, items: &[PushItem]) -> Result<PushOutcome, RelayError> {
+        self.run(|h| h.before_push.take());
         let out = self.inner.push(chain_id, token, items);
         self.run(|h| h.after_push.take());
         out

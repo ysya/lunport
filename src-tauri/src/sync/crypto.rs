@@ -105,6 +105,11 @@ pub fn is_chain_id(s: &str) -> bool {
 }
 
 impl ChainKeys {
+    /// Clear only an owned temporary restored from the protected source keybook.
+    pub(crate) fn clear_sensitive(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.auth_token);
+        zeroize::Zeroize::zeroize(&mut self.enc_key);
+    }
     /// 新建 space 的位置、權杖與金鑰(spec §5.1):各 32 bytes 的 OS CSPRNG 隨機值,不由同步碼推導。
     pub fn generate() -> Result<Self, AppError> {
         let mut bytes = [0u8; 96];

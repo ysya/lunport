@@ -1,0 +1,300 @@
+{
+  "anchor": {
+    "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+    "origin": "https://relay.example"
+  },
+  "fixture": "SYNTHETIC REKEY DATA ONLY",
+  "known_prefix": {
+    "epoch": 1,
+    "history_hash": "522a31e3e0b6e3e5d45e3448ae8e83589350208011cd211a62cffd4e62c280c2",
+    "sequence": 1
+  },
+  "manifest": {
+    "body": {
+      "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "author": "ffffffffffffffffffffffffffffffff",
+      "authorization_epoch": "4",
+      "from_epoch": "1",
+      "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+      "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+      "origin": "https://relay.example",
+      "rotation_id": "b3d4d6304be0f272ea7ce506749e8c84",
+      "source_history_hash": "32f8643d9500a93b3676c256e962fb9886864b6dc680b2bd6afa9c076d976698",
+      "source_sequence": "2",
+      "target_history_hash": "59c5481c59037f1034f6d43bfbd027d74392d6902e55fdc0b2d37a2a0ce82694",
+      "to_epoch": "2",
+      "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "wraps_digest": "721c64836125925326f9b2d12c589235b03e12d32696ea1eae9f88942db78381"
+    },
+    "signature": "HoFCv3Nl3GpQKpxG31WP4JHi7L5lXVTVLG2/jth6M9aEEQGeUq9P1ytM7a8u84qNkcnc8eASFoDSEzEpafntAg=="
+  },
+  "manifest_canonical_base64": "WyJsdW5wb3J0LXJla2V5LXYyIiwiaHR0cHM6Ly9yZWxheS5leGFtcGxlIiwiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImVkMzIwMjk4OTVkODczYTc1ZDcxN2FlY2E1ZTc2YmM2YmM1Y2EyZGRmMjYyMTA3YjQyNGJjY2U4MTA5M2NjYzAiLCJjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjIiwiYjNkNGQ2MzA0YmUwZjI3MmVhN2NlNTA2NzQ5ZThjODQiLCI0IiwiMSIsIjIiLCI0MWJmZWUzMjgzNTY0OTc2MzNlNWQ3YWMwMjU2YTRkMTUxNGZmMDI4ODljZjYxYjIxNDM2NmUxMjZjZTc5OTU2IiwiZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCIyIiwiMzJmODY0M2Q5NTAwYTkzYjM2NzZjMjU2ZTk2MmZiOTg4Njg2NGI2ZGM2ODBiMmJkNmFmYTljMDc2ZDk3NjY5OCIsIjU5YzU0ODFjNTkwMzdmMTAzNGY2ZDQzYmZiZDAyN2Q3NDM5MmQ2OTAyZTU1ZmRjMGIyZDM3YTJhMGNlODI2OTQiLCI3MjFjNjQ4MzYxMjU5MjUzMjZmOWIyZDEyYzU4OTIzNWIwM2UxMmQzMjY5NmVhMWVhZTlmODg5NDJkYjc4MzgxIl0=",
+  "proof": {
+    "genesis": {
+      "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "device_signature": "zNmPlEkN0J670LQ/ArawcfXBLKoytWUN47Iw8wB7uxop8qAu9EFlpjH5zVN9ihmcpwZ86siryoghQ80iwFaBAA==",
+      "first": {
+        "id": "ffffffffffffffffffffffffffffffff",
+        "keys": {
+          "encryption": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+          "signing": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+        }
+      },
+      "nonce": "86428c98d3946591741c227a3903552e4e99e69cb602d6b673d94466d59c918a",
+      "origin": "https://relay.example",
+      "recovery": {
+        "encryption": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "signing": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw="
+      },
+      "recovery_signature": "ZIek+ZnOBmlBka7wtUHYoWdsCoeBQO5rLYjnvNvv8p8Ag2dfJmnwQFjsAjzukwgZWmoerKoScB6wG0j0Su9RCQ=="
+    },
+    "nodes": [
+      {
+        "body": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "action": "add",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "devices": {
+            "dddddddddddddddddddddddddddddddd": {
+              "encryption": "zo060cy2M+x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk=",
+              "signing": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q="
+            },
+            "ffffffffffffffffffffffffffffffff": {
+              "encryption": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+              "signing": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+            }
+          },
+          "enrollment": {
+            "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "created_at_ms": "1700000000000",
+            "device": {
+              "id": "dddddddddddddddddddddddddddddddd",
+              "keys": {
+                "encryption": "zo060cy2M+x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk=",
+                "signing": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q="
+              }
+            },
+            "expires_at_ms": "1700000600000",
+            "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+            "nonce": "41e16b2457c34b1d1451d4e0dbf623cb831612487490ac2f2aafbcc313826e35",
+            "origin": "https://relay.example",
+            "request_id": "683ccb4788bdf746d1bf3dc98f76c8b3",
+            "signature": "JhTIj5olZwXjSinNVR8OGYrLqWvrtSW2HucaQwHZaXp1GOKajWrXvhTcT24zsqXRInWs8IURLWORsyNtvl7iBA=="
+          },
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "issued_at_ms": "1700000001000",
+          "origin": "https://relay.example",
+          "previous_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "recovery": {
+            "encryption": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+            "signing": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw="
+          },
+          "revision": "1"
+        },
+        "signature": "EBZ3alUR4aBsicoKewlkiVeBm076ckXXiim8HNoA8NEydVmlRrHs7fDaS0dCqUmsgWW1pvchPvBsCoSFRrRxAg=="
+      },
+      {
+        "body": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "action": "revoke",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "devices": {
+            "ffffffffffffffffffffffffffffffff": {
+              "encryption": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+              "signing": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+            }
+          },
+          "enrollment": null,
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "issued_at_ms": "1700000002000",
+          "origin": "https://relay.example",
+          "previous_head": "fd334f45161778bffe9874f4729c86896429a6711a2a7806a635f672022e5236",
+          "recovery": {
+            "encryption": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+            "signing": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw="
+          },
+          "revision": "2"
+        },
+        "signature": "6hu988cK7zUana5Uwur0D+HV6P1vitt2VWESP8qJ9GWXSQgPhPaMYS9hBWvGd2C36eY00L9w7x7JW1Mv7LB3Cw=="
+      }
+    ]
+  },
+  "source": {
+    "epoch": 1,
+    "history_hash": "32f8643d9500a93b3676c256e962fb9886864b6dc680b2bd6afa9c076d976698",
+    "sequence": 2
+  },
+  "source_rows": [
+    {
+      "digest": "a4de02ad5948f41ab334c031c08bff3d610d767af5aaead63abaaf18ca48f892",
+      "envelope": {
+        "ciphertext": "SeJs2OC5dVnEFG+xaFG/EYGXduP8lWFRnWYnEPkYPYvpg/L9M0g76xROgQ==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "host",
+          "membership_head": "fd334f45161778bffe9874f4729c86896429a6711a2a7806a635f672022e5236",
+          "operation_id": "11111111111111111111111111111111",
+          "origin": "https://relay.example",
+          "record_id": "eef19bebf040c7aa7b2a752028c116f31701d849b2391fdf6bdc861a160516df",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "bmWfPcX9/YRJFgzwRapqphaV+1QkfFwU",
+        "signature": "tjwWACR7QuXmlj9hJD0uv3tg690OGyGyg0435UKBE35lDKBCp19QM2/JxJDXdjRNnOdR1nBQeraB0+SWBkabBw=="
+      },
+      "history_hash": "522a31e3e0b6e3e5d45e3448ae8e83589350208011cd211a62cffd4e62c280c2",
+      "revision": "1",
+      "sequence": "1"
+    },
+    {
+      "digest": "d53160d2ebe23d98fd5637304067a503a1dd8acd28c555538915f31c1f26c4c3",
+      "envelope": {
+        "ciphertext": "pJXxd3T00tTAutLVFkhtWfxDBI4cvHyJRzwCB1+++d5B9zsMuAEExQ==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "dddddddddddddddddddddddddddddddd",
+          "deleted": false,
+          "expected_revision": "1",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "host",
+          "membership_head": "fd334f45161778bffe9874f4729c86896429a6711a2a7806a635f672022e5236",
+          "operation_id": "22222222222222222222222222222222",
+          "origin": "https://relay.example",
+          "record_id": "eef19bebf040c7aa7b2a752028c116f31701d849b2391fdf6bdc861a160516df",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "ZIIGoOaa3suWFOKiykeaHi1Li/uLNy1N",
+        "signature": "FSsJrm8mOvj7xQSdQHmakcOhm2cLQlZsYiWzklIYMuGMiLamKMbCpWunQnbv8Wjmh0kgFq10YG3KMiYXbvjYDw=="
+      },
+      "history_hash": "32f8643d9500a93b3676c256e962fb9886864b6dc680b2bd6afa9c076d976698",
+      "revision": "2",
+      "sequence": "2"
+    }
+  ],
+  "source_wraps": [
+    {
+      "ciphertext": "HlVuI7hVPlWFD9nmbg06Nzu89wRCzgxStkFayKH9vjzOfzdeU87LzDelcpzE9qP+bj63rrQJghV5gEqm3QmuN1Zhs33YByVZc4KIirCLgs4=",
+      "encapsulated_key": "/n14GL1l7273sSi4IJNiXFpSzKBN9bkQJhwAUFj/7kM=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "1",
+        "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+        "origin": "https://relay.example",
+        "recipient": "ffffffffffffffffffffffffffffffff",
+        "recipient_key": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "d2FE9WBzXq51ERU3DAoQI+V6JgIXoGzodIvj2MqNb/2WY74E8ttBFlFXyNaR6sQRLJNnbtuD4EtCyDceEmuXDw=="
+    },
+    {
+      "ciphertext": "PtmoK3KNOSwh2FoLsrhB4uEd2xH+DmfQdDCcvNt2Du9XdUoFphQ5k0SH1Fz3WMuk0MzeUMzRPtlclYvUK4ZgbavXa5XhE8LLytoFR+no1Mc=",
+      "encapsulated_key": "hYRfACFujUMG+eWGnPZpPubuces2ynJrWKd7VdDNnBo=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "1",
+        "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+        "origin": "https://relay.example",
+        "recipient": "recovery",
+        "recipient_key": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "gITwkipFF3IKhI7ryKi8zl3URGRNymisMG7JKQ+OYplSY5hNdqhAOm/1FiUds6OqgI0WOM8IUP2h8Z2F3j/QBg=="
+    }
+  ],
+  "target_rows": [
+    {
+      "digest": "dc8329f676acf73de17d74b6c22d95adec39c83fc1ccd14b5b7660efc946b06d",
+      "envelope": {
+        "ciphertext": "CAtZQkfV9rK3Xzzh0SFHTh3ABSqC+umlsucXYCKocfqeq0qt7jHs7Pz33Q==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "2",
+          "kind": "host",
+          "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+          "operation_id": "11111111111111111111111111111111",
+          "origin": "https://relay.example",
+          "record_id": "eef19bebf040c7aa7b2a752028c116f31701d849b2391fdf6bdc861a160516df",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "KkFUFvaaqjQH7ccywqk7jJYAtknLsbOM",
+        "signature": "Uah0L/Zx2VFo2cfgT/Qb6x+66Ve7P8vmIbEJVt3/e0kf4vjugsTGYIHvyvja6zGPpBlTBqRuWvhGFj1/l2rZBQ=="
+      },
+      "history_hash": "c4f1a6ace7cb4f2ec84733c19fc18fac2c4fe5ad54a3037dcabd8c998084664b",
+      "revision": "1",
+      "sequence": "1"
+    },
+    {
+      "digest": "73c7807ce28c5426d25a37dc5e6b41357c84f1d88e3ee16bded35e04ac8347be",
+      "envelope": {
+        "ciphertext": "dfuB/FIjbS3PU8Kgi9wjUVUW6+4CnYFDM13/zvthgoGSAMpun/PJyQ==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "1",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "2",
+          "kind": "host",
+          "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+          "operation_id": "22222222222222222222222222222222",
+          "origin": "https://relay.example",
+          "record_id": "eef19bebf040c7aa7b2a752028c116f31701d849b2391fdf6bdc861a160516df",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "krvBtGHHmjhmKBY5s4vyxd+00SuERkN2",
+        "signature": "kY6HlAgsKBds/vwVUcOq3Bh+DoG9sjr9N/k3xF5RFYsEjNPc7gmshPUgLkM+VSBBsn3ngJUM2LeQS4MNmP4wBg=="
+      },
+      "history_hash": "59c5481c59037f1034f6d43bfbd027d74392d6902e55fdc0b2d37a2a0ce82694",
+      "revision": "2",
+      "sequence": "2"
+    }
+  ],
+  "target_wraps": [
+    {
+      "ciphertext": "rUuQuf0twb/UYSSElNr00Mx+BrLvq5NaFaDxf4176SDrOMpd1v5knIGAeDnMNbrqIzERlte3KQ0vGcW4qzpRG/GC/yJvyy1HvNWmE9ijtWU=",
+      "encapsulated_key": "x2mPqwlbPb8jlZ7L5wez04X9Rvf5eSBtcBVj0cuXCBw=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "2",
+        "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+        "origin": "https://relay.example",
+        "recipient": "ffffffffffffffffffffffffffffffff",
+        "recipient_key": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "/rznWDLZguoiiWKlh19xMIU6q619nUwmP8DYugiPBm9CwrOaw15hvpHyrftAtcFUylo8q8hYhJuzXNZKEMqUBQ=="
+    },
+    {
+      "ciphertext": "ERid+Q1D0rL5OeCDDBouLPuCKXVXg1tfAN/x2pFoYg0IqHt8IiL7TEPnImybdRWEReQ8Y3Rbyf3mPg1jMHQ7CGHgL7GROmtVnuJrvFZvs6M=",
+      "encapsulated_key": "FFlB3z1x4FfsFHE7LmEpDvfeiAyvSZm7WviJhtJtiBM=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "2",
+        "membership_head": "41bfee328356497633e5d7ac0256a4d1514ff02889cf61b214366e126ce79956",
+        "origin": "https://relay.example",
+        "recipient": "recovery",
+        "recipient_key": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "SWyObeyewqCKk246P9/g2KM/Pwj1gBpV0wc2j9V187cP98RVFOv1FeIhcjwDkYjJmZAJcxvnLQM3G7QJOuKDDQ=="
+    }
+  ]
+}

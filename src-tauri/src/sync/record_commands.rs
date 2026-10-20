@@ -1,5 +1,6 @@
 //! Native public-record API. Credentials and private key text never enter overview DTOs.
 use crate::error::AppError;
+use crate::sync::central::payload::KeyStorage;
 use crate::sync::env::SyncEnv;
 use crate::sync::record_repository::{
     self as repo, HostReadiness, KeyAuthority, KeyStatus, RecordRevision,
@@ -72,6 +73,8 @@ pub struct GroupView {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct KeyView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<&'static str>,
     synced: Option<bool>,
     id: String,
     authority: &'static str,
@@ -98,6 +101,9 @@ pub struct PendingAccountView {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordOverview {
+    central_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_scope: Option<crate::sync::record_import::central_local::Invocation>,
     syncing: bool,
     generation: String,
     group_deletion_token: String,
@@ -117,6 +123,7 @@ pub struct RecordOverview {
     library_enabled: bool,
     library_scope: Option<HostScope>,
     pending_changes: usize,
+    conflicts: Vec<crate::sync::record_conflicts::ConflictView>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupOrderView {
@@ -190,6 +197,13 @@ pub fn overview_from(
         .keys
         .into_iter()
         .map(|key| KeyView {
+            storage: state.local.central_projection.as_ref()
+                .and_then(|ledger| ledger.key_storage(&key.id))
+                .map(|storage| match storage {
+                    KeyStorage::Managed { .. } => "managed",
+                    KeyStorage::Hardware => "hardware",
+                    KeyStorage::ExternalAgent => "external_agent",
+                }),
             synced: if key.authority == KeyAuthority::Local {
                 Some(false)
             } else {
@@ -252,7 +266,10 @@ pub fn overview_from(
         })
         .collect();
     Ok(RecordOverview {
+        key_scope: crate::sync::record_import::central_local::invocation(state).map(|scope| scope.with_generation(generation)),
+        central_mode: state.local.central.as_ref().is_some_and(|owner| owner.control.cutover),
         syncing: false,
+        conflicts: crate::sync::record_conflicts::views(state)?,
         generation: generation.to_string(),
         group_deletion_token,
         relay_url: state.relay_url.clone(),
@@ -944,15 +961,17 @@ pub async fn records_key_import(
     app: AppHandle,
     name: String,
     private_text: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
     let private = zeroize::Zeroizing::new(private_text);
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_keys::import_local(
+            crate::sync::record_keys::import_local_scoped(
                 env,
                 &name,
                 private,
                 crate::vault::store::EntryOrigin::Imported,
+                invocation.as_ref(),
             )?;
             let result = overview(env)?;
             env.events.status();
@@ -967,10 +986,11 @@ pub async fn records_key_import_file(
     app: AppHandle,
     name: String,
     path: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_keys::import_local_file(env, &name, std::path::Path::new(&path))?;
+            crate::sync::record_keys::import_local_file_scoped(env, &name, std::path::Path::new(&path), invocation.as_ref())?;
             let result = overview(env)?;
             env.events.status();
             Ok(result)
@@ -983,15 +1003,17 @@ pub async fn records_key_import_file(
 pub async fn records_key_generate(
     app: AppHandle,
     name: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_keys::generate_local(
+            crate::sync::record_keys::generate_local_scoped(
                 env,
                 &name,
                 crate::vault::generate::KeyAlgorithm::Ed25519,
                 &name,
                 None,
+                invocation.as_ref(),
             )?;
             let result = overview(env)?;
             env.events.status();
@@ -1007,8 +1029,20 @@ pub async fn records_key_rename(
     key_id: String,
     expected: KeySlotPayload,
     name: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
-    edit(app, move |state, now| repo::rename_key(state, &key_id, &expected, &name, now).map_err(error)).await
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sync::engine::with_env(&app, |env| {
+            if let Some(invocation) = invocation.as_ref() {
+                crate::sync::record_import::central_local::rename(env, invocation, &key_id, &expected, &name)
+            } else {
+                edit_records(env, |state, now| {
+                    crate::sync::record_import::central_local::check_invocation(state, None)?;
+                    repo::rename_key(state, &key_id, &expected, &name, now).map_err(error)
+                })
+            }
+        })?
+    }).await.map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
 pub async fn records_key_download(
@@ -1030,6 +1064,12 @@ fn material_for_sync(
     id: &str,
 ) -> Result<(KeySlotPayload, zeroize::Zeroizing<String>), AppError> {
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    {
+        let core = env.runtime.core.lock().unwrap();
+        if record_runtime::active_state(&core)?.local.central.as_ref().is_some_and(|owner| owner.control.cutover) {
+            return Err(AppError::Other("Keys synchronize automatically in central account mode.".into()));
+        }
+    }
     crate::sync::record_round::require_no_pending_migration(env)?;
     let _vault = env.runtime.vault.lock().unwrap();
     let (state, _) = record_runtime::snapshot(env)?;
@@ -1349,6 +1389,54 @@ mod tests {
     use crate::sync::env::Keychain;
     use crate::sync::fake_relay::FakeRelay;
     use crate::sync::testkit::{TestClock, TestDevice};
+    struct ForbiddenKeyIo;
+    impl Keychain for ForbiddenKeyIo {
+        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("manual central key actions cannot read credentials")
+        }
+        fn get_noninteractive(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("manual central key actions cannot read credentials")
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+            panic!("manual central key actions cannot write credentials")
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            panic!("manual central key actions cannot delete credentials")
+        }
+    }
+    #[test]
+    fn central_key_policy_is_public_and_legacy_actions_stop_before_material_or_network_access() {
+        let d = device("central-key-actions", &FakeRelay::new(), &TestClock::new());
+        let (state, _, _, id, entry) = crate::sync::central::material_fixture_for_test();
+        let view = overview_from(&state, 1, None).unwrap();
+        assert!(view.central_mode);
+        assert_eq!(view.keys[0].storage, Some("managed"));
+        if let KeyStorage::Managed { sha256 } =
+            &state.local.central_projection.as_ref().unwrap().storage[&id]
+        {
+            assert!(!serde_json::to_string(&view).unwrap().contains(sha256));
+        }
+        assert!(!serde_json::to_string(&view)
+            .unwrap()
+            .contains(&entry.private_key));
+        d.runtime.core.lock().unwrap().records = Some(state.clone());
+        let mut env = d.env();
+        env.keychain = &ForbiddenKeyIo;
+        assert!(material_for_sync(&env, &id)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("automatically"));
+        assert!(crate::sync::record_account::download_key(&env, &id).is_err());
+        assert!(crate::sync::record_account::unpublish_key(&env, &id).is_err());
+        assert!(d.relay.calls().is_empty());
+        let mut configured = state;
+        configured.local.central_projection = None;
+        let control = &mut configured.local.central.as_mut().unwrap().control;
+        control.phase = crate::sync::central::client_state::Phase::Enrolled;
+        control.cutover = false;
+        assert!(!overview_from(&configured, 1, None).unwrap().central_mode);
+    }
     #[test]
     fn pending_migration_blocks_account_effects_but_keeps_local_edits_available() {
         let d = device("pending", &FakeRelay::new(), &TestClock::new());
@@ -1508,4 +1596,10 @@ mod tests {
             assert!(token_number(value).is_err(), "{value}");
         }
     }
+}
+
+#[tauri::command]
+pub async fn records_conflict_resolve(app: AppHandle, space_id: Option<String>, key: String, token: String, choice: crate::sync::record_conflicts::Resolution, copy_alias: Option<String>) -> Result<RecordOverview, AppError> {
+    tauri::async_runtime::spawn_blocking(move || crate::sync::engine::with_env(&app, |env| crate::sync::record_conflicts::resolve_saved(env, space_id.as_deref(), &key, &token, choice, copy_alias.as_deref()))?)
+        .await.map_err(crate::sync::engine::join_error)?
 }

@@ -1,0 +1,66 @@
+// Fresh-install unrouted example only; never replace an existing migration history with this file.
+// Existing namespaces require the explicit authority transfer/import procedure in security/README.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-08-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": {
+    "enabled": true
+  },
+  "name": "sshelter-relay",
+  "main": "src/index.ts",
+  "build": {
+    "command": "node scripts/build-passkey-page.mjs"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHAIN",
+        "class_name": "ChainStore"
+      },
+      {
+        "name": "IP_LIMIT",
+        "class_name": "IpLimiter"
+      },
+      {
+        "name": "ACCOUNT",
+        "class_name": "AccountStore",
+        "script_name": "lunport-sync-security"
+      },
+      {
+        "name": "VAULT",
+        "class_name": "VaultStore",
+        "script_name": "lunport-sync-security"
+      },
+      {
+        "name": "PASSKEY",
+        "class_name": "PasskeyStore",
+        "script_name": "lunport-sync-security"
+      },
+      {
+        "name": "LEGACY_RETIREMENT",
+        "class_name": "LegacyRetirementStore",
+        "script_name": "lunport-sync-security"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChainStore", "IpLimiter"]
+    }
+  ],
+  "vars": {
+    "CENTRAL_PRIVATE_CORE": "1",
+    "CENTRAL_ENABLED": "0",
+    "CENTRAL_ORIGIN": "https://sync.example.invalid",
+    "PASSKEY_ENABLED": "1",
+    "OIDC_ISSUER": "",
+    "OIDC_JWKS_URL": "",
+    "OIDC_API_AUDIENCE": "lunport-sync",
+    "OIDC_NATIVE_CLIENT_ID": "lunport-native",
+    "OIDC_SYNC_SCOPE": "lunport:sync"
+  }
+}

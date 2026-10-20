@@ -131,6 +131,39 @@ fn independent_device_edits_merge_per_rule_and_deletions_do_not_resurrect() {
         },
         1,
     );
+    let key = record_key(RecordKind::Meta, &wire_id(A));
+    assert_eq!(result.conflicts, vec![key.clone()]);
+    assert!(matches!(
+        &result.section.recovery.conflicts[&key][0].remote,
+        crate::sync::record_conflicts::RecordVersion::Public(row) if row.record.deleted
+    ));
+    assert!(
+        record_merge::account_outgoing(&result.section, &keys)
+            .unwrap()
+            .is_empty(),
+        "an unacknowledged edit cannot silently overwrite the remote deletion"
+    );
+
+    // Once this device has read back its accepted edit, a subsequent deletion wins.
+    let accepted = record_merge::merge_account(
+        one.account.as_ref().unwrap(),
+        &keys,
+        &PullResponse {
+            records: vec![envelope(&keys, record, 2)],
+            latest_seq: 2,
+        },
+        1,
+    );
+    let result = record_merge::merge_account(
+        &accepted.section,
+        &keys,
+        &PullResponse {
+            records: vec![envelope(&keys, tombstone, 3)],
+            latest_seq: 3,
+        },
+        2,
+    );
+    assert!(result.conflicts.is_empty());
     let mut merged = one;
     merged.account = Some(result.section);
     assert!(view(&merged).is_empty());

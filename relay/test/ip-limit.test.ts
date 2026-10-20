@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 const TOKEN = "d".repeat(64);
 const IP = "198.51.100.9";
@@ -159,4 +159,46 @@ it("charges a chain request with one limiter call: PUT counts request and create
   expect(refused.status).toBe(429);
   windows = await windowsOf(limiter);
   expect([windows.request?.count, windows.create?.count]).toEqual([3, 21]);
+});
+
+
+it("does not mutate durable counters or alarms after a bucket is blocked", async () => {
+  const limiter = env.IP_LIMIT.getByName("ip:bounded-denials");
+  expect(await limiter.allowMany([["request", 1201], ["create", 1]])).toBe(false);
+  const before = await windowsOf(limiter);
+  const alarm = await alarmOf(limiter);
+  for (let i = 0; i < 100; i++) {
+    expect(await limiter.allowMany([["request", 1], ["create", 1]])).toBe(false);
+  }
+  expect(await windowsOf(limiter)).toEqual(before);
+  expect(await alarmOf(limiter)).toBe(alarm);
+  // The persisted blocked state survives the next request; other buckets remain usable.
+  expect(await limiter.allow("pull", 1)).toBe(true);
+  expect((await windowsOf(limiter)).create).toEqual(before.create);
+});
+
+it("caps over-limit costs and permits requests again after the fixed window expires", async () => {
+  const limiter = env.IP_LIMIT.getByName("ip:bounded-cost");
+  expect(await limiter.allow("pull", 1000000)).toBe(false);
+  expect((await windowsOf(limiter)).pull?.count).toBe(12001);
+  await runInDurableObject(limiter, async (_instance, state) => {
+    const windows = (await state.storage.get<Windows>("windows"))!;
+    windows.pull!.start = Date.now() - HOUR - 1;
+    await state.storage.put("windows", windows);
+  });
+  expect(await limiter.allow("pull", 1)).toBe(true);
+  expect((await windowsOf(limiter)).pull?.count).toBe(1);
+});
+
+
+it("performs no persistent put for requests against a blocked window", async () => {
+  const limiter = env.IP_LIMIT.getByName("ip:no-denial-writes");
+  expect(await limiter.allow("request", 1201)).toBe(false);
+  await runInDurableObject(limiter, async (instance, state) => {
+    const put = vi.spyOn(state.storage, "put");
+    try {
+      for (let i = 0; i < 100; i++) expect(await instance.allow("request")).toBe(false);
+      expect(put).not.toHaveBeenCalled();
+    } finally { put.mockRestore(); }
+  });
 });

@@ -89,7 +89,7 @@ export function HostKeyCardView({
         <div className="flex items-start justify-between gap-4 text-xs">
           <div className="min-w-0 space-y-1">
             <p className="text-muted-foreground">Server</p>
-            <p className="break-all font-mono">{hostKeyEndpoint(request)}</p>
+            <p className="break-all font-mono">{`${request.user ? `${revealHidden(request.user)}@` : ""}${hostKeyEndpoint(request)}`}</p>
           </div>
           <div className="shrink-0 space-y-1 text-right">
             <p className="text-muted-foreground">Key type</p>

@@ -1,0 +1,265 @@
+{
+  "device": "ffffffffffffffffffffffffffffffff",
+  "fixture": "SYNTHETIC MIGRATION KEYS ONLY - never use in an account",
+  "locator": "4f371f2171a7d464324a64174547d4ec5bfa0f9bb123bf8a38423f1dca630913",
+  "manifest": {
+    "body": {
+      "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "author": "ffffffffffffffffffffffffffffffff",
+      "authorization_epoch": "1",
+      "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+      "inventory_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+      "key_epoch": "1",
+      "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+      "migration_id": "77777777777777777777777777777777",
+      "origin": "https://relay.example",
+      "sources": [],
+      "target_history_hash": "b453c2f34f36097800e8baab0ea4b153f72a1b910b12bf768f0c73b504ee9d85",
+      "target_sequence": "6",
+      "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "wraps_digest": "919d45d90a49fd54ca0842e280b9e160efb9c9008ec8b712f9ecdaed7e252dd5"
+    },
+    "signature": "m1Hphtx0wlOXe7Hpl67ficQTNCF7lNb1audHAGNU8uqcIghT9ehc8A1ScUTyk5NaacpPanvsGtwLS8TiPnRrBg=="
+  },
+  "original_wraps": [
+    {
+      "ciphertext": "j9jXG7Pkci/qJ4t65N9KoTAmfTOb2CEKUlWEvwwma+G+aBTrcP3Mar6U5e1LFtyEII7mgbB+frkdnkWEgb2K7aGlN9Si+CXScMyn9MMAvFI=",
+      "encapsulated_key": "lag9BxrM3sd3biAsUCnfDqQPmYMA5dBIA49/N3hUPWw=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "1",
+        "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "origin": "https://relay.example",
+        "recipient": "ffffffffffffffffffffffffffffffff",
+        "recipient_key": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "rbe9nCFk6HhLsz4ROIVjqTQYwOEZNGutxHxxbijJ3d2Gd9PUxI0SBRKD8aKqNyaYgTJ1VknZkuWB8kxua1GGBQ=="
+    },
+    {
+      "ciphertext": "/oTnAbcBErIKUqvZXMdW5gWeeDXtWv0iBxuOevsG6bplGcmJkvcvBiQZVlgOJGNtR883i3MTP58ItNFZA8oPv7x5dtae+iumi8rRG5r6bRE=",
+      "encapsulated_key": "yctuIWhhoIMSUD4gFzsSzbZEo5/4ir9ZfFYHPKsSrjE=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "1",
+        "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "origin": "https://relay.example",
+        "recipient": "recovery",
+        "recipient_key": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "AfKjr1tJn7z8f4DJQMDShrVQr/VeTTeBbyBPFH2mSp270FHwxMoJBSnwdKVptbw/7DutBDqrngPUAnbhL8DuBQ=="
+    }
+  ],
+  "proof": {
+    "genesis": {
+      "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "device_signature": "zNmPlEkN0J670LQ/ArawcfXBLKoytWUN47Iw8wB7uxop8qAu9EFlpjH5zVN9ihmcpwZ86siryoghQ80iwFaBAA==",
+      "first": {
+        "id": "ffffffffffffffffffffffffffffffff",
+        "keys": {
+          "encryption": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+          "signing": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+        }
+      },
+      "nonce": "86428c98d3946591741c227a3903552e4e99e69cb602d6b673d94466d59c918a",
+      "origin": "https://relay.example",
+      "recovery": {
+        "encryption": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "signing": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw="
+      },
+      "recovery_signature": "ZIek+ZnOBmlBka7wtUHYoWdsCoeBQO5rLYjnvNvv8p8Ag2dfJmnwQFjsAjzukwgZWmoerKoScB6wG0j0Su9RCQ=="
+    },
+    "nodes": []
+  },
+  "rows": [
+    {
+      "digest": "6df649662bfeca5793dada045cac55b777f53ec8acc2b10406d89019e9dfa0ec",
+      "envelope": {
+        "ciphertext": "7F5gbERw96sqRN/4ZlLp5QYsPy8jxzvVcWno/BZljdFDM7WjzC78uDSpTe2JhMaEvPA360rr5nG5NY4lzfbmeaM2hM8m6EtKbVIrhBBfFQ/CLVBanQHstWrNBz90N0iSoc0Iy+re2Q==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "meta",
+          "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "operation_id": "6aca030cc91624a1a94fad7b563aa510",
+          "origin": "https://relay.example",
+          "record_id": "d5950c2aef2f3c2729950d2cd2f2f59b5ca581e027e78ed2783d817aa40818bb",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "TrMWqepomqiBlCGHlE+l3yZcw4Nfzxrg",
+        "signature": "4WDaJFRipLxEaTsVETGlN9mt8J3XSii2z2s8SMfzyXXHjbDWzlD+XxQa9XdADpLv3SsU4jlGS0D78Rm/nf3eBw=="
+      },
+      "history_hash": "479884cbb8f9755f26346ab9f171f4816d5ccfa0584ef0a35c363ca5e6b06891",
+      "revision": "1",
+      "sequence": "1"
+    },
+    {
+      "digest": "1fd6c0846916f91971fd779894ff9d4c28b64c26096afe88505d0bb6d027ff4b",
+      "envelope": {
+        "ciphertext": "vQhfguRm81x83d3HE/03cNGfdaDEjoU8MoADqrnVYYUPxBYjNsBMYPgxQ4b/u+fMEphObeaOj5tuxJPc+jejhL1ct0vV/H7DNBU+MhvE4wpKdznJoZOUCVDwRXAYeh4VkGSVTVU8RSARrdSRMmehdKVRpeYykmVbKZSakrNIAgsurPbOf43VViiHRxlXVcRz1ecPTguoArkKf6MiG1ZLH0/OV/HzpmzCCMJe3BjzbmPhuLk1osbsfNvXdsl6zdd2/HZS8bs9wlK2bWK1ui0dWBRkvRBBDOjTmaEZiy0tMt1Qu0TqW8UjeezQUhhVcROiMtHI2yglnu8M4M7jwiCYi1NGOouCqc2erTH1su9X6bklKDhOZ2Fcz+fvDbBPdrWeWQG+1NSsBZKOPmLRUp0B3DxgBY207m1OZtQ2d6LjhmB7NQ4Kj4DUJUIFpnOhU7akgG3d25lWY5+58fA+QHYwPhEdnu1iQ+LLyx1NiAt2fjgYznnc/9s+el9+U22Mokx/3rra2L+Lfe78biT0AaxfknWmQnHnL0brfWuoNrcTqzdFwaiZcPt2ZF4EBUNnwB2LYmQ+jmNJbxkL1B2VF1yAP29yjZ2YQbycE92avNssxuTrbRsdjnHiUsKT27YVendpPAssgp7byf6k01PrPLMWSiddEDLkXE3rZG3nz3o+gf35BE/5qkA0HON0SP4wAJB0Sg==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "keyslot",
+          "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "operation_id": "eabfb5e97e03d8d2a7d3f6421d2fac89",
+          "origin": "https://relay.example",
+          "record_id": "909bc6114bf1a932885f3e7672e9a027b368190478255e0ca7f741ca3f01ea17",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "1aP11GqTkRZ08oY0Y8SykmSW8euEgyEH",
+        "signature": "4p7/TSXkoae1sv/ItL94S03WTNFDFwR4dQtg//6YVcDs8XQtuIK72Hz0CedVXb6yG01TknSP4ip2butxWZBfCQ=="
+      },
+      "history_hash": "73b1324f677929534ae1197c3e5f623a264dcea57881afc88405970a1a6975b2",
+      "revision": "1",
+      "sequence": "2"
+    },
+    {
+      "digest": "e795d9170c964ae271dac503af97356e308d34421c5afd1e9c8a9b87cb0c44d1",
+      "envelope": {
+        "ciphertext": "XvPbVnv/eomIAXis126TMYnoB0ie8XbJS/ET2fJCPynUfFmlf6thNttWoEhm01/4v/pI/51pezWKMXvfJQqIhj++XLD7axTNJ4Fjrm5f4F21ChsR1Tt1UGTKEYH76IVN6viZS7N9xpLjerKvX5s8WWcrQal66eZ2MF+saTWbPQgMZmAege1ZTjytUoREXHh1fR+4x1BRyppg6dD6GFcIE5As6Iz47BgjRu7ylMhf0yaC/Q96svslMYSKkN2yBCg/F4PiD2sfcpRbVbHO/dVlZp3jL0ZNMbbmHmfE8v2ImK/s4FWSbOQmu3LdlDCh9uQW1PKkotcPBqcWczZDkXSsX8txL0WbkUvRLkz0dc3pxPHFTBgle/u7MW5kwuyZOowC1cj8fKcb8AVDOBXa1VgS8klrICibUORky/5Vhs6b2hHkHaGwSoDPv1Bg+FEgXA2Y88Q1C4rhpsAAWB6rl4pVcczQ5+ZIv09fFWvCBJL38Lu35FnpZUIuRUv3DY8cDZ9W3ZGEHL2N/7swwvDINXKkPqW8JSFqnPSbvRrzAzcUgRTX0uXiWl+CqJeO3WNGz4XWjTiL5KD2Sv379R6sRsKcvy4xa3P7WhR59TyA/9XJNailazKv4dbzAsGuPmAl5U4mu+W9G6jXkZUcX1QLTKzX9VePIw1uyLhQ3asS7vaZbYDkVwV7PYh8FHNteopbzAFE+bf1vIoNdiDPd4K7/IFfWJehOlZS40N8Wv7DCo5kElAjlGh03q+JgkxbhklKDF7xf1iHm/E4pw==",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "key",
+          "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "operation_id": "62f7f2cbf5de183be9776940ce6ce13d",
+          "origin": "https://relay.example",
+          "record_id": "cab4ca0f4d109cfbd9c073d0ad0dc4fb8b42e1b16cb745bfb7354d968aa74b32",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "GJ0M/XrwioNTopygyxGA7UQ/suesgEtD",
+        "signature": "jyQk1bGu6hzvbrbTJK4LVR9BAxiBsRsaAIahN/Frk9ykQrGb0eXbIoe8f9e2QOpzIKyPRs3fQHEoicfnXf5MBQ=="
+      },
+      "history_hash": "c5cd5af2efa1d84e41080292785a8602d1a2015bdfe77d31754d48355e1c1fdf",
+      "revision": "1",
+      "sequence": "3"
+    },
+    {
+      "digest": "92a5761defdcf04d7ac1d16ac584fda07077c3712a5a6b4ace74fdf2c17899a5",
+      "envelope": {
+        "ciphertext": "sTXlwJ0clGVzyyIKDmEL/3tc5YXdmQa47CbUJT+S91Es5l6Y660cQ3wJkm6HgJ5LoK9h52IK22aXBM0Lvnwt96QWBJ9oOYApFnrRlRxEHpifu1RzFpc3TxUr+D52Lw5Q6t6gWnS+GlHIx00UJeunW25iwp2TUlpMBJxHGpod7TGUf6y9OjjJcAPd6LGfpVvwPxonUySQ8WAntWJPvnlrIEZtZ67LBtYN12HghondWMxaBl5RJBhaVavJAgAXXWxRInG51A/2/Bs/qvDmGTAueOxRi5VlQWc0b4Ud+tDujfft5EUi0qHkHPznjSzkRdTPI/ZTsPTaGUA4Yi7ZjsAVKGxW4hFPrYDNzQqKiVOsII69TgEhc8PsKTt+jfEniQtAa1Oa56TP6D1QQw0ko2G1yAq70UsHwuEiru8c0Daykkqbjg/I910nNjBEYOBgk5sTQEHBL0llcId5CSgltqJ89IgGsIFgR5/d2ZaWbCnjsIBxbLhayhsjhSAcDVwybBhWvjXuIkcLt3Bg1wEnBzBL5tprPSdhdI6DSL0QpyUlanHgkrPu6XOD8iuIQ0fA/QoAxhZDtTab65v8dCn86207YY/wggDiCC/p9d1aqcKHdJa7guTfpRn1IJVqf+H7HHVd0W/5QbmvKfvHWW8QZCltlzUTGz+0z1XV8iiLQWS0FGHIamghx4On",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "keyslot",
+          "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "operation_id": "9b0fdcc08a6d07b176d6911c1985eb2b",
+          "origin": "https://relay.example",
+          "record_id": "90fd433e1f3ef04fe14f6bee9220e8d3f209dc557d44fda2cd2a06bb95e79f7a",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "geWuNgUbGkxWv10PugCLoA0UFnP9qX95",
+        "signature": "K6qS4YClZUqHlzq5NCHChtxSDq0+hEJ51QTofvOeZzLE5S6Z0eFR9MwXusfUxJ/xvfvSo+ys/gtNKqb67ImyAA=="
+      },
+      "history_hash": "4024dc8b4960c7e0085f6662f1c5d7ee66834bd0aec52ce8066eec7b3a975e24",
+      "revision": "1",
+      "sequence": "4"
+    },
+    {
+      "digest": "ab83cdcbd2d2a43c2c5dd5fcf00d9b8701f2732518d1d5c43d7b4fc74de6384f",
+      "envelope": {
+        "ciphertext": "6wm0qVUtDzbAU6FSn23pHnjo4p9Ihwq/TAPBjmCcOE9qLKXiS1rPfB2cQT87Uev8MnR8alrrqftAplfmyEVUepTTaqx8lKFEDvMa22YTK2nHv/lzUbObUh2zY4LHOFTqh0+XmTgulVIGXxkz7NNLSc5bDd5v8V+cjz4/uN/NtbsjM3ZOXeoqdKSZ4eUFLRjphPJvAq2SQpA4oXJEdOKp1j7fV9yriInUfueUTP+16x63g7zqRS/LSCiYrSsRXaUj011hzA61L79MJgElob1ux1YVyn9Dz8F9Q0GMt0KDvfhq7HWdWHt/irDua2YyyHYpB7NTKcNGl/NCeKP/tzvpWfHOpz0AjVTdg5jeePDkD/eRlicPzP98H0fbDNpVyb1jXQ+nLPEQ7VnWaLpJ4xtc6Biyc/uSqE7UUOwX64DBk7pLsZ9ANFUCel2tsXH+xiVXvNZf8qFFjeZlp7/bnko5QLZnkccsU9Vwv/8PeWIySkyT9/WYFZOgVLvnTcHMwFsSDzEM4MoDqCteVdt7oUNaKyjRcmfMgEfsK0S4X2IQT6NJuTSGdkCkLsyj3oO+O2I6vs/5ZoTv4ZjGPuCmBcRDHTKJNI86+fQ5ZhpmmcQ4i55IPBUM5eAHqhPveyHlQNFciKHqMXwMhcGd0LA8JLfS7Iil9Ajj1OEFMkuSViOGXhAIb+grzSD0Iz8zSSIOJIHBdqEDZUk3Fh7tJcadfhBDDBjCom6w4aA/aVkyt4MuMXwemKR8O6INURyN26dDvfr8Lr4MZWDpP/NU3PZZvPpnzmACJ8/WxH/+i852JzmgKdF7+rDddgIeZ0wFSkCHNSg098n2kSM=",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": false,
+          "expected_revision": "0",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "key",
+          "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "operation_id": "ad6ebf461d9a31a5fc218f8aa4b232f7",
+          "origin": "https://relay.example",
+          "record_id": "3dee437c50b66cebe955ef9e8bab552cbad14d3fb20c6d3f380fbb8627872d6c",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "2xUtDZdOJohG75isP6STGrPLg497pscy",
+        "signature": "dqtZ0/kpL3T1ZiIf2SsJ9IyQTl/PEgUwIBL9L2Il3VAkYJlmnOtHBjPDhCQiOV2MP5KNRGJ4UphfwtX99FFRDA=="
+      },
+      "history_hash": "98da4f907fa4c07f888cc9f5ac7910c9a73ba1cef62076b097e0e973657249f3",
+      "revision": "1",
+      "sequence": "5"
+    },
+    {
+      "digest": "5c9859a5cb9189d7bb19264ffa401f441e95ece3a46420da1b2c2077a2fa359b",
+      "envelope": {
+        "ciphertext": "luAFJ6ifDLLwY5Jr3R444SDStZ68mYN0YEe6PQXGvXTq8OEhB12lFjSQHeCL1ozIU/uqKllpaEr2MrhBwK91C1zgvk4HpAxeL/gBN+1jIb93j/huv+iVMmRiSbirp+da",
+        "header": {
+          "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": "ffffffffffffffffffffffffffffffff",
+          "deleted": true,
+          "expected_revision": "1",
+          "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "key_epoch": "1",
+          "kind": "keyslot",
+          "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+          "operation_id": "02d3bd19c31941f3178dc9391c706675",
+          "origin": "https://relay.example",
+          "record_id": "90fd433e1f3ef04fe14f6bee9220e8d3f209dc557d44fda2cd2a06bb95e79f7a",
+          "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "nonce": "As0bz0czhztdY++j+ecW+eRHTmQAtI1/",
+        "signature": "jyx7Vp5+Vy5psQbbTrJmbWJtUJdAkVrQfbkrrxAqmSh7rlvzqL1npv67BVLvCXZlJTkJxYOpGDJlzJB5D/LoAQ=="
+      },
+      "history_hash": "b453c2f34f36097800e8baab0ea4b153f72a1b910b12bf768f0c73b504ee9d85",
+      "revision": "2",
+      "sequence": "6"
+    }
+  ],
+  "wraps": [
+    {
+      "ciphertext": "b+7ti/NY6eJsHvnL/HuF1knh86Vb0cZUQbZUKCJNgYPg0wKA90u4wyS7eNdxKQvBonOau1FEkuwE/Kdrz+/3JRTB+MHmg7MiqOsVKkL3G5k=",
+      "encapsulated_key": "03uDE8t3okdb0E321D2jTK9eLNYOtuK8TXKmnyztDVg=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "1",
+        "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "origin": "https://relay.example",
+        "recipient": "ffffffffffffffffffffffffffffffff",
+        "recipient_key": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "K2eSKBKlMmD3yWZ3FtBFRIz/M93aKErX8pEnvOpQs/CmoaUroo9k3VwX02WB3PQ3OhUPF7/cTj0tJU9vyetCAg=="
+    },
+    {
+      "ciphertext": "tOklWKcbQLcFmxVVmUXe12/uS797hG0p6mAr+xk59bEOqI9hrmVP5DYZjObY9lgkK2yu4k7QCEXkvfdeH7oWmPupGccIROqJyOYkvQoPbhM=",
+      "encapsulated_key": "XxCVhiUepPDKF4tZV1EJXqyJTQGcemYUwy/sEAJsPDQ=",
+      "header": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "author": "ffffffffffffffffffffffffffffffff",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "key_epoch": "1",
+        "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "origin": "https://relay.example",
+        "recipient": "recovery",
+        "recipient_key": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "vault_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "signature": "//PlYrH9lb3LQHHY1G7ko03leT4UQ32Mh3RCuIsE+ICmlfKdZWqkstapU0InNCNNjmBCU2DwJ5NNNjpjnrijBg=="
+    }
+  ]
+}

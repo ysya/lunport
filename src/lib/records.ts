@@ -103,13 +103,36 @@ export type KeySlotPayload = {
   origin_device_id: string;
 };
 export type RecordKeyView = {
+  storage?: "managed" | "hardware" | "external_agent";
   id: string;
   authority: "local" | "account";
   synced: boolean | null;
   public: KeySlotPayload | null;
   status: "available" | "needs_material" | "conflict" | "deleted";
 };
+export type ConflictVersion = { seq: string; deleted: boolean; record: { kind: string; id: string; updated_at_ms: number; device_id: string; payload: unknown } | null };
+export type RecordConflict = { space_id: string | null; key: string; token: string; label: string; base: ConflictVersion | null; local: ConflictVersion; remote: ConflictVersion[]; can_copy_remote: boolean };
+export type RecordKeyInvocation = {
+  generation: string;
+  profile: string;
+  account: string;
+  genesis: string;
+  vault: string;
+  device: string;
+  identity_slot: string | null;
+};
+// Generation fences IPC requests; harmless workspace edits keep the same form lifetime.
+export function recordKeyInvocationKey(scope?: RecordKeyInvocation | null): string {
+  return JSON.stringify(scope ? [scope.profile, scope.account, scope.genesis, scope.vault, scope.device, scope.identity_slot] : null);
+}
+export function recordKeyDestinationKey(overview: RecordOverview): string {
+  return JSON.stringify([overview.central_mode === true, overview.relay_url, overview.account?.chain_id ?? null, recordKeyInvocationKey(overview.key_scope)]);
+}
 export type RecordOverview = {
+  /** Native cutover policy; account setup alone does not enable automatic sharing. */
+  central_mode?: boolean;
+  key_scope?: RecordKeyInvocation;
+  conflicts?: RecordConflict[];
   /** Transient transport activity; absent in older backend fixtures. */
   syncing?: boolean;
   library_enabled: boolean;
@@ -292,18 +315,19 @@ export async function resumeRecordImport(
 export async function importRecordKey(
   name: string,
   privateText: string,
+  invocation?: RecordKeyInvocation,
 ): Promise<RecordOverview> {
-  return tauriInvoke("records_key_import", { name, privateText });
+  return tauriInvoke("records_key_import", { name, privateText, ...(invocation ? { invocation } : {}) });
 }
 /** Only the selected path crosses IPC; native code copies the key and preserves the source file. */
-export async function importRecordKeyFile(name: string, path: string): Promise<RecordOverview> {
-  return tauriInvoke("records_key_import_file", { name, path });
+export async function importRecordKeyFile(name: string, path: string, invocation?: RecordKeyInvocation): Promise<RecordOverview> {
+  return tauriInvoke("records_key_import_file", { name, path, ...(invocation ? { invocation } : {}) });
 }
-export async function generateRecordKey(name: string): Promise<RecordOverview> {
-  return tauriInvoke("records_key_generate", { name });
+export async function generateRecordKey(name: string, invocation?: RecordKeyInvocation): Promise<RecordOverview> {
+  return tauriInvoke("records_key_generate", { name, ...(invocation ? { invocation } : {}) });
 }
-export async function renameRecordKey(keyId: string, expected: KeySlotPayload, name: string): Promise<RecordOverview> {
-  return tauriInvoke("records_key_rename", { keyId, expected, name });
+export async function renameRecordKey(keyId: string, expected: KeySlotPayload, name: string, invocation?: RecordKeyInvocation): Promise<RecordOverview> {
+  return tauriInvoke("records_key_rename", { keyId, expected, name, ...(invocation ? { invocation } : {}) });
 }
 export async function createRecordAccount(
   deviceName: string,
@@ -627,3 +651,7 @@ export const confirmRecordDeploy = (previewId: string, authorized: boolean) =>
   });
 export const cancelRecordDeploy = (previewId: string) =>
   tauriInvoke<void>("records_deploy_cancel", { previewId });
+
+export async function resolveRecordConflict(conflict: RecordConflict, choice: "local" | "remote" | "copy_remote", copyAlias?: string): Promise<RecordOverview> {
+  return tauriInvoke("records_conflict_resolve", { spaceId: conflict.space_id, key: conflict.key, token: conflict.token, choice, copyAlias: copyAlias ?? null });
+}

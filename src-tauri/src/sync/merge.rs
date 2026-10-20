@@ -775,6 +775,8 @@ pub struct Pushed {
     /// relay 已經有的記錄下一輪又會整批重送(chain 的額度滿了的話,每一輪都在重寫前面的批次)。
     pub accepted: Vec<(String, u64)>,
     pub conflicts: usize,
+    /// Exact conflict responses for Records-mode durable recovery; legacy callers still re-pull.
+    pub conflict_rows: Vec<crate::sync::record::Envelope>,
     /// `409 frozen`(spec §6.4):這一批之後的都沒送,呼叫端停止這一輪的所有上傳、保留 dirty。凍結之前收下的批次仍在
     /// `accepted`。
     pub frozen: bool,
@@ -827,7 +829,10 @@ pub fn push_outgoing(relay: &dyn RelayApi, chain_id: &str, token: &str, outgoing
                 for (o, result) in batch.iter().zip(results) {
                     match result {
                         PushResult::Accepted { seq } => pushed.accepted.push((o.key.clone(), seq)),
-                        PushResult::Conflict { .. } => pushed.conflicts += 1,
+                        PushResult::Conflict { current } => {
+                            pushed.conflicts += 1;
+                            pushed.conflict_rows.push(current);
+                        }
                     }
                 }
             }

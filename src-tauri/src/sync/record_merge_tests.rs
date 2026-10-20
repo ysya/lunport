@@ -281,7 +281,7 @@ fn relationship_conflicts_are_preserved_for_complete_snapshot_review() {
     assert_eq!(out.gate, AccountGate::Compatible);
 }
 #[test]
-fn lww_uses_device_order_tombstones_and_keeps_dirty_local_winners() {
+fn concurrent_public_edits_and_tombstones_retain_both_versions_independent_of_clock() {
     let keys = ChainKeys::generate().unwrap();
     let mut before = space();
     before.baseline_established = true;
@@ -303,8 +303,21 @@ fn lww_uses_device_order_tombstones_and_keeps_dirty_local_winners() {
         0,
         &AccountGate::Compatible,
     );
-    assert_eq!(out.section.records["host:0000000000000001"].record, remote);
+    assert_eq!(out.section.records["host:0000000000000001"].record, mine);
     assert_eq!(out.conflicts.len(), 1);
+    assert_eq!(
+        out.section.recovery.conflicts["host:0000000000000001"][0].remote,
+        RecordVersion::Public(LocalRecord {
+            record: remote,
+            seq: 1,
+            dirty: false
+        })
+    );
+    assert!(
+        space_outgoing(&out.section, &keys, &AccountGate::Compatible)
+            .unwrap()
+            .is_empty()
+    );
     let mut dead = mine.clone();
     dead.deleted = true;
     dead.payload = Value::Null;
@@ -316,7 +329,10 @@ fn lww_uses_device_order_tombstones_and_keeps_dirty_local_winners() {
         0,
         &AccountGate::Compatible,
     );
-    assert!(out.section.records["host:0000000000000001"].record.deleted);
+    assert!(!out.section.records["host:0000000000000001"].record.deleted);
+    assert!(
+        matches!(&out.section.recovery.conflicts["host:0000000000000001"][0].remote, RecordVersion::Public(row) if row.record.deleted)
+    );
     let out = merge_space(
         &before,
         &keys,
@@ -609,7 +625,7 @@ fn older_typed_rows_cannot_discard_a_newer_opaque_revision() {
     assert_eq!(out.gate, AccountGate::InvalidPull);
 }
 #[test]
-fn secret_lww_keeps_newer_dirty_material_and_clears_only_a_remote_winner() {
+fn concurrent_secret_versions_remain_encrypted_and_block_publication_until_resolved() {
     let keys = ChainKeys::generate().unwrap();
     let mut before = account(&keys);
     let mine = record(
@@ -637,13 +653,23 @@ fn secret_lww_keeps_newer_dirty_material_and_clears_only_a_remote_winner() {
     let kept = merge_account(&before, &keys, &pull(vec![envelope(&keys, &old, 2)], 2), 1);
     assert_eq!(kept.section.sealed[&id].envelope.ciphertext, env.ciphertext);
     assert!(kept.section.sealed[&id].dirty);
-    assert_eq!(kept.section.sealed[&id].envelope.seq, 2);
+    assert_eq!(kept.section.sealed[&id].envelope.seq, 1);
+    assert_eq!(kept.section.recovery.conflicts[&id].len(), 1);
     let mut remote = mine.clone();
     remote.device_id = "a".repeat(32);
     let remote = envelope(&keys, &remote, 2);
     let won = merge_account(&before, &keys, &pull(vec![remote.clone()], 2), 1);
-    assert_eq!(won.section.sealed[&id].envelope, remote);
-    assert!(!won.section.sealed[&id].dirty);
+    assert_eq!(won.section.sealed[&id].envelope, env);
+    assert!(won.section.sealed[&id].dirty);
+    assert_eq!(
+        won.section.recovery.conflicts[&id][0].remote,
+        RecordVersion::Sealed(SealedRecord {
+            envelope: remote,
+            dirty: false,
+            public_identity: None
+        })
+    );
+    assert!(account_outgoing(&won.section, &keys).unwrap().is_empty());
     assert_eq!(won.conflicts, vec![id]);
     for section in [&kept.section, &won.section] {
         let disk = serde_json::to_string(section).unwrap();

@@ -62,6 +62,7 @@ pub struct PinnedSummary {
 /// A host key for the person to confirm in Lunport's window (spec §10, §14).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKeyQuestion {
+    pub user: String,
     pub alias: String,
     pub hostname: String,
     pub port: u16,
@@ -333,6 +334,7 @@ impl Connector<'_> {
         }
         owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in Lunport.", label(&hop.alias)));
         let question = HostKeyQuestion {
+            user: hop.user.clone(),
             alias: hop.alias.clone(),
             hostname: hop.hostname.clone(),
             port: hop.port,
@@ -508,6 +510,7 @@ mod tests {
         assert_eq!(
             asked[0],
             HostKeyQuestion {
+                user: "deploy".into(),
                 alias: "web".into(),
                 hostname: "web.example.com".into(),
                 port: 22,

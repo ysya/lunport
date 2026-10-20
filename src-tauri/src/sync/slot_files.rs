@@ -387,6 +387,7 @@ mod tests {
     fn windows_slots_are_owner_only_and_hard_linked() {
         use crate::sync::slot_files_windows::ace_count;
         let home = tempfile::tempdir().unwrap();
+        crate::sync::testkit::inherited_windows_directory(home.path());
         let dir = home.path().join("keys");
         ensure_keys_dir(&dir).unwrap();
         assert_eq!(ace_count(&dir).unwrap(), 1);

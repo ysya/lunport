@@ -56,6 +56,35 @@ pub fn get(account: &str) -> Result<Option<String>, AppError> {
     }
 }
 
+/// Background APIs never fall back to an interactive keyring operation.
+pub fn get_noninteractive(account:&str)->Result<Option<String>,AppError> {
+    #[cfg(target_os="macos")]
+    {
+        let _access=access_guard();
+        if crate::app_profile::CURRENT==crate::app_profile::AppProfile::Production {return macos_helper::get_noninteractive(account);}
+        return Err(AppError::Other("needs interaction: unlock credentials in the Development app".into()));
+    }
+    #[cfg(windows)] {return get(account);}
+    #[cfg(target_os="linux")] {return linux_background::get(account);}
+    #[cfg(not(any(target_os="macos",windows,target_os="linux")))]
+    Err(AppError::Other("needs interaction: no verified background credential store".into()))
+}
+pub fn set_noninteractive(account:&str,secret:&str)->Result<(),AppError> {
+    #[cfg(target_os="macos")]
+    {
+        let _access=access_guard();
+        if crate::app_profile::CURRENT==crate::app_profile::AppProfile::Production {return macos_helper::set_noninteractive(account,secret);}
+        return Err(AppError::Other("needs interaction: unlock credentials in the Development app".into()));
+    }
+    #[cfg(windows)] {return set(account,secret);}
+    #[cfg(target_os="linux")] {return linux_background::set(account,secret);}
+    #[cfg(not(any(target_os="macos",windows,target_os="linux")))]
+    Err(AppError::Other("needs interaction: no verified background credential store".into()))
+}
+#[cfg(target_os="linux")]
+#[path="linux_background_credentials.rs"]
+mod linux_background;
+
 /// Check whether a saved credential exists without requesting its protected data.
 #[cfg(target_os = "macos")]
 pub fn contains(account: &str) -> Result<bool, AppError> {

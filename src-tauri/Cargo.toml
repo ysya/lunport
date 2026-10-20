@@ -17,6 +17,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 development-profile = []
+default = ["central-sync"]
+central-sync = []
+# Compatibility for scripts that explicitly enabled earlier preview builds.
+central-sync-preview = ["central-sync"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -27,7 +31,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 # Preserve comments and unknown settings when adding the user-selected Codex MCP entry.
 # Already present in the lockfile through tauri-build.
 toml_edit = "=0.25.12"
@@ -43,10 +47,19 @@ getrandom = "0.3"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2"
-bip39 = { version = "2", features = ["rand"] }
+bip39 = { version = "2", features = ["rand", "zeroize"] }
 hkdf = "0.12"
 hmac = "0.12"
 chacha20poly1305 = "0.10"
+# Central sync: independent device signatures and RFC 9180 key wrapping.
+ed25519-dalek = "3.0"
+hpke = { version = "0.14", default-features = false, features = ["alloc", "getrandom", "chacha", "x25519"] }
+# Native browser OIDC; HTTP is supplied by our bounded, no-redirect adapter.
+openidconnect = { version = "4.0", default-features = false, features = ["timing-resistant-secret-traits"] }
+# Local OAuth callback: use the existing Hyper parser, with bounded HTTP/1 connections.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 zeroize = "1"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 # 金鑰保管庫(src/vault/material.rs):解析、解密 OpenSSH 私鑰並簽章。ssh-key 0.6.7 的 RSA 簽章有錯,RSA 改用 rsa 套件;
@@ -89,12 +102,17 @@ tauri-plugin-single-instance = "~2.4.5"
 # `sshelter connect`'s console (src/cli/terminal_windows.rs): Win32_System_Console for the console's modes, code pages, window size and
 # input buffer.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ErrorReporting", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ErrorReporting", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 # 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):macOS 用 libc 的 proc_pidinfo、proc_pidpath 與 sysctl(KERN_PROCARGS2);
 # Linux 只讀 /proc。libc 已在 Cargo.lock(其他套件的相依),不需下載。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Use only unlocked Secret Service items in background; the high-level keyring backend auto-prompts.
+# This exact version is already in Cargo.lock through keyring.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "=5.1.0", features = ["rt-tokio-crypto-rust"] }
 
 # keyring's attributes API reads the password on macOS. Query native metadata instead.
 # This is the same Security.framework version already used by keyring.
@@ -111,3 +129,20 @@ opt-level = 3
 # See vendor/tauri-runtime-wry/LUNPORT_PATCH.md for provenance and regression evidence.
 [patch.crates-io]
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
+
+# Signature verification runs under real synchronization deadlines in isolated tests.
+# Optimize the existing curve implementation as for RSA above; release builds are unchanged.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+# Migration validates and clears complete encrypted historical snapshots under the
+# same real deadlines as release builds. Keep these existing crypto primitives
+# optimized in development as well, without changing requests or timeout limits.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.zeroize]
+opt-level = 3

@@ -7,6 +7,7 @@ export function RecordSyncStatus({
   pending = false,
   pendingChanges = 0,
   syncing = false,
+  conflicts = 0,
 }: {
   lastSyncMs: number | null;
   error: string | null;
@@ -14,6 +15,7 @@ export function RecordSyncStatus({
   pending?: boolean;
   pendingChanges?: number;
   syncing?: boolean;
+  conflicts?: number;
 }) {
   // An authenticated account check can clear the backend error before child
   // downloads finish. Keep the known prior failure until this whole attempt ends.
@@ -36,7 +38,9 @@ export function RecordSyncStatus({
         ) : pending ? (
           "Sync setup pending"
         ) : !connected ? (
-          "Sync not set up"
+          "Local library · Sync not set up"
+        ) : conflicts > 0 ? (
+          `${conflicts} saved sync conflicts need review`
         ) : pendingChanges > 0 ? (
           `${pendingChanges} changes saved, waiting to sync`
         ) : lastSyncMs === null ? (

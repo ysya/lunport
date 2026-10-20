@@ -5,7 +5,7 @@ import type { PinnedHostKey } from "./PinnedHostKey";
  * A host key question as the window shows it. The strings come from the user's host settings and the server: the window shows them
  * through `revealHidden`.
  */
-export type HostKeyRequest = { id: string, alias: string, hostname: string, port: number, algorithm: string, fingerprint: string, 
+export type HostKeyRequest = { user: string, id: string, alias: string, hostname: string, port: number, algorithm: string, fingerprint: string,
 /**
  * Set for a key that changed: the pinned one.
  */

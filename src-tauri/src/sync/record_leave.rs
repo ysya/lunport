@@ -257,6 +257,9 @@ fn source_spaces(
             error("a selected space could not be read; local preservation did not complete")
         })?;
         let merged = record_merge::merge_space(old, &child, &pulled, 0, &AccountGate::Compatible);
+        if !merged.section.recovery.conflicts.is_empty() {
+            return Err(error("Sync and resolve saved conflicts before leaving this account. Existing versions have been kept."));
+        }
         if merged.gate != AccountGate::Compatible
             || !merged.baseline_established
             || merged.section.sealed.values().any(|r| {
@@ -833,6 +836,7 @@ pub fn leave_account(env: &SyncEnv) -> Result<LeaveReceipt, AppError> {
         return Err(error("account format prevents local detach"));
     }
     let s = record_runtime::snapshot(env)?.0;
+    crate::sync::record_conflicts::require_resolved(&s)?;
     let account = s.account.as_ref().unwrap();
     let spaces = source_spaces(env, account, &p.keys, &s.spaces)?;
     check_source_key_material(&s, &p.keys, &spaces)?;

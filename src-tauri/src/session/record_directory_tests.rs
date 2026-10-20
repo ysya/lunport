@@ -81,7 +81,11 @@ fn fixture(
             if !save {
                 return Err(DirectoryError::Failed("save failed".into()));
             }
-            *s = next;
+            let host = repo::get_host(&next, id.as_str()).unwrap();
+            let p = &host.effective_payload;
+            let hop = HopRef { id: id.clone(), alias: p.alias.clone(), hostname: p.hostname.clone(), port: p.port,
+                user: if p.user.is_empty() { "os-user".into() } else { p.user.clone() } };
+            *s = crate::session::credential_approval::approve(next, &hop, &pinned_key(candidate)?.key)?;
             Ok(())
         }),
     };
@@ -465,4 +469,84 @@ fn editing_the_destination_during_probe_review_cannot_trust_the_old_endpoint() {
         .payload
         .host_key
         .is_none());
+}
+
+
+#[test]
+fn synchronized_identity_changes_never_release_a_locally_saved_password() {
+    use crate::session::{auth::BrokerAuth, testing::{FakeKeys, FakeOwner}};
+    use crate::sync::{env::Keychain, testkit::MemKeychain};
+    use crate::ssh::AuthSource;
+    for field in ["hostname", "port", "user", "host_key"] {
+        let original = add(&state(), WEB, payload("web"));
+        // A synchronized pin is not a local approval, even on an otherwise valid host.
+        let original = repo::pin_host_key(&original, WEB, &HostEndpoint { hostname: "web.example.com".into(), port: 22 }, None, stored(&key()), 1).unwrap();
+        let (directory, shared, _) = fixture(original, true, true);
+        let old = directory.resolve(&HostQuery::Id(WEB.into())).unwrap().hops.remove(0);
+        assert!(old.pinned.is_none());
+        let keys = FakeKeys::new();
+        let secrets = MemKeychain::default();
+        secrets.set(&format!("host:{WEB}"), "device-local-password").unwrap();
+        let owner = FakeOwner::default();
+        let auth = BrokerAuth::new(&keys, &secrets, &owner, &directory);
+        auth.prepare(&Target { hops: vec![old.clone()] });
+        assert!(auth.password(&old.reference()).is_none());
+        assert!(owner.asked().is_empty(), "no fresh password prompt before reviewing the identity");
+        // A human locally confirms this endpoint/user/key; normal reuse then works.
+        directory.pin_for(&old.reference(), &key()).unwrap();
+        auth.prepare(&directory.resolve(&HostQuery::Id(WEB.into())).unwrap());
+        assert_eq!(auth.password(&old.reference()).as_deref().map(String::as_str), Some("device-local-password"));
+        {
+            let mut state = shared.lock().unwrap();
+            let row = state.local.hosts.get_mut(&record_key(RecordKind::Host, WEB)).unwrap();
+            match field {
+                "hostname" => row.record.payload["hostname"] = "attacker.example.com".into(),
+                "port" => row.record.payload["port"] = 2222.into(),
+                "user" => row.record.payload["user"] = "root".into(),
+                "host_key" => {
+                    let mut pin = stored(&HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap());
+                    pin.pinned_by_device_id = "b".repeat(32);
+                    row.record.payload["host_key"] = serde_json::to_value(pin).unwrap();
+                },
+                _ => unreachable!(),
+            }
+        }
+        let changed = directory.resolve(&HostQuery::Id(WEB.into())).unwrap().hops.remove(0);
+        assert!(changed.pinned.is_none(), "{field} needs local server identity review");
+        assert!(auth.password(&changed.reference()).is_none(), "{field} must not release the old password");
+        assert_eq!(secrets.get(&format!("host:{WEB}")).unwrap().as_deref(), Some("device-local-password"));
+        assert!(owner.asked().is_empty());
+    }
+}
+
+#[test]
+fn harmless_edits_preserve_local_approval_but_forgotten_pins_do_not() {
+    let (directory, shared, _) = fixture(add(&state(), WEB, payload("web")), true, true);
+    let hop = directory.resolve(&HostQuery::Id(WEB.into())).unwrap().hops.remove(0).reference();
+    directory.pin_for(&hop, &key()).unwrap();
+    {
+        let mut state = shared.lock().unwrap();
+        let host = repo::get_host(&state, WEB).unwrap();
+        let mut payload = host.host.payload;
+        payload.notes = "a harmless edit".into();
+        *state = repo::update_host(&state, WEB, &host.revision, payload, 100).unwrap();
+    }
+    assert!(directory.password_authorized(&hop, Some(&key())).unwrap());
+    let mut state = shared.lock().unwrap();
+    let host = repo::get_host(&state, WEB).unwrap();
+    *state = repo::forget_host_key(&state, WEB, &host.revision, &HostEndpoint { hostname: hop.hostname, port: hop.port }, host.host.payload.host_key.as_ref().unwrap(), 101).unwrap();
+    assert!(!state.local.credential_approvals.contains_key(WEB));
+}
+
+
+#[test]
+fn a_later_pin_approval_cannot_authorize_a_password_for_an_in_flight_old_server_key() {
+    let (directory, _, _) = fixture(add(&state(), WEB, payload("web")), true, true);
+    let hop = directory.resolve(&HostQuery::Id(WEB.into())).unwrap().hops.remove(0).reference();
+    let original = key();
+    directory.pin_for(&hop, &original).unwrap();
+    let replacement = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
+    directory.replace_pin_for(&hop, &original, &replacement).unwrap();
+    assert!(!directory.password_authorized(&hop, Some(&original)).unwrap());
+    assert!(directory.password_authorized(&hop, Some(&replacement)).unwrap());
 }
