@@ -55,6 +55,9 @@ pub struct LocalState {
     /// Accepted public projection bases; contains no private material or credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub central_projection: Option<crate::sync::central::projection_state::Ledger>,
+    /// Passive cache awaiting native reconciliation. The old ledger stays in this exact archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central_cache_source: Option<Box<crate::sync::central::replacement_archive::Receipt>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -224,25 +227,71 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
     if let Some(central) = &state.local.central {
         if state.version < CENTRAL_STATE_VERSION || central.validate().is_err() {
-            return Err(state_invalid("central","local","central state needs schema 8 and a verified anchored replica"));
+            return Err(state_invalid(
+                "central",
+                "local",
+                "central state needs schema 8 and a verified anchored replica",
+            ));
         }
     }
 
     if let Some(ledger) = &state.local.central_projection {
         let Some(central) = state.local.central.as_ref() else {
-            return Err(state_invalid("central_projection", "local", "projection requires the anchored central owner"));
+            return Err(state_invalid(
+                "central_projection",
+                "local",
+                "projection requires the anchored central owner",
+            ));
         };
-        if ledger.validate(central).is_err() || state.account.as_ref().map(|a| a.chain_id.as_str()) != Some(ledger.vault.as_str()) {
-            return Err(state_invalid("central_projection", "local", "projection does not match the central vault"));
+        if ledger.validate(central).is_err()
+            || state.account.as_ref().map(|a| a.chain_id.as_str())
+                != Some(ledger.vault.as_str())
+        {
+            return Err(state_invalid(
+                "central_projection",
+                "local",
+                "projection does not match the central vault",
+            ));
         }
     }
 
-    if !state.local.credential_approvals.is_empty() && state.version < LOCAL_CREDENTIAL_STATE_VERSION {
-        return Err(state_invalid("credential_approvals", "local", "local credential approvals need state version 6"));
+    if let Some(source) = &state.local.central_cache_source {
+        let valid = state.local.central.as_ref().is_some_and(|owner| {
+            owner.control.cutover
+                && state.local.central_projection.is_none()
+                && owner
+                    .replacement_archives
+                    .last()
+                    .is_some_and(|a| a.needs_reconciliation && a.receipt == **source)
+                && state.account.as_ref().map(|a| a.chain_id.as_str())
+                    == owner.control.personal_vault.as_deref()
+        });
+        if !valid || source.validate().is_err() {
+            return Err(state_invalid(
+                "central_cache_source",
+                "local",
+                "retained cache requires its exact unresolved replacement archive",
+            ));
+        }
+    }
+
+    if !state.local.credential_approvals.is_empty()
+        && state.version < LOCAL_CREDENTIAL_STATE_VERSION
+    {
+        return Err(state_invalid(
+            "credential_approvals",
+            "local",
+            "local credential approvals need state version 6",
+        ));
     }
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
+        STATE_VERSION
+            | GROUP_STATE_VERSION
+            | NAVIGATION_STATE_VERSION
+            | LOCAL_CREDENTIAL_STATE_VERSION
+            | LOCAL_CONFLICT_STATE_VERSION
+            | CENTRAL_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -399,12 +448,10 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                         .get("migration")
                         .filter(|value| !value.is_null())
                     {
-                        let gate: MigrationGate =
-                            serde_json::from_value(value.clone()).map_err(|_| {
-                                RecordValidationError::Decode {
-                                    kind: "migration",
-                                    reason: "migration marker is invalid".into(),
-                                }
+                        let gate: MigrationGate = serde_json::from_value(value.clone())
+                            .map_err(|_| RecordValidationError::Decode {
+                                kind: "migration",
+                                reason: "migration marker is invalid".into(),
                             })?;
                         validate_migration_gate(&gate)?;
                     }

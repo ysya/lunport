@@ -77,7 +77,9 @@ fn install_push(
     (batches, lose)
 }
 fn fixture() -> Fixture {
-    let mut service = Service::new();
+    fixture_with_service(Service::new())
+}
+fn fixture_with_service(mut service: Service) -> Fixture {
     let d = Arc::new(TestDevice::new(
         "active-cycle",
         &FakeRelay::new(),
@@ -509,4 +511,138 @@ fn a_local_b_during_http_remains_visible_and_conflicts_with_remote_c_without_blo
         .iter()
         .flatten()
         .all(|row| row.header.kind != "host"));
+}
+
+#[test]
+fn actual_active_takeover_rotates_then_reconciles_its_unsent_key_through_background_rounds() {
+    use crate::sync::central::{client_state::Phase, migration_flow, replacement_flow};
+    use crate::sync::env::Keychain;
+    let origin = "https://takeover.synthetic.invalid";
+    let service = Service::at_origin(Some(origin));
+    let address = service.server.url();
+    crate::sync::central::api::with_test_transport(origin, &address, || {
+        let f = fixture_with_service(service);
+        let trusted = TestDevice::new("trusted-peer", &FakeRelay::new(), &f.d.clock);
+        f.service.login(&trusted);
+        let invite = devices::pairing_code(&trusted.env()).unwrap();
+        devices::approve(&f.d.env(), &invite.code).unwrap();
+        controller::refresh(&trusted.env()).unwrap();
+        round::sync_once(&trusted.env()).unwrap();
+        let before = state(&f.d);
+        assert!(!before
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending
+            .is_empty());
+        let pending = replacement_flow::begin_trusted(&f.d.env()).unwrap();
+        let operation = pending.operation.unwrap();
+        let invite = replacement_flow::pairing_code(&f.d.env(), &operation).unwrap();
+        devices::approve(&trusted.env(), &invite.code).unwrap();
+        assert_eq!(
+            replacement_flow::begin_trusted(&f.d.env()).unwrap().phase,
+            "reading"
+        );
+        assert_eq!(
+            replacement_flow::advance(&f.d.env(), &operation)
+                .unwrap()
+                .phase,
+            "complete"
+        );
+        let switched = state(&f.d);
+        assert!(switched.local.central_cache_source.is_some());
+        assert!(switched.local.central_projection.is_none());
+        assert_eq!(
+            switched.local.central.as_ref().unwrap().control.phase,
+            Phase::Rekey
+        );
+        let profile = before
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .control
+            .profile
+            .profile()
+            .unwrap();
+        f.d.keychain.delete(&profile.slot("device")).unwrap();
+        for _ in 0..12 {
+            round::sync_once(&f.d.env()).unwrap();
+            if state(&f.d).local.central.as_ref().unwrap().control.phase == Phase::Active {
+                break;
+            }
+        }
+        let rotated = state(&f.d);
+        assert_eq!(
+            rotated.local.central.as_ref().unwrap().control.phase,
+            Phase::Active
+        );
+        assert_eq!(
+            rotated
+                .local
+                .central
+                .as_ref()
+                .unwrap()
+                .replica
+                .as_ref()
+                .unwrap()
+                .checkpoint
+                .epoch,
+            2
+        );
+        assert!(rotated
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replacement_archives
+            .iter()
+            .all(|a| a.needs_reconciliation));
+        assert!(rotated.local.central_cache_source.is_some());
+        let scope = migration_flow::Scope::from_state(&rotated).unwrap();
+        let mut review = None;
+        for _ in 0..12 {
+            if let Some(value) = migration_flow::prepare(&f.d.env(), &scope).unwrap().review {
+                review = Some(value);
+                break;
+            }
+        }
+        let review = serde_json::to_value(review.unwrap()).unwrap();
+        migration_flow::confirm(&f.d.env(), &scope, review["ticket"].as_str().unwrap())
+            .unwrap();
+        for _ in 0..40 {
+            round::sync_once(&f.d.env()).unwrap();
+            if state(&f.d).local.central.as_ref().unwrap().can_upload() {
+                break;
+            }
+        }
+        let completed = state(&f.d);
+        let owner = completed.local.central.as_ref().unwrap();
+        assert!(owner.can_upload());
+        assert!(completed.local.central_cache_source.is_none());
+        completed
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .validate(owner)
+            .unwrap();
+        let key = completed
+            .local
+            .keys
+            .values()
+            .find(|k| k.public.name == "work")
+            .unwrap();
+        let vault = store::read_vault(&store::vault_path(&f.d.env().state_path), &f.d.keychain)
+            .unwrap();
+        assert_eq!(
+            vault.get(&key.vault_id).unwrap().unwrap().private_key,
+            test_keys::plain()
+        );
+        assert!(f.d.keychain.get(&profile.slot("device")).unwrap().is_none());
+    });
 }

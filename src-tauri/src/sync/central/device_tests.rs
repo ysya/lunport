@@ -82,10 +82,15 @@ struct Service {
     server: mockito::ServerGuard,
     state: Arc<Mutex<Account>>,
     config: OidcConfig,
+    origin: String,
 }
 impl Service {
     fn new() -> Self {
+        Self::at_origin(None)
+    }
+    fn at_origin(logical: Option<&str>) -> Self {
         let mut server = mockito::Server::new();
+        let origin = logical.map(str::to_owned).unwrap_or_else(|| server.url());
         let state = Arc::new(Mutex::new(Account {
             epoch: 1,
             key_epoch: 1,
@@ -97,7 +102,7 @@ impl Service {
             scopes: vec![],
             audience: Some("api".into()),
         };
-        let profile = Profile::new(&server.url(), &config.issuer, "opaque").unwrap();
+        let profile = Profile::new(&origin, &config.issuer, "opaque").unwrap();
         let account = Arc::clone(&state);
         let authorization = Arc::clone(&state);
         server.mock("POST","/v2/session").with_status_code_from_request(move |r| {let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();if authorization.lock().unwrap().denied.iter().any(|id|Some(id.as_str())==body["device"]["id"].as_str()){403}else{200}}).with_header("content-type","application/json").with_body_from_request(move|r|{
@@ -233,7 +238,7 @@ impl Service {
                 let body=body.to_string().into_bytes();
                 let hook = s.on_pull.take(); drop(s); if let Some(hook) = hook { hook(); } body
             }).create();
-        let locator = Profile::new(&server.url(), &config.issuer, "opaque")
+        let locator = Profile::new(&origin, &config.issuer, "opaque")
             .unwrap()
             .locator;
         install_account_access_routes(&mut server, &state, locator);
@@ -243,6 +248,7 @@ impl Service {
             server,
             state,
             config,
+            origin,
         }
     }
     fn login(&self, d: &TestDevice) {
@@ -258,7 +264,7 @@ impl Service {
         };
         controller::establish(
             &d.env(),
-            &self.server.url(),
+            &self.origin,
             self.config.clone(),
             tokens,
             None,
@@ -2615,7 +2621,7 @@ fn trusted_replacement_requires_the_protected_oob_secret_and_exact_selected_sess
     let switched=OwnerPath::Current.snapshot(&d.env()).unwrap();assert_eq!(switched.control.device,identity.device());
     assert_eq!(switched.control.phase,super::client_state::Phase::Rekey);
     assert!(switched.control.denied_devices.contains(&source.control.device.id));assert!(switched.require_key_recipients().is_err());
-    assert_eq!(switched.replacement_archives[0].route,Route::TrustedDevice);assert!(!switched.replacement_archives[0].needs_reconciliation);
+    assert_eq!(switched.replacement_archives[0].route,Route::TrustedDevice);assert!(switched.replacement_archives[0].needs_reconciliation);
     assert_eq!(d.keychain.entry(&profile.slot("device")),saved);
 }
 

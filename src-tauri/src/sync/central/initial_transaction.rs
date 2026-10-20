@@ -112,20 +112,23 @@ pub(in crate::sync) fn verify_saved(
         .central
         .as_ref()
         .ok_or_else(super::wire::invalid)?;
-    if before
-        .control
-        .proof
-        .as_ref()
-        .ok_or_else(super::wire::invalid)?
-        .genesis
-        .first
-        == before.control.device
+    if before.replacement_archives.is_empty()
+        && before
+            .control
+            .proof
+            .as_ref()
+            .ok_or_else(super::wire::invalid)?
+            .genesis
+            .first
+            == before.control.device
     {
         super::initial_publication::Prepared::verify_saved_reservation(
             env, life, current, original, operation, manifest, observed,
         )
     } else {
-        super::adoption::verify_saved(env, life, current, original, operation, manifest, observed)
+        super::adoption::verify_saved(
+            env, life, current, original, operation, manifest, observed,
+        )
     }
 }
 pub(super) fn complete_saved(env: &SyncEnv) -> Result<(), AppError> {
@@ -135,14 +138,15 @@ pub(super) fn complete_saved(env: &SyncEnv) -> Result<(), AppError> {
         .central
         .as_ref()
         .ok_or_else(super::wire::invalid)?;
-    if owner
-        .control
-        .proof
-        .as_ref()
-        .ok_or_else(super::wire::invalid)?
-        .genesis
-        .first
-        == owner.control.device
+    if owner.replacement_archives.is_empty()
+        && owner
+            .control
+            .proof
+            .as_ref()
+            .ok_or_else(super::wire::invalid)?
+            .genesis
+            .first
+            == owner.control.device
     {
         super::initial_publication::complete_saved(env)
     } else {

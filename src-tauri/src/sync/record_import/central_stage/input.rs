@@ -8,6 +8,8 @@ pub(super) struct InitialBinding {
     source: String,
     shadow: String,
     observed: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reconciliation: bool,
 }
 impl InitialBinding {
     pub(super) fn manifest(&self) -> &str {
@@ -62,6 +64,7 @@ impl<'a> Input<'a> {
                 source: state_digest(initial.source())?,
                 shadow: state_digest(initial.shadow())?,
                 observed: initial.observed(),
+                reconciliation: initial.reconciliation(),
             })),
         }
     }
@@ -80,12 +83,19 @@ impl<'a> Input<'a> {
                 crate::sync::records_v3::validate_state(state)
                     .map_err(|_| failure("invalid initial stage source"))?;
                 if state != initial.source()
-                    || state.local.central_projection.is_some()
-                    || state
-                        .local
-                        .central
-                        .as_ref()
-                        .is_none_or(|owner| owner.control.cutover)
+                    || !initial.reconciliation()
+                        && (state.local.central_projection.is_some()
+                            || state
+                                .local
+                                .central
+                                .as_ref()
+                                .is_none_or(|owner| owner.control.cutover))
+                    || initial.reconciliation()
+                        && !state
+                            .local
+                            .central
+                            .as_ref()
+                            .is_some_and(central::replacement_reconciliation_required)
                 {
                     return Err(failure(
                         "initial source changed; all source material is retained",

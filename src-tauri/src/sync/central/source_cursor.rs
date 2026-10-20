@@ -26,11 +26,15 @@ pub(super) struct Restored {
     pub outputs: source_archive::Outputs,
 }
 fn role(owner: &Workspace) -> Result<String, AppError> {
-    Ok(owner
-        .control
-        .profile
-        .profile()?
-        .slot("source-migration-cursor"))
+    let profile = owner.control.profile.profile()?;
+    if owner.replacement_archives.is_empty() {
+        Ok(profile.slot("source-migration-cursor"))
+    } else {
+        profile.device_slot(
+            "source-reconciliation-cursor",
+            owner.identity_slot.as_deref(),
+        )
+    }
 }
 impl Cursor {
     pub(super) fn validate(&self, owner: &Workspace) -> Result<(), AppError> {

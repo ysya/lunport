@@ -10,6 +10,7 @@ const MAX_ARCHIVES: usize = 64;
 const MAX_PLAIN: usize = 128 * 1024 * 1024;
 pub(in crate::sync::central) struct Captured {
     pub states: Vec<SyncStateV3>,
+    pub receipts: Vec<Receipt>,
     pub admitted: BTreeSet<PathBuf>,
     pub histories: Vec<super::super::source_package::snapshot::Group>,
 }
@@ -21,6 +22,7 @@ pub(in crate::sync::central) fn read_all(
     let root = Path::new(ROOT);
     let mut result = Captured {
         states: vec![],
+        receipts: vec![],
         histories: vec![],
         admitted: BTreeSet::new(),
     };
@@ -114,9 +116,14 @@ pub(in crate::sync::central) fn read_all(
             }
             result
                 .histories
-                .push(decode_history(context, &key, history, &state)?);
-            used_histories.insert(history_path);
+                .extend(decode_history(context, &key, history, &state)?);
+            used_histories.insert(history_path.clone());
         }
+        result.receipts.push(Receipt {
+            context: context.clone(),
+            file_hash: crypto::hash(bytes),
+            history_hash: files.get(&history_path).map(|b| crypto::hash(b)),
+        });
         result.states.push(state);
         result.admitted.insert(path.clone());
         used_markers.insert(marker);

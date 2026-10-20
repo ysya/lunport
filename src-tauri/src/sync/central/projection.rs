@@ -103,9 +103,35 @@ impl Plan {
         {
             return Err(super::wire::invalid());
         }
+        Self::passive_inventory(before, keys)
+    }
+    /// Replacement-only semantic view. This never materializes into the live cache and cannot
+    /// satisfy ordinary publication_allowed while the archive flags remain unresolved.
+    pub(super) fn reconciliation_inventory(
+        before: Workspace,
+        keys: &VaultKeys,
+    ) -> Result<Self, AppError> {
+        before.validate()?;
+        before.require_key_recipients()?;
+        if !super::replacement_reconciliation::required(&before)
+            || !matches!(
+                before.control.phase,
+                super::client_state::Phase::Enrolled | super::client_state::Phase::Active
+            )
+            || before.replacement.is_some()
+            || before.rotation.is_some()
+            || before.recovery.is_some()
+            || before.bootstrap.is_some()
+        {
+            return Err(invalid());
+        }
+        Self::passive_inventory(before, keys)
+    }
+    fn passive_inventory(before: Workspace, keys: &VaultKeys) -> Result<Self, AppError> {
         let chain = before.control.verified_chain()?;
         let replica = before.replica.as_ref().ok_or_else(super::wire::invalid)?;
-        if !replica.baseline_ready() || !replica.pending.is_empty() || !replica.conflicts.is_empty() {
+        if !replica.baseline_ready() || !replica.pending.is_empty() || !replica.conflicts.is_empty()
+        {
             return Err(super::wire::invalid());
         }
         replica.verify_write_authority(

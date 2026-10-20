@@ -88,7 +88,7 @@ struct Loaded {
 }
 /// Passive bounded read state, stored inside the one Records Core; never an IPC DTO.
 pub(in crate::sync) struct ReadingCache {
-    reading: Reading,
+    reading: Box<Reading>,
 }
 pub(super) struct Prepared {
     loaded: Loaded,
@@ -103,18 +103,28 @@ pub(super) fn target(
 ) -> Result<(), AppError> {
     super::source_capture::require_adoption_target(env, owner, session, keys)
 }
+fn policy(owner: &Workspace) -> &'static str {
+    if owner.replacement_archives.is_empty() {
+        "device-adoption-v1"
+    } else {
+        "replacement-history-v1"
+    }
+}
 fn role(owner: &Workspace) -> Result<String, AppError> {
-    owner
-        .control
-        .profile
-        .profile()?
-        .device_slot("source-adoption", owner.identity_slot.as_deref())
+    owner.control.profile.profile()?.device_slot(
+        if owner.replacement_archives.is_empty() {
+            "source-adoption"
+        } else {
+            "source-reconciliation"
+        },
+        owner.identity_slot.as_deref(),
+    )
 }
 impl State {
     fn validate(&self, owner: &Workspace) -> Result<(), AppError> {
         self.source.validate(owner)?;
         if self.version != 1
-            || self.policy != "device-adoption-v1"
+            || self.policy != policy(owner)
             || self.source.revision() != 1
             || self.archives.len() > 8
             || !hex(&self.ticket, 64)
@@ -248,6 +258,9 @@ impl Loaded {
             return Err(crate::sync::runtime::superseded());
         }
         super::source_capture::require_selected(env, self.owner()?, &session)?;
+        if self.state.policy != policy(self.owner()?) {
+            return Err(invalid());
+        }
         Ok(())
     }
     fn files(&self, env: &SyncEnv) -> Result<(), AppError> {
@@ -538,8 +551,25 @@ fn initialize(
     retired: Option<&legacy::Witness>,
 ) -> Result<Loaded, AppError> {
     scope.check(env)?;
-    let captured =
-        super::source_capture::capture_adoption(env, reading.keys()?, &BTreeMap::new(), retired)?;
+    let records = scope.check(env)?;
+    let reconciling = super::replacement_reconciliation::required(
+        records.local.central.as_ref().ok_or_else(invalid)?,
+    );
+    let captured = if reconciling {
+        super::source_capture::capture_reconciliation(
+            env,
+            reading.keys()?,
+            &BTreeMap::new(),
+            retired,
+        )?
+    } else {
+        super::source_capture::capture_adoption(
+            env,
+            reading.keys()?,
+            &BTreeMap::new(),
+            retired,
+        )?
+    };
     let life = env.runtime.lifecycle.lock().unwrap();
     let _vault = env
         .runtime
@@ -570,7 +600,7 @@ fn initialize(
     let source = captured.package.initialize_source(env, &life, owner, 0)?;
     let state = State {
         version: 1,
-        policy: "device-adoption-v1".into(),
+        policy: policy(owner).into(),
         source: source.cursor,
         floor: reading.checkpoint()?,
         archives: vec![],
@@ -635,7 +665,7 @@ fn read_remote(
                 }
                 None => vec![],
             })?;
-            r
+            Box::new(r)
         }
     };
     if reading.total() == 0 {
@@ -644,7 +674,7 @@ fn read_remote(
     let result = reading.advance_bounded(env, &check, budget);
     match result {
         Ok(true) => {
-            let (read, transcript) = reading.finish_captured()?;
+            let (read, transcript) = (*reading).finish_captured()?;
             if let Some(loaded) = loaded {
                 loaded.package.require_historical_read(&read, &transcript)?;
             }
@@ -744,6 +774,48 @@ pub(super) fn run(
     action: Action,
     budget: &Budget,
 ) -> Result<Preparation, AppError> {
+    match run_attempts(env, scope, action, budget) {
+        Err(error) if Budget::exhausted(&error) => yielded(env, scope),
+        outcome => outcome,
+    }
+}
+fn yielded(env: &SyncEnv, scope: &Scope) -> Result<Preparation, AppError> {
+    let mut current = migration_flow::status(env, scope)?;
+    if current.phase != "complete" {
+        let records = scope.check(env)?;
+        let owner = records.local.central.as_ref().ok_or_else(invalid)?;
+        // Recover public progress from the protected operation only. No source decryption,
+        // consent, network allowance or publication authority is created by yielding.
+        if let Some(saved) = read(env, owner)? {
+            current.mode = "join";
+            current.phase = if saved.final_read.is_some() {
+                "publishing"
+            } else if saved.accepted {
+                "staging"
+            } else if saved.plan.is_some() {
+                "review"
+            } else {
+                "reading"
+            };
+            current.approved = saved.accepted;
+            current.legacy_sources = saved.legacy.is_some();
+            current.staged = saved.completed;
+            current.verified = if saved.remote.is_some() {
+                saved.floor.sequence as usize
+            } else {
+                0
+            };
+            current.total = current.total.max(current.staged).max(current.verified);
+        }
+    }
+    result(env, scope, current, None)
+}
+fn run_attempts(
+    env: &SyncEnv,
+    scope: &Scope,
+    action: Action,
+    budget: &Budget,
+) -> Result<Preparation, AppError> {
     let outcome = run_once(env, scope, action, budget);
     if outcome.is_err() && budget.take_refusal() {
         super::round::check_cooldown(env)?;
@@ -760,6 +832,29 @@ fn run_once(
     action: Action,
     budget: &Budget,
 ) -> Result<Preparation, AppError> {
+    match start(env, scope, action, budget)? {
+        Some(loaded) => continue_loaded(env, scope, action, budget, loaded),
+        None => result(
+            env,
+            scope,
+            Progress {
+                phase: "waiting",
+                mode: "join",
+                ..Progress::default()
+            },
+            None,
+        ),
+    }
+}
+// Keep the large temporary reader/capture return slots out of every later transport/readback
+// invocation. The single protected operation and cached reader remain the existing authority.
+#[inline(never)]
+fn start(
+    env: &SyncEnv,
+    scope: &Scope,
+    action: Action,
+    budget: &Budget,
+) -> Result<Option<Loaded>, AppError> {
     scope.check(env)?;
     if !controller::resume_bounded(env, false, budget)? {
         return Err(invalid());
@@ -775,22 +870,22 @@ fn run_once(
         // Capture a ready authenticated metadata view before freezing any local library.
         let selected = controller::context(env)?;
         let check = || scope.check(env).map(|_| ());
-        let mut reading =
-            Reading::begin_bounded(env, OwnerPath::Current, selected, &check, budget)?;
+        let mut reading = Box::new(Reading::begin_bounded(
+            env,
+            OwnerPath::Current,
+            selected,
+            &check,
+            budget,
+        )?);
         if reading.total() == 0 {
-            return result(
-                env,
-                scope,
-                Progress {
-                    phase: "waiting",
-                    mode: "join",
-                    ..Progress::default()
-                },
-                None,
-            );
+            return Ok(None);
         }
         let state = scope.check(env)?;
-        let retired = if state.account.is_some() {
+        let retired = if if super::replacement_reconciliation::projected(&state) {
+            super::source_capture::reconciliation_has_legacy(env)?
+        } else {
+            state.account.is_some()
+        } {
             Some(legacy::fetch(
                 env,
                 scope,
@@ -817,7 +912,7 @@ fn run_once(
             Some(Box::new(ReadingCache { reading }));
         loaded = Some(next);
     }
-    continue_loaded(env, scope, action, budget, loaded.ok_or_else(invalid)?)
+    Ok(loaded)
 }
 fn continue_loaded(
     env: &SyncEnv,
@@ -1088,13 +1183,29 @@ fn publish(
         .ok_or_else(invalid)?
         .ciphertext_hash
         .clone();
-    let initial = Candidate::adopt(
-        &loaded.package.state,
-        &final_read,
-        &commitment,
-        loaded.state.observed,
-        &merge::selections(&loaded.package.state, &loaded.state.operation)?,
-    )?;
+    let selections = merge::selections(&loaded.package.state, &loaded.state.operation)?;
+    let initial = if loaded.state.policy == "replacement-history-v1" {
+        super::replacement_reconciliation::archives(
+            &loaded.package.state,
+            &loaded.package.files.bytes,
+            loaded.package.decryptors(),
+        )?;
+        Candidate::reconcile(
+            &loaded.package.state,
+            &final_read,
+            &commitment,
+            loaded.state.observed,
+            &selections,
+        )?
+    } else {
+        Candidate::adopt(
+            &loaded.package.state,
+            &final_read,
+            &commitment,
+            loaded.state.observed,
+            &selections,
+        )?
+    };
     let prepared = Prepared {
         loaded,
         initial,
@@ -1293,6 +1404,11 @@ pub(super) fn verify_saved(
 pub(super) fn complete_saved(env: &SyncEnv) -> Result<(), AppError> {
     let records = record_runtime::snapshot(env)?.0;
     let owner = records.local.central.as_ref().ok_or_else(invalid)?;
+    if !owner.control.cutover || super::replacement_reconciliation::required(owner) {
+        // A replacement was already cut over before this merge began. Its archive flags,
+        // not that older cutover bit, prove the new protected publication has completed.
+        return Ok(());
+    }
     let Some(encoded) = env
         .keychain
         .get_noninteractive(&role(owner)?)?
@@ -1304,7 +1420,7 @@ pub(super) fn complete_saved(env: &SyncEnv) -> Result<(), AppError> {
         return Err(invalid());
     }
     let state: State = serde_json::from_str(&encoded).map_err(|_| invalid())?;
-    if state.version != 1 || state.policy != "device-adoption-v1" || !hex(&state.operation, 32) {
+    if state.version != 1 || state.policy != policy(owner) || !hex(&state.operation, 32) {
         return Err(invalid());
     }
     crate::sync::record_import::central_stage::complete_initial_saved(env, &state.operation)?;

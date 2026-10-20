@@ -366,10 +366,8 @@ impl Authorization {
                 .approved_head
                 .clone(),
         };
-        let unresolved = source.rotation.is_some()
-            || source.replica.as_ref().is_some_and(|replica| {
-                !replica.pending.is_empty() || !replica.conflicts.is_empty()
-            });
+        // Even a clean old cache has device-bound local-material receipts. Rebuild its live
+        // projection through reviewed reconciliation before allowing the new identity to sync.
         candidate.replacement_archives = source.replacement_archives.clone();
         candidate.replacement_archives.push(Archive {
             receipt,
@@ -381,7 +379,7 @@ impl Authorization {
             target: candidate.control.device.clone(),
             approved_head,
             route: intent.route,
-            needs_reconciliation: unresolved,
+            needs_reconciliation: true,
         });
         candidate.validate()?;
         Ok(candidate)
@@ -393,7 +391,12 @@ impl Authorization {
     ) -> Result<crate::sync::records_v3::SyncStateV3, AppError> {
         let owner = source.local.central.as_ref().ok_or_else(invalid)?;
         let mut next = source.clone();
-        next.local.central = Some(self.candidate(owner, receipt)?);
+        next.local.central = Some(self.candidate(owner, receipt.clone())?);
+        if source.local.central_projection.is_some() || source.local.central_cache_source.is_some()
+        {
+            next.local.central_projection = None;
+            next.local.central_cache_source = Some(Box::new(receipt));
+        }
         next.local.credential_approvals.clear();
         next.version = next
             .version

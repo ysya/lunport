@@ -17,6 +17,8 @@ struct Metadata {
     state: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     planned: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ordered: bool,
     admitted: BTreeSet<String>,
     floors: Vec<Checkpoint>,
     controls: Vec<super::super::adoption::captured::ControlMinimum>,
@@ -82,6 +84,7 @@ impl Group {
                 source: Some(source.clone()),
                 state: None,
                 planned: false,
+                ordered: false,
                 admitted: value.admitted,
                 floors: value.floors,
                 controls: value.controls,
@@ -94,7 +97,8 @@ impl Group {
     fn validate(&self) -> Result<(), AppError> {
         if let Some(source) = &self.meta.source {
             source.validate()?;
-            if self.meta.state.is_some()
+            if self.meta.ordered
+                || self.meta.state.is_some()
                 || self.meta.admitted.len() < 2
                 || !self.meta.admitted.contains(&source.ciphertext_hash)
                 || !self.meta.planned && self.meta.floors.is_empty()
@@ -123,7 +127,7 @@ impl Group {
             return Err(invalid());
         }
         if self.meta.controls.is_empty()
-            || self.meta.controls.len() > 16
+            || self.meta.controls.len() > if self.meta.state.is_some() { 256 } else { 16 }
             || self.meta.controls.iter().any(|c| {
                 c.highwater.revision > 1024
                     || !super::super::wire::hex(&c.highwater.head, 64)
@@ -156,6 +160,7 @@ impl Group {
                 source: Some(source.clone()),
                 state: None,
                 planned: true,
+                ordered: false,
                 admitted,
                 floors: vec![],
                 controls: vec![super::super::adoption::captured::ControlMinimum {
@@ -189,7 +194,9 @@ impl Group {
     ) -> Result<String, AppError> {
         group_key(source, admitted)
     }
-    pub(super) fn controls(&self) -> &[super::super::adoption::captured::ControlMinimum] {
+    pub(in crate::sync::central) fn controls(
+        &self,
+    ) -> &[super::super::adoption::captured::ControlMinimum] {
         &self.meta.controls
     }
     pub(super) fn key(&self) -> Result<String, AppError> {
@@ -212,7 +219,7 @@ impl Group {
             ))
         ))
     }
-    pub(super) fn state_captured(
+    pub(in crate::sync::central) fn state_captured(
         state: &SyncStateV3,
         captured: super::super::historical_state::Captured,
     ) -> Result<Self, AppError> {
@@ -225,6 +232,7 @@ impl Group {
                 source: None,
                 state: Some(hash.clone()),
                 planned: false,
+                ordered: super::super::replacement_reconciliation::projected(state),
                 admitted: BTreeSet::from([hash]),
                 floors: captured.floors,
                 controls: captured.controls,
@@ -247,11 +255,11 @@ impl Group {
     pub(super) fn admitted(&self) -> &BTreeSet<String> {
         &self.meta.admitted
     }
-    pub(super) fn floors(&self) -> &[Checkpoint] {
+    pub(in crate::sync::central) fn floors(&self) -> &[Checkpoint] {
         &self.meta.floors
     }
     /// Call only after the enclosing snapshot has passed signature and complete input binding.
-    pub(super) fn history(&self) -> Result<History, AppError> {
+    pub(in crate::sync::central) fn history(&self) -> Result<History, AppError> {
         self.validate()?;
         let mut input = self.rows.as_slice();
         let mut history = History::empty_retained();
@@ -274,7 +282,11 @@ impl Group {
             if payload::encode(&admitted.identity, &admitted.data)?.as_slice() != plain {
                 return Err(invalid());
             }
-            history.push_retained(admitted.identity, admitted.data)?;
+            if self.meta.ordered {
+                history.push_selected(admitted.identity, admitted.data)?;
+            } else {
+                history.push_retained(admitted.identity, admitted.data)?;
+            }
         }
         Ok(history)
     }
@@ -419,9 +431,11 @@ impl Snapshot {
         if binding != package.snapshot_binding()?.as_bytes() {
             return Err(invalid());
         }
-        let book = Sources::decode_local(
-            section(&mut input, super::super::migration_sources::MAX_BOOK_BYTES)?,
+        let book = Package::restore_sources(
             &package.state,
+            &package.files,
+            &package.decryptors,
+            section(&mut input, super::super::migration_sources::MAX_BOOK_BYTES)?,
         )?;
         package.sources.require_retained_subset(&book)?;
         // The final fixed-size Ed25519 signature section cannot be confused with a group.
@@ -470,10 +484,29 @@ impl StateSnapshot {
         state: &SyncStateV3,
         identity: &DeviceIdentity,
     ) -> Result<Self, AppError> {
-        let group = Group::state_captured(
+        Self::create_captured(
             state,
+            identity,
             super::super::historical_state::read(state, identity)?,
-        )?;
+        )
+    }
+    pub(in crate::sync::central) fn create_captured(
+        state: &SyncStateV3,
+        identity: &DeviceIdentity,
+        captured: super::super::historical_state::Captured,
+    ) -> Result<Self, AppError> {
+        if identity.device()
+            != state
+                .local
+                .central
+                .as_ref()
+                .ok_or_else(invalid)?
+                .control
+                .device
+        {
+            return Err(invalid());
+        }
+        let group = Group::state_captured(state, captured)?;
         let mut bytes = Zeroizing::new(b"LPSTATE1".to_vec());
         put(
             &mut bytes,
@@ -488,7 +521,9 @@ impl StateSnapshot {
         Ok(result)
     }
     pub(in crate::sync::central) fn decode(bytes: &[u8]) -> Result<Self, AppError> {
-        if bytes.len() > MAX_HISTORY + 128 * 1024 || !bytes.starts_with(b"LPSTATE1") {
+        if bytes.len() > MAX_HISTORY + 128 * 1024
+            || !(bytes.starts_with(b"LPSTATE1") || bytes.starts_with(b"LPSTATE2"))
+        {
             return Err(invalid());
         }
         Ok(Self {
@@ -498,7 +533,109 @@ impl StateSnapshot {
     pub(in crate::sync::central) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    pub(in crate::sync::central) fn verify(&self, state: &SyncStateV3) -> Result<Group, AppError> {
+    pub(in crate::sync::central) fn create_groups(
+        state: &SyncStateV3,
+        identity: &DeviceIdentity,
+        groups: Vec<Group>,
+    ) -> Result<Self, AppError> {
+        if identity.device()
+            != state
+                .local
+                .central
+                .as_ref()
+                .ok_or_else(invalid)?
+                .control
+                .device
+            || groups.is_empty()
+            || groups.len() > 256
+        {
+            return Err(invalid());
+        }
+        let mut bytes = Zeroizing::new(b"LPSTATE2".to_vec());
+        put(&mut bytes, Group::state_key(state)?.as_bytes())?;
+        bytes.extend_from_slice(&(groups.len() as u32).to_be_bytes());
+        let mut logical = 0usize;
+        let mut seen = BTreeSet::new();
+        for group in groups {
+            group.validate()?;
+            if !seen.insert(group.key()?) {
+                return Err(invalid());
+            }
+            logical = logical.checked_add(group.rows.len()).ok_or_else(invalid)?;
+            if logical > MAX_HISTORY {
+                return Err(invalid());
+            }
+            put(
+                &mut bytes,
+                &serde_json::to_vec(&group.meta).map_err(|_| invalid())?,
+            )?;
+            put(&mut bytes, &group.rows)?;
+            if bytes.len() > MAX_HISTORY + 128 * 1024 - 96 {
+                return Err(invalid());
+            }
+        }
+        let mut signed = Zeroizing::new(b"lunport-native-state-history-v2\0".to_vec());
+        signed.extend_from_slice(&bytes);
+        put(&mut bytes, identity.keys.sign(&signed).as_bytes())?;
+        let result = Self { bytes };
+        drop(result.verify_all(state)?);
+        Ok(result)
+    }
+    pub(in crate::sync::central) fn verify_all(
+        &self,
+        state: &SyncStateV3,
+    ) -> Result<Vec<Group>, AppError> {
+        if self.bytes.starts_with(b"LPSTATE1") {
+            return Ok(vec![self.verify_one(state)?]);
+        }
+        if !self.bytes.starts_with(b"LPSTATE2") || self.bytes.len() > MAX_HISTORY + 128 * 1024 {
+            return Err(invalid());
+        }
+        let signing = Self::signing_key(state)?;
+        let mut input = &self.bytes[8..];
+        if section(&mut input, 70)? != Group::state_key(state)?.as_bytes() || input.len() < 4 {
+            return Err(invalid());
+        }
+        let count = u32::from_be_bytes(input[..4].try_into().map_err(|_| invalid())?) as usize;
+        input = &input[4..];
+        if count == 0 || count > 256 {
+            return Err(invalid());
+        }
+        let mut groups = vec![];
+        let mut logical = 0usize;
+        let mut seen = BTreeSet::new();
+        for _ in 0..count {
+            let meta =
+                serde_json::from_slice(section(&mut input, 128 * 1024)?).map_err(|_| invalid())?;
+            let rows = Zeroizing::new(section(&mut input, MAX_HISTORY)?.to_vec());
+            logical = logical.checked_add(rows.len()).ok_or_else(invalid)?;
+            if logical > MAX_HISTORY {
+                return Err(invalid());
+            }
+            let group = Group { meta, rows };
+            group.validate()?;
+            if !seen.insert(group.key()?) {
+                return Err(invalid());
+            }
+            groups.push(group);
+        }
+        let signed_len = self.bytes.len() - input.len();
+        let signature = std::str::from_utf8(section(&mut input, 88)?).map_err(|_| invalid())?;
+        if !input.is_empty() {
+            return Err(invalid());
+        }
+        let mut signed = Zeroizing::new(b"lunport-native-state-history-v2\0".to_vec());
+        signed.extend_from_slice(&self.bytes[..signed_len]);
+        crypto::verify(signing, &signed, signature)?;
+        if !groups.iter().any(|g| g.require_state(state).is_ok()) {
+            return Err(invalid());
+        }
+        for group in &groups {
+            drop(group.history()?);
+        }
+        Ok(groups)
+    }
+    fn signing_key(state: &SyncStateV3) -> Result<&str, AppError> {
         records_v3::validate_state(state).map_err(|_| invalid())?;
         let owner = state.local.central.as_ref().ok_or_else(invalid)?;
         let chain = match &owner.recovery {
@@ -514,6 +651,16 @@ impl StateSnapshot {
         }) {
             return Err(invalid());
         }
+        Ok(&owner.control.device.keys.signing)
+    }
+    pub(in crate::sync::central) fn verify(&self, state: &SyncStateV3) -> Result<Group, AppError> {
+        self.verify_all(state)?
+            .into_iter()
+            .find(|g| g.require_state(state).is_ok())
+            .ok_or_else(invalid)
+    }
+    fn verify_one(&self, state: &SyncStateV3) -> Result<Group, AppError> {
+        let signing = Self::signing_key(state)?;
         let mut input = &self.bytes[8..];
         let meta =
             serde_json::from_slice(section(&mut input, 128 * 1024)?).map_err(|_| invalid())?;
@@ -525,10 +672,87 @@ impl StateSnapshot {
         }
         let mut signed = Zeroizing::new(b"lunport-native-state-history-v1\0".to_vec());
         signed.extend_from_slice(&self.bytes[..signed_len]);
-        crypto::verify(&owner.control.device.keys.signing, &signed, signature)?;
+        crypto::verify(signing, &signed, signature)?;
         let group = Group { meta, rows };
         group.require_state(state)?;
         drop(group.history()?);
         Ok(group)
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    #[test]
+    fn complete_replacement_snapshot_binds_all_groups_and_keeps_single_state_compatibility() {
+        let (device, _keys, session) = super::super::super::source_capture::tests::fixture(false);
+        let state = crate::sync::record_runtime::snapshot(&device.env())
+            .unwrap()
+            .0;
+        let signer = session.identity.as_ref().unwrap();
+        let legacy = StateSnapshot::create(&state, signer).unwrap();
+        assert_eq!(legacy.verify_all(&state).unwrap().len(), 1);
+        let current = legacy.verify(&state).unwrap();
+        let mut older = state.clone();
+        older.device_name = "older captured image".into();
+        let old = StateSnapshot::create(&older, signer)
+            .unwrap()
+            .verify(&older)
+            .unwrap();
+        let complete =
+            StateSnapshot::create_groups(&state, signer, vec![current.clone(), old.clone()])
+                .unwrap();
+        assert_eq!(complete.verify_all(&state).unwrap().len(), 2);
+        assert!(complete.verify_all(&older).is_err());
+        assert!(StateSnapshot::create_groups(&state, signer, vec![old]).is_err());
+        assert!(
+            StateSnapshot::create_groups(&state, signer, vec![current.clone(), current]).is_err()
+        );
+        let mut changed = complete.bytes().to_vec();
+        let n = changed.len() - 1;
+        changed[n] ^= 1;
+        assert!(StateSnapshot::decode(&changed)
+            .unwrap()
+            .verify_all(&state)
+            .is_err());
+        let mut oversized = complete.bytes().to_vec();
+        let count_at = 8 + 8 + Group::state_key(&state).unwrap().len();
+        oversized[count_at..count_at + 4].copy_from_slice(&257u32.to_be_bytes());
+        assert!(StateSnapshot::decode(&oversized)
+            .unwrap()
+            .verify_all(&state)
+            .is_err());
+    }
+    #[test]
+    fn selected_history_replays_a_returned_value_without_changing_legacy_snapshot_semantics() {
+        let mut history = History::empty_retained();
+        for alias in ["first", "second", "first"] {
+            history.push_selected(payload::Identity{kind:"host".into(),id:"1".repeat(16),scope:Some(crate::sync::records_v3::HostScope::Local)},payload::Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":alias,"hostname":"test.invalid","auth":"password"})).unwrap())).unwrap();
+        }
+        let hash = "1".repeat(64);
+        let mut group = Group {
+            meta: Metadata {
+                source: None,
+                state: Some(hash.clone()),
+                planned: false,
+                ordered: true,
+                admitted: BTreeSet::from([hash]),
+                floors: vec![],
+                controls: vec![super::super::super::adoption::captured::ControlMinimum {
+                    highwater: super::super::super::trust::Highwater {
+                        revision: 0,
+                        head: "2".repeat(64),
+                    },
+                    auth_epoch: 1,
+                }],
+            },
+            rows: rows(history).unwrap(),
+        };
+        assert_eq!(group.history().unwrap().into_rows().len(), 3);
+        group.meta.ordered = false;
+        assert_eq!(group.history().unwrap().into_rows().len(), 2);
+        let old = serde_json::to_value(&group.meta).unwrap();
+        assert!(old.get("ordered").is_none());
+        assert!(!serde_json::from_value::<Metadata>(old).unwrap().ordered);
     }
 }

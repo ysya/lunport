@@ -275,7 +275,7 @@ fn decode_history(
     key: &[u8; 32],
     bytes: &[u8],
     state: &SyncStateV3,
-) -> Result<super::source_package::snapshot::Group, AppError> {
+) -> Result<Vec<super::source_package::snapshot::Group>, AppError> {
     if bytes.len() < 12 || bytes.len() > MAX_HISTORY_FILE || !bytes.starts_with(HISTORY_MAGIC) {
         return Err(invalid());
     }
@@ -300,7 +300,7 @@ fn decode_history(
             )
             .map_err(|_| invalid())?,
     );
-    super::source_package::snapshot::StateSnapshot::decode(&plain)?.verify(state)
+    super::source_package::snapshot::StateSnapshot::decode(&plain)?.verify_all(state)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -446,9 +446,12 @@ pub fn prepare(
                         workspace.identity_slot.as_deref(),
                         false,
                     )?;
-                    let snapshot = super::source_package::snapshot::StateSnapshot::create(
-                        state, &identity,
-                    )?;
+                    let groups =
+                        super::source_package::Package::replacement_history_groups(env, state)?;
+                    let snapshot =
+                        super::source_package::snapshot::StateSnapshot::create_groups(
+                            state, &identity, groups,
+                        )?;
                     let bytes = encode_history(&context, &key, snapshot.bytes())?;
                     dir.publish(&history_name, &bytes)?;
                     bytes

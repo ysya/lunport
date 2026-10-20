@@ -36,6 +36,7 @@ pub struct Status {
     pub has_session: bool,
     pub needs_recovery: bool,
     pub replacement_pending: bool,
+    pub needs_reconciliation: bool,
     pub can_sync: bool,
     pub login_pending: bool,
     pub root_fingerprint: Option<String>,
@@ -100,6 +101,7 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
                     && ws.is_some_and(|w| w.control.anchor.is_none())
         }),
         replacement_pending: ws.is_some_and(|w| w.replacement.is_some()),
+        needs_reconciliation: ws.is_some_and(super::replacement_reconciliation::required),
         can_sync: ws.is_some_and(Workspace::can_upload)
             && core
                 .central_session

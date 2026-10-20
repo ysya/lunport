@@ -52,6 +52,11 @@ impl Target {
         if owner.control.cutover || owner.control.phase != Phase::Enrolled {
             return Err(invalid());
         }
+        Self::historical(owner)
+    }
+    /// Scope comparison for passive captured facts. Never a legacy transport target.
+    pub(super) fn historical(owner: &Workspace) -> Result<Self, AppError> {
+        owner.validate()?;
         Ok(Self {
             profile: owner.control.profile.locator.clone(),
             anchor: owner.control.anchor.clone().ok_or_else(invalid)?,

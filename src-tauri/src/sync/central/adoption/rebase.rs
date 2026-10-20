@@ -4,7 +4,7 @@ use super::super::{
     active_read::VerifiedLibrary,
     crypto::{DeviceKeys, RecordEnvelope},
     payload::{self, Catalog, Data},
-    projection::{self, PublicData},
+    projection::PublicData,
     rekey::{self, Version},
     wire::canonical,
 };
@@ -12,7 +12,7 @@ use super::*;
 use crate::sync::records_v3::HostScope;
 fn catalog(read: &VerifiedLibrary) -> Result<Catalog, AppError> {
     let owner = merge::current_owner(read.previous_owner(), read)?;
-    let inventory = projection::Plan::inventory(owner, read.keys())?;
+    let inventory = super::merge::inventory(owner, read.keys())?;
     if !inventory.complete() {
         return Err(invalid());
     }
@@ -254,7 +254,7 @@ impl merge::Plan {
             );
         }
         shadow.validate()?;
-        if !projection::Plan::inventory(shadow, read.keys())?.complete() {
+        if !super::merge::inventory(shadow, read.keys())?.complete() {
             return Err(invalid());
         }
         Ok(())

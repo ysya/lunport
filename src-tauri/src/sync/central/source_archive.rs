@@ -41,6 +41,8 @@ pub(super) struct Context {
     operation: String,
     snapshot: String,
     generation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
 }
 impl Context {
     fn validate(&self) -> Result<(), AppError> {
@@ -61,6 +63,13 @@ impl Context {
         {
             return Err(invalid());
         }
+        if self
+            .purpose
+            .as_deref()
+            .is_some_and(|p| p != "replacement-history-v1")
+        {
+            return Err(invalid());
+        }
         self.device.keys.validate()?;
         number(&self.generation, true)?;
         Ok(())
@@ -68,13 +77,22 @@ impl Context {
     fn owner(owner: &Workspace) -> Result<(), AppError> {
         owner.validate()?;
         owner.require_key_recipients()?;
-        if owner.control.cutover || owner.control.phase != Phase::Enrolled {
+        if owner.replacement_archives.is_empty()
+            && (owner.control.cutover || owner.control.phase != Phase::Enrolled)
+            || !owner.replacement_archives.is_empty()
+                && !matches!(owner.control.phase, Phase::Enrolled | Phase::Active)
+        {
             return Err(invalid());
         }
         Ok(())
     }
     fn fresh(owner: &Workspace, generation: u64) -> Result<Self, AppError> {
         Self::owner(owner)?;
+        if !owner.replacement_archives.is_empty()
+            && !super::replacement_reconciliation::required(owner)
+        {
+            return Err(invalid());
+        }
         let result = Self {
             anchor: owner.control.anchor.clone().ok_or_else(invalid)?,
             locator: owner.control.profile.locator.clone(),
@@ -83,6 +101,8 @@ impl Context {
             operation: crypto::random_id(16)?,
             snapshot: crypto::random_id(16)?,
             generation: generation.to_string(),
+            purpose: (!owner.replacement_archives.is_empty())
+                .then(|| "replacement-history-v1".into()),
         };
         result.validate()?;
         Ok(result)
@@ -114,7 +134,7 @@ impl Context {
     }
     fn scope(&self) -> Result<String, AppError> {
         self.validate()?;
-        Ok(crypto::hash(&canonical(&[
+        let mut bytes = canonical(&[
             "lunport-local-source-key-v1",
             &self.anchor.origin,
             &self.locator,
@@ -125,7 +145,11 @@ impl Context {
             &self.device.keys.signing,
             &self.device.keys.encryption,
             &self.operation,
-        ])?))
+        ])?;
+        if let Some(purpose) = &self.purpose {
+            bytes.extend(canonical(&["lunport-source-purpose-v1", purpose])?);
+        }
+        Ok(crypto::hash(&bytes))
     }
     fn key_role(&self, profile: &Profile) -> Result<String, AppError> {
         self.matches_profile(profile)?;
@@ -150,7 +174,10 @@ impl Receipt {
     pub(super) fn matches_selected(&self, owner: &Workspace) -> Result<(), AppError> {
         self.validate()?;
         self.context.matches_owner(owner)?;
-        if self.context.device != owner.control.device {
+        if self.context.device != owner.control.device
+            || self.context.purpose.as_deref()
+                != (!owner.replacement_archives.is_empty()).then_some("replacement-history-v1")
+        {
             return Err(invalid());
         }
         Ok(())

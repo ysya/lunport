@@ -25,7 +25,9 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"LPSRCPK3";
 const FROZEN_MAGIC: &[u8; 8] = b"LPSRCPK2";
 const MAX_BYTES: usize = 192 * 1024 * 1024;
 mod coverage;
+mod legacy_book;
 mod retained;
+mod replacement_history;
 pub(in crate::sync::central) mod snapshot;
 /// Only explicit native encode/decode. Never a frontend DTO or an SSH private-key export.
 pub(super) struct Package {
@@ -69,6 +71,33 @@ fn state(files: &Files, name: &str) -> Result<SyncStateV3, AppError> {
     Ok(state)
 }
 impl Package {
+    pub(super) fn decryptors(&self) -> &Snapshot {
+        &self.decryptors
+    }
+    pub(super) fn replacement_sources(
+        state: &SyncStateV3,
+        files: &Files,
+        keys: &dyn crate::sync::env::Keychain,
+    ) -> Result<Sources, AppError> {
+        legacy_book::discover(state, files, keys)
+    }
+    fn restore_sources(
+        state: &SyncStateV3,
+        files: &Files,
+        keys: &dyn crate::sync::env::Keychain,
+        bytes: &[u8],
+    ) -> Result<Sources, AppError> {
+        if super::replacement_reconciliation::projected(state) {
+            let sources = legacy_book::discover(state, files, keys)?;
+            if sources.encode_local()?.as_slice() != bytes {
+                return Err(invalid());
+            }
+            Ok(sources)
+        } else {
+            Sources::decode_local(bytes, state)
+        }
+    }
+
     /// Modern retained states; v1/v2 histories use their separate strict admission below.
     fn retained_states(&self) -> Result<Vec<SyncStateV3>, AppError> {
         let mut result = crate::sync::record_import::inventory::read_all(
@@ -131,6 +160,9 @@ impl Package {
                     return Err(invalid());
                 }
             }
+        }
+        if super::replacement_reconciliation::projected(&self.state) {
+            result.push(self.state.clone());
         }
         // A historical image may name an older backup that the selected state no longer names.
         // It is complete only when that exact backup is captured and read as a state image too.
@@ -198,7 +230,7 @@ impl Package {
             return Err(crate::sync::runtime::superseded());
         }
         let book = sources.encode_local()?;
-        let sources = Sources::decode_local(&book, &archived)?;
+        let sources = Self::restore_sources(&archived, &files, &decryptors, &book)?;
         // Validate the full path set now, before any archive key or file can be created.
         files.validate_archive()?;
         Ok(Self {
@@ -220,6 +252,9 @@ impl Package {
         }
         let mut inventory = match &self.frozen {
             Some(frozen) => frozen.inventory(&self.sources, &self.state)?,
+            None if super::replacement_reconciliation::projected(&self.state) => {
+                Inventory::for_replacement(&self.sources, &self.state)?
+            }
             None => Inventory::from_state(&self.sources, &self.state)?,
         };
         for image in self
@@ -323,7 +358,7 @@ impl Package {
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
         self.require_own_supported_files()?;
-        let mut normalized = self.state.clone();
+        let mut normalized = super::replacement_reconciliation::physical_view(&self.state)?;
         let private_inputs = self
             .own_record_inputs()?
             .admit_known()?
@@ -356,6 +391,9 @@ impl Package {
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<super::migration_library::History, AppError> {
         self.require_own_supported_files()?;
+        if super::replacement_reconciliation::projected(&self.state) {
+            return self.replacement_structured_history(keys, references);
+        }
         if self.frozen.is_some() {
             drop(self.own_record_inputs()?); // Compare the captured state image before deriving a passive candidate.
             let prepared = self
@@ -383,7 +421,7 @@ impl Package {
                         .collect::<Result<_, _>>()?,
                 );
         }
-        let mut normalized = self.state.clone();
+        let mut normalized = super::replacement_reconciliation::physical_view(&self.state)?;
         let known = self
             .own_record_inputs()?
             .admit_known()?
@@ -407,6 +445,50 @@ impl Package {
                 .map(|g| g.history())
                 .collect::<Result<_, _>>()?,
         )
+    }
+    // Keep replacement-only scratch state out of every ordinary source reader's stack frame.
+    #[inline(never)]
+    fn replacement_structured_history(
+        &self,
+        keys: &VaultKeys,
+        references: &BTreeMap<String, KeyStorage>,
+    ) -> Result<super::migration_library::History, AppError> {
+        let inventory = self.own_record_inputs()?;
+        let groups = self.state_groups()?;
+        let current = groups
+            .iter()
+            .find(|g| g.require_state(&self.state).is_ok())
+            .ok_or_else(invalid)?;
+        let mut view = super::replacement_reconciliation::physical_view(&self.state)?;
+        let known = inventory
+            .admit_known()?
+            .normalize_legacy(&mut view, Some(&self.files))?;
+        let materials = Materials::from_files_with_key_inputs(
+            &view,
+            keys,
+            &self.files,
+            &self.decryptors,
+            references,
+            known.key_inputs()?,
+        )?;
+        // This passive empty account gives retained legacy catalog versions a scope. It
+        // carries no credentials or control authority and is never selected or published.
+        let vault = self
+            .state
+            .local
+            .central
+            .as_ref()
+            .and_then(|owner| owner.control.personal_vault.as_deref())
+            .ok_or_else(invalid)?;
+        view.account = Some(crate::sync::state_v2::AccountState::new(vault));
+        let physical = super::migration_library::prepare(&view, &known, materials)?;
+        let mut retained = vec![physical];
+        for group in &groups {
+            if group.require_state(&self.state).is_err() {
+                retained.push(group.history()?);
+            }
+        }
+        current.history()?.with_retained(retained)
     }
     pub(in crate::sync::central) fn captured_initial_digest(&self) -> Result<&str, AppError> {
         self.frozen.as_ref().ok_or_else(invalid)?.initial_digest()
@@ -454,7 +536,12 @@ impl Package {
         }
         let files = self.files.encode_local()?;
         let sources = self.sources.encode_local()?;
-        drop(Sources::decode_local(&sources, &self.state)?);
+        drop(Self::restore_sources(
+            &self.state,
+            &self.files,
+            &self.decryptors,
+            &sources,
+        )?);
         let decryptors = self.decryptors.encode_local()?;
         let frozen = self
             .frozen
@@ -533,11 +620,9 @@ impl Package {
             super::migration_files::MAX_ARCHIVE_BYTES,
         )?)?;
         let state = state(&files, &name)?;
-        let sources = Sources::decode_local(
-            section(&mut input, super::migration_sources::MAX_BOOK_BYTES)?,
-            &state,
-        )?;
+        let book = section(&mut input, super::migration_sources::MAX_BOOK_BYTES)?;
         let decryptors = Snapshot::decode_local(section(&mut input, 2 * 1024 * 1024)?)?;
+        let sources = Self::restore_sources(&state, &files, &decryptors, book)?;
         let frozen_bytes = if magic == Some(SNAPSHOT_MAGIC.as_slice()) {
             Some(section(
                 &mut input,

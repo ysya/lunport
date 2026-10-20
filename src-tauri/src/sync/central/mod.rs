@@ -84,6 +84,7 @@ pub mod replacement;
 pub mod replacement_flow;
 mod replacement_proof;
 pub(crate) mod replacement_publication;
+mod replacement_reconciliation;
 mod owner;
 pub mod rekey;
 pub mod round;
@@ -108,3 +109,5 @@ pub(super) use projection_capture::public_candidate as capture_for_test;
 pub(super) use projection_state::tests::initial as library_fixture_for_test;
 #[cfg(test)]
 pub(super) use projection_delta::tests::append as append_library_for_test;
+
+pub(in crate::sync) use replacement_reconciliation::{required as replacement_reconciliation_required, verify_completed as verify_reconciliation_completed};

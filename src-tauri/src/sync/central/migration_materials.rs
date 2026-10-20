@@ -18,6 +18,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 mod files;
+pub(super) use files::observe_vault_images;
 mod records;
 
 /// No Debug/Serialize: original private bytes are only consumed by explicit native encryption.

@@ -52,6 +52,9 @@ impl Publication<'_> {
             .central
             .as_ref()
             .ok_or_else(|| failure("initial publication has no proposed owner"))?;
+        if self.prepared.projection().reconciliation() {
+            central::verify_reconciliation_completed(before, candidate)?;
+        }
         let session = self.prepared.session();
         let grant = session
             .device
@@ -60,9 +63,15 @@ impl Publication<'_> {
         if before != self.prepared.projection().source()
             || candidate != &self.candidate
             || generation != self.generation()
-            || before.local.central_projection.is_some()
-            || owner.control.cutover
-            || owner.control.phase != AccountPhase::Enrolled
+            || !self.prepared.projection().reconciliation()
+                && (before.local.central_projection.is_some()
+                    || owner.control.cutover
+                    || owner.control.phase != AccountPhase::Enrolled)
+            || self.prepared.projection().reconciliation()
+                && !matches!(
+                    owner.control.phase,
+                    AccountPhase::Enrolled | AccountPhase::Active
+                )
             || candidate.version != crate::sync::records_v3::CENTRAL_STATE_VERSION
             || candidate.local.central_projection.is_none()
             || !after.control.cutover

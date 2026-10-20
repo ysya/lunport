@@ -121,7 +121,8 @@ pub(super) fn cached(
 }
 fn joining(state: &SyncStateV3) -> Result<bool, AppError> {
     let w = state.local.central.as_ref().ok_or_else(invalid)?;
-    Ok(w.control.proof.as_ref().ok_or_else(invalid)?.genesis.first != w.control.device)
+    Ok(super::replacement_reconciliation::required(w)
+        || w.control.proof.as_ref().ok_or_else(invalid)?.genesis.first != w.control.device)
 }
 pub fn status(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppError> {
     let state = scope.check(env)?;
@@ -129,7 +130,7 @@ pub fn status(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppError> {
         .local
         .central
         .as_ref()
-        .is_some_and(|w| w.control.cutover)
+        .is_some_and(|w| w.control.cutover && !super::replacement_reconciliation::required(w))
     {
         return Ok(Progress {
             phase: "complete",
@@ -194,7 +195,7 @@ pub(in crate::sync) fn pending(env: &SyncEnv) -> Result<bool, AppError> {
     let Some(w) = state.local.central.as_ref() else {
         return Ok(false);
     };
-    if w.control.cutover {
+    if w.control.cutover && !super::replacement_reconciliation::required(w) {
         return Ok(false);
     }
     super::source_archive::initial_pending(env, w)
@@ -272,7 +273,7 @@ fn run(
         .local
         .central
         .as_ref()
-        .is_some_and(|w| w.control.cutover)
+        .is_some_and(|w| w.control.cutover && !super::replacement_reconciliation::required(w))
     {
         super::initial_transaction::complete_saved(env)?;
         return Ok(Preparation {
@@ -297,11 +298,32 @@ fn run_first(
     }
     let state = scope.check(env)?;
     let keys = keys(env, scope)?;
-    let references = BTreeMap::<String, KeyStorage>::new();
     if reserved(env, &state)? {
-        let prepared = initial_publication::resume(env, &keys, &references)?;
-        return publish(env, scope, prepared, &keys);
+        return resume_reserved(env, scope, &keys);
     }
+    run_unreserved(env, scope, action, budget, &state, &keys)
+}
+// Resumption reads nested journals. Do not retain the unrelated capture/staging temporaries
+// from the unreserved path on that reader's stack.
+#[inline(never)]
+fn resume_reserved(
+    env: &SyncEnv,
+    scope: &Scope,
+    keys: &VaultKeys,
+) -> Result<Preparation, AppError> {
+    let prepared = initial_publication::resume(env, keys, &BTreeMap::new())?;
+    publish(env, scope, prepared, keys)
+}
+#[inline(never)]
+fn run_unreserved(
+    env: &SyncEnv,
+    scope: &Scope,
+    action: Action,
+    budget: &Budget,
+    state: &SyncStateV3,
+    keys: &VaultKeys,
+) -> Result<Preparation, AppError> {
+    let references = BTreeMap::<String, KeyStorage>::new();
     let capturing = {
         let life = env.runtime.lifecycle.lock().unwrap();
         let owner = state.local.central.as_ref().ok_or_else(invalid)?;
@@ -443,11 +465,13 @@ pub(super) fn background(env: &SyncEnv, report: &mut round::Report) -> Result<bo
 /// Read protected startup state outside Core, then cache only the ordinary edit barrier.
 pub(in crate::sync) fn refresh_edit_gate(env: &SyncEnv) -> Result<(), AppError> {
     let state = record_runtime::snapshot(env)?.0;
-    let frozen = if let Some(w) = &state.local.central {
-        !w.control.cutover && super::source_archive::initial_pending(env, w)?
-    } else {
-        false
-    };
+    let frozen = state.local.central_cache_source.is_some()
+        || if let Some(w) = &state.local.central {
+            (!w.control.cutover || super::replacement_reconciliation::required(w))
+                && super::source_archive::initial_pending(env, w)?
+        } else {
+            false
+        };
     let mut core = env.runtime.core.lock().unwrap();
     if record_runtime::active_state(&core)?.local.central != state.local.central {
         return Err(crate::sync::runtime::superseded());

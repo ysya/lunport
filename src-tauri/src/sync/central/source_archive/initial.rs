@@ -21,11 +21,15 @@ struct Initial {
     stage: Stage,
 }
 fn role(owner: &Workspace) -> Result<String, AppError> {
-    Ok(owner
-        .control
-        .profile
-        .profile()?
-        .slot("source-migration-initial"))
+    let profile = owner.control.profile.profile()?;
+    if owner.replacement_archives.is_empty() {
+        Ok(profile.slot("source-migration-initial"))
+    } else {
+        profile.device_slot(
+            "source-reconciliation-initial",
+            owner.identity_slot.as_deref(),
+        )
+    }
 }
 impl Initial {
     fn validate(&self, owner: &Workspace) -> Result<(), AppError> {

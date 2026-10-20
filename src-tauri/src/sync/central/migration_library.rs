@@ -41,6 +41,14 @@ impl History {
     ) -> Result<(), AppError> {
         self.append(identity, data, false)
     }
+    /// Preserve an explicitly verified selected value after historical occurrences of that value.
+    pub(in crate::sync::central) fn push_selected(
+        &mut self,
+        identity: Identity,
+        data: Data,
+    ) -> Result<(), AppError> {
+        self.append(identity, data, true)
+    }
     /// Ancestor-only items remain inactive; selected library versions always come last.
     pub(in crate::sync::central) fn with_retained(
         self,

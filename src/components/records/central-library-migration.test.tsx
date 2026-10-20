@@ -27,6 +27,7 @@ const status: CentralStatus = {
   login_pending: false,
   needs_recovery: false,
   replacement_pending: false,
+  needs_reconciliation: false,
   can_sync: false,
   pending: 0,
   conflicts: 0,
@@ -142,6 +143,15 @@ describe("whole-library review and continuation", () => {
     expect(text(html)).toContain("Connect this device");
     expect(text(html)).toContain("separate merge before upload");
     expect(text(html)).toContain("Continue preparing");
+  });
+  it("offers reviewed history reconciliation for an active replacement and hides it after completion", () => {
+    const current = { ...status, phase: "active" as const, needs_reconciliation: true };
+    const html = render({ mode: "join", phase: "review" }, current).html;
+    expect(text(html)).toContain("Reconcile restored library");
+    expect(text(html)).toContain("Original files stay preserved");
+    expect(text(html)).toContain("Review complete library");
+    expect(render({}, { ...current, needs_reconciliation: false }).html).toBe("");
+    expect(render({}, { ...current, needs_recovery: true }).html).toBe("");
   });
   it("hides migration actions for an unapproved, signed-out or replacement device", () => {
     for (const partial of [

@@ -517,6 +517,9 @@ mod tests {
         .intent()
         .unwrap();
         let old = intent.candidate(&old, &old_keys, &signer, &entry).unwrap();
+        // Model the real pre-replacement source on disk before signing its complete history.
+        let current_disk = Zeroizing::new(fs::read(&env.state_path).unwrap());
+        fs::write(&env.state_path, serde_json::to_vec(&old).unwrap()).unwrap();
         let receipt = {
             let life = env.runtime.lifecycle.lock().unwrap();
             replacement_archive::prepare(&env, &life, &old, 42, &"8".repeat(32))
@@ -525,6 +528,7 @@ mod tests {
                 .clone()
         };
         assert!(receipt.history_hash.is_some());
+        fs::write(&env.state_path, current_disk.as_slice()).unwrap();
         let root = env
             .state_path
             .parent()
@@ -908,6 +912,8 @@ mod tests {
         let (device, _, _) = source_capture::tests::fixture(false);
         let env = device.env();
         let (state, _, _, _, _, _) = super::super::local_material::tests::fixture(true);
+        let current_disk = Zeroizing::new(std::fs::read(&env.state_path).unwrap());
+        std::fs::write(&env.state_path, serde_json::to_vec(&state).unwrap()).unwrap();
         let profile = state
             .local
             .central
@@ -940,6 +946,7 @@ mod tests {
                 .receipt()
                 .clone()
         };
+        std::fs::write(&env.state_path, current_disk.as_slice()).unwrap();
         assert!(upgraded.history_hash.is_some());
         assert_eq!(upgraded.context, receipt.context);
         assert_eq!(upgraded.file_hash, receipt.file_hash);

@@ -1804,3 +1804,386 @@ fn signed_historical_floor_blocks_a_valid_older_read_before_merge_or_publication
         assert_eq!(archive_bytes(&f.peer.env()), originals);
     });
 }
+
+
+/// A persisted post-cutover replacement: old A keeps a signed archive, selected B keeps only
+/// its own protected role/session. The old device's local receipts cannot authorize B.
+fn replacement_fixture() -> Fixture {
+    replacement_fixture_kind(false)
+}
+fn replacement_fixture_kind(legacy: bool) -> Fixture {
+    let mut f = fixture_legacy(false, false, legacy);
+    let old_env = f.first.env();
+    let raw = Zeroizing::new(crate::sync::slot_rules::test_keys::encrypted());
+    let (initial, generation) = record_runtime::snapshot(&old_env).unwrap();
+    let invocation = crate::sync::record_import::central_local::invocation(&initial)
+        .unwrap()
+        .with_generation(generation);
+    let imported = crate::sync::record_keys::import_local_scoped(
+        &old_env,
+        "unsent-replacement-key",
+        raw,
+        crate::vault::store::EntryOrigin::Imported,
+        Some(&invocation),
+    )
+    .unwrap();
+    let payload:crate::sync::records_v3::HostPayload=serde_json::from_value(json!({"schema":2,"alias":"old-local-edit","hostname":"retained.invalid","auth":"key","key_id":imported.key_id})).unwrap();
+    crate::sync::record_commands::edit_records(&old_env, |state, now| {
+        crate::sync::record_repository::create_host(
+            state,
+            &"9".repeat(16),
+            crate::sync::records_v3::HostScope::Local,
+            payload.clone(),
+            now,
+        )
+        .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let original = record_runtime::snapshot(&old_env).unwrap().0;
+    let old = original.local.central.as_ref().unwrap();
+    assert!(!old.replica.as_ref().unwrap().pending.is_empty());
+    let operation = "8".repeat(32);
+    let receipt = {
+        let life = old_env.runtime.lifecycle.lock().unwrap();
+        super::super::replacement_archive::prepare(&old_env, &life, &original, 0, &operation)
+            .unwrap()
+            .receipt()
+            .clone()
+    };
+    assert!(receipt.history_hash.is_some());
+    let new_session = controller::context(&f.peer.env()).unwrap();
+    let profile = old.control.profile.profile().unwrap();
+    let encoded = f
+        .peer
+        .keychain
+        .get(&profile.slot("device"))
+        .unwrap()
+        .unwrap();
+    f.first
+        .keychain
+        .set(
+            &profile.device_slot("device", Some(&operation)).unwrap(),
+            &encoded,
+        )
+        .unwrap();
+    let identity = Arc::new(
+        DeviceIdentity::load_selected(&f.first.keychain, &profile, Some(&operation), false)
+            .unwrap(),
+    );
+    let mut next = original.clone();
+    let mut owner = record_runtime::snapshot(&f.peer.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    owner.identity_slot = Some(operation.clone());
+    owner.control.cutover = true;
+    owner.control.phase = super::super::client_state::Phase::Active;
+    owner.control.library = old.control.library.clone();
+    let mut replica = old.replica.as_ref().unwrap().clone();
+    replica.pending.clear();
+    replica.conflicts.clear();
+    owner.replica = Some(replica);
+    owner
+        .replacement_archives
+        .push(super::super::replacement_publication::Archive {
+            receipt,
+            previous_selection: old.identity_slot.clone(),
+            highwater: old.control.highwater.clone(),
+            minimums: vec![old.replica.as_ref().unwrap().checkpoint.clone()],
+            creation_head: Some(old.replica.as_ref().unwrap().creation_head.clone()),
+            creation_authorization_epoch: Some(
+                old.replica.as_ref().unwrap().creation_authorization_epoch,
+            ),
+            target: identity.device(),
+            approved_head: owner.control.highwater.as_ref().unwrap().head.clone(),
+            route: super::super::replacement::Route::TrustedDevice,
+            needs_reconciliation: true,
+        });
+    owner.validate().unwrap();
+    next.local.central = Some(owner.clone());
+    next.local.credential_approvals.clear();
+    assert!(next
+        .local
+        .central_projection
+        .as_ref()
+        .unwrap()
+        .validate(&owner)
+        .is_err());
+    next.local.central_projection = None;
+    next.local.central_cache_source = Some(Box::new(
+        owner.replacement_archives.last().unwrap().receipt.clone(),
+    ));
+    crate::sync::records_v3::validate_state(&next).unwrap();
+    // Only test setup models the already durable replacement. Runtime code must use its
+    // sealed replacement publication; no ordinary mutation exception is added for this fixture.
+    fs::write(&old_env.state_path, serde_json::to_vec(&next).unwrap()).unwrap();
+    let probe = record_runtime::probe_startup(&old_env.state_path, "replacement");
+    record_runtime::activate_probe(&mut f.first.runtime.core.lock().unwrap(), probe).unwrap();
+    f.first.runtime.core.lock().unwrap().central_session = Some(Arc::new(Session {
+        profile: new_session.profile.clone(),
+        identity: Some(identity),
+        tokens: Arc::new(LoginTokens {
+            issuer: new_session.tokens.issuer.clone(),
+            subject: new_session.tokens.subject.clone(),
+            nonce: new_session.tokens.nonce.clone(),
+            access: new_session.tokens.access.clone(),
+            refresh: new_session.tokens.refresh.clone(),
+            expires_in: std::time::Duration::from_secs(3600),
+        }),
+        device: Some(DeviceSession::synthetic_for_test(
+            owner.control.account_id.clone(),
+            DeviceState::Active,
+            owner.control.auth_epoch,
+            std::time::Duration::from_secs(3600),
+        )),
+        device_access_denied: false,
+        tokens_started: std::time::Instant::now(),
+    }));
+    std::mem::swap(&mut f.first, &mut f.peer);
+    f
+}
+#[test]
+fn replacement_history_reconciles_unsent_private_material_and_old_local_receipts_after_restart()
+{
+    let f = replacement_fixture();
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let before = record_runtime::snapshot(&env).unwrap().0;
+        let owner = before.local.central.as_ref().unwrap();
+        assert!(!owner.can_upload());
+        assert!(super::super::projection::Plan::current(owner.clone(), &f.keys).is_err());
+        assert!(super::super::projection::Plan::inventory(owner.clone(), &f.keys).is_err());
+        assert!(super::super::projection::Plan::reconciliation_inventory(
+            owner.clone(),
+            &f.keys
+        )
+        .unwrap()
+        .complete());
+        let generation = record_runtime::snapshot(&env).unwrap().1;
+        let mut forged = before.clone();
+        forged.local.central_cache_source = None;
+        for archive in &mut forged.local.central.as_mut().unwrap().replacement_archives {
+            archive.needs_reconciliation = false;
+        }
+        assert!(record_runtime::commit_candidate(&env, generation, forged.clone()).is_err());
+        assert!(record_runtime::save_active(&env.state_path, &forged).is_err());
+        assert_eq!(record_runtime::snapshot(&env).unwrap().0, before);
+        let archive_path = fs::read_dir(
+            env.state_path
+                .parent()
+                .unwrap()
+                .join("central-recovery-archives"),
+        )
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "lparch"))
+        .unwrap();
+        let bytes = fs::read(&archive_path).unwrap();
+        let mut changed = bytes.clone();
+        let n = changed.len() - 1;
+        changed[n] ^= 1;
+        fs::write(&archive_path, &changed).unwrap();
+        let expected_scope = Scope::from_state(&before).unwrap();
+        assert!(migration_flow::prepare(&env, &expected_scope).is_err());
+        assert_eq!(fs::read(&archive_path).unwrap(), changed);
+        assert_eq!(record_runtime::snapshot(&env).unwrap().0, before);
+        assert_eq!(s.rows.lock().unwrap().len(), f.rows.len());
+        fs::write(&archive_path, &bytes).unwrap();
+        let originals: BTreeMap<_, _> = fs::read_dir(
+            env.state_path
+                .parent()
+                .unwrap()
+                .join("central-recovery-archives"),
+        )
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (p.file_name().unwrap().to_owned(), fs::read(p).unwrap())
+        })
+        .collect();
+        let (scope, ticket) = prepared(&f);
+        assert_eq!(
+            load(&env).unwrap().unwrap().state.policy,
+            "replacement-history-v1"
+        );
+        assert_eq!(s.rows.lock().unwrap().len(), f.rows.len());
+        let old_role = owner.control.profile.profile().unwrap().slot("device");
+        f.peer.keychain.delete(&old_role).unwrap();
+        reopen(&f.peer);
+        assert!(migration_flow::confirm(&env, &scope, &"0".repeat(64)).is_err());
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        let calls = s.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let limited = Budget::limited(0, std::time::Duration::from_secs(30));
+        let paused = run(&env, &scope, Action::Continue, &limited).unwrap();
+        assert!(matches!(
+            paused.progress.phase,
+            "staging" | "reading" | "publishing"
+        ));
+        assert!(paused.progress.approved);
+        assert_eq!(limited.used(), 0);
+        assert_eq!(s.calls.load(std::sync::atomic::Ordering::SeqCst), calls);
+        assert_eq!(record_runtime::snapshot(&env).unwrap().0, before);
+        finish(&f, &scope);
+        let after = record_runtime::snapshot(&env).unwrap().0;
+        let current = after.local.central.as_ref().unwrap();
+        assert!(current.can_upload());
+        assert!(current
+            .replacement_archives
+            .iter()
+            .all(|a| !a.needs_reconciliation));
+        super::super::replacement_reconciliation::verify_completed(&before, &after).unwrap();
+        assert!(owner.verify_transition(current).is_err());
+        after
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .validate(current)
+            .unwrap();
+        assert!(s.rows.lock().unwrap().starts_with(&f.rows));
+        let vault = crate::vault::store::read_vault(
+            &crate::vault::store::vault_path(&env.state_path),
+            &f.peer.keychain,
+        )
+        .unwrap();
+        let key = after
+            .local
+            .keys
+            .values()
+            .find(|k| k.public.name == "unsent-replacement-key")
+            .unwrap();
+        assert_eq!(
+            vault.get(&key.vault_id).unwrap().unwrap().private_key,
+            crate::sync::slot_rules::test_keys::encrypted()
+        );
+        let serialized = serde_json::to_string(&after).unwrap();
+        assert!(serialized.contains("old-local-edit"));
+        let kept: BTreeMap<_, _> = fs::read_dir(
+            env.state_path
+                .parent()
+                .unwrap()
+                .join("central-recovery-archives"),
+        )
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            (p.file_name().unwrap().to_owned(), fs::read(p).unwrap())
+        })
+        .collect();
+        assert_eq!(kept, originals);
+        let completed = record_runtime::snapshot(&env).unwrap();
+        assert_eq!(
+            migration_flow::advance(&env, &scope).unwrap().phase,
+            "complete"
+        );
+        assert_eq!(record_runtime::snapshot(&env).unwrap(), completed);
+    });
+}
+
+#[test]
+fn replacement_history_keeps_its_block_until_vault_and_cache_publication_resume_together() {
+    use crate::sync::record_import::{with_test_step, PublishStep};
+    let f = replacement_fixture();
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let original = record_runtime::snapshot(&env).unwrap().0;
+        let (scope, ticket) = prepared(&f);
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        let old = original
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .control
+            .profile
+            .profile()
+            .unwrap()
+            .slot("device");
+        f.peer.keychain.delete(&old).unwrap();
+        let mut stopped = false;
+        for _ in 0..30 {
+            match with_test_step(
+                |step| {
+                    if step == PublishStep::VaultSaved {
+                        Err(invalid())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || migration_flow::advance(&env, &scope),
+            ) {
+                Ok(progress) => assert_ne!(progress.phase, "complete"),
+                Err(_) => {
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+        assert!(stopped);
+        let blocked = record_runtime::snapshot(&env).unwrap().0;
+        assert!(super::super::replacement_reconciliation::required(
+            blocked.local.central.as_ref().unwrap()
+        ));
+        assert!(blocked.local.central_cache_source.is_some());
+        assert_eq!(blocked, original);
+        reopen(&f.peer);
+        finish(&f, &scope);
+        let completed = record_runtime::snapshot(&env).unwrap().0;
+        assert!(completed.local.central_cache_source.is_none());
+        assert!(completed.local.central.as_ref().unwrap().can_upload());
+        assert!(s.rows.lock().unwrap().starts_with(&f.rows));
+    });
+}
+
+#[test]
+fn replacement_history_requires_retirement_for_original_legacy_books_and_keeps_their_data() {
+    let f = replacement_fixture_kind(true);
+    let mut s = service(&f);
+    assert!(super::super::source_capture::reconciliation_has_legacy(&f.peer.env()).unwrap());
+    let mut not_retired = retired_status(&f);
+    not_retired["phase"] = json!("committed");
+    let missing = migration_status_mock(&mut s, &f, not_retired);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let scope =
+            Scope::from_state(&record_runtime::snapshot(&f.peer.env()).unwrap().0).unwrap();
+        assert!(migration_flow::prepare(&f.peer.env(), &scope).is_err());
+        assert!(super::super::replacement_reconciliation::required(
+            record_runtime::snapshot(&f.peer.env())
+                .unwrap()
+                .0
+                .local
+                .central
+                .as_ref()
+                .unwrap()
+        ));
+        assert_eq!(s.rows.lock().unwrap().len(), f.rows.len());
+    });
+    missing.remove();
+    let _retired = migration_status_mock(&mut s, &f, retired_status(&f));
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        let loaded = load(&f.peer.env()).unwrap().unwrap();
+        let retained = loaded
+            .package
+            .structured_history(&f.keys, &BTreeMap::new())
+            .unwrap();
+        assert!(retained.rows().iter().any(|(_,data)|matches!(data,super::super::payload::Data::Key(private) if private.private()==crate::sync::slot_rules::test_keys::plain())));
+        drop(retained);
+        drop(loaded);
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        assert!(record_runtime::snapshot(&f.peer.env())
+            .unwrap()
+            .0
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .can_upload());
+        assert!(s.rows.lock().unwrap().starts_with(&f.rows));
+    });
+}

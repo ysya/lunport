@@ -85,6 +85,26 @@ impl Inventory {
     pub fn rows(&self) -> &[Item] {
         &self.rows
     }
+    pub(in crate::sync::central) fn for_replacement(
+        sources: &Sources,
+        state: &SyncStateV3,
+    ) -> Result<Self, AppError> {
+        if !super::super::replacement_reconciliation::projected(state) {
+            return Err(invalid());
+        }
+        Ok(Self {
+            rows: vec![],
+            bytes: 0,
+            positions: BTreeSet::new(),
+            keybook: super::super::crypto::hash(&sources.encode_local()?),
+            target: Some(super::frozen::Target::historical(
+                state.local.central.as_ref().ok_or_else(invalid)?,
+            )?),
+            frozen_context: None,
+            frozen: BTreeMap::new(),
+            minima: BTreeMap::new(),
+        })
+    }
     pub fn from_state(sources: &Sources, state: &SyncStateV3) -> Result<Self, AppError> {
         records_v3::validate_state(state).map_err(|_| invalid())?;
         drop(Sources::decode_local(&sources.encode_local()?, state)?);

@@ -20,6 +20,7 @@ pub(in crate::sync) struct Candidate {
     delta: Delta,
     manifest: String,
     observed: u64,
+    reconciliation: bool,
 }
 /// Verified material mappings only. Still no consent or Core publication authority.
 pub(in crate::sync) struct Prepared {
@@ -80,7 +81,15 @@ impl Candidate {
             plan.manifest.body.inventory_digest.clone(),
             &owner.control.highwater.as_ref().ok_or_else(invalid)?.head,
         )?;
-        Self::from_owner(source, owner, keys, plan.manifest.digest()?, observed, None)
+        Self::from_owner(
+            source,
+            owner,
+            keys,
+            plan.manifest.digest()?,
+            observed,
+            None,
+            false,
+        )
     }
     fn from_owner(
         source: &SyncStateV3,
@@ -89,11 +98,18 @@ impl Candidate {
         manifest: String,
         observed: u64,
         selections_override: Option<&BTreeMap<String, bool>>,
+        reconciliation: bool,
     ) -> Result<Self, AppError> {
         records_v3::validate_state(source).map_err(|_| invalid())?;
         if observed > MAX_SAFE_INTEGER
             || !super::wire::hex(&manifest, 64)
-            || source.local.central_projection.is_some()
+            || source.local.central_projection.is_some() && !reconciliation
+            || reconciliation
+                && !source
+                    .local
+                    .central
+                    .as_ref()
+                    .is_some_and(super::replacement_reconciliation::required)
         {
             return Err(invalid());
         }
@@ -125,6 +141,7 @@ impl Candidate {
         shadow.local.credential_approvals.clear();
         shadow.local.central = Some(owner);
         shadow.local.central_projection = None;
+        shadow.local.central_cache_source = None;
         shadow.pending_account = None;
         shadow.rotation = None;
         shadow.migration_gate = None;
@@ -146,6 +163,7 @@ impl Candidate {
             delta,
             manifest,
             observed,
+            reconciliation,
         })
     }
     pub(super) fn adopt(
@@ -155,9 +173,30 @@ impl Candidate {
         observed: u64,
         selections: &BTreeMap<String, bool>,
     ) -> Result<Self, AppError> {
+        Self::adopt_inner(source, read, commitment, observed, selections, false)
+    }
+    pub(super) fn reconcile(
+        source: &SyncStateV3,
+        read: &super::active_read::VerifiedLibrary,
+        commitment: &str,
+        observed: u64,
+        selections: &BTreeMap<String, bool>,
+    ) -> Result<Self, AppError> {
+        Self::adopt_inner(source, read, commitment, observed, selections, true)
+    }
+    fn adopt_inner(
+        source: &SyncStateV3,
+        read: &super::active_read::VerifiedLibrary,
+        commitment: &str,
+        observed: u64,
+        selections: &BTreeMap<String, bool>,
+        reconciliation: bool,
+    ) -> Result<Self, AppError> {
         let before = source.local.central.as_ref().ok_or_else(invalid)?;
         if before != read.previous_owner()
-            || before.control.cutover
+            || before.control.cutover && !reconciliation
+            || reconciliation && !super::replacement_reconciliation::required(before)
+            || !reconciliation && !before.replacement_archives.is_empty()
             || read.checkpoint().sequence == 0
             || read.phase() != "ready"
         {
@@ -168,9 +207,18 @@ impl Candidate {
         owner.control.highwater = Some(read.chain().highwater());
         owner.control.auth_epoch = read.auth_epoch();
         owner.control.cutover = true;
-        owner.control = owner
-            .control
-            .approve_library(commitment.into(), read.chain().current().head())?;
+        if owner.control.phase == super::client_state::Phase::Enrolled {
+            owner.control = owner
+                .control
+                .approve_library(commitment.into(), read.chain().current().head())?;
+        } else if !reconciliation
+            || owner.control.phase != super::client_state::Phase::Active
+            || owner.control.library.is_none()
+        {
+            return Err(invalid());
+        }
+        // An active account keeps its original cutover approval. This new whole-source consent
+        // is independently bound by the protected reconciliation operation and stage manifest.
         owner.replica = Some(read.replica().clone());
         owner.last_epoch_acceptance = read.epoch_acceptance().cloned();
         owner.epochs = read.epochs().to_vec();
@@ -179,6 +227,11 @@ impl Candidate {
             .own_wraps
             .retain(|w| w.header.key_epoch != read.checkpoint().epoch.to_string());
         owner.own_wraps.push(read.wrap().clone());
+        if reconciliation {
+            for archive in &mut owner.replacement_archives {
+                archive.needs_reconciliation = false;
+            }
+        }
         owner.validate()?;
         Self::from_owner(
             source,
@@ -187,7 +240,11 @@ impl Candidate {
             commitment.into(),
             observed,
             Some(selections),
+            reconciliation,
         )
+    }
+    pub(in crate::sync) fn reconciliation(&self) -> bool {
+        self.reconciliation
     }
     pub fn finish(
         self,

@@ -3,7 +3,7 @@ use super::super::{credentials::DeviceIdentity, migration_library::History, reke
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 mod plan;
-struct Retained {
+pub(super) struct Retained {
     package: Box<Package>,
     plan: Option<plan::Evidence>,
     history: Option<History>,
@@ -99,7 +99,7 @@ fn inherit_groups(
     Ok(())
 }
 impl Package {
-    fn retained_packages_inner(
+    pub(super) fn retained_packages_inner(
         &self,
         identities: Option<&IdentityReader<'_>>,
     ) -> Result<(Vec<Retained>, Vec<snapshot::Group>), AppError> {
@@ -167,7 +167,16 @@ impl Package {
                     None => {
                         let owner = state.local.central.as_ref().ok_or_else(invalid)?;
                         identities.ok_or_else(invalid)?; // New witnesses are created only by explicit native capture.
-                        let captured = if super::super::historical_state::needed(&state) {
+                        let captured = if state == parent.state
+                            && super::super::replacement_reconciliation::projected(&state)
+                        {
+                            super::super::replacement_reconciliation::capture_projected(
+                                &state,
+                                &parent.files.bytes,
+                                &parent.decryptors,
+                                identities.ok_or_else(invalid)?,
+                            )?
+                        } else if super::super::historical_state::needed(&state) {
                             let identity = identities.ok_or_else(invalid)?(owner)?;
                             super::super::historical_state::read(&state, &identity)?
                         } else {

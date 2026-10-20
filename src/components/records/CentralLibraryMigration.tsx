@@ -105,7 +105,8 @@ export function CentralLibraryMigration({
   const eligible =
     status.available &&
     status.has_session &&
-    status.phase === "enrolled" &&
+    (status.phase === "enrolled" ||
+      (status.phase === "active" && status.needs_reconciliation)) &&
     !status.needs_recovery &&
     !status.replacement_pending;
   const inFlight = useRef(false);
@@ -229,7 +230,9 @@ export function CentralLibraryMigration({
       aria-label="Encrypted library setup"
     >
       <h3 className="font-medium">
-        {progress?.mode === "join"
+        {status.needs_reconciliation
+          ? "Reconcile restored library"
+          : progress?.mode === "join"
           ? "Connect this device"
           : "Enable encrypted library sync"}
       </h3>
@@ -238,6 +241,9 @@ export function CentralLibraryMigration({
           ? phaseText[progress.phase]
           : "Checking saved migration progress."}
       </p>
+      {status.needs_reconciliation && (
+        <p>Review the restored history before merging it with your encrypted library. Original files stay preserved; sync resumes after the merge is verified.</p>
+      )}
       {progress?.mode === "publish" && !progress.approved && (
         <p>
           Preparing a migration freezes any existing legacy sync. Original data

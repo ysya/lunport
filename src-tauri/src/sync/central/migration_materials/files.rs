@@ -59,6 +59,26 @@ fn image<'a>(
     };
     store::read_vault_image(bytes, &SourceMaster { inner, import }).map_err(|_| invalid())
 }
+/// Observe known captured Vault decryptors without deriving logical content or retaining keys.
+/// Semantic admission and exact path coverage remain the later package reader's requirements.
+pub(in crate::sync::central) fn observe_vault_images(
+    files: &Files,
+    keychain: &dyn Keychain,
+) -> Result<(), AppError> {
+    for (path, bytes) in &files.bytes {
+        if !path.starts_with("data") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or_else(invalid)?;
+        if name.starts_with("vault") || name == "original-vault.json" {
+            drop(image(path, bytes, keychain)?);
+        }
+    }
+    Ok(())
+}
 pub(super) fn raw_index(materials: &Materials) -> BTreeMap<String, usize> {
     materials
         .history

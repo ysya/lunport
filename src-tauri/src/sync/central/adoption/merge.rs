@@ -63,6 +63,16 @@ fn map_optional(
     }
     Ok(())
 }
+pub(super) fn inventory(
+    owner: Workspace,
+    keys: &VaultKeys,
+) -> Result<projection::Plan, AppError> {
+    if super::super::replacement_reconciliation::required(&owner) {
+        projection::Plan::reconciliation_inventory(owner, keys)
+    } else {
+        projection::Plan::inventory(owner, keys)
+    }
+}
 pub(super) fn current_owner(
     before: &Workspace,
     read: &super::super::active_read::VerifiedLibrary,
@@ -95,7 +105,7 @@ pub(super) fn history(
         package.state.local.central.as_ref().ok_or_else(invalid)?,
         read,
     )?;
-    let projected = projection::Plan::inventory(owner, read.keys())?;
+    let projected = inventory(owner, read.keys())?;
     if !projected.complete() {
         return Err(invalid());
     }
@@ -194,7 +204,9 @@ pub(super) fn history(
         }
         match id.kind.as_str() {
             "host" => id.id = host(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
-            "group" => id.id = group(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
+            "group" => {
+                id.id = group(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?
+            }
             "keyslot" | "key" => id.id = key(operation, &id.id)?,
             "meta" => {}
             _ => return Err(invalid()),
@@ -357,7 +369,7 @@ impl Plan {
             );
         }
         owner.validate()?;
-        let projected = projection::Plan::inventory(owner, read.keys())?;
+        let projected = inventory(owner, read.keys())?;
         if !projected.complete() {
             return Err(AppError::Other("The combined library is incomplete. Original local data and the existing Vault are retained.".into()));
         }

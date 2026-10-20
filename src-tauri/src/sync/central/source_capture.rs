@@ -148,7 +148,7 @@ pub(super) fn capture(
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
 ) -> Result<Captured, AppError> {
-    capture_inner(env, keys, references, false, None)
+    capture_inner(env, keys, references, CaptureKind::Initial, None)
 }
 pub(super) fn capture_adoption(
     env: &SyncEnv,
@@ -156,13 +156,27 @@ pub(super) fn capture_adoption(
     references: &BTreeMap<String, KeyStorage>,
     retired: Option<&super::adoption::legacy::Witness>,
 ) -> Result<Captured, AppError> {
-    capture_inner(env, keys, references, true, retired)
+    capture_inner(env, keys, references, CaptureKind::Adoption, retired)
+}
+pub(super) fn capture_reconciliation(
+    env: &SyncEnv,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+    retired: Option<&super::adoption::legacy::Witness>,
+) -> Result<Captured, AppError> {
+    capture_inner(env, keys, references, CaptureKind::Reconciliation, retired)
+}
+#[derive(Clone, Copy)]
+enum CaptureKind {
+    Initial,
+    Adoption,
+    Reconciliation,
 }
 fn capture_inner(
     env: &SyncEnv,
     keys: &VaultKeys,
     references: &BTreeMap<String, KeyStorage>,
-    adoption: bool,
+    kind: CaptureKind,
     retired: Option<&super::adoption::legacy::Witness>,
 ) -> Result<Captured, AppError> {
     controller::require_enabled()?;
@@ -175,16 +189,33 @@ fn capture_inner(
     let _publication = env.runtime.format_publication.lock().unwrap();
     let (before, generation, selected) = current(env)?;
     let owner = before.local.central.as_ref().ok_or_else(invalid)?;
-    if adoption {
-        super::adoption::target(env, owner, &selected, keys)?;
-    } else {
-        target(owner, &selected, keys)?;
+    let adoption = !matches!(kind, CaptureKind::Initial);
+    match kind {
+        CaptureKind::Initial => target(owner, &selected, keys)?,
+        CaptureKind::Adoption => super::adoption::target(env, owner, &selected, keys)?,
+        CaptureKind::Reconciliation => {
+            super::replacement_reconciliation::target(env, &before, &selected, keys)?
+        }
     }
     protected(env, owner, &selected)?;
     let readonly = NonInteractiveKeychain(env.keychain);
-    let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
-    let sources = Sources::discover(&before, account.0.as_ref())?;
-    let record_inputs = Inventory::from_state(&sources, &before)?;
+    let physical = super::replacement_reconciliation::physical_view(&before)?;
+    let account = Legacy(record_runtime::read_account_keys(&physical, &readonly)?);
+    let projected = super::replacement_reconciliation::projected(&before);
+    let sources = if projected {
+        Package::replacement_sources(
+            &before,
+            &Files::capture(env, before.legacy_v1_backup.as_deref())?,
+            &readonly,
+        )?
+    } else {
+        Sources::discover(&physical, account.0.as_ref())?
+    };
+    let record_inputs = if projected {
+        Inventory::for_replacement(&sources, &before)?
+    } else {
+        Inventory::from_state(&sources, &physical)?
+    };
     if adoption && !sources.chains().is_empty() {
         retired
             .ok_or_else(invalid)?
@@ -211,7 +242,7 @@ fn capture_inner(
         };
         let observer = Capture::new(&readonly);
         let materials = Materials::from_files_with_key_inputs(
-            &before,
+            &physical,
             keys,
             &files,
             &observer,
@@ -250,6 +281,7 @@ fn capture_inner(
             }
         }
     }
+
     package.capture_historical_snapshots(
         selected.identity.as_ref().ok_or_else(invalid)?,
         &|historical| {
@@ -263,6 +295,7 @@ fn capture_inner(
         keys,
         references,
     )?;
+
     if !adoption {
         package.require_historical_owner()?;
     }
@@ -276,9 +309,15 @@ fn capture_inner(
             &package.record_inputs()?,
         )?;
     }
+
     drop(package.materials(keys, references)?);
-    let latest_account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
-    let latest_sources = Sources::discover(&before, latest_account.0.as_ref())?;
+
+    let latest_account = Legacy(record_runtime::read_account_keys(&physical, &readonly)?);
+    let latest_sources = if projected {
+        Package::replacement_sources(&before, &package.files, &readonly)?
+    } else {
+        Sources::discover(&physical, latest_account.0.as_ref())?
+    };
     if latest_sources.encode_local()?.as_slice() != package.sources.encode_local()?.as_slice() {
         return Err(crate::sync::runtime::superseded());
     }
@@ -334,13 +373,15 @@ pub(super) fn start_or_resume(
                 if package.state != state {
                     return Err(crate::sync::runtime::superseded());
                 }
+
                 drop(package.materials(keys, references)?);
-                let cursor = if super::source_archive::initial_attached(env, owner, &saved.cursor)?
-                {
-                    saved.cursor
-                } else {
-                    package.initialize_source(env, &life, owner, 0)?.cursor
-                };
+
+                let cursor =
+                    if super::source_archive::initial_attached(env, owner, &saved.cursor)? {
+                        saved.cursor
+                    } else {
+                        package.initialize_source(env, &life, owner, 0)?.cursor
+                    };
                 super::capture_journal::Journal::begin(&cursor, &package, signer)?.store(
                     env,
                     &life,
@@ -1138,4 +1179,19 @@ pub(in crate::sync::central) mod tests {
         }
     }
 
+}
+
+pub(super) fn reconciliation_has_legacy(env: &SyncEnv) -> Result<bool, AppError> {
+    let state = record_runtime::snapshot(env)?.0;
+    if !super::replacement_reconciliation::projected(&state) {
+        return Ok(state.account.is_some());
+    }
+    let readonly = NonInteractiveKeychain(env.keychain);
+    Ok(!Package::replacement_sources(
+        &state,
+        &Files::capture(env, state.legacy_v1_backup.as_deref())?,
+        &readonly,
+    )?
+    .chains()
+    .is_empty())
 }
