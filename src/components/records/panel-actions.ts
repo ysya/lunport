@@ -73,12 +73,12 @@ export async function submitKeyDraft(
     update({ privateText: "", name: "", path: null });
     applyRecordOverview(client, overview);
     return true;
-  } catch {
+  } catch (error) {
     if (fence && !fence.current()) return false;
     update({
-      error: generate
+      error: keyActionError(error, generate
         ? "Could not generate the key. Retry when the workspace is available."
-        : "Could not import the key. Choose a readable OpenSSH private key (up to 1 MiB) and retry. Public keys, PuTTY and PEM formats are not supported.",
+        : "Could not import the key. Choose a readable OpenSSH private key (up to 1 MiB) and retry. Public keys, PuTTY and PEM formats are not supported."),
     });
     return false;
   } finally {
@@ -154,4 +154,38 @@ export async function resumeImport(
   const result = await resumeRecordImport(importId);
   applyRecordOverview(client, result.overview);
   return result;
+}
+
+/** Only fixed native diagnostics may be reflected here; arbitrary errors can contain secrets. */
+export function keyActionError(error: unknown, fallback = "The key action could not be completed. Refresh the workspace and retry."): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  switch (message) {
+    case "This key has no material on this device.":
+    case "The key material is unavailable on this device.":
+      return "The key reference exists, but its private key is missing on this device. Complete encrypted library sync, or import the matching private key and select it for the host.";
+    case "The vault key does not match its authoritative public identity.":
+    case "The vault key does not match the authoritative public identity.":
+    case "The saved SSH private key does not match this key reference.":
+      return "The saved private key does not match this key reference. Review its fingerprint and the host’s selected key before retrying.";
+    case "The vault is unavailable; its original file was retained.":
+      return "The encrypted vault could not be unlocked. Allow access to your system credential store and retry. The original vault is retained.";
+    case "The vault key cannot be read.":
+    case "The saved key cannot be read.":
+      return "The saved private key could not be decrypted or read. The original vault is retained.";
+    case "The saved private key differs from the encrypted account copy.":
+      return "This device’s private key differs from the current encrypted account copy. Sync the account before retrying.";
+    case "The saved SSH private key could not be parsed.":
+      return "The saved private key is not readable OpenSSH material. The original vault is retained.";
+    case "The saved private key's passphrase state does not match this key reference.":
+      return "The saved key’s passphrase state differs from its account metadata. Review the key on the device that originally synced it.";
+    case "record account is not writable":
+      return "Account sync is blocked. Open Account to resolve the migration, update or sync error before retrying.";
+    case "the sync code could not be read":
+    case "the sync code is unavailable on this device":
+      return "The account’s sync credentials are unavailable. Allow credential-store access and check the Account page before retrying.";
+    case "synced private material is unavailable":
+      return "This account has no synced private copy of this key. Sync it from a device that still holds the private key.";
+    default:
+      return fallback;
+  }
 }

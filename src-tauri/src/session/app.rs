@@ -105,7 +105,7 @@ impl AppKeyStore {
                     let Some(vault_id)=&key.vault_id else{return Ok(None);};
                     let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),read_keychain).map_err(|_|"The vault is unavailable; its original file was retained.".to_string())?;
                     let Some(entry)=vault.get(vault_id).map_err(|_|"The saved key cannot be read.".to_string())? else{return Ok(None);};
-                    if !super::record_material::matches(&key,&entry){return Err("The vault key does not match the authoritative public identity.".into());}
+                    super::record_material::verify(&key,&entry).map_err(str::to_owned)?;
                     Ok(Some(Zeroizing::new(entry.private_key.clone())))
                 }
                 crate::sync::record_runtime::RuntimeFormat::Legacy=>crate::vault::store::with_vault(env.runtime,&crate::vault::store::vault_path(&env.state_path),read_keychain,env.now(),|v|v.get(key_id)).map(|entry|entry.map(|entry|Zeroizing::new(entry.private_key.clone()))).map_err(|e|e.to_string()),
@@ -123,7 +123,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
             let Some(id)=&key.vault_id else{return Ok(false);};let _vault=env.runtime.vault.lock().unwrap();
             let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),&OsKeychain).map_err(|_|super::directory::DirectoryError::Failed("The vault is unavailable; its original file was retained.".into()))?;
             let entry=vault.get(id).map_err(|_|super::directory::DirectoryError::Failed("The saved key cannot be read.".into()))?;
-            Ok(entry.is_some_and(|entry|super::record_material::matches(key,&entry)))
+            super::record_material::available(key,entry.as_ref()).map_err(|message|super::directory::DirectoryError::Unsupported(message.into()))
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?),
         username:Box::new(||super::os_identity::current_username().map_err(|_|super::directory::DirectoryError::Failed("Cannot read this device's operating system username.".into()))),
         pin:Box::new(move|id,endpoint,previous,candidate|crate::sync::engine::with_env(&for_pin,|env|{
