@@ -586,9 +586,13 @@ impl Temporary {
         let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
         unsafe {
             (*info).Anonymous.ReplaceIfExists = replace;
-            // A simple name with a null root renames within this open file's actual parent.
-            // Full-path MoveFileEx reopens that parent for write and conflicts with its guard.
-            (*info).RootDirectory = ptr::null_mut();
+            // Resolve the name against the verified directory handle, never the process CWD.
+            (*info).RootDirectory = self
+                ._directory
+                .pins
+                .last()
+                .ok_or_else(invalid)?
+                .as_raw_handle();
             (*info).FileNameLength = (name.len() * 2) as u32;
             ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
         }
