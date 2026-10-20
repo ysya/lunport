@@ -19,6 +19,18 @@ cargo test --locked
 
 Some backend tests need a scratch OpenSSH server or platform-specific facilities; credential-service tests can touch the OS keychain. The safe suite and platform-specific checks are defined in [the SSH engine workflow](../.github/workflows/test-engine.yml) and [the Windows workflow](../.github/workflows/test-windows.yml).
 
+## Test feedback time
+
+For an edit to one component or Rust module, run its tests first, then leave the complete platform suites to CI:
+
+```bash
+pnpm test src/components/HostEditor.test.tsx
+cd src-tauri
+cargo test --locked --lib sync::central::server_change -- --test-threads=2
+```
+
+Development/test builds optimize the existing OpenSSH PEM/base64 parsers as well as the crypto primitives. Application code keeps debug assertions and overflow checks; fixture sizes and validation remain unchanged. CI runs the actual Production and Development release-library boundaries in parallel with the complete debug suites. Windows runs each migration/publication/console test once in the complete suite; the separate Win32 handle/DACL probe remains.
+
 ## Isolated Development profile
 
 `pnpm tauri:dev` runs **Lunport Dev**. `pnpm tauri:build:dev` builds a release-mode Development bundle. The Development profile uses `org.homelab.sshelter.dev`, the `SSHelter Development` credential service and a sandbox home under its data directory. It can run beside Production. Writes remain in that sandbox; updater and login integration are disabled. Selected external import sources are read and copied, preserving the originals.

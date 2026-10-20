@@ -146,3 +146,15 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.zeroize]
 opt-level = 3
+
+# Capacity-test sampling spends its time decoding OpenSSH PEM/base64. These
+# existing parsers must keep their real validation; optimize them as above
+# instead of shrinking migration fixtures. Production builds are unchanged.
+[profile.dev.package.ssh-key]
+opt-level = 3
+[profile.dev.package.ssh-encoding]
+opt-level = 3
+[profile.dev.package.pem-rfc7468]
+opt-level = 3
+[profile.dev.package.base64ct]
+opt-level = 3

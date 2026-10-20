@@ -102,20 +102,12 @@ jobs:
       # (`cli::`: the arguments, the console layer against a fake console and against real ones, the keys, control events and window
       # size, and run() over a pipe against the broker; the Unix terminal's tests are Unix only), and the terminal launch (`connect::`:
       # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the three real OS credential tests are explicitly excluded.
+      # The full suite below already includes the migration/publication/console tests.
+      # Only the independent Win32 handle/DACL probe needs a separate invocation.
       - name: Central sync Windows filesystem security boundary
         run: |
           cargo test --locked --manifest-path windows-sync-check/Cargo.toml -- --test-threads=2 --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Windows central filesystem security boundary failed' }
-          cargo test --locked --lib sync::central::migration_files -- --test-threads=2
-          if ($LASTEXITCODE -ne 0) { throw 'Windows central source capture and archive codec failed' }
-          cargo test --locked --lib sync::central::active_dispatch::pull::tests::valid_page_advances_only_ciphertext_and_never_activates_public_or_private_cache -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'Windows central ciphertext publication failed' }
-          cargo test --locked --lib sync::central::adoption::tests::approved_empty_device_reviews_and_materializes_the_existing_managed_library_then_retries_safely -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'Windows central second-device publication failed' }
-          cargo test --locked --lib sync::central::adoption::tests::empty_reserved_stage_is_recovered_but_unknown_contents_are_retained -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'Windows central empty reservation recovery failed' }
-          cargo test --locked --lib cli::real_console_tests::a_real_console_works_as_the_keys_reader_needs -- --exact --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'Windows real console contract failed' }
 
       - name: Complete safe Rust suite
         env:
@@ -123,17 +115,9 @@ jobs:
         # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
         run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
-      - name: Profile selection in the normal library
-        env:
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
-          CARGO_PROFILE_RELEASE_LTO: "false"
-        run: |
-          cargo test --locked --test app_profile_build
-          if ($LASTEXITCODE -ne 0) { throw 'debug profile test failed' }
-          cargo test --locked --release --test app_profile_build
-          if ($LASTEXITCODE -ne 0) { throw 'production profile test failed' }
-          cargo test --locked --release --features development-profile --test app_profile_build
-          if ($LASTEXITCODE -ne 0) { throw 'development release profile test failed' }
+      # Release-profile boundaries run in parallel in CI - App on all three OSes.
+      - name: Debug profile selection in the normal library
+        run: cargo test --locked --test app_profile_build
 
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
