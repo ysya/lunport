@@ -22,7 +22,8 @@
 //!   line read without echo still moves the cursor to the next line.
 //! - The input handle is signalled while the buffer holds any record (a focus event too, which a raw read then waits past).
 //! - Raw mode with virtual terminal input gives an arrow as `ESC [ A`; a surrogate pair typed as two records comes in one read.
-//! - Once the console is freed, a read in progress fails (ERROR_ACCESS_DENIED), and so does every read after it (ERROR_INVALID_HANDLE).
+//! - Once the console is freed, new reads fail. FreeConsole does not promise cancellation of an already pending synchronous read;
+//!   cancellation and process-exit behavior are checked separately below.
 //! - (Fix round 1, measured in a console shared with another process, as the shell shares its console with `sshelter connect`.) A read a
 //!   process leaves in progress when it ends ends with it: neither a raw read nor a hidden line read with "hun" typed into it takes the
 //!   key or the line typed next, and "hun" never shows; so `sshelter connect`'s own end, which leaves its keys thread in a read, leaves
@@ -527,14 +528,19 @@ fn case(name: &str) {
             // Not dropped: its restore would hide a hook that did not.
             std::mem::forget(tty);
         }
-        // A read in progress when the console is freed fails, and so does a read after it.
-        "a_freed_console_fails_its_reads" => {
-            let (h, read, _thread) = console.reading(console.raw, "freed");
-            // SAFETY: detaches this process from its console; only `h` is used after it, to see how a read fails.
+        // FreeConsole detaches the process; it does not document cancellation of a pending ReadConsoleW.
+        // https://learn.microsoft.com/en-us/windows/console/freeconsole
+        // Check new reads through both Win32 and the production adapter. Pending-read cancellation,
+        // wake-up and process-exit cleanup have independent cases above and below.
+        "a_freed_console_refuses_new_reads" => {
+            let std_console = Arc::new(StdConsole::opened().unwrap());
+            let h = H(std_console.input() as usize);
+            // SAFETY: detaches only this isolated child. Its opened input remains owned until the test ends.
             assert_ne!(unsafe { FreeConsole() }, 0);
-            assert!(!read.recv_timeout(DONE).expect("the read returned").ok);
-            let (again, _thread) = read_on_a_thread(h);
-            assert!(!again.recv_timeout(DONE).expect("the read returned").ok);
+            let (read, _thread) = read_on_a_thread(h);
+            assert!(!read.recv_timeout(DONE).expect("the Win32 read returned").ok);
+            let read = read_through(&std_console);
+            assert!(read.recv_timeout(DONE).expect("the console adapter read returned").is_err());
         }
         // The input handle is signalled while the buffer holds a record, and not once it is empty.
         "the_input_is_signalled_while_it_holds_a_record" => {
@@ -820,7 +826,7 @@ fn a_real_console_works_as_the_keys_reader_needs() {
         "a_hidden_line_is_not_in_the_history",
         "the_keys_reader_on_a_real_console",
         "a_panic_puts_the_real_console_back",
-        "a_freed_console_fails_its_reads",
+        "a_freed_console_refuses_new_reads",
         "the_input_is_signalled_while_it_holds_a_record",
         "an_end_under_a_question_leaves_nothing_behind",
         "a_read_an_ended_process_left_takes_nothing",

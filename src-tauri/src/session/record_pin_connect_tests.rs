@@ -72,6 +72,10 @@ fn trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_backgr
                     5,
                 )
                 .map_err(failed)
+                .and_then(|next| crate::session::credential_approval::approve(next, &crate::ssh::HopRef {
+                    id: HOST.into(), alias: "web".into(), hostname: "127.0.0.1".into(),
+                    port: server.sshd.port, user: server.sshd.user.clone(),
+                }, &HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap()).map_err(failed))
             })
             .unwrap();
         }

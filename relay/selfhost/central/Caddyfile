@@ -1,0 +1,10 @@
+{
+    admin off
+}
+{$RELAY_DOMAIN} {
+    reverse_proxy gateway:8080 {
+        header_up CF-Connecting-IP {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Lunport-Proxy-Key {$SELFHOST_PROXY_KEY}
+    }
+}

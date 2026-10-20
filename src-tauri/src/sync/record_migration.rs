@@ -1,6 +1,8 @@
 //! Confirmed account migration. Previews remain in memory and all originals are retained.
 mod publication;
+pub(in crate::sync) mod inventory;
 mod source;
+pub(in crate::sync) use source::key_options as legacy_key_options;
 use crate::error::AppError;
 use crate::sync::crypto::ChainKeys;
 use crate::sync::env::SyncEnv;

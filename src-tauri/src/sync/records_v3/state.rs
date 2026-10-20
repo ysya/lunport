@@ -49,6 +49,15 @@ pub struct SyncStateV3 {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalState {
+    /// Public control proofs and ciphertext only; native credentials remain in OS storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central: Option<crate::sync::central::workspace::Workspace>,
+    /// Accepted public projection bases; contains no private material or credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central_projection: Option<crate::sync::central::projection_state::Ledger>,
+    /// Passive cache awaiting native reconciliation. The old ledger stays in this exact archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central_cache_source: Option<Box<crate::sync::central::replacement_archive::Receipt>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tunnel_rules: BTreeMap<String, LocalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -62,6 +71,22 @@ pub struct LocalState {
     /// Published atomically with an import overlay; retries preserve subsequent edits/deletions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub import_receipts: BTreeMap<String, LocalImportReceipt>,
+    /// Local human approvals only; never published as synchronized records.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_approvals: BTreeMap<String, CredentialApproval>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialApproval {
+    pub device_id: String,
+    pub scope: HostScope,
+    pub account_id: Option<String>,
+    pub relay_url: Option<String>,
+    pub hostname: String,
+    pub port: u16,
+    pub user: String,
+    pub fingerprint: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +120,8 @@ pub struct SpaceStateV3 {
     pub last_error: Option<String>,
     #[serde(default)]
     pub missing: bool,
+    #[serde(default, skip_serializing_if = "crate::sync::record_conflicts::RecordRecovery::is_empty")]
+    pub recovery: crate::sync::record_conflicts::RecordRecovery,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -119,7 +146,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | crate::sync::tunnel_rules::STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -200,9 +227,73 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 }
 
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
+    if let Some(central) = &state.local.central {
+        if state.version < CENTRAL_STATE_VERSION || central.validate().is_err() {
+            return Err(state_invalid(
+                "central",
+                "local",
+                "central state needs schema 8 and a verified anchored replica",
+            ));
+        }
+    }
+
+    if let Some(ledger) = &state.local.central_projection {
+        let Some(central) = state.local.central.as_ref() else {
+            return Err(state_invalid(
+                "central_projection",
+                "local",
+                "projection requires the anchored central owner",
+            ));
+        };
+        if ledger.validate(central).is_err()
+            || state.account.as_ref().map(|a| a.chain_id.as_str())
+                != Some(ledger.vault.as_str())
+        {
+            return Err(state_invalid(
+                "central_projection",
+                "local",
+                "projection does not match the central vault",
+            ));
+        }
+    }
+
+    if let Some(source) = &state.local.central_cache_source {
+        let valid = state.local.central.as_ref().is_some_and(|owner| {
+            owner.control.cutover
+                && state.local.central_projection.is_none()
+                && owner
+                    .replacement_archives
+                    .last()
+                    .is_some_and(|a| a.needs_reconciliation && a.receipt == **source)
+                && state.account.as_ref().map(|a| a.chain_id.as_str())
+                    == owner.control.personal_vault.as_deref()
+        });
+        if !valid || source.validate().is_err() {
+            return Err(state_invalid(
+                "central_cache_source",
+                "local",
+                "retained cache requires its exact unresolved replacement archive",
+            ));
+        }
+    }
+
+    if !state.local.credential_approvals.is_empty()
+        && state.version < LOCAL_CREDENTIAL_STATE_VERSION
+    {
+        return Err(state_invalid(
+            "credential_approvals",
+            "local",
+            "local credential approvals need state version 6",
+        ));
+    }
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | crate::sync::tunnel_rules::STATE_VERSION
+        STATE_VERSION
+            | GROUP_STATE_VERSION
+            | NAVIGATION_STATE_VERSION
+            | LOCAL_CREDENTIAL_STATE_VERSION
+            | LOCAL_CONFLICT_STATE_VERSION
+            | CENTRAL_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -320,6 +411,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
         }
     }
     for (space_id, space) in &state.spaces {
+        validate_recovery(state.version, &space.recovery)?;
         if !is_chain_id(space_id) {
             return Err(state_invalid("space_id", space_id, "expected a chain id"));
         }
@@ -332,6 +424,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
         validate_sealed(&space.sealed, false)?;
     }
     if let Some(account) = &state.account {
+        validate_recovery(state.version, &account.recovery)?;
         if !is_chain_id(&account.chain_id) {
             return Err(state_invalid(
                 "chain_id",
@@ -367,12 +460,10 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                         .get("migration")
                         .filter(|value| !value.is_null())
                     {
-                        let gate: MigrationGate =
-                            serde_json::from_value(value.clone()).map_err(|_| {
-                                RecordValidationError::Decode {
-                                    kind: "migration",
-                                    reason: "migration marker is invalid".into(),
-                                }
+                        let gate: MigrationGate = serde_json::from_value(value.clone())
+                            .map_err(|_| RecordValidationError::Decode {
+                                kind: "migration",
+                                reason: "migration marker is invalid".into(),
                             })?;
                         validate_migration_gate(&gate)?;
                     }
@@ -466,6 +557,13 @@ pub fn validate_account_meta(meta: &MetaPayload) -> Result<(), RecordValidationE
             kind: "account",
             found: meta.schema_version,
         });
+    }
+    Ok(())
+}
+
+fn validate_recovery(version: u32, recovery: &crate::sync::record_conflicts::RecordRecovery) -> Result<(), RecordValidationError> {
+    if !recovery.valid() || !recovery.conflicts.is_empty() && version < LOCAL_CONFLICT_STATE_VERSION {
+        return Err(state_invalid("recovery", "state", "invalid or unsupported conflict recovery state"));
     }
     Ok(())
 }

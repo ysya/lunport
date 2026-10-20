@@ -25,6 +25,8 @@ jobs:
           node-version: lts/*
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run check:security-config
+      - run: npm run test:security-config
       - run: npm test
 
   # The "Update relay" helper that ships inside relay/.github for deployed copies.
@@ -80,3 +82,18 @@ jobs:
         run: |
           docker logs relay || true
           docker compose logs || true
+
+  central-selfhost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - name: Build independent application and security images
+        run: |
+          docker build -f relay/selfhost/central/Dockerfile --target core-bundle -t lunport-central-core:local relay
+          docker build -f relay/selfhost/central/Dockerfile --target security-runtime -t lunport-central-security:local relay
+      - name: Verify private provisioning, proxy boundary, persistence and floor enforcement
+        run: node relay/selfhost/central/smoke-test.mjs

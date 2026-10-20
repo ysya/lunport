@@ -6,6 +6,7 @@ import { HostKeyCard, HostKeyCardView } from "@/components/HostKeyWindow";
 
 function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
   return {
+    user: "",
     id: "hostkey-1",
     alias: "web",
     hostname: "web.example.com",
@@ -40,6 +41,9 @@ function buttonDisabled(html: string, label: string): boolean {
 }
 
 describe("HostKeyCardView", () => {
+  it("shows the resolved username alongside the endpoint before trust", () => {
+    expect(render(request({ user: "root" }))).toContain("root@web.example.com:22");
+  });
   it("asks about a new key with Cancel and Trust this key", () => {
     const html = render(request());
     expect(html).toContain("Verify server identity");

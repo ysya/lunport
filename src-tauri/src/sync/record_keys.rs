@@ -6,19 +6,41 @@ use crate::vault::generate::KeyAlgorithm;
 use crate::vault::store::{EntryOrigin, VaultEntry};
 use serde::Serialize;
 use zeroize::Zeroizing;
+fn check_key_destination(
+    env: &SyncEnv,
+    invocation: Option<&super::record_import::central_local::Invocation>,
+) -> Result<(), AppError> {
+    crate::sync::central::migration_flow::require_editable(env)?;
+    let core = env.runtime.core.lock().unwrap();
+    super::record_import::central_local::check_request(
+        super::record_runtime::active_state(&core)?,
+        core.generation,
+        invocation,
+    )
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LocalKeyReceipt {
     pub import_id: String,
     pub key_id: String,
     pub public: KeySlotPayload,
 }
-/// Explicit native import, always Local. Ownership moves into VaultEntry's zeroizing lifetime.
+/// Explicit native import. Central cutover adds an encrypted outbox; material stays in the protected vault.
 pub fn import_local(
+    env: &SyncEnv,
+    name: &str,
+    private: Zeroizing<String>,
+    origin: EntryOrigin,
+) -> Result<LocalKeyReceipt, AppError> {
+    import_local_scoped(env, name, private, origin, None)
+}
+pub fn import_local_scoped(
     env: &SyncEnv,
     name: &str,
     mut private: Zeroizing<String>,
     origin: EntryOrigin,
+    invocation: Option<&super::record_import::central_local::Invocation>,
 ) -> Result<LocalKeyReceipt, AppError> {
+    check_key_destination(env, invocation)?;
     if !crate::sync::slot_rules::valid_slot_name(name) {
         return Err(AppError::Other("local key name is not valid".into()));
     }
@@ -53,7 +75,7 @@ pub fn import_local(
         origin,
         added_at_ms: 0,
     };
-    let (receipt, public) = super::record_import::publish_material(env, name, entry)?;
+    let (receipt, public) = super::record_import::publish_material(env, name, entry, invocation)?;
     let key_id = receipt
         .copied_key_ids
         .into_iter()
@@ -72,17 +94,30 @@ pub fn import_local_file(
     name: &str,
     path: &std::path::Path,
 ) -> Result<LocalKeyReceipt, AppError> {
+    import_local_file_scoped(env, name, path, None)
+}
+pub fn import_local_file_scoped(
+    env: &SyncEnv,
+    name: &str,
+    path: &std::path::Path,
+    invocation: Option<&super::record_import::central_local::Invocation>,
+) -> Result<LocalKeyReceipt, AppError> {
+    check_key_destination(env, invocation)?;
     if !crate::sync::slot_rules::valid_slot_name(name) {
         return Err(AppError::Other("local key name is not valid".into()));
     }
-    let bytes = super::record_import::bounded_read(
-        path,
-        super::record_import::MAX_PRIVATE_SOURCE_BYTES,
-    )?;
+    let bytes =
+        super::record_import::bounded_read(path, super::record_import::MAX_PRIVATE_SOURCE_BYTES)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| {
         AppError::Other("selected file is not readable OpenSSH private key material".into())
     })?;
-    import_local(env, name, Zeroizing::new(text.to_owned()), EntryOrigin::Imported)
+    import_local_scoped(
+        env,
+        name,
+        Zeroizing::new(text.to_owned()),
+        EntryOrigin::Imported,
+        invocation,
+    )
 }
 /// Generation stays in memory; the normal explicit Local publication path stores the result.
 pub fn generate_local(
@@ -92,6 +127,17 @@ pub fn generate_local(
     comment: &str,
     passphrase: Option<Zeroizing<String>>,
 ) -> Result<LocalKeyReceipt, AppError> {
+    generate_local_scoped(env, name, algorithm, comment, passphrase, None)
+}
+pub fn generate_local_scoped(
+    env: &SyncEnv,
+    name: &str,
+    algorithm: KeyAlgorithm,
+    comment: &str,
+    passphrase: Option<Zeroizing<String>>,
+    invocation: Option<&super::record_import::central_local::Invocation>,
+) -> Result<LocalKeyReceipt, AppError> {
+    check_key_destination(env, invocation)?;
     if !crate::sync::slot_rules::valid_slot_name(name) {
         return Err(AppError::Other("local key name is not valid".into()));
     }
@@ -101,7 +147,7 @@ pub fn generate_local(
         passphrase.as_ref().map(|value| value.as_str()),
     )
     .map_err(|_| AppError::Other("cannot generate a supported local key".into()))?;
-    import_local(env, name, private, EntryOrigin::Generated)
+    import_local_scoped(env, name, private, EntryOrigin::Generated, invocation)
 }
 #[cfg(test)]
 #[path = "record_keys_tests.rs"]

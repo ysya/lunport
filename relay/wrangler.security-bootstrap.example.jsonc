@@ -1,0 +1,60 @@
+// Fresh-install unrouted example only; never replace an existing migration history with this file.
+// Existing namespaces require the explicit authority transfer/import procedure in security/README.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-08-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": {
+    "enabled": true
+  },
+  "name": "lunport-sync-security",
+  "main": "src/security/gateway.ts",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LEGACY_RETIREMENT",
+        "class_name": "LegacyRetirementStore"
+      },
+      {
+        "name": "SECURITY_FLOOR",
+        "class_name": "SecurityFloorStore"
+      },
+      {
+        "name": "IP_LIMIT",
+        "class_name": "IpLimiter"
+      },
+      {
+        "name": "ACCOUNT",
+        "class_name": "AccountStore"
+      },
+      {
+        "name": "VAULT",
+        "class_name": "VaultStore"
+      },
+      {
+        "name": "PASSKEY",
+        "class_name": "PasskeyStore"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "security-v1",
+      "new_sqlite_classes": [
+        "LegacyRetirementStore",
+        "SecurityFloorStore",
+        "IpLimiter"
+      ]
+    },
+    {
+      "tag": "security-v2-central-authority",
+      "new_sqlite_classes": ["AccountStore", "VaultStore", "PasskeyStore"]
+    }
+  ],
+  "vars": {
+    "SECURITY_INSTALLATION": "00000000000000000000000000000000",
+    "CENTRAL_ORIGIN": "https://sync.example.invalid"
+  }
+}

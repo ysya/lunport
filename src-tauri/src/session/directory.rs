@@ -120,6 +120,9 @@ pub trait HostDirectory: Send + Sync {
     }
     /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;
+    /// Records independently approve the effective endpoint, user and server key locally.
+    fn password_authorized(&self, _hop: &HopRef, _server_key: Option<&HostKey>) -> Result<bool, DirectoryError> { Ok(true) }
+
 }
 
 /// What a `pin` or a `replace_pin` has to do, given the key pinned now. The rules are the ones documented on those two methods. They are

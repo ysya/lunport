@@ -18,6 +18,7 @@ import { stubEventBus } from "./event-bus-fixture";
 
 function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
   return {
+    user: "",
     id: "hostkey-1",
     alias: "web",
     hostname: "web.example.com",

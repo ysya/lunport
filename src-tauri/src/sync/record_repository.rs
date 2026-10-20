@@ -50,6 +50,8 @@ pub struct KeyView {
     pub public: Option<KeySlotPayload>,
     pub vault_id: Option<String>,
     pub status: KeyStatus,
+    /// Native-only central material digest; legacy metadata never supplies this binding.
+    pub expected_material_hash: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositorySnapshot {
@@ -99,7 +101,7 @@ pub(crate) fn invalid(field: &'static str, id: &str, reason: &str) -> Repository
 fn validate_header(state: &SyncStateV3) -> Result<(), RepositoryError> {
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | crate::sync::tunnel_rules::STATE_VERSION
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -435,6 +437,7 @@ pub fn list_keys(state: &SyncStateV3) -> Result<Vec<KeyView>, RepositoryError> {
                 public: Some(local.public.clone()),
                 vault_id: Some(local.vault_id.clone()),
                 status: KeyStatus::Available,
+                expected_material_hash: None,
             },
         );
     }
@@ -459,6 +462,7 @@ pub fn list_keys(state: &SyncStateV3) -> Result<Vec<KeyView>, RepositoryError> {
                     public: None,
                     vault_id: None,
                     status: KeyStatus::Deleted,
+                    expected_material_hash: None,
                 },
                 TypedRecord::Live(public) => {
                     let material = state.local.keys.get(id);
@@ -487,6 +491,7 @@ pub fn list_keys(state: &SyncStateV3) -> Result<Vec<KeyView>, RepositoryError> {
                         public: Some(public),
                         vault_id,
                         status,
+                        expected_material_hash: None,
                     }
                 }
             };
@@ -506,6 +511,31 @@ pub fn list_keys(state: &SyncStateV3) -> Result<Vec<KeyView>, RepositoryError> {
                 // Keep old public metadata for inspection, but never expose a vault fallback.
                 view.authority = KeyAuthority::Account;
                 view.status = KeyStatus::Conflict;
+                view.vault_id = None;
+            }
+        }
+    }
+    if let Some(owner) = state.local.central.as_ref().filter(|owner| owner.control.cutover) {
+        let ledger = state.local.central_projection.as_ref();
+        if ledger.is_some_and(|ledger| {
+            ledger.validate(owner).is_err()
+                || state.account.as_ref().map(|account| account.chain_id.as_str())
+                    != Some(ledger.vault.as_str())
+        }) {
+            return Err(invalid("central_projection", "local", "central material authority does not match this vault"));
+        }
+        for view in keys.values_mut() {
+            if view.status == KeyStatus::Deleted || view.status == KeyStatus::Conflict {
+                continue;
+            }
+            let binding = (view.authority == KeyAuthority::Account).then_some(ledger).flatten()
+                .and_then(|ledger| ledger.material_reference(
+                    owner, &view.id, state.local.keys.get(&view.id)?, view.public.as_ref()?,
+                ));
+            if let Some(hash) = binding {
+                view.expected_material_hash = Some(hash);
+            } else {
+                view.status = KeyStatus::NeedsMaterial;
                 view.vault_id = None;
             }
         }
@@ -907,6 +937,7 @@ pub fn forget_host_key(
         &[&previous.record],
     )?;
     let mut next = state.clone();
+    next.local.credential_approvals.remove(id);
     records_mut(&mut next, &host.host.scope)
         .insert(key, cached(record, previous.seq, &host.host.scope));
     validate_transition(state, &next)?;

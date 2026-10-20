@@ -70,7 +70,7 @@ fn host(id: &str, alias: &str, at: u64) -> Record {
         at,
     )
 }
-fn fixture() -> (Arc<TestDevice>, ChainKeys) {
+pub(crate) fn fixture() -> (Arc<TestDevice>, ChainKeys) {
     let relay = FakeRelay::new();
     let device = Arc::new(TestDevice::new("a", &relay, &TestClock::new()));
     let phrase = crypto::generate_mnemonic().unwrap();
@@ -125,7 +125,7 @@ fn fixture() -> (Arc<TestDevice>, ChainKeys) {
     relay.clear_calls();
     (device, keys)
 }
-fn add_space(device: &TestDevice, keys: &ChainKeys, selected: bool) -> ChainKeys {
+pub(crate) fn add_space(device: &TestDevice, keys: &ChainKeys, selected: bool) -> ChainKeys {
     let child = ChainKeys::generate().unwrap();
     device
         .relay
@@ -329,7 +329,8 @@ fn unselected_spaces_have_no_requests_and_missing_spaces_are_never_recreated() {
     d.relay.clear_calls();
     sync_once(&d.env()).unwrap();
     let after = state(&d);
-    assert!(after.spaces[&second.chain_id].missing);
+    assert!(!after.spaces[&second.chain_id].missing);
+    assert_eq!(after.spaces[&second.chain_id].last_error.as_deref(), Some(TEMPORARY_SPACE_ERROR));
     assert!(!d.relay.exists(&second.chain_id));
     assert!(!d
         .relay
@@ -764,7 +765,7 @@ fn receipt_generation_overflow_does_not_replace_current_state() {
         observed_schema: Some(3),
     };
     d.runtime.core.lock().unwrap().generation = u64::MAX;
-    assert!(receipt_commit(&d.env(), &proof, None, &sent, &pushed).is_err());
+    assert!(receipt_commit(&d.env(), &proof, None, &proof.keys, &sent, &pushed).is_err());
     assert_eq!(state(&d), before);
     assert!(!d.runtime.core.lock().unwrap().unsaved);
 }
@@ -1556,4 +1557,151 @@ fn local_to_space_during_external_guard_cannot_bypass_fresh_account_preparation(
             .host_key
             .is_none()
     );
+}
+
+#[test]
+fn temporary_404_keeps_cache_and_recovers_without_recreating_or_resurrecting_deleted_spaces() {
+    let (d, keys) = fixture();
+    let child = add_space(&d, &keys, true);
+    let item = encode_record(&child, &host(HOST, "cached", 3), 0).unwrap();
+    d.relay.push(&child.chain_id, &child.auth_token, &[item.clone()]).unwrap();
+    sync_once(&d.env()).unwrap();
+    let before = state(&d).spaces[&child.chain_id].clone();
+    d.relay.expire(&child.chain_id);
+    sync_once(&d.env()).unwrap();
+    let unavailable = state(&d);
+    assert_eq!(unavailable.spaces[&child.chain_id].records, before.records);
+    assert_eq!(unavailable.spaces[&child.chain_id].cursor_seq, before.cursor_seq);
+    assert!(!unavailable.spaces[&child.chain_id].missing);
+    assert_eq!(crate::sync::record_repository::snapshot(&unavailable).unwrap().hosts.len(), 1);
+    // Restore the same chain snapshot, as after a temporary routing/storage outage.
+    d.relay.create_chain(&child.chain_id, &child.auth_token).unwrap();
+    d.relay.push(&child.chain_id, &child.auth_token, &[item]).unwrap();
+    d.relay.clear_calls();
+    sync_once(&d.env()).unwrap();
+    assert!(state(&d).spaces[&child.chain_id].last_error.is_none());
+    assert!(!d.relay.calls().iter().any(|c| c.starts_with("create:")));
+    let mut deleted = value(RecordKind::Space, &child.chain_id, json!({"schema":1,"name":"test","slug":"test","created_at_ms":1}), 20);
+    deleted.deleted = true;
+    let seq = d.relay.rows(&keys.chain_id).iter().find(|r| r.kind == "space").unwrap().seq;
+    d.relay.push(&keys.chain_id, &keys.auth_token, &[encode_record(&keys, &deleted, seq).unwrap()]).unwrap();
+    d.relay.clear_calls();
+    sync_once(&d.env()).unwrap();
+    assert!(state(&d).spaces[&child.chain_id].missing);
+    assert!(!d.relay.calls().iter().any(|c| c.starts_with("batch:")));
+}
+
+#[test]
+fn old_404_flag_is_retried_only_with_live_authenticated_metadata() {
+    let (d, keys) = fixture();
+    let child = add_space(&d, &keys, true);
+    record_runtime::mutate_records(&d.env(), |s| {
+        let mut n = s.clone();
+        let child = n.spaces.get_mut(&child.chain_id).unwrap();
+        child.missing = true;
+        child.last_error = Some(OLD_MISSING_SPACE_ERROR.into());
+        Ok(n)
+    }).unwrap();
+    assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, 1);
+    assert!(!state(&d).spaces[&child.chain_id].missing);
+}
+
+#[test]
+fn records_batch_schedule_handles_20_64_65_spaces_and_ten_devices_with_budget_headroom() {
+    use std::time::Duration;
+    for count in [1,20,64,65] {
+        let (d, keys) = fixture();
+        for _ in 0..count { add_space(&d, &keys, true); }
+        d.relay.clear_calls();
+        let report = sync_once(&d.env()).unwrap();
+        assert_eq!(report.spaces_pulled, count);
+        let calls = d.relay.calls();
+        assert_eq!(calls.iter().filter(|c| c.starts_with("batch:")).count(), count.div_ceil(64));
+        assert_eq!(calls.iter().filter(|c| c.starts_with("pull:")).count(), 1);
+        d.runtime.focused.store(true, std::sync::atomic::Ordering::SeqCst);
+        let delay = crate::sync::round::next_delay(&d.env());
+        assert_eq!(delay, Duration::from_secs(90.max(4*(1+count) as u64)));
+        for devices in [1,3,10] {
+            let rounds = 3600 / delay.as_secs();
+            assert!(rounds * (1+count.div_ceil(64)) as u64 * devices < 1200);
+            assert!(rounds * count as u64 * devices < 12000);
+        }
+        d.relay.clear_calls();
+        sync_once(&d.env()).unwrap();
+        assert!(!d.relay.calls().iter().any(|c| c == "info"));
+    }
+}
+
+#[test]
+fn deferred_records_are_fairly_drained_and_429_preserves_other_cursors_without_more_io() {
+    let (d, keys) = fixture();
+    let children: Vec<_> = (0..5).map(|_| add_space(&d, &keys, true)).collect();
+    d.relay.set_budget(Some(1));
+    assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, 5);
+    assert_eq!(d.runtime.core.lock().unwrap().records_pull_cost, (5, 15));
+    d.runtime.focused.store(true, std::sync::atomic::Ordering::SeqCst);
+    let delay = crate::sync::round::next_delay(&d.env()).as_secs();
+    assert_eq!(delay, 240); // account + five repeated/deferred batches
+    assert!(3600 / delay * 6 * 10 < 1200);
+    assert!(3600 / delay * 15 * 10 < 12000);
+    d.relay.clear_calls();
+    d.relay.fail_batches_with_429(1);
+    let before = state(&d).spaces;
+    assert!(sync_once(&d.env()).is_err());
+    assert_eq!(state(&d).spaces, before);
+    assert_eq!(d.runtime.core.lock().unwrap().failed_rounds, 1);
+    assert_eq!(d.relay.calls().len(), 2); // account proof, then the rejected batch
+    assert!(crate::sync::round::next_delay(&d.env()).as_secs() >= 90);
+    d.relay.set_budget(None);
+    d.relay.set_legacy(true);
+    record_runtime::mutate_records(&d.env(), |s| { let mut n=s.clone(); n.relay_features=None; Ok(n) }).unwrap();
+    d.relay.clear_calls();
+    assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, children.len());
+    assert!(!d.relay.calls().iter().any(|c| c.starts_with("batch:")));
+}
+
+#[test]
+fn unsupported_batch_is_remembered_and_legacy_http_cost_is_scheduled_with_nat_headroom() {
+    let (d, keys) = fixture();
+    for _ in 0..20 { add_space(&d, &keys, true); }
+    sync_once(&d.env()).unwrap();
+    d.relay.set_legacy(true);
+    d.relay.clear_calls();
+    assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, 20);
+    assert_eq!(d.relay.calls().iter().filter(|c| c.starts_with("batch:")).count(), 1);
+    d.runtime.focused.store(true, std::sync::atomic::Ordering::SeqCst);
+    let delay = crate::sync::round::next_delay(&d.env()).as_secs();
+    assert_eq!(delay, 40*22); // includes the unsupported probe in this round
+    assert!(3600 / delay * 21 * 10 < 1200);
+    d.relay.clear_calls();
+    sync_once(&d.env()).unwrap();
+    assert_eq!(d.relay.calls().len(), 21);
+    assert_eq!(crate::sync::round::next_delay(&d.env()).as_secs(), 40*21);
+    assert!(!d.relay.calls().iter().any(|c| c.starts_with("batch:")));
+}
+
+#[test]
+fn central_cutover_rejects_legacy_credentials_and_inflight_account_publication() {
+    struct Forbidden;
+    impl Keychain for Forbidden {
+        fn get(&self,_:&str)->Result<Option<String>,AppError>{panic!("legacy credential read after cutover")}
+        fn set(&self,_:&str,_:&str)->Result<(),AppError>{panic!("legacy credential write after cutover")}
+        fn delete(&self,_:&str)->Result<(),AppError>{panic!("legacy credential delete after cutover")}
+    }
+    impl RelayConnector for Forbidden {
+        fn connect(&self,_:&str)->Result<Box<dyn RelayApi>,AppError>{panic!("legacy network after cutover")}
+    }
+    let (device,keys)=fixture();let mut snapshot=record_runtime::snapshot(&device.env()).unwrap().0;
+    assert!(same_account(&snapshot,&keys.chain_id,&snapshot.relay_url));
+    let mut central=crate::sync::central::workspace::tests::enrolled();central.control.cutover=true;
+    snapshot.local.central=Some(central);snapshot.version=crate::sync::records_v3::CENTRAL_STATE_VERSION;
+    assert!(!same_account(&snapshot,&keys.chain_id,&snapshot.relay_url));
+    let generation=device.runtime.core.lock().unwrap().generation;
+    record_runtime::commit_candidate(&device.env(),generation,snapshot.clone()).unwrap();
+    let mut env=device.env();env.keychain=&Forbidden;env.relays=&Forbidden;
+    assert!(preflight(&env).unwrap_err().to_string().contains("central accounts"));
+    assert!(record_runtime::read_account_keys(&snapshot,&Forbidden).unwrap().is_none());
+    assert!(device.runtime.core.lock().unwrap().account_keys.is_none());
+    let failed=prepare_account_gate(&env,&Forbidden,snapshot);
+    assert!(matches!(failed,Err(error) if error.to_string().contains("central accounts")));
 }

@@ -1,0 +1,106 @@
+name: lunport-central
+x-runtime: &runtime
+  image: ${SECURITY_IMAGE:-lunport-central-security:local}
+  build:
+    context: ../..
+    dockerfile: selfhost/central/Dockerfile
+    target: security-runtime
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+  volumes:
+    - core-module:/core:ro
+    - app-data:/data
+    - security-data:/security-data
+  environment: &settings
+    SECURITY_INSTALLATION: ${SECURITY_INSTALLATION:?set a stable random 32-character installation ID}
+    SELFHOST_PROXY_KEY: ${SELFHOST_PROXY_KEY:?set a random 64-character proxy capability}
+    CENTRAL_ORIGIN: https://${RELAY_DOMAIN:?set the public relay domain}
+    CENTRAL_ENABLED: ${CENTRAL_ENABLED:-0}
+    PASSKEY_ENABLED: ${PASSKEY_ENABLED:-1}
+    OIDC_ISSUER: ${OIDC_ISSUER:-}
+    OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
+    OIDC_API_AUDIENCE: ${OIDC_API_AUDIENCE:-lunport-sync}
+    OIDC_NATIVE_CLIENT_ID: ${OIDC_NATIVE_CLIENT_ID:-lunport-native}
+    OIDC_SYNC_SCOPE: ${OIDC_SYNC_SCOPE:-lunport:sync}
+services:
+  core-bundle:
+    image: ${CORE_IMAGE:-lunport-central-core:local}
+    build:
+      context: ../..
+      dockerfile: selfhost/central/Dockerfile
+      target: core-bundle
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes: [core-module:/modules]
+  gateway:
+    <<: *runtime
+    restart: unless-stopped
+    depends_on:
+      core-bundle: { condition: service_completed_successfully }
+    networks: [proxy, identity-egress]
+    healthcheck:
+      test: [CMD, /bin/sh, /relay/healthcheck.sh]
+      interval: 30s
+      timeout: 6s
+      start_period: 10s
+      retries: 3
+    # No published socket. Caddy alone forwards requests with the private proxy capability.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      gateway: { condition: service_healthy }
+    ports: ["80:80", "443:443", "443:443/udp"]
+    networks: [proxy, public-egress]
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN}
+      SELFHOST_PROXY_KEY: ${SELFHOST_PROXY_KEY}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+  authority-operator:
+    image: ${AUTHORITY_OPERATOR_IMAGE:-lunport-central-authority-operator:local}
+    build:
+      context: ../..
+      dockerfile: selfhost/central/Dockerfile
+      target: authority-operator
+    profiles: [setup]
+    command: [plan]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes: [app-data:/data:ro, security-data:/security-data]
+    environment:
+      SECURITY_INSTALLATION: ${SECURITY_INSTALLATION}
+  control:
+    <<: *runtime
+    profiles: [setup]
+    command: [inspect]
+    network_mode: none
+    depends_on:
+      core-bundle: { condition: service_completed_successfully }
+    environment:
+      <<: *settings
+      SELFHOST_EXPECTED_REGISTRY: ${SELFHOST_EXPECTED_REGISTRY:-}
+      SELFHOST_CONFIRM_NEW_INSTALLATION: ${SELFHOST_CONFIRM_NEW_INSTALLATION:-}
+      SELFHOST_MINIMUM_FLOOR: ${SELFHOST_MINIMUM_FLOOR:-2}
+      SELFHOST_EXPECTED_AUTHORITY: ${SELFHOST_EXPECTED_AUTHORITY:-}
+      SELFHOST_AUTHORITY_RECEIPT: ${SELFHOST_AUTHORITY_RECEIPT:-}
+networks:
+  proxy: { internal: true }
+  identity-egress: {}
+  public-egress: {}
+volumes:
+  core-module:
+  app-data:
+  security-data:
+  caddy-data:
+  caddy-config:

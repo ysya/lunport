@@ -24,6 +24,8 @@ pub const HOSTKEY_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct HostKeyRequest {
+    #[serde(default)]
+    pub user: String,
     pub id: String,
     pub alias: String,
     pub hostname: String,
@@ -166,6 +168,7 @@ pub struct WindowConfirmer {
 impl HostKeyConfirmer for WindowConfirmer {
     fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
         let request = HostKeyRequest {
+            user: question.user.clone(),
             id: String::new(),
             alias: question.alias.clone(),
             hostname: question.hostname.clone(),
@@ -284,7 +287,7 @@ mod tests {
     }
 
     fn question(alias: &str) -> HostKeyQuestion {
-        HostKeyQuestion { alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+        HostKeyQuestion { user: "deploy".into(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
     }
 
     fn wait_until(what: &str, condition: impl Fn() -> bool) {
@@ -386,7 +389,7 @@ mod tests {
     }
 
     fn request(alias: &str) -> HostKeyRequest {
-        HostKeyRequest { id: String::new(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+        HostKeyRequest { user: "deploy".into(), id: String::new(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
     }
 
     /// An answered question whose `ask` has not woken up yet is no longer listed: it would be announced again, as the head, meanwhile.
@@ -398,8 +401,8 @@ mod tests {
         let (second, _second_reader) = mpsc::sync_channel(1);
         {
             let mut pending = hub.pending.lock().unwrap();
-            pending.push(Waiting { request: HostKeyRequest { id: "hostkey-1".into(), ..request("web") }, answer: first, answered: false });
-            pending.push(Waiting { request: HostKeyRequest { id: "hostkey-2".into(), ..request("db") }, answer: second, answered: false });
+            pending.push(Waiting { request: HostKeyRequest { user: "deploy".into(), id: "hostkey-1".into(), ..request("web") }, answer: first, answered: false });
+            pending.push(Waiting { request: HostKeyRequest { user: "deploy".into(), id: "hostkey-2".into(), ..request("db") }, answer: second, answered: false });
         }
         hub.resolve("hostkey-1", HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
         assert_eq!(hub.pending().into_iter().map(|request| request.id).collect::<Vec<_>>(), ["hostkey-2"], "the answered question is not listed");
@@ -471,7 +474,7 @@ mod tests {
     fn the_window_comes_to_the_front_only_for_a_new_question_at_the_head() {
         let list = |ids: &[&str]| {
             ids.iter()
-                .map(|id| HostKeyRequest { id: (*id).into(), alias: "web".into(), hostname: "web".into(), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:x".into(), changed: None })
+                .map(|id| HostKeyRequest { user: "deploy".into(), id: (*id).into(), alias: "web".into(), hostname: "web".into(), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:x".into(), changed: None })
                 .collect::<Vec<_>>()
         };
         let mut shown = None;

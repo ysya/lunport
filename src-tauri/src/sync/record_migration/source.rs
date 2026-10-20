@@ -441,7 +441,7 @@ fn stable_key_id(space: &str, value: &str) -> String {
     }
     hex(&h.finalize()[..16])
 }
-fn key_options(
+pub(in crate::sync) fn key_options(
     home: &Path,
     space: &str,
     old: &[Record],

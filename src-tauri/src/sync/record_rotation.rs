@@ -1398,6 +1398,7 @@ pub fn start_rotation(env: &SyncEnv, name: &str) -> Result<RotationCreation, App
     let proof = crate::sync::record_round::fresh_account_gate(env)?;
     proof.ensure_compatible()?;
     let s = record_runtime::snapshot(env)?.0;
+    crate::sync::record_conflicts::require_resolved(&s)?;
     let relay = env.relay(&s.relay_url)?;
     if !relay.info()?.supports(crate::sync::relay::FEATURE_FREEZE) {
         return Err(error(

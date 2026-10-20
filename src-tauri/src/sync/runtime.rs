@@ -39,6 +39,15 @@ pub struct SyncCore {
     pub generation: u64,
     pub format: RuntimeFormat,
     pub records: Option<SyncStateV3>,
+    /// Ephemeral native credentials only; the public central state remains in records.local.central.
+    pub central_session: Option<std::sync::Arc<crate::sync::central::controller::Session>>,
+    pub central_user_action: Option<String>,
+    pub central_migration: Option<crate::sync::central::migration_flow::Cached>,
+    pub(crate) central_migration_frozen: bool,
+    pub(crate) migration_plan: Option<Box<crate::sync::central::CachedPlan>>,
+    pub(crate) migration_verifier: Option<Box<crate::sync::central::CachedVerifier>>,
+    pub(crate) adoption_read: Option<Box<crate::sync::central::adoption::ReadingCache>>,
+    pub central_poll: crate::sync::central::round::Polling,
     /// Probe-selected legacy sources wait for explicit workspace choice or migration.
     pub legacy_paused: bool,
     pub state: Option<SyncStateV2>,
@@ -49,6 +58,8 @@ pub struct SyncCore {
     pub conflict_streak: u32,
     pub failed_rounds: u32,
     pub batch_failures: u32,
+    /// Most recent Records child-pull (HTTP requests, charged batch items), including deferred retries.
+    pub records_pull_cost: (usize, usize),
     pub relay_checked: Option<String>,
     pub rounds: u64,
     pub swap_pending: bool,
@@ -61,6 +72,12 @@ pub struct SyncCore {
 #[derive(Default)]
 pub struct SyncRuntime {
     pub core: Mutex<SyncCore>,
+    pub central_login: Mutex<Option<(String, Option<crate::sync::central::browser::LoginCancellation>)>>,
+    pub central_recovery_read: Mutex<Option<crate::sync::central::recovery_flow::Reading>>,
+    pub central_recovery_cancel: AtomicBool,
+    pub(crate) central_replacement_read: Mutex<Option<crate::sync::central::replacement_flow::Reading>>,
+    pub(crate) central_replacement_generation: Mutex<Option<String>>,
+    pub(crate) central_replacement_ui: Mutex<Option<crate::sync::central::replacement_flow::Invocation>>,
     pub lifecycle: std::sync::Arc<Mutex<()>>,
     /// 保管庫檔(`vault::store`)的寫入互斥:開檔、改動、存檔全程持有(`vault::store::with_vault`)。同步執行緒、命令與 agent 共用。
     pub vault: Mutex<()>,

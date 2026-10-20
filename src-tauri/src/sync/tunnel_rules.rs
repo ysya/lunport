@@ -35,11 +35,11 @@ impl TunnelRule {
         self.forward.validate()
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Payload {
-    schema: u32,
-    rule: TunnelRule,
+pub(crate) struct Payload {
+    pub schema: u32,
+    pub rule: TunnelRule,
 }
 pub fn is_id(id: &str) -> bool {
     id.strip_prefix(PREFIX).is_some_and(records_v3::is_host_id)

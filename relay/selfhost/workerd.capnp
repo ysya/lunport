@@ -20,10 +20,19 @@ const relay :Workerd.Worker = (
     # A uniqueKey names its objects' storage on disk: changing it orphans every stored chain.
     (className = "ChainStore", uniqueKey = "sshelter-relay-ChainStore", enableSql = true),
     (className = "IpLimiter", uniqueKey = "sshelter-relay-IpLimiter", enableSql = true),
+    # Security state has separate storage and no expiry. Preserve this namespace on restore.
+    (className = "LegacyRetirementStore", uniqueKey = "sshelter-relay-LegacyRetirementStore", enableSql = true),
+    (className = "AccountStore", uniqueKey = "sshelter-relay-AccountStore", enableSql = true),
+    (className = "VaultStore", uniqueKey = "sshelter-relay-VaultStore", enableSql = true),
+    (className = "PasskeyStore", uniqueKey = "sshelter-relay-PasskeyStore", enableSql = true),
   ],
   durableObjectStorage = (localDisk = "storage"),
   bindings = [
     (name = "CHAIN", durableObjectNamespace = "ChainStore"),
     (name = "IP_LIMIT", durableObjectNamespace = "IpLimiter"),
+    (name = "LEGACY_RETIREMENT", durableObjectNamespace = "LegacyRetirementStore"),
+    (name = "ACCOUNT", durableObjectNamespace = "AccountStore"),
+    (name = "VAULT", durableObjectNamespace = "VaultStore"),
+    (name = "PASSKEY", durableObjectNamespace = "PasskeyStore"),
   ],
 );

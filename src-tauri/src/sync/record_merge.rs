@@ -17,6 +17,7 @@ use crate::sync::record::{
     merge, record_key, DevicePayload, Envelope, LocalRecord, MergeOutcome, Record, RecordKind,
     SpacePayload, ACCOUNT_META_ID,
 };
+use crate::sync::record_conflicts::{RecordRecovery, RecordVersion};
 use crate::sync::records_v3::{
     decode_host, decode_keyslot, validate_migration_gate, HostScope, MigrationPhase, SpaceStateV3,
     ACCOUNT_SCHEMA, MIN_ACCOUNT_SCHEMA,
@@ -47,6 +48,7 @@ pub enum AccountGate {
     MigrationPending(MigrationGate),
     InvalidMigration,
     InvalidPull,
+    RecoveryFull,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +255,12 @@ fn opened_secret(
     if section.chain_id != keys.chain_id {
         return Err(failure());
     }
+    if section.recovery.conflicts.contains_key(&sealed_key(
+        kind.as_str(),
+        &crypto::id_hash(keys, kind.as_str(), id),
+    )) {
+        return Err(failure());
+    }
     let key = sealed_key(kind.as_str(), &crypto::id_hash(keys, kind.as_str(), id));
     let Some(sealed) = section.sealed.get(&key) else {
         return Ok(None);
@@ -282,6 +290,10 @@ fn live_metadata(
         return Ok(false);
     }
     if !valid_public(&row.record, true, keys)
+        || section
+            .recovery
+            .conflicts
+            .contains_key(&record_key(kind, id))
         || section.sealed.contains_key(&sealed_key(
             kind.as_str(),
             &crypto::id_hash(keys, kind.as_str(), id),
@@ -849,6 +861,7 @@ fn merge_rows(
     keys: &ChainKeys,
     pulled: &PullResponse,
     account: bool,
+    recovery: &mut RecordRecovery,
     conflicts: &mut Vec<String>,
     diagnostics: &mut Vec<MergeDiagnostic>,
 ) -> bool {
@@ -885,28 +898,35 @@ fn merge_rows(
                     .ok()
                     .map(|record| (record, row.dirty, row.envelope.seq))
             });
-            // LWW needs headers only: never clone a decrypted secret JSON payload.
-            let local_view = local
-                .as_ref()
-                .map(|(record, dirty, seq)| header_view(&record.0, *seq, *dirty));
-            let outcome = merge(local_view.as_ref(), &remote.0);
-            if outcome == MergeOutcome::KeepLocal {
-                if let Some(local) = sealed.get_mut(&wire_key) {
-                    local.envelope.seq = local.envelope.seq.max(envelope.seq);
+            if let Some((record, dirty, seq)) = &local {
+                if *dirty && record.0 != remote.0 {
+                    if envelope.seq > *seq {
+                        recovery.retain(
+                            &wire_key,
+                            RecordVersion::Sealed(sealed[&wire_key].clone()),
+                            RecordVersion::Sealed(SealedRecord {
+                                envelope: envelope.clone(),
+                                dirty: false,
+                                public_identity: None,
+                            }),
+                        );
+                        conflicts.push(wire_key.clone());
+                    }
+                    continue;
                 }
-            } else {
-                if outcome == MergeOutcome::RemoteWinsOverDirtyLocal {
-                    conflicts.push(wire_key.clone());
+                if envelope.seq < *seq {
+                    continue;
                 }
-                sealed.insert(
-                    wire_key,
-                    SealedRecord {
-                        envelope: envelope.clone(),
-                        dirty: false,
-                        public_identity: None,
-                    },
-                );
             }
+            let row = SealedRecord {
+                envelope: envelope.clone(),
+                dirty: false,
+                public_identity: None,
+            };
+            recovery
+                .bases
+                .insert(wire_key.clone(), RecordVersion::Sealed(row.clone()));
+            sealed.insert(wire_key, row);
         } else {
             if let Some(opaque) = sealed.get(&wire_key) {
                 if let Ok(old) = open_record(keys, &opaque.envelope) {
@@ -924,24 +944,35 @@ fn merge_rows(
                 }
             }
             let key = record_key(remote.0.kind, &remote.0.id);
-            let outcome = merge(records.get(&key), &remote.0);
-            if outcome == MergeOutcome::KeepLocal {
-                if let Some(local) = records.get_mut(&key) {
-                    local.seq = local.seq.max(envelope.seq);
+            if let Some(local) = records.get(&key) {
+                if local.dirty && local.record != remote.0 {
+                    if envelope.seq > local.seq {
+                        recovery.retain(
+                            &key,
+                            RecordVersion::Public(local.clone()),
+                            RecordVersion::Public(LocalRecord {
+                                record: remote.0.clone(),
+                                seq: envelope.seq,
+                                dirty: false,
+                            }),
+                        );
+                        conflicts.push(key.clone());
+                    }
+                    continue;
                 }
-            } else {
-                if outcome == MergeOutcome::RemoteWinsOverDirtyLocal {
-                    conflicts.push(key.clone());
+                if envelope.seq < local.seq {
+                    continue;
                 }
-                records.insert(
-                    key,
-                    LocalRecord {
-                        record: remote.0.clone(),
-                        seq: envelope.seq,
-                        dirty: false,
-                    },
-                );
             }
+            let row = LocalRecord {
+                record: remote.0.clone(),
+                seq: envelope.seq,
+                dirty: false,
+            };
+            recovery
+                .bases
+                .insert(key.clone(), RecordVersion::Public(row.clone()));
+            records.insert(key, row);
             if !sealed.get(&wire_key).is_some_and(|row| row.dirty) {
                 sealed.remove(&wire_key);
             }
@@ -985,6 +1016,7 @@ fn admit_retained_group_order(
             latest_seq: section.cursor_seq,
         },
         true,
+        &mut section.recovery,
         conflicts,
         diagnostics,
     )
@@ -1000,7 +1032,7 @@ fn admit_retained_tunnels(section: &mut AccountState, keys: &ChainKeys, conflict
             continue;
         }
         section.sealed.remove(&wire);
-        if !merge_rows(&mut section.records, &mut section.sealed, keys, &PullResponse { records: vec![envelope], latest_seq: section.cursor_seq }, true, conflicts, diagnostics) { return false; }
+        if !merge_rows(&mut section.records, &mut section.sealed, keys, &PullResponse { records: vec![envelope], latest_seq: section.cursor_seq }, true, &mut section.recovery, conflicts, diagnostics) { return false; }
     }
     true
 }
@@ -1036,6 +1068,7 @@ pub fn merge_account(
         keys,
         pulled,
         true,
+        &mut out.section.recovery,
         &mut out.conflicts,
         &mut out.diagnostics,
     ) {
@@ -1048,6 +1081,12 @@ pub fn merge_account(
             id_hash: String::new(),
             code: DiagnosticCode::OpaqueConflict,
         });
+        return out;
+    }
+    if !out.section.recovery.bounded() {
+        out.section = section.clone();
+        out.gate = AccountGate::RecoveryFull;
+        out.conflicts.clear();
         return out;
     }
     out.skipped = out.diagnostics.len().try_into().unwrap_or(u32::MAX);
@@ -1084,6 +1123,7 @@ pub fn merge_space(
         keys,
         pulled,
         false,
+        &mut out.section.recovery,
         &mut out.conflicts,
         &mut out.diagnostics,
     ) {
@@ -1096,6 +1136,12 @@ pub fn merge_space(
             id_hash: String::new(),
             code: DiagnosticCode::OpaqueConflict,
         });
+        return out;
+    }
+    if !out.section.recovery.bounded() {
+        out.section = section.clone();
+        out.gate = AccountGate::RecoveryFull;
+        out.conflicts.clear();
         return out;
     }
     out.skipped = out.diagnostics.len().try_into().unwrap_or(u32::MAX);
@@ -1111,9 +1157,13 @@ fn outgoing(
     sealed: &BTreeMap<String, SealedRecord>,
     keys: &ChainKeys,
     account: bool,
+    recovery: &RecordRecovery,
 ) -> Result<Vec<TypedOutgoing>, AppError> {
     let mut out = Vec::new();
-    for (key, row) in records.iter().filter(|(_, row)| row.dirty) {
+    for (key, row) in records
+        .iter()
+        .filter(|(key, row)| row.dirty && !recovery.conflicts.contains_key(*key))
+    {
         if row.record.kind.is_secret()
             || *key != record_key(row.record.kind, &row.record.id)
             || !valid_public(&row.record, account, keys)
@@ -1134,7 +1184,10 @@ fn outgoing(
             expected: ExpectedRevision::Public(row.record.clone()),
         });
     }
-    for (key, row) in sealed.iter().filter(|(_, row)| row.dirty) {
+    for (key, row) in sealed
+        .iter()
+        .filter(|(key, row)| row.dirty && !recovery.conflicts.contains_key(*key))
+    {
         let opened = open_record(keys, &row.envelope).map_err(|_| failure())?;
         if !account
             || !opened.0.kind.is_secret()
@@ -1180,7 +1233,13 @@ pub fn account_outgoing(
     {
         return Err(failure());
     }
-    outgoing(&section.records, &section.sealed, keys, true)
+    outgoing(
+        &section.records,
+        &section.sealed,
+        keys,
+        true,
+        &section.recovery,
+    )
 }
 pub fn space_outgoing(
     section: &SpaceStateV3,
@@ -1194,7 +1253,13 @@ pub fn space_outgoing(
     {
         return Err(failure());
     }
-    outgoing(&section.records, &section.sealed, keys, false)
+    outgoing(
+        &section.records,
+        &section.sealed,
+        keys,
+        false,
+        &section.recovery,
+    )
 }
 fn same_ciphertext(a: &Envelope, b: &Envelope) -> bool {
     a.kind == b.kind
@@ -1208,6 +1273,7 @@ fn apply_receipts(
     sealed: &mut BTreeMap<String, SealedRecord>,
     outgoing: &[TypedOutgoing],
     pushed: &Pushed,
+    recovery: &mut RecordRecovery,
 ) {
     for (key, seq) in &pushed.accepted {
         let Some(sent) = outgoing.iter().find(|sent| &sent.outgoing.key == key) else {
@@ -1224,6 +1290,9 @@ fn apply_receipts(
                 {
                     row.seq = *seq;
                     row.dirty = false;
+                    recovery
+                        .bases
+                        .insert(key.clone(), RecordVersion::Public(row.clone()));
                 }
             }
             ExpectedRevision::Sealed(expected) => {
@@ -1234,6 +1303,9 @@ fn apply_receipts(
                 }) {
                     row.envelope.seq = *seq;
                     row.dirty = false;
+                    recovery
+                        .bases
+                        .insert(key.clone(), RecordVersion::Sealed(row.clone()));
                 }
             }
         }
@@ -1246,7 +1318,13 @@ pub fn apply_account_receipts(
     pushed: &Pushed,
 ) -> AccountState {
     let mut next = section.clone();
-    apply_receipts(&mut next.records, &mut next.sealed, outgoing, pushed);
+    apply_receipts(
+        &mut next.records,
+        &mut next.sealed,
+        outgoing,
+        pushed,
+        &mut next.recovery,
+    );
     next
 }
 pub fn apply_space_receipts(
@@ -1255,8 +1333,108 @@ pub fn apply_space_receipts(
     pushed: &Pushed,
 ) -> SpaceStateV3 {
     let mut next = section.clone();
-    apply_receipts(&mut next.records, &mut next.sealed, outgoing, pushed);
+    apply_receipts(
+        &mut next.records,
+        &mut next.sealed,
+        outgoing,
+        pushed,
+        &mut next.recovery,
+    );
     next
+}
+
+/// Conflict responses are recovery evidence, not pull cursors or authority for other records.
+pub(crate) fn retain_push_conflicts(
+    records: &mut BTreeMap<String, LocalRecord>,
+    sealed: &mut BTreeMap<String, SealedRecord>,
+    recovery: &mut RecordRecovery,
+    keys: &ChainKeys,
+    account: bool,
+    sent: &[TypedOutgoing],
+    pushed: &Pushed,
+) -> Result<(), AppError> {
+    if pushed.conflict_rows.is_empty() {
+        return Ok(());
+    }
+    for row in &pushed.conflict_rows {
+        let Some(request) = sent.iter().find(|sent| {
+            sent.outgoing.item.id_hash == row.id_hash && sent.outgoing.item.kind == row.kind
+        }) else {
+            return Err(failure());
+        };
+        if row.seq == 0 || row.seq > MAX_RELAY_SEQ || row.seq <= request.outgoing.item.base_seq {
+            return Err(failure());
+        }
+    }
+    let mut candidate = (records.clone(), sealed.clone(), recovery.clone());
+    if !merge_rows(
+        &mut candidate.0,
+        &mut candidate.1,
+        keys,
+        &PullResponse {
+            records: pushed.conflict_rows.clone(),
+            latest_seq: 0,
+        },
+        account,
+        &mut candidate.2,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    ) || !candidate.2.bounded()
+    {
+        return Err(failure());
+    }
+    *records = candidate.0;
+    *sealed = candidate.1;
+    *recovery = candidate.2;
+    Ok(())
+}
+
+/// Re-encrypt only inside Rust; private payloads never become a conflict UI value.
+pub(crate) fn rebase_conflicted_secret(
+    local: &SealedRecord,
+    remote: &[RecordVersion],
+    keys: &ChainKeys,
+    device: &str,
+    now: u64,
+) -> Result<SealedRecord, AppError> {
+    let mut opened = open_record(keys, &local.envelope).map_err(|_| failure())?;
+    let mut seq = local.envelope.seq;
+    for row in remote {
+        let RecordVersion::Sealed(row) = row else {
+            return Err(failure());
+        };
+        let other = open_record(keys, &row.envelope).map_err(|_| failure())?;
+        if other.0.kind != opened.0.kind || other.0.id != opened.0.id || !valid_secret(&other.0) {
+            return Err(failure());
+        }
+        opened.0.version = opened.0.version.max(other.0.version);
+        opened.0.updated_at_ms = opened.0.updated_at_ms.max(other.0.updated_at_ms);
+        seq = seq.max(row.envelope.seq);
+    }
+    if !valid_secret(&opened.0) {
+        return Err(failure());
+    }
+    opened.0.version = opened.0.version.checked_add(1).ok_or_else(failure)?;
+    opened.0.updated_at_ms = opened
+        .0
+        .updated_at_ms
+        .checked_add(1)
+        .ok_or_else(failure)?
+        .max(now);
+    opened.0.device_id = device.into();
+    let item = encode_record(keys, &opened.0, seq)?;
+    Ok(SealedRecord {
+        envelope: Envelope {
+            id_hash: item.id_hash,
+            kind: item.kind,
+            seq,
+            nonce: item.nonce,
+            ciphertext: item.ciphertext,
+            deleted: item.deleted,
+        },
+        dirty: true,
+        public_identity: None,
+    })
 }
 
 #[cfg(test)]

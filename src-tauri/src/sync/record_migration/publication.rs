@@ -85,10 +85,16 @@ fn save(paths: &Paths, j: &Journal) -> Result<(), AppError> {
 pub(super) fn read_journal(paths: &Paths) -> Result<Journal, AppError> {
     let bytes = read_optional(&paths.journal, MAX_JOURNAL_BYTES)?
         .ok_or_else(|| failure("migration recovery journal is missing"))?;
-    let j: Journal = serde_json::from_slice(&bytes)
+    parse_captured_journal(&bytes, &paths.root.file_name().unwrap().to_string_lossy())
+}
+pub(super) fn parse_captured_journal(bytes: &[u8], id: &str) -> Result<Journal, AppError> {
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err(failure("captured migration journal exceeds its size limit"));
+    }
+    let j: Journal = serde_json::from_slice(bytes)
         .map_err(|_| failure("migration recovery journal is invalid"))?;
     if j.version != 1
-        || j.plan.migration_id != paths.root.file_name().unwrap().to_string_lossy()
+        || j.plan.migration_id != id
         || !crate::sync::crypto::is_chain_id(&j.plan.source_digest)
         || !crate::sync::crypto::is_chain_id(&j.source_state_digest)
         || !matches!(
