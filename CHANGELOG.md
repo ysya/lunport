@@ -2,6 +2,12 @@
 
 ## [1.8.0](https://github.com/ysya/lunport/compare/v1.7.1...v1.8.0) (2026-10-20)
 
+The sync server starts blank: enter the HTTPS URL of your own deployed service. Local use remains available without an account. The client now uses central Passkey account sync; old sync-code setup and per-key sync controls have been removed.
+
+Changing an existing server requires an explicit restart and opens a new empty local workspace. It does not carry old accounts, keys or sync history into the new service. Original files remain on disk; use SSH-config import to populate the new library.
+
+Keys now offer deletion, including explicit forced deletion when hosts or Groups reference a key. Windows native authentication/key dropdown options now use the selected theme colors.
+
 
 ### Features
 
