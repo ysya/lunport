@@ -1,7 +1,7 @@
 /** Development-only Vite entry. No native backend, real hosts, keys, or relay requests. */
 import App from "@/App";
 import { legacyPreviewRead } from "./legacy-fixtures";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
@@ -12,6 +12,7 @@ import { AuthenticationCardView } from "@/components/AuthenticationWindow";
 import { groupView, hostPayload, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
 import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
+import { useTerminalStore } from "@/stores/terminals";
 import "@/index.css";
 
 const fixtureInstalled = import.meta.hot?.data.interfaceFixtureInstalled === true;
@@ -37,10 +38,14 @@ else {
   const scenario = new URLSearchParams(window.location.search).get("scenario");
   const failure = new URLSearchParams(window.location.search).get("failure");
   if (scenario === "vault") overview.keys = Array.from({ length: 25 }, (_, index) => ({ ...overview.keys[0], id: (index + 1).toString(16).padStart(32, "0"), public: { ...overview.keys[0].public!, name: index === 0 ? "Work key" : `Infrastructure key ${index + 1}` } }));
+  if (scenario === "terminal-missing-key") overview = { ...overview,
+    hosts: [hostView({ payload: hostPayload({ alias: "simple", auth: "key", key_id: keyId }) })],
+    keys: [{ ...overview.keys[0], authority: "account", synced: true, status: "needs_material" }],
+  };
   // Disposable in-memory credentials only; no OS store or remote SSH is used here.
   const passwords = new Map<string, string>();
   let passwordSaveFailed = false;
-  if (scenario === "password" || scenario === "password-save-retry") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
+  if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
   let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
   if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
   if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
@@ -70,6 +75,18 @@ else {
       transformCallback: (callback: unknown) => { const id = callbackId++; callbacks.set(id, callback); return id; },
       unregisterCallback: (id: number) => callbacks.delete(id),
       invoke: async (command: string, args: Record<string, unknown> = {}) => {
+        if (scenario === "terminal-missing-key" && command === "terminal_open") {
+          const output = args.output as { onmessage: (buffer: ArrayBuffer) => void };
+          const send = (event: object) => {
+            const json = new TextEncoder().encode(JSON.stringify(event));
+            const packet = new Uint8Array(json.length + 1); packet[0] = 1; packet.set(json, 1);
+            output.onmessage(packet.buffer);
+          };
+          send({ type: "event", event: "error", kind: "host", text: `simple needs key ${keyId} material on this device.` });
+          send({ type: "exited", code: null, signal: null }); send({ type: "closed" });
+          return;
+        }
+        if (scenario === "terminal-missing-key" && ["terminal_close", "terminal_ack"].includes(command)) return;
         if (command === failure) throw new Error("Disposable fixture read failure. Retry after changing the preview scenario.");
         if (command === "secrets_has") return passwords.has(String(args.alias));
         if (command === "secrets_set") {
@@ -151,6 +168,11 @@ else {
     useApplyTheme();
     const status = useRecordsStatus();
     const [answer, setAnswer] = useState("");
+    useEffect(() => {
+      if (scenario !== "terminal-missing-key") return;
+      useTerminalStore.getState().open({ host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
+      return () => useTerminalStore.getState().reset();
+    }, []);
     if (scenario === "legacy") return <App />;
     if (scenario === "hostkey" || scenario === "hostkey-changed") return <HostKeyCard
       request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
