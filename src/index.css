@@ -189,6 +189,16 @@
   [data-slot="switch"] {
     cursor: default;
     }
+  /* WebView2 paints native popup rows separately from the select control. Give both
+   * row colors explicitly so dark-theme text never lands on the OS white surface. */
+  select option,
+  select optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+    }
+  select option:disabled {
+    color: var(--muted-foreground);
+    }
   input[type="text"],
   input[type="search"],
   input[type="number"],

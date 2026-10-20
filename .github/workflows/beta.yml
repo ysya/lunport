@@ -154,21 +154,6 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      # Two supported modes: with the repository variable set, releases ship a built-in sync relay;
-      # without it, users who want sync enter their own relay URL in Settings → Sync. A value that is
-      # set but not https:// would ship a default the app itself rejects, so that fails the build.
-      - name: Check the sync relay URL
-        shell: bash
-        env:
-          SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
-        run: |
-          if [ -z "$SSHELTER_RELAY_URL" ]; then
-            echo "::notice::SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync)."
-          elif [[ "$SSHELTER_RELAY_URL" != https://* ]]; then
-            echo "::error::SSHELTER_RELAY_URL must start with https:// (got '$SSHELTER_RELAY_URL')."
-            exit 1
-          fi
-
       - name: Prepare the fixed macOS signing identity
         if: startsWith(matrix.platform, 'macos')
         env:
@@ -195,8 +180,8 @@ jobs:
           # empty PASSWORD var keeps the CLI from prompting interactively.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          # Built-in sync relay URL (repository variable; https:// only, checked above). When unset, the release has no built-in relay.
-          SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
+          # Public installers ask users for their own deployed server.
+          SSHELTER_RELAY_URL: ""
         with:
           # The prerelease already exists (created by `prepare`); upload assets by ID without editing its metadata.
           releaseId: ${{ steps.target-release.outputs.id }}
