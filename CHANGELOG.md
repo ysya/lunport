@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.7.0](https://github.com/ysya/lunport/compare/v1.6.0...v1.7.0) (2026-10-20)
+
+Use hosts, keys and SSH locally without an account. Passkey sign-in and encrypted multi-device sync are optional.
+
+
+### Features
+
+* duplicate hosts and clarify terminal key recovery ([#53](https://github.com/ysya/lunport/issues/53)) ([9b16d26](https://github.com/ysya/lunport/commit/9b16d260ddea87dabf411f71dc28cc14fbafa345))
+* integrate in-app SSH terminals with wterm and Ghostty ([#44](https://github.com/ysya/lunport/issues/44)) ([4dea911](https://github.com/ysya/lunport/commit/4dea9112ae4827b2571af3b2d46777308cf504e6))
+* reconnect embedded SSH sessions without losing output ([#51](https://github.com/ysya/lunport/issues/51)) ([7f5e0b6](https://github.com/ysya/lunport/commit/7f5e0b6f352b1df8c0ba3c08de705e16d7f5401c))
+* **ssh:** add synced port-forwarding rules and tunnel management ([#49](https://github.com/ysya/lunport/issues/49)) ([051cccd](https://github.com/ysya/lunport/commit/051cccd4928840f51d1a42f7d0b508244c5c5991))
+* **sync:** enable Passkey accounts and encrypted multi-device sync ([#52](https://github.com/ysya/lunport/issues/52)) ([a2010ad](https://github.com/ysya/lunport/commit/a2010ad1892e5b9e1063f2d581fecb8de47522df))
+
+
+### Bug Fixes
+
+* **app:** preserve macOS rename integrations and simplify MCP setup ([#48](https://github.com/ysya/lunport/issues/48)) ([7c61b60](https://github.com/ysya/lunport/commit/7c61b60cea7f02b4b8fd2844409c7d8a8e889375))
+* keep authorization prompts on the workspace display ([#50](https://github.com/ysya/lunport/issues/50)) ([572f0ae](https://github.com/ysya/lunport/commit/572f0aee9d539527bfd669080eea62c02a2e535e))
+* **ui:** simplify the in-app terminal workspace ([#47](https://github.com/ysya/lunport/issues/47)) ([380a18f](https://github.com/ysya/lunport/commit/380a18f93739854f6b959b592aa93a4833747204))
+* use public release downloads in updater manifests ([#46](https://github.com/ysya/lunport/issues/46)) ([ec07d52](https://github.com/ysya/lunport/commit/ec07d524713deb38cce0622f2a8b8ba54f6615eb))
+
 ## [1.6.0](https://github.com/ysya/lunport/compare/v1.5.0...v1.6.0) (2026-10-18)
 
 Single-click a host card to select it, double-click or press Enter to connect, and use the right-hand pencil to edit. The saved-host editor now slides in from the right without changing the catalog layout. Click outside to close it; unsaved changes still require a Keep editing or Discard changes choice. Connection details, port checks and server identity management remain in the host's context menu.
