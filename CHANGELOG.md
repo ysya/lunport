@@ -2,6 +2,8 @@
 
 ## [1.10.2](https://github.com/ysya/lunport/compare/v1.10.1...v1.10.2) (2026-10-21)
 
+Fix **Unlock and sync** rejecting a new device with “The account changed” despite a correct sync password. Pending-device overviews omit the private Vault catalog; unlock and offline recovery now verify the authenticated encrypted history before admission. Existing accounts, sync passwords and local data are retained.
+
 
 ### Bug Fixes
 
