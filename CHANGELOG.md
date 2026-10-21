@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.10.1](https://github.com/ysya/lunport/compare/v1.10.0...v1.10.1) (2026-10-21)
+
+Export saved host settings offline from **All hosts → More library actions → Export host settings…**. Choose **Export previous workspace hosts…** when changing the account server left your old hosts in the original workspace. Import the resulting `lunport-hosts.json` on another device, review the hosts, then assign SSH keys.
+
+Connection settings, resolved Group defaults, jump-host relationships, tags and notes are retained. SSH private keys, old key bindings, fingerprint approvals, imported commands and account authority are excluded. The original workspaces remain in place.
+
+
+### Bug Fixes
+
+* export and recover cached host settings ([#61](https://github.com/ysya/lunport/issues/61)) ([976083b](https://github.com/ysya/lunport/commit/976083bd40ed8ea1db5e040c6c93b996bd3a86ca))
+
 ## [1.10.0](https://github.com/ysya/lunport/compare/v1.9.0...v1.10.0) (2026-10-21)
 
 Create an account on your own server using an email as its name and a Passkey. Email is unverified and cannot recover the account; no SMTP or verification message is required. The sync unlock password stays in the app.
