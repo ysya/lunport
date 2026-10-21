@@ -280,6 +280,53 @@ impl Service {
         controller::establish(&d.env(), &self.origin, self.config.clone(), tokens, None).unwrap();
     }
 }
+#[test]
+fn fresh_sign_in_repairs_local_backoff_but_cannot_bypass_server_retry_after() {
+    use super::{api::Reply, round};
+    use std::time::{Duration, Instant};
+    let mut service = Service::new();
+    let d = TestDevice::new("sign-in-cooldown", &FakeRelay::new(), &TestClock::new());
+    service.login(&d);
+    let before = record_runtime::snapshot(&d.env()).unwrap().0;
+    let sign_in = || controller::establish(
+        &d.env(), &service.origin, service.config.clone(),
+        LoginTokens {
+            issuer: service.config.issuer.clone(), subject: "opaque".into(),
+            nonce: Zeroizing::new("synthetic nonce".into()),
+            access: Zeroizing::new("synthetic access".into()),
+            refresh: Some(Zeroizing::new("synthetic refresh".into())),
+            expires_in: Duration::from_secs(300),
+        }, None,
+    );
+    {
+        let mut core = d.runtime.core.lock().unwrap();
+        core.central_poll.retry_at = Some(Instant::now() + Duration::from_secs(600));
+        core.central_poll.failures = 4;
+        core.central_user_action = Some("Synthetic local sync failure".into());
+    }
+    assert!(round::cooldown(&d.env()) > Duration::from_secs(599));
+    round::check_cooldown(&d.env()).unwrap();
+    assert!(sign_in().unwrap().has_session);
+    // This is also the post-browser-login step that used to surface the false cooldown.
+    joining::initialize(&d.env()).unwrap();
+    assert!(round::cooldown(&d.env()).is_zero());
+    assert_eq!(d.runtime.core.lock().unwrap().central_poll.failures, 0);
+    assert!(controller::status(&d.env()).unwrap().error.is_none());
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0, before);
+
+    let mut limited = Reply::for_test(429, &json!({}));
+    limited.retry_after = Some(Duration::from_secs(200));
+    assert!(round::require_success(&d.env(), &limited).is_err());
+    assert!(round::cooldown(&d.env()) > Duration::from_secs(199));
+    assert!(round::next_delay(&d.env()) > Duration::from_secs(199));
+    let no_registration = service.server.mock("POST", "/v2/session").expect(0).create();
+    let expected = round::check_cooldown(&d.env()).unwrap_err().to_string();
+    assert_eq!(sign_in().unwrap_err().to_string(), expected);
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0, before);
+    assert!(round::cooldown(&d.env()) > Duration::from_secs(199));
+    no_registration.assert();
+}
+
 fn install_recovery_routes(
     server: &mut mockito::ServerGuard,
     state: &Arc<Mutex<Account>>,

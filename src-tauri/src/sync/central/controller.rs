@@ -534,6 +534,13 @@ fn establish_locked(
         } else {
             None
         };
+        if new_login {
+            // A verified fresh sign-in repairs local retry state. A server's
+            // separate Retry-After deadline is never cleared by signing in.
+            core.central_poll.retry_at = None;
+            core.central_poll.failures = 0;
+            core.central_poll.requests = 0;
+        }
         core.adoption_read = None;
         core.migration_plan = None;
         core.migration_verifier = None;
