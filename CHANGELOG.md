@@ -2,6 +2,10 @@
 
 ## [1.10.0](https://github.com/ysya/lunport/compare/v1.9.0...v1.10.0) (2026-10-21)
 
+Create an account on your own server using an email as its name and a Passkey. Email is unverified and cannot recover the account; no SMTP or verification message is required. The sync unlock password stays in the app.
+
+Returning sign-ins stay bound to their library account, and a failed local retry no longer blocks fresh sign-in. To start over with a different account on the same server, sign out and choose **Account and device settings → Start with a new account and restart**. Cloudflare and Docker use the same flow.
+
 
 ### Features
 
