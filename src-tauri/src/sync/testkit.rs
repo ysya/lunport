@@ -107,11 +107,16 @@ pub struct MemKeychain {
     entries: Mutex<BTreeMap<String, String>>,
     pub fail_reads: AtomicBool,
     pub fail_deletes: AtomicBool,
+    pub windows_credentials: AtomicBool,
+    windows: crate::secrets::credential_blob::tests::Fixture,
     failing_writes: Mutex<BTreeSet<String>>,
 }
 
 impl MemKeychain {
     pub fn entry(&self, account: &str) -> Option<String> {
+        if self.windows_credentials.load(Ordering::SeqCst) {
+            return crate::secrets::credential_blob::get(&self.windows.slot(account), "synthetic OS store", account).ok().flatten();
+        }
         self.entries.lock().unwrap().get(account).cloned()
     }
 
@@ -134,11 +139,17 @@ impl Keychain for MemKeychain {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(AppError::Other("keychain error: locked".to_string()));
         }
+        if self.windows_credentials.load(Ordering::SeqCst) {
+            return crate::secrets::credential_blob::get(&self.windows.slot(account), "synthetic OS store", account);
+        }
         Ok(self.entries.lock().unwrap().get(account).cloned())
     }
     fn set(&self, account: &str, secret: &str) -> Result<(), AppError> {
         if self.failing_writes.lock().unwrap().contains(account) {
             return Err(AppError::Other("keychain error: denied".to_string()));
+        }
+        if self.windows_credentials.load(Ordering::SeqCst) {
+            return crate::secrets::credential_blob::set(&self.windows.slot(account), "synthetic OS store", account, secret);
         }
         self.entries.lock().unwrap().insert(account.to_string(), secret.to_string());
         Ok(())
@@ -146,6 +157,9 @@ impl Keychain for MemKeychain {
     fn delete(&self, account: &str) -> Result<(), AppError> {
         if self.fail_deletes.load(Ordering::SeqCst) {
             return Err(AppError::Other("keychain error: denied".to_string()));
+        }
+        if self.windows_credentials.load(Ordering::SeqCst) {
+            return crate::secrets::credential_blob::delete(&self.windows.slot(account));
         }
         self.entries.lock().unwrap().remove(account);
         Ok(())
