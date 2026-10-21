@@ -253,14 +253,18 @@ impl Service {
         install_account_access_routes(&mut server, &state, locator);
         install_rotation_routes(&mut server, &state);
         install_recovery_routes(&mut server, &state, &config);
-        install_unlock_routes(&mut server, &state);
-        install_fresh_library_routes(&mut server, &state);
         Self {
             server,
             state,
             config,
             origin,
         }
+    }
+    fn automatic() -> Self {
+        let mut service = Self::at_origin(Some("https://sync.example"));
+        install_unlock_routes(&mut service.server, &service.state);
+        install_fresh_library_routes(&mut service.server, &service.state);
+        service
     }
     fn login(&self, d: &TestDevice) {
         let probe = record_runtime::probe_startup(&d.env().state_path, "synthetic");
@@ -3413,7 +3417,7 @@ mod active_cycle_tests;
 fn automatic_password_setup_commits_only_ciphertext_before_cleanup_and_new_device_unlock_is_additive(
 ) {
     use super::{automatic, unlock_flow};
-    let service = Service::at_origin(Some("https://sync.example"));
+    let service = Service::automatic();
     super::api::with_test_transport(&service.origin, &service.server.url(), || {
         let relay = FakeRelay::new();
         let clock = TestClock::new();
@@ -3483,7 +3487,7 @@ fn automatic_password_setup_commits_only_ciphertext_before_cleanup_and_new_devic
 #[test]
 fn automatic_unlock_resumes_a_committed_join_after_lost_reply_and_process_restart() {
     use super::{automatic, unlock_flow};
-    let service = Service::at_origin(Some("https://sync.example"));
+    let service = Service::automatic();
     super::api::with_test_transport(&service.origin, &service.server.url(), || {
         let relay = FakeRelay::new();
         let clock = TestClock::new();
@@ -3514,7 +3518,7 @@ fn automatic_unlock_resumes_a_committed_join_after_lost_reply_and_process_restar
 #[test]
 fn automatic_fresh_library_publishes_and_second_device_materializes_hosts_without_manual_review() {
     use super::automatic;
-    let service = Service::at_origin(Some("https://sync.example"));
+    let service = Service::automatic();
     super::api::with_test_transport(&service.origin, &service.server.url(), || {
         let relay = FakeRelay::new();
         let clock = TestClock::new();

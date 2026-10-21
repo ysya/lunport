@@ -90,6 +90,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
   const blocked = disabled || busy || deviceBusy;
   const serviceOrigin = service.trim().replace(/\/$/, "");
   const changed = !!status.service && serviceOrigin !== status.service;
+  useEffect(() => { setService(status.service ?? ""); }, [status.service]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { onBusyChange?.(busy || deviceBusy); return () => onBusyChange?.(false); }, [busy, deviceBusy, onBusyChange]);
   useEffect(() => { setPassword(""); setConfirmation(""); }, [status.service, status.account_id, status.device_id, phase]);
@@ -134,7 +135,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
       </div>
     </div>
     {!status.configured && serviceField}
-    {phase === "ready" && <p className="text-sm text-muted-foreground">{status.conflicts > 0 ? `${status.conflicts} conflicts need review in your library.` : status.pending > 0 ? `${status.pending} changes waiting to sync.` : "Hosts, Groups, tunnels and managed SSH keys are up to date."}</p>}
+    {phase === "ready" && <p className="text-sm text-muted-foreground">{status.conflicts > 0 ? `${status.conflicts} conflicts need review in your library.` : status.pending > 0 ? `${status.pending} changes waiting to sync.` : "Hosts, Groups, tunnels and managed SSH keys sync across your devices."}</p>}
     {!status.service && <p className="text-sm text-muted-foreground">Deploy your own sync server with Cloudflare Workers or Docker, then enter its HTTPS URL. Local mode works without an account.</p>}
     {(setup || unlock) && !login && !changed && <form className="max-w-lg space-y-3" onSubmit={(e) => {
       e.preventDefault();
