@@ -1348,7 +1348,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
             "result": {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "sshelter", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
@@ -1647,6 +1647,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(response["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(response["result"]["serverInfo"]["name"], "lunport");
         assert!(response["result"]["capabilities"]["tools"].is_object());
     }
 

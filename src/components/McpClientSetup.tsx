@@ -94,6 +94,7 @@ export function McpClientSetup({ fallbackExecutable, accessControl, connectionNo
       <summary className="cursor-pointer text-sm text-muted-foreground">Manual setup & other agents</summary>
       <div className="mt-3 space-y-3">
         <p className="text-xs text-muted-foreground">For agents that support local MCP (stdio) on this computer. No Lunport API key is needed.</p>
+        <p className="text-xs text-muted-foreground">New server name: <code>lunport</code>. Existing <code>sshelter</code> registrations and executable paths remain supported.</p>
         <div className="flex items-center gap-2">
           <Select value={format} onValueChange={value => setFormat(value as McpSetupFormat)}><SelectTrigger aria-label="MCP configuration format" className="min-w-0 flex-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="json">JSON · Most agents</SelectItem><SelectItem value="toml">TOML · Codex</SelectItem><SelectItem value="vscode">JSON · VS Code</SelectItem></SelectContent></Select>
           <Button variant="outline" size="icon" aria-label="Copy MCP configuration" disabled={!executable} onClick={() => void copy(mcpSetupConfig(executable, format), "Configuration")}><Copy className="size-4" /></Button>

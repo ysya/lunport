@@ -34,6 +34,9 @@ describe("multi-agent MCP setup", () => {
     expect(html).toContain("Copy MCP configuration");
     expect(html).toContain("Export MCP configuration");
     expect(html).toContain("Copy MCP command path");
+    expect(html).toContain("New server name:");
+    expect(html).toContain("registrations and executable paths remain supported");
+    expect(html).toContain("&quot;lunport&quot;");
     expect(html).toContain("Arguments:");
     expect(html).toContain("--mcp");
   });

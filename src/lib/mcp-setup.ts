@@ -2,7 +2,7 @@
 export type McpSetupClient = "codex" | "claude_code" | "claude_desktop" | "cursor" | "vscode" | "other";
 export type McpSetupFormat = "json" | "toml" | "vscode";
 
-export const MCP_SERVER_ID = "sshelter";
+export const MCP_SERVER_ID = "lunport";
 export const mcpSetupClients: ReadonlyArray<{ id: McpSetupClient; name: string; description: string }> = [
   { id: "codex", name: "Codex", description: "Desktop, CLI and IDE extension" },
   { id: "claude_code", name: "Claude Code", description: "Available across your projects" },
