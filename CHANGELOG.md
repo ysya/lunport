@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.10.0](https://github.com/ysya/lunport/compare/v1.9.0...v1.10.0) (2026-10-21)
+
+Create an account on your own server using an email as its name and a Passkey. Email is unverified and cannot recover the account; no SMTP or verification message is required. The sync unlock password stays in the app.
+
+Returning sign-ins stay bound to their library account, and a failed local retry no longer blocks fresh sign-in. To start over with a different account on the same server, sign out and choose **Account and device settings → Start with a new account and restart**. Cloudflare and Docker use the same flow.
+
+
+### Features
+
+* **auth:** use email account names and fix Passkey sign-in ([604cbe2](https://github.com/ysya/lunport/commit/604cbe2014cfb64cb7758f2550192edb1554bc01))
+
 ## [1.9.0](https://github.com/ysya/lunport/compare/v1.8.0...v1.9.0) (2026-10-21)
 
 Sign in with Passkey, then set a sync unlock password in Lunport on your first device. Enter the same password once on each new device to start automatic encrypted sync of hosts, Groups, tunnels and managed SSH keys. Local use remains available without an account.
