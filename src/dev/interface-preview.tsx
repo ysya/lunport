@@ -11,6 +11,7 @@ import { ApprovalCard } from "@/components/AgentApprovalWindow";
 import { AuthenticationCardView } from "@/components/AuthenticationWindow";
 import { groupView, hostPayload, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
 import type { CentralStatus } from "@/lib/central-sync";
+import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
 import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
 import { useTerminalStore } from "@/stores/terminals";
@@ -47,7 +48,20 @@ else {
   const passwords = new Map<string, string>();
   let passwordSaveFailed = false;
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
-  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
+  if (scenario === "mcp-audit") {
+    const entry: McpAuditEntry = {
+      id: "fixture-command", client: "Example AI client", host_id: overview.hosts[0].id,
+      alias: "Production web", command: "uptime", mode: "ask", requested_by: ["Example AI client"],
+      requester_id: "fixture-client", client_info: { name: "Example AI client", title: null, version: "1" },
+      at_ms: Date.parse("2026-10-21T23:59:58.000Z"), completed_at_ms: Date.parse("2026-10-22T00:00:02.000Z"),
+      outcome: "allowed", ended: "exited", exit_code: 0, signal: null, detail: null,
+    };
+    mcp = { ...mcp, enabled: true, recent: [entry, {
+      ...entry, id: "fixture-legacy-command", alias: "Database replica", command: "hostname",
+      at_ms: 0, completed_at_ms: Date.parse("2026-10-21T23:55:30.000Z"),
+    }] };
+  }
   if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
   if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
   const updateOverview = (patch: Partial<RecordOverview>) => {
