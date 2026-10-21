@@ -48,7 +48,7 @@ use deploy::{
 };
 use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
 use known_hosts::{known_hosts_list, known_hosts_remove};
-use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
+use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_set_group_allowed, mcp_status};
 use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
 use sync::engine::sync_overview;
@@ -335,10 +335,11 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::central::commands::central_devices,
             sync::central::commands::central_account_access,
             sync::central::commands::central_revoke_account_device,
-            sync::central::commands::central_pairing_code,
-            sync::central::commands::central_approve_device,
             sync::central::commands::central_revoke_device,
             sync::central::commands::central_status,
+            sync::central::conflicts::central_conflicts,
+            sync::central::conflicts::central_conflict_resolve,
+            sync::central::commands::central_server_capabilities,
             sync::central::commands::central_automatic_status,
             sync::central::commands::central_automatic_start,
             sync::central::commands::central_automatic_step,
@@ -352,25 +353,6 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::central::commands::central_cancel_sign_in,
             sync::central::commands::central_refresh,
             sync::central::commands::central_sign_out,
-            sync::central::commands::central_prepare_vault,
-            sync::central::commands::central_reveal_recovery,
-            sync::central::commands::central_confirm_recovery,
-            sync::central::commands::central_replacement_status,
-            sync::central::commands::central_replacement_reserve,
-            sync::central::commands::central_replacement_start,
-            sync::central::commands::central_replacement_continue,
-            sync::central::commands::central_replacement_revalidate,
-            sync::central::commands::central_replacement_cancel,
-            sync::central::commands::central_replacement_reveal_pairing,
-            sync::central::commands::central_replacement_reveal_kit,
-            sync::central::commands::central_replacement_confirm,
-            sync::central::commands::central_recovery_status,
-            sync::central::commands::central_begin_account_recovery,
-            sync::central::commands::central_advance_account_recovery,
-            sync::central::commands::central_revalidate_account_recovery,
-            sync::central::commands::central_cancel_account_recovery,
-            sync::central::commands::central_reveal_new_recovery,
-            sync::central::commands::central_confirm_account_recovery,
             sync::record_commands::records_status,
             sync::record_commands::records_conflict_resolve,
             sync::record_commands::records_group_create,
@@ -389,6 +371,7 @@ fn run_app(host: bool, start_hidden: bool) {
             connection_probe::records_host_probe,
             sync::record_commands::records_import_preview,
             sync::record_export::records_hosts_export,
+            sync::record_export::workspaces::records_saved_workspaces,
             sync::record_commands::records_import_confirm,
             sync::record_commands::records_import_cancel,
             sync::record_commands::records_import_resume,
@@ -472,6 +455,7 @@ fn run_app(host: bool, start_hidden: bool) {
             session::auth_window::auth_resolve,
             mcp_set_enabled,
             mcp_set_host_allowed,
+            mcp_set_group_allowed,
             mcp_resolve_request,
             sync_overview,
             sync::engine::sync_key_candidates,

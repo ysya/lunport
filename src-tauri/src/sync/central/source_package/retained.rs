@@ -29,18 +29,22 @@ fn captured_group(
     frames: &[(Receipt, Zeroizing<Vec<u8>>)],
     nested: &Package,
     identities: Option<&IdentityReader<'_>>,
+    content: Option<&super::super::active_read::VerifiedLibrary>,
 ) -> Result<snapshot::Group, AppError> {
     let owner = nested.state.local.central.as_ref().ok_or_else(invalid)?;
-    let identity = identities.ok_or_else(invalid)?(owner)?;
+
     let (_, plain) = frames
         .iter()
         .find(|(r, _)| r == source)
         .ok_or_else(invalid)?;
     let mut prepared = owned_package(plain)?;
     prepared.inherited = nested.inherited.clone();
-    let verified = super::super::adoption::captured::read_prepared_group(
-        source, frames, &identity, *prepared,
-    )?;
+    let verified = if let Some(read) = content {
+        super::super::adoption::captured::read_reconnected_group(source, frames, read, *prepared)?
+    } else {
+        let identity = identities.ok_or_else(invalid)?(owner)?;
+        super::super::adoption::captured::read_prepared_group(source, frames, &identity, *prepared)?
+    };
     snapshot::Group::captured(source, verified)
 }
 #[inline(never)]
@@ -103,6 +107,13 @@ impl Package {
         &self,
         identities: Option<&IdentityReader<'_>>,
     ) -> Result<(Vec<Retained>, Vec<snapshot::Group>), AppError> {
+        self.retained_packages_with_content(identities, None)
+    }
+    pub(super) fn retained_packages_with_content(
+        &self,
+        identities: Option<&IdentityReader<'_>>,
+        content: Option<&super::super::active_read::VerifiedLibrary>,
+    ) -> Result<(Vec<Retained>, Vec<snapshot::Group>), AppError> {
         fn visit(
             parent: &Package,
             selected: &Package,
@@ -111,6 +122,7 @@ impl Package {
             result: &mut Vec<Retained>,
             groups: &mut BTreeMap<String, snapshot::Group>,
             identities: Option<&IdentityReader<'_>>,
+            content: Option<&super::super::active_read::VerifiedLibrary>,
         ) -> Result<BTreeSet<String>, AppError> {
             let mut used = BTreeSet::new();
             parent.require_own_supported_files()?;
@@ -167,7 +179,14 @@ impl Package {
                     None => {
                         let owner = state.local.central.as_ref().ok_or_else(invalid)?;
                         identities.ok_or_else(invalid)?; // New witnesses are created only by explicit native capture.
-                        let captured = if state == parent.state
+                        let captured = if content.is_some()
+                            && state.local.central_projection.is_some()
+                        {
+                            super::super::historical_state::read_reconnected(
+                                &state,
+                                content.ok_or_else(invalid)?,
+                            )?
+                        } else if state == parent.state
                             && super::super::replacement_reconciliation::projected(&state)
                         {
                             super::super::replacement_reconciliation::capture_projected(
@@ -177,8 +196,12 @@ impl Package {
                                 identities.ok_or_else(invalid)?,
                             )?
                         } else if super::super::historical_state::needed(&state) {
-                            let identity = identities.ok_or_else(invalid)?(owner)?;
-                            super::super::historical_state::read(&state, &identity)?
+                            if let Some(content) = content {
+                                super::super::historical_state::read_reconnected(&state, content)?
+                            } else {
+                                let identity = identities.ok_or_else(invalid)?(owner)?;
+                                super::super::historical_state::read(&state, &identity)?
+                            }
                         } else {
                             super::super::historical_state::read_public_control(&state)?
                         };
@@ -221,6 +244,7 @@ impl Package {
                     result,
                     groups,
                     identities,
+                    content,
                 )?;
                 nested.inherited = needed
                     .iter()
@@ -230,7 +254,9 @@ impl Package {
                 let group = match groups.get(&hash) {
                     Some(group) if group.source() == Some(&source) => group.clone(),
                     Some(_) => return Err(invalid()),
-                    None => captured_group(&source, &captured.frames, &nested, identities)?,
+                    None => {
+                        captured_group(&source, &captured.frames, &nested, identities, content)?
+                    }
                 };
                 group.require_frames(&captured.frames)?;
                 if result.len() >= MAX_PACKAGES {
@@ -297,6 +323,7 @@ impl Package {
                     result,
                     groups,
                     identities,
+                    content,
                 )?;
                 nested.inherited = needed
                     .iter()
@@ -313,6 +340,16 @@ impl Package {
                         Some(group) => {
                             group.require_plan(plan.source(), &admitted)?;
                             Some(group.clone())
+                        }
+                        None if content.is_some() => {
+                            let read = content.ok_or_else(invalid)?;
+                            let owner = nested.state.local.central.as_ref().ok_or_else(invalid)?;
+                            Some(snapshot::Group::planned(
+                                plan.source(),
+                                admitted,
+                                plan.capture_reconnected(&nested, read)?,
+                                owner,
+                            )?)
                         }
                         None => match identities {
                             Some(identities) => {
@@ -376,7 +413,16 @@ impl Package {
         }
         let mut result = vec![];
         let mut groups = BTreeMap::new();
-        let used = visit(self, self, 0, &mut 0, &mut result, &mut groups, identities)?;
+        let used = visit(
+            self,
+            self,
+            0,
+            &mut 0,
+            &mut result,
+            &mut groups,
+            identities,
+            content,
+        )?;
         if groups.keys().any(|key| !used.contains(key)) {
             return Err(invalid());
         }
@@ -887,10 +933,10 @@ mod tests {
                 }
             }
             package = capture(&device, &package, &keys);
-            if ordinal+1==MAX_DEPTH {
+            if ordinal + 1 == MAX_DEPTH {
                 // The exact supported depth succeeds on the default test-thread stack.
-                package.materials(&keys,&BTreeMap::new()).unwrap();
-                package.structured_history(&keys,&BTreeMap::new()).unwrap();
+                package.materials(&keys, &BTreeMap::new()).unwrap();
+                package.structured_history(&keys, &BTreeMap::new()).unwrap();
             }
         }
         let original = package.encode_local().unwrap();

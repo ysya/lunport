@@ -562,10 +562,26 @@ impl Transcript {
         identity: &super::credentials::DeviceIdentity,
         floor: Option<&Checkpoint>,
     ) -> Result<VerifiedLibrary, AppError> {
+        let plan = Plan::new(before, identity, self.proof.clone(), self.snapshot.clone())?;
+        self.verify_plan(plan, floor)
+    }
+    pub(super) fn verify_reconnected(
+        &self,
+        before: &Workspace,
+        read: &VerifiedLibrary,
+        floor: Option<&Checkpoint>,
+    ) -> Result<VerifiedLibrary, AppError> {
+        let plan = Plan::reconnected(before, self.proof.clone(), self.snapshot.clone(), read)?;
+        self.verify_plan(plan, floor)
+    }
+    fn verify_plan(
+        &self,
+        plan: Plan,
+        floor: Option<&Checkpoint>,
+    ) -> Result<VerifiedLibrary, AppError> {
         if self.pages.len() > 16384 || self.bridges.len() > 64 {
             return Err(invalid());
         }
-        let plan = Plan::new(before, identity, self.proof.clone(), self.snapshot.clone())?;
         let own = bridges_for(&self.bridges, plan.floors())?;
         let mut read = plan.start(&own)?;
         if let Some(floor) = floor {

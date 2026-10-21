@@ -44,7 +44,7 @@ export function CentralAccountAccessList({
                 : "Revoked"
               : device.state === "active"
                 ? "Active"
-                : "Pending approval"}
+                : "Not yet unlocked"}
           </p>
           <code className="block break-all text-xs text-muted-foreground">
             Device ID: {device.id}
@@ -158,8 +158,7 @@ export function CentralAccountAccess({
       <h3 className="font-medium">Account access</h3>
       <p className="text-sm text-muted-foreground">
         You can block a device's cloud access by authenticating again in your
-        browser. Unlocking the encrypted library still requires a trusted device
-        or your offline recovery kit.
+        browser. A new device still needs your sync password to unlock the encrypted library.
       </p>
       {query.data && (
         <CentralAccountAccessList

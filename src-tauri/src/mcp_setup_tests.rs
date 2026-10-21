@@ -19,7 +19,7 @@ args = ["secret-argument"]
     assert!(text.starts_with(std::str::from_utf8(before).unwrap()));
     let doc = text.parse::<toml_edit::DocumentMut>().unwrap();
     assert_eq!(
-        doc["mcp_servers"][SERVER_ID]["command"].as_str(),
+        doc["mcp_servers"]["lunport"]["command"].as_str(),
         exe().to_str()
     );
     assert_eq!(
@@ -30,19 +30,19 @@ args = ["secret-argument"]
 }
 
 #[test]
-fn existing_lunport_identity_is_repaired_without_duplicating_it() {
+fn existing_server_alias_is_repaired_without_duplicate_or_permissions_loss() {
     let old = "/Applications/SSHelter.app/Contents/MacOS/sshelter";
-    let before = json!({"mcpServers":{"lunport":{"command":old,"args":["--mcp"],"env":{"KEEP":"fixture"}}},"other":{"keep":true}});
-    let (bytes, ready) = configure_json(&serde_json::to_vec(&before).unwrap(), exe()).unwrap();
-    assert!(!ready);
-    let doc: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(doc["mcpServers"].as_object().unwrap().len(), 1);
-    assert_eq!(
-        doc["mcpServers"]["lunport"]["command"],
-        exe().to_str().unwrap()
-    );
-    assert_eq!(doc["mcpServers"]["lunport"]["env"]["KEEP"], "fixture");
-    assert_eq!(doc["other"]["keep"], true);
+    for id in ALIASES {
+        let before = json!({"mcpServers":{id:{"command":old,"args":["--mcp"],"env":{"KEEP":"fixture"}}},"other":{"keep":true}});
+        let (bytes, ready) = configure_json(&serde_json::to_vec(&before).unwrap(), exe()).unwrap();
+        assert!(!ready);
+        let doc: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["mcpServers"].as_object().unwrap().len(), 1);
+        assert_eq!(doc["mcpServers"][id]["command"], exe().to_str().unwrap());
+        assert_eq!(doc["mcpServers"][id]["env"]["KEEP"], "fixture");
+        assert_eq!(doc["other"]["keep"], true);
+        assert!(configure_json(&bytes, exe()).unwrap().1);
+    }
 }
 
 #[test]
@@ -90,21 +90,15 @@ fn malformed_settings_errors_do_not_include_their_secret_contents() {
 
 #[test]
 fn explicit_codex_add_can_enable_only_its_owned_disabled_server() {
-    let before = format!("[mcp_servers.sshelter]\ncommand={}\nargs=['--mcp']\nenabled=false\ndisabled_tools=['keep']\n", serde_json::to_string(exe().to_str().unwrap()).unwrap());
-    let (bytes, ready) = configure_toml(before.as_bytes(), exe()).unwrap();
-    assert!(!ready);
-    let doc = String::from_utf8(bytes)
-        .unwrap()
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap();
-    assert_eq!(
-        doc["mcp_servers"][SERVER_ID]["enabled"].as_bool(),
-        Some(true)
-    );
-    assert_eq!(
-        doc["mcp_servers"][SERVER_ID]["disabled_tools"][0].as_str(),
-        Some("keep")
-    );
+    for id in ALIASES {
+        let before = format!("[mcp_servers.{id}]\ncommand={}\nargs=['--mcp']\nenabled=false\ndisabled_tools=['keep']\n", serde_json::to_string(exe().to_str().unwrap()).unwrap());
+        let (bytes, ready) = configure_toml(before.as_bytes(), exe()).unwrap();
+        assert!(!ready);
+        let doc = String::from_utf8(bytes).unwrap().parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(doc["mcp_servers"].as_table().unwrap().len(), 1);
+        assert_eq!(doc["mcp_servers"][id]["enabled"].as_bool(), Some(true));
+        assert_eq!(doc["mcp_servers"][id]["disabled_tools"][0].as_str(), Some("keep"));
+    }
 }
 
 #[test]
@@ -227,7 +221,7 @@ fn install_links_keep_unicode_and_shell_syntax_in_a_command_value() {
     let path = Path::new("/Applications/測試 A & $x/Lunport.app/Contents/MacOS/sshelter");
     let url = tauri::Url::parse(&install_link(SetupClient::Cursor, path).unwrap()).unwrap();
     let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
-    assert_eq!(query["name"], SERVER_ID);
+    assert_eq!(query["name"], "lunport");
     let doc: Value = serde_json::from_slice(
         &base64::engine::general_purpose::STANDARD
             .decode(query["config"].as_bytes())

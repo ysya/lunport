@@ -89,11 +89,13 @@ pub(crate) struct Progress {
 }
 pub(crate) fn status(env: &SyncEnv) -> Result<Progress, AppError> {
     let status = controller::status(env)?;
-    let phase = if !status.configured || status.phase == "signed_out" {
+    let phase = if status.reconnect_available && status.account_authenticated && (status.needs_recovery || status.phase == "revoked" || status.replacement_pending) {
+        if status.connecting { "connecting" } else { "password_recovery" }
+    } else if !status.configured || status.phase == "signed_out" {
         "signed_out"
     } else if status.needs_recovery {
         "needs_attention"
-    } else if super::unlock_flow::active(env) {
+    } else if status.connecting {
         "connecting"
     } else if !status.has_session {
         "sign_in_required"
@@ -110,6 +112,11 @@ pub(crate) fn status(env: &SyncEnv) -> Result<Progress, AppError> {
 }
 pub(crate) fn password(env: &SyncEnv, password: &str) -> Result<Progress, AppError> {
     let current = controller::status(env)?;
+    if current.reconnect_available && current.account_authenticated && (current.needs_recovery || current.phase == "revoked" || current.replacement_pending) {
+        super::password_replacement::begin(env, password)?;
+        env.events.wake();
+        return status(env);
+    }
     if !current.has_session {
         return Err(AppError::Other("Sign in before unlocking sync.".into()));
     }
@@ -149,11 +156,16 @@ pub(super) fn background(
     report: &mut super::round::Report,
 ) -> Result<bool, AppError> {
     if super::unlock_flow::active(env) {
-        report.more = super::unlock_flow::advance(env)?;
+        report.more = if super::password_replacement::pending(env)? {
+            super::password_replacement::advance_unlock(env)?
+        } else { super::unlock_flow::advance(env)? };
         if !report.more {
-            super::joining::initialize(env)?;
+            if !super::password_replacement::pending(env)? { super::joining::initialize(env)?; }
             report.more = true;
         }
+        return Ok(true);
+    }
+    if record_runtime::snapshot(env)?.0.local.central.is_some() && super::password_replacement::background(env, report)? {
         return Ok(true);
     }
     let state = record_runtime::snapshot(env)?.0;
@@ -165,6 +177,9 @@ pub(super) fn background(
         || owner.control.cutover
         || !permitted(env, owner)?
     {
+        return Ok(false);
+    }
+    if super::replacement_reconciliation::required(owner) {
         return Ok(false);
     }
     if owner.replacement.is_some()

@@ -56,7 +56,7 @@ pub(super) fn recovery_read(
     if owner
         .replacement
         .as_ref()
-        .is_none_or(|i| i.route != Route::RecoveryKit)
+        .is_none_or(|i| !matches!(i.route, Route::RecoveryKit | Route::SyncPassword))
     {
         return Err(invalid());
     }
@@ -88,7 +88,7 @@ pub(super) fn pin_recovery_read(
     if owner
         .replacement
         .as_ref()
-        .is_none_or(|i| i.route != Route::RecoveryKit)
+        .is_none_or(|i| !matches!(i.route, Route::RecoveryKit | Route::SyncPassword))
     {
         return Err(invalid());
     }

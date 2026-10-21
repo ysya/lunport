@@ -661,6 +661,9 @@ export async function resolveRecordConflict(conflict: RecordConflict, choice: "l
   return tauriInvoke("records_conflict_resolve", { spaceId: conflict.space_id, key: conflict.key, token: conflict.token, choice, copyAlias: copyAlias ?? null });
 }
 
-export function exportRecordHosts(previousWorkspace = false): Promise<{ path: string; hosts: number; groups: number } | null> {
-  return tauriInvoke("records_hosts_export", { previousWorkspace });
+export function exportRecordHosts(previousWorkspace = false, workspace?: string): Promise<{ path: string; hosts: number; groups: number } | null> {
+  return tauriInvoke("records_hosts_export", { previousWorkspace, workspace: workspace ?? null });
 }
+
+export type SavedWorkspace = { id: string; active: boolean; service: string | null; hosts: number; groups: number; modified_ms: number | null; error: string | null };
+export const savedWorkspaces = () => tauriInvoke<SavedWorkspace[]>("records_saved_workspaces");

@@ -207,7 +207,7 @@ export function RecordHostList({
                 {importHosts && (
                   <DropdownMenuItem disabled={disabled} onSelect={importHosts}>
                     <Upload />
-                    Import hosts
+                    Import hosts and Groups
                   </DropdownMenuItem>
                 )}
                 {exportHosts && <>
@@ -215,7 +215,7 @@ export function RecordHostList({
                     <Download />Export hosts and Groups…
                   </DropdownMenuItem>
                   <DropdownMenuItem disabled={disabled} onSelect={() => exportHosts(true)}>
-                    <Download />Export previous workspace hosts and Groups…
+                    <Download />Choose a saved workspace…
                   </DropdownMenuItem>
                 </>}
                 {createGroup && (
@@ -521,7 +521,7 @@ export function RecordHostList({
                   )}
                   {importHosts && (
                     <Button variant="outline" onClick={importHosts}>
-                      Import hosts
+                      Import hosts and Groups
                     </Button>
                   )}
                 </div>

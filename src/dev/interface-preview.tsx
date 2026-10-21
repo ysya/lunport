@@ -10,7 +10,7 @@ import { HostKeyCard } from "@/components/HostKeyWindow";
 import { ApprovalCard } from "@/components/AgentApprovalWindow";
 import { AuthenticationCardView } from "@/components/AuthenticationWindow";
 import { groupView, hostPayload, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
-import type { CentralStatus, CentralRecoveryProgress } from "@/lib/central-sync";
+import type { CentralStatus } from "@/lib/central-sync";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
 import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
 import { useTerminalStore } from "@/stores/terminals";
@@ -47,7 +47,7 @@ else {
   const passwords = new Map<string, string>();
   let passwordSaveFailed = false;
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
-  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
   if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
   if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
   const updateOverview = (patch: Partial<RecordOverview>) => {
@@ -68,6 +68,7 @@ else {
   };
   let reviewedImport: ImportPreviewResult | null = null;
   let previewSequence = 0;
+  let conflictResolved = false;
   let callbackId = 1;
   const callbacks = new Map<number, unknown>();
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -109,20 +110,29 @@ else {
           console.info("Fixture connection requested", String(args.hostId));
           return;
         }
-        if (["central_status","central_automatic_status"].includes(command) && scenario === "sync-layout") {
+        if (command === "records_saved_workspaces") return [
+          {id:"original",active:false,service:null,hosts:21,groups:4,modified_ms:1700000000000,error:null},
+          {id:"1".repeat(32),active:true,service:"https://sync.example.com",hosts:3,groups:2,modified_ms:1700100000000,error:null}
+        ];
+        if (command === "records_hosts_export") return {path:"/fixture/lunport-hosts.json",hosts:21,groups:4};
+        if (command === "central_server_capabilities") return {passkey:true,oidc:false};
+        if (["central_status","central_automatic_status","central_conflict_resolve"].includes(command) && ["sync-layout","sync-active","sync-conflicts","sync-cooldown","sync-revoked","sync-reconnect","sync-reconnecting","sync-failure"].includes(scenario ?? "")) {
+          if (command === "central_conflict_resolve") conflictResolved = true;
+          const active = scenario !== "sync-layout";
           const status={
-          available: true, configured: true, phase: "setup", service: "https://sync.example.com",
-          account_id: "a".repeat(64), device_id: "b".repeat(32), root_fingerprint: null,
-          membership_head: null, authorization_epoch: "1", has_session: true, login_pending: false,
-          needs_recovery: false, replacement_pending: false, needs_reconciliation: false,
-          can_sync: false, pending: 0, conflicts: 0, error: null,
-        } satisfies CentralStatus;
-          return command === "central_status" ? status : {phase:"password_setup",status};
+            available: true, configured: true, phase: scenario === "sync-revoked" ? "revoked" : active ? "active" : "setup", service: "https://sync.example.com",
+            account_id: "a".repeat(64), device_id: "b".repeat(32), root_fingerprint: active ? "c".repeat(64) : null,
+            membership_head: active ? "d".repeat(64) : null, authorization_epoch: "1", has_session: true, account_authenticated:true, login_pending: false,
+            needs_recovery: ["sync-revoked", "sync-reconnect", "sync-reconnecting"].includes(scenario ?? ""), replacement_pending: false, needs_reconciliation: false,
+            can_sync: active && scenario !== "sync-revoked", pending: 0, conflicts: scenario === "sync-conflicts" && !conflictResolved ? 1 : 0,
+            connecting: scenario === "sync-reconnecting", automatic_sync:true, cooldown_seconds: scenario === "sync-cooldown" ? 25 : 0,
+            error: scenario === "sync-failure" ? "Invalid central sync protocol data." : null,
+          } satisfies CentralStatus;
+          return command === "central_automatic_status" ? {phase:active ? "ready" : "password_setup",status} : status;
         }
-        if (command === "central_recovery_status" && scenario === "sync-layout") return {
-          phase: "idle", operation: null, backup_confirmed: false, verified: 0, total: 0, root_fingerprint: null,
-        } satisfies CentralRecoveryProgress;
-        if (command === "central_cancel_account_recovery" && scenario === "sync-layout") return;
+        if (command === "central_conflicts") return conflictResolved ? [] : [{id:"1".repeat(64),token:"2".repeat(64),kind:"host",name:"production-web",local:{hostname:"web-old.example.com",port:22,user:"deploy"},remote:{hostname:"web-new.example.com",port:2222,user:"deploy"},local_deleted:false,remote_deleted:false,remote_revision:"3",can_resolve:true,can_remote:true,can_copy:true}];
+        if (command === "central_account_access") return {authorization_epoch:"1",barrier_pending:false,devices:[{id:"b".repeat(32),name:"Example laptop",created_at_ms:"1",state:"active",current:true}]};
+        if (command === "central_devices") return {authorization_epoch:"1",membership_head:"d".repeat(64),devices:[{id:"b".repeat(32),name:"Example laptop",state:"approved",fingerprint:"SHA256:ExampleOnly",current:true}]};
         if (command === "app_platform") return new URLSearchParams(window.location.search).get("platform") === "windows" ? "windows" : "macos";
         if (command === "app_is_development") return true;
         if (command === "app_home_dir") return "/fixture";
@@ -164,8 +174,15 @@ else {
           if (review?.token !== "fixture-library-review") throw new Error("Review the fixture library first.");
           return includeFixtureLibrary(review.renames);
         }
+        if (command === "mcp_setup_overview") return { sandbox: true, executable: "/fixture/sshelter", clients: ["codex", "claude_code", "claude_desktop", "cursor", "vscode"].map(client => ({ client, state: "not_added", config_path: null, message: null })) };
         if (command === "mcp_status") return mcp;
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
+        if (command === "mcp_set_group_allowed") {
+          if (args.generation !== overview.generation) throw new Error("The fixture library changed. Refresh AI Access and try again.");
+          const scope = args.scope as { kind: string; space_id?: string };
+          const key = scope.kind === "local" ? `local/${args.groupId}` : `space/${scope.space_id}/${args.groupId}`;
+          return mcp = { ...mcp, allowed_groups: args.allowed ? [...new Set([...mcp.allowed_groups, key])] : mcp.allowed_groups.filter((id) => id !== key) };
+        }
         if (command === "mcp_set_host_allowed") return mcp = { ...mcp, allowed_hosts: args.allowed ? [...new Set([...mcp.allowed_hosts, String(args.alias)])] : mcp.allowed_hosts.filter((id) => id !== args.alias) };
         if (command === "mcp_set_approval_mode") return mcp = { ...mcp, approval_mode: String(args.approvalMode) };
         if (command === "records_key_generate" || command === "records_key_import" || command === "records_key_import_file") {

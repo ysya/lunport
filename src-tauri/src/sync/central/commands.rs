@@ -47,6 +47,19 @@ pub async fn central_unlock_password(
     .await
     .map_err(engine::join_error)?
 }
+#[derive(serde::Serialize)]
+pub struct Capabilities { passkey: bool, oidc: bool }
+#[tauri::command]
+pub async fn central_server_capabilities(service: String) -> Result<Capabilities, AppError> {
+    controller::require_enabled()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let info = Api::new(&service)?.info()?;
+        // Discovery is untrusted. Validate advertised login configurations before offering them.
+        let passkey = info.passkey.is_some() && info.login_for_method(&service, None, Some(super::authentication::Method::Passkey)).is_ok();
+        let oidc = info.oidc.is_some() && info.login_for_method(&service, None, Some(super::authentication::Method::Oidc)).is_ok();
+        Ok(Capabilities { passkey, oidc })
+    }).await.map_err(engine::join_error)?
+}
 #[tauri::command]
 pub async fn central_status(app: AppHandle) -> Result<Status, AppError> {
     tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, controller::status)?)

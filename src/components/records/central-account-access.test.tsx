@@ -85,7 +85,7 @@ describe("account access without Vault credentials", () => {
       </QueryClientProvider>,
     );
     expect(text(html)).toContain(
-      "Unlocking the encrypted library still requires a trusted device or your offline recovery kit",
+      "A new device still needs your sync password to unlock the encrypted library",
     );
     expect(text(html)).toContain("authenticating again in your browser");
     expect(html).not.toContain('type="password"');

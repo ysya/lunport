@@ -75,7 +75,7 @@ The mark geometry lives in [lunport-mark.json](../src/brand/lunport-mark.json); 
 node scripts/generate-brand-icons.mjs
 ```
 
-Use Lunport for visible product copy and `ysya/lunport` for current repository links. Bundle IDs, credential services, executable names, MCP registration, SSH paths and persisted storage keys intentionally retain their SSHelter identities. See [installer compatibility](../src-tauri/installers/README.md) before changing any of them. Historical releases, validation records and signatures retain their original names.
+Use Lunport for visible product copy and `ysya/lunport` for current repository links. Bundle IDs, credential services, executable names, SSH paths and persisted storage keys intentionally retain their SSHelter identities. See [installer compatibility](../src-tauri/installers/README.md) before changing any of them. New MCP setup and protocol metadata use `lunport`; automatic setup preserves an existing owned `sshelter` alias and its settings rather than creating a duplicate. Historical releases, validation records and signatures retain their original names.
 
 The macOS pre-runtime migration in `macos_install.rs` renames only the running legacy app bundle, preserves its parent and leaves a relative compatibility symlink. It uses no-overwrite moves, a bounded installation lock and a recovery journal. Permission repair elevates the system interpreter with a fixed Foundation file-operation program and literal validated paths. It does not execute the mutable application binary as root, start Tauri or read user credentials. Development can exercise migration only inside its existing write sandbox. Login repair changes only an existing `SSHelter` entry whose old command resolves to this installation.
 

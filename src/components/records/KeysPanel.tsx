@@ -10,6 +10,8 @@ import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, A
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
 import { applyRecordOverview, recordKeyDestinationKey, renameRecordKey, deleteRecordKey, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
+import type { CentralStatus } from "@/lib/central-sync";
+import { syncSummary } from "@/lib/central-status";
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
@@ -25,13 +27,13 @@ export const GENERATE_KEY_BUTTON_ID = "records-generate-key";
 
 function keyStatusLabel(key: RecordKeyView, central: boolean) {
   if (key.status !== "available") {
-    if (central && key.status === "needs_material") return key.storage === "hardware" ? "Hardware key required" : key.storage === "external_agent" ? "SSH agent required" : "Sync pending";
+    if (central && key.status === "needs_material") return key.storage === "hardware" ? "Hardware key required" : key.storage === "external_agent" ? "SSH agent required" : "Private key unavailable";
     return key.status.replace(/_/g, " ");
   }
   return central ? "Ready" : "Local library";
 }
 
-export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverview; openSync?: () => void }) {
+export function RecordsKeysPanel({ overview, openSync, syncStatus }: { overview: RecordOverview; openSync?: () => void; syncStatus?: CentralStatus }) {
   const central = overview.central_mode === true;
   const client = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -200,9 +202,10 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
           {error && <p role="alert" className="app-task-error mb-4">
             {error}
           </p>}
+          {syncStatus?.configured && <p className="mb-4 text-sm text-muted-foreground" role="status">{syncSummary(syncStatus).text} <Button size="sm" variant="ghost" onClick={openSync}>Open sync</Button></p>}
           {!central && <section className="app-notice mb-4 space-y-3" aria-label="Automatic key sync">
             <h2 className="font-medium">Sync all keys automatically</h2>
-            <p className="text-sm text-muted-foreground">Sign in with Passkey and enable encrypted library sync once. All managed SSH private keys then sync automatically to your approved devices. Your existing library is reviewed and preserved during setup.</p>
+            <p className="text-sm text-muted-foreground">Sign in with Passkey and unlock with your sync password. Hosts, Groups and all managed SSH private keys then sync automatically across your devices.</p>
             <p className="text-sm text-muted-foreground">You can keep using your keys locally without signing in.</p>
             {openSync && <Button variant="outline" disabled={busy || draft.busy} onClick={openSync}>Set up automatic sync</Button>}
           </section>}
@@ -239,7 +242,7 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
               {search ? "No matching keys" : "No key references yet."}
             </h2>
             <p>
-              {search ? "Try another name, fingerprint or key type." : central ? "Generate or import a key to sync it automatically with your approved devices." : "Generate a key or import one into this device. Enable encrypted library sync to include all managed keys automatically."}
+              {search ? "Try another name, fingerprint or key type." : central ? "Generate or import a key to sync it automatically with your approved devices." : "Generate a key or import one into this device. Sign in and unlock to sync all managed keys automatically."}
             </p>
             {search && <Button variant="outline" onClick={() => setSearch("")}>Clear search</Button>}
           </div>}
@@ -288,10 +291,14 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
             Copy public key</Button>}
         </div>
         {key.status === "conflict" && <p role="status" className="app-task-error">{central ? "Review this key’s identity conflict before connecting." : "Local and account key metadata conflict. Review the key identity before connecting or migrating this library."}</p>}
-        {central && key.status === "needs_material" && <p role="status" className="text-sm text-muted-foreground">{key.storage === "hardware" ? "Connect this key’s hardware device to use it on this computer." : key.storage === "external_agent" ? "Connect the SSH agent that holds this key to use it on this computer." : "This key will become available automatically after encrypted sync completes."}</p>}
+        {central && key.status === "needs_material" && <p role="status" className="text-sm text-muted-foreground">{key.storage === "hardware" ? "Connect this key’s hardware device to use it on this computer." : key.storage === "external_agent" ? "Connect the SSH agent that holds this key to use it on this computer." : "The matching private key is not available on this device. Check sync, or import the matching key and select it in the host’s authentication settings."}</p>}
         {key.status === "deleted" && <p className="text-sm text-muted-foreground">This account key was deleted. A local copy cannot replace its account identity.</p>}
         <section className="library-preview-section">
-          <h3>Availability and sharing</h3>
+          {key.status === "needs_material" && key.storage !== "hardware" && key.storage !== "external_agent" && <div className="mb-3 flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" disabled={busy || draft.busy} onClick={openSync}>Check sync</Button>
+            <Button variant="outline" size="sm" disabled={busy || draft.busy} onClick={() => setMode("import")}>Import matching key…</Button>
+          </div>}
+          <h3>Availability and sync</h3>
           <dl>
             <div>
               <dt>Type</dt>
@@ -300,9 +307,9 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
               </dd>
             </div>
             <div>
-              <dt>Sharing</dt>
+              <dt>Sync</dt>
               <dd>
-                {central ? (key.storage === "hardware" || key.storage === "external_agent" ? "Key reference syncs automatically" : "Automatic encrypted sync") : "Enable automatic library sync"}
+                {central ? (key.storage === "hardware" || key.storage === "external_agent" ? "Key reference syncs automatically" : "Automatic encrypted sync") : "Local library"}
               </dd>
             </div>
           </dl>
@@ -400,7 +407,7 @@ export function RecordsKeysPanel({ overview, openSync }: { overview: RecordOverv
                 {mode === "import" ? "Import private key" : "Generate Ed25519 key"}
               </DialogTitle>
               <DialogDescription>
-                {central ? (mode === "import" ? "Copy a private key into your encrypted account vault. The source key stays in place." : "Create an Ed25519 key in your encrypted account vault.") : mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. Enabling encrypted library sync includes all managed keys automatically."}
+                {central ? (mode === "import" ? "Copy a private key into your encrypted account vault. The source key stays in place." : "Create an Ed25519 key in your encrypted account vault.") : mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. Signing in and unlocking includes all managed keys automatically."}
               </DialogDescription>
             </DialogHeader>
             <TaskDialogBody><fieldset disabled={draft.busy} className="space-y-4">

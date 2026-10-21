@@ -47,7 +47,6 @@ import {
   applyRecordOverview,
   exportRecordHosts,
   recordsStatusKey,
-  syncRecordsNow,
   setRecordGroupOrder,
   type RecordOverview,
   type HostScope,
@@ -67,7 +66,10 @@ import { selectHost } from "./editor";
 import { RecordsKeysPanel, KEYS_SEARCH_INPUT_ID, GENERATE_KEY_BUTTON_ID } from "./KeysPanel";
 import { RecordsAccountPanel } from "./AccountPanel";
 import { RecordsImportPanel } from "./ImportPanel";
-import { RecordSyncStatus } from "./SyncStatus";
+import { useCentralStatus } from "@/lib/use-central-status";
+import { syncSummary } from "@/lib/central-status";
+import { centralAutomaticStep, centralStatusKey } from "@/lib/central-sync";
+import { WorkspaceTransfer } from "./WorkspaceTransfer";
 import { decideHostSelection, type HostSelection } from "./selection";
 import { LibraryNavigation, LIBRARY_NAVIGATION_ID, type WorkspacePanel } from "./LibraryNavigation";
 import type { LibraryFilter } from "./library-view";
@@ -86,6 +88,9 @@ export function RecordsWorkspace({
   reload: () => void;
 }) {
   useSyncBackendSettings();
+  const central = useCentralStatus();
+  const summary = syncSummary(central.data);
+  const [transferOpen, setTransferOpen] = useState(false);
   useGlobalHotkey();
   const setSettingsOpen = useUiStore((state) => state.setSettingsOpen);
   const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
@@ -117,7 +122,6 @@ export function RecordsWorkspace({
   const [accountBusy, setAccountBusy] = useState(false);
   const [reordering, setReordering] = useState(false);
   const syncActive = syncing || accountBusy || !!overview.syncing;
-  const [error, setError] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const connectInFlight = useRef(false);
   const syncInFlight = useRef(false);
@@ -281,12 +285,12 @@ export function RecordsWorkspace({
     if (syncInFlight.current) return;
     syncInFlight.current = true;
     setSyncing(true);
-    setError(null);
     try {
-      await syncRecordsNow();
+      const progress = await centralAutomaticStep();
+      client.setQueryData(centralStatusKey, progress.status);
       reload();
-    } catch {
-      setError("Sync could not be started. Refresh and retry.");
+    } catch (failure) {
+      toast.error("Could not start sync", { description: revealHidden(String(failure)) });
     } finally {
       syncInFlight.current = false;
       setSyncing(false);
@@ -417,7 +421,7 @@ export function RecordsWorkspace({
           </p>
         )}
         {!syncActive &&
-          overview.account &&
+          !overview.central_mode && overview.account &&
           (!overview.library_enabled ||
             [...overview.hosts, ...overview.groups].some(
               (row) => row.scope.kind === "local",
@@ -479,7 +483,7 @@ export function RecordsWorkspace({
               changeFilter={changeFilter}
               searchShortcut={platform.data === "macos" ? "⌘ F" : "Ctrl F"}
               importHosts={() => setPanel("import")}
-              exportHosts={(previous) => void exportHosts(previous)}
+              exportHosts={(previous) => previous ? setTransferOpen(true) : void exportHosts(false)}
             />
           </main>
           {panel === "hosts" && <DetailPresence>{inspected ? (
@@ -505,10 +509,11 @@ export function RecordsWorkspace({
               className={cn("library-tools-main app-main min-h-0 min-w-0 flex-1", panel === "keys" ? "flex flex-col overflow-hidden" : "overflow-y-auto")}
               aria-label="Workspace content"
             >
-              {panel === "keys" && <RecordsKeysPanel overview={overview} openSync={() => setPanel("account")} />}
+              {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
               {panel === "account" && (
                 <RecordsAccountPanel
+                  onOpenImport={() => setPanel("import")}
                   overview={overview}
                   onBusyChange={setAccountBusy}
                 />
@@ -525,30 +530,18 @@ export function RecordsWorkspace({
             onClick={() => setPanel("account")}
           >
             <Cloud className="size-3.5" />
-            <RecordSyncStatus
-              connected={!!overview.account && overview.library_enabled}
-              pending={!!overview.pending_account}
-              pendingChanges={overview.pending_changes}
-              conflicts={overview.conflicts?.length ?? 0}
-              lastSyncMs={overview.last_sync_ms}
-              error={error ?? overview.last_error}
-              syncing={syncActive}
-            />
+            <span role="status">{central.isError ? "Sync status unavailable · Open to retry" : summary.text}</span>
           </button>
           <Button
             variant="ghost"
             size="sm"
             className="library-sync-now"
-            disabled={syncActive}
-            onClick={
-              overview.library_enabled ? sync : () => setPanel("account")
-            }
+            disabled={syncActive || !!central.data?.syncing}
+            onClick={summary.ready ? sync : () => setPanel("account")}
           >
             {syncActive
               ? "Syncing…"
-              : overview.library_enabled
-                ? "Sync now"
-                : "Set up sync"}
+              : summary.action}
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -750,8 +743,10 @@ export function RecordsWorkspace({
         edit={editHost}
         create={createHost}
       />
+      <WorkspaceTransfer open={transferOpen} onOpenChange={setTransferOpen} onImport={() => { setTransferOpen(false); setPanel("import"); }} />
       <SettingsDialog
         recordOverview={overview}
+        onOpenDataTools={() => { setSettingsOpen(false); setTransferOpen(true); }}
         onOpenImport={() => {
           setSettingsOpen(false);
           setActiveTerminal(null);
