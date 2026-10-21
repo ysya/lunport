@@ -2,6 +2,8 @@
 
 ## [1.10.3](https://github.com/ysya/lunport/compare/v1.10.2...v1.10.3) (2026-10-21)
 
+Fix Windows failing after **Unlock and sync** when structured state exceeds Credential Manager’s 2,560-byte limit. Large local values now use current-user Windows DPAPI with a small OS-protected descriptor that pins the current ciphertext. Legacy small credentials, noninteractive operation and interrupted-write recovery remain supported. Accounts, local hosts, SSH keys and sync passwords are preserved; no server reset is required.
+
 
 ### Bug Fixes
 
