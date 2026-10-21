@@ -124,9 +124,16 @@ impl Service {
         server.mock("GET","/v2/account").with_header("content-type","application/json").with_body_from_request(move|r|{
             let s=account.lock().unwrap();let own=s.device(r);let chain=s.chain();let active=chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&own));
             let devices:Vec<Value>=s.devices.values().map(|d|json!({"device":d,"name":"Synthetic device","state":if chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&d.id)){"active"}else{"pending"},"request":s.requests.get(&d.id)})).collect();
-            json!({"account_id":"a".repeat(64),"device_state":if active{"active"}else{"pending"},"auth_epoch":s.epoch,"phase":if s.barrier_pending{"revocation_pending"}else{"ready"},"proof":s.proof,
-                "genesis_hash":chain.as_ref().map(|c|c.current().anchor().genesis_hash.clone()),"pairing_confirmation":s.confirmations.get(&own),
-                "vaults":s.vault.as_ref().map(|v|json!({v:{"epoch":s.key_epoch,"rekey":s.rekey_pending}})).unwrap_or_else(||json!({})),"denied":s.denied,"devices":devices,"barrier":if s.barrier_pending{json!({"id":"synthetic barrier","acknowledged":0,"total":1})}else{Value::Null}}).to_string().into_bytes()
+            // Production omits private account metadata until the device is approved.
+            let mut body=json!({"account_id":"a".repeat(64),"device_state":if active{"active"}else{"pending"},"auth_epoch":s.epoch,"phase":if s.barrier_pending{"revocation_pending"}else{"ready"},"proof":s.proof,
+                "genesis_hash":chain.as_ref().map(|c|c.current().anchor().genesis_hash.clone()),"pairing_confirmation":s.confirmations.get(&own)});
+            if active {
+                body["vaults"]=s.vault.as_ref().map(|v|json!({v:{"epoch":s.key_epoch,"rekey":s.rekey_pending}})).unwrap_or_else(||json!({}));
+                body["denied"]=json!(s.denied);
+                body["devices"]=json!(devices);
+                body["barrier"]=if s.barrier_pending{json!({"id":"synthetic barrier","acknowledged":0,"total":1})}else{Value::Null};
+            }
+            body.to_string().into_bytes()
         }).create();
         let account = Arc::clone(&state);
         server
@@ -3511,10 +3518,23 @@ fn automatic_password_setup_commits_only_ciphertext_before_cleanup_and_new_devic
             .clone();
         service.login(&peer);
         automatic::start(&peer.env()).unwrap();
+        let peer_session = controller::context(&peer.env()).unwrap();
+        let api = super::api::Api::new(&service.origin).unwrap();
+        let view = controller::overview(&peer.env(), &api, &peer_session).unwrap();
+        assert_eq!(view.device_state, super::api::DeviceState::Pending);
+        assert!(view.vaults.is_empty());
+        assert!(view.devices.is_empty());
         let before = record_runtime::snapshot(&peer.env()).unwrap();
-        assert!(automatic::password(&peer.env(), "wrong password").is_err());
+        let wrong = automatic::password(&peer.env(), "wrong password").err().unwrap();
+        assert!(wrong.to_string().contains("Check your sync unlock password"), "{wrong}");
         assert_eq!(record_runtime::snapshot(&peer.env()).unwrap(), before);
         assert_eq!(service.state.lock().unwrap().unlock_joins, 0);
+        service.state.lock().unwrap().barrier_pending = true;
+        let blocked = automatic::password(&peer.env(), password).err().unwrap();
+        assert!(blocked.to_string().contains("The account changed"), "{blocked}");
+        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap(), before);
+        assert!(!unlock_flow::active(&peer.env()));
+        service.state.lock().unwrap().barrier_pending = false;
         automatic::password(&peer.env(), password).unwrap();
         assert!(unlock_flow::active(&peer.env()));
         assert!(!unlock_flow::advance(&peer.env()).unwrap());
