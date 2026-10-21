@@ -205,7 +205,7 @@ export function RecordsKeysPanel({ overview, openSync, syncStatus }: { overview:
           {syncStatus?.configured && <p className="mb-4 text-sm text-muted-foreground" role="status">{syncSummary(syncStatus).text} <Button size="sm" variant="ghost" onClick={openSync}>Open sync</Button></p>}
           {!central && <section className="app-notice mb-4 space-y-3" aria-label="Automatic key sync">
             <h2 className="font-medium">Sync all keys automatically</h2>
-            <p className="text-sm text-muted-foreground">Sign in with Passkey and unlock with your sync password. Hosts, Groups and all managed SSH private keys then sync automatically across your devices.</p>
+            <p className="text-sm text-muted-foreground">Sign in with Passkey and unlock with your sync password. Hosts, Groups, saved SSH passwords and all managed SSH private keys then sync automatically across your devices.</p>
             <p className="text-sm text-muted-foreground">You can keep using your keys locally without signing in.</p>
             {openSync && <Button variant="outline" disabled={busy || draft.busy} onClick={openSync}>Set up automatic sync</Button>}
           </section>}

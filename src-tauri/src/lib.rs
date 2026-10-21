@@ -434,6 +434,8 @@ fn run_app(host: bool, start_hidden: bool) {
             deploy_key,
             deploy_preflight,
             secrets_has,
+            sync::central::passwords::records_password_status,
+            sync::central::passwords::records_password_change,
             secrets_get,
             secrets_set,
             secrets_delete,

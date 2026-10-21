@@ -91,6 +91,11 @@ else {
         if (scenario === "terminal-missing-key" && ["terminal_close", "terminal_ack"].includes(command)) return;
         if (command === failure) throw new Error("Disposable fixture read failure. Retry after changing the preview scenario.");
         if (command === "secrets_has") return passwords.has(String(args.alias));
+        if (command === "records_password_status") return passwords.has(String(args.hostId));
+        if (command === "records_password_change") {
+          if (scenario === "password-save-retry" && !passwordSaveFailed) {passwordSaveFailed=true;throw new Error("Disposable credential-store failure");}
+          if (args.password === null) passwords.delete(String(args.hostId));else passwords.set(String(args.hostId),String(args.password));return;
+        }
         if (command === "secrets_set") {
           if (scenario === "password-save-retry" && !passwordSaveFailed) { passwordSaveFailed = true; throw new Error("Disposable credential-store failure"); }
           passwords.set(String(args.alias), String(args.password)); return;
