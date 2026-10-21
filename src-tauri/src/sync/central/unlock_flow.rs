@@ -122,7 +122,7 @@ pub(super) fn begin_password(env: &SyncEnv, password: &str) -> Result<(), AppErr
     super::round::require_success(env, &reply)?;
     let response: RecoveryReply = reply.decode()?;
     let read = ReadSession::begin_fresh(&before, &kit, source.clone(), response, env.now())?;
-    *env.runtime.central_unlock.lock().unwrap() = Some(Reading {
+    *env.runtime.central_unlock.lock().unwrap() = Some(Box::new(Reading {
         before,
         anchor,
         session,
@@ -132,7 +132,7 @@ pub(super) fn begin_password(env: &SyncEnv, password: &str) -> Result<(), AppErr
         read_proof,
         read: Some(read),
         prepared: None,
-    });
+    }));
     Ok(())
 }
 /// At most eight history pages and twenty seconds per foreground step. No secret enters progress.
