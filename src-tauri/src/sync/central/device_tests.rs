@@ -3477,6 +3477,8 @@ fn automatic_password_setup_commits_only_ciphertext_before_cleanup_and_new_devic
         let clock = TestClock::new();
         let first = TestDevice::new("automatic-first", &relay, &clock);
         let peer = TestDevice::new("automatic-peer", &relay, &clock);
+        first.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
+        peer.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
         service.login(&first);
         assert_eq!(
             automatic::start(&first.env()).unwrap().phase,
@@ -3591,6 +3593,8 @@ fn automatic_fresh_library_publishes_and_second_device_materializes_hosts_withou
         let clock = TestClock::new();
         let first = TestDevice::new("automatic-library-a", &relay, &clock);
         let peer = TestDevice::new("automatic-library-b", &relay, &clock);
+        first.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
+        peer.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
         service.login(&first);
         crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
         let payload:crate::sync::records_v3::HostPayload=serde_json::from_value(json!({"schema":2,"alias":"automatic-host","hostname":"synthetic.invalid","user":"fixture","port":22,"auth":"password"})).unwrap();
