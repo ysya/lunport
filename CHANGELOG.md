@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.3](https://github.com/ysya/lunport/compare/v1.10.2...v1.10.3) (2026-10-21)
+
+Fix Windows failing after **Unlock and sync** when structured state exceeds Credential Manager’s 2,560-byte limit. Large local values now use current-user Windows DPAPI with a small OS-protected descriptor that pins the current ciphertext. Legacy small credentials, noninteractive operation and interrupted-write recovery remain supported. Accounts, local hosts, SSH keys and sync passwords are preserved; no server reset is required.
+
+
+### Bug Fixes
+
+* **windows:** protect large credentials with DPAPI and pinned storage ([#69](https://github.com/ysya/lunport/issues/69)) ([f7d89a6](https://github.com/ysya/lunport/commit/f7d89a6dfe8fe228f238012620c2a38969fda64a))
+
 ## [1.10.2](https://github.com/ysya/lunport/compare/v1.10.1...v1.10.2) (2026-10-21)
 
 Fix **Unlock and sync** rejecting a new device with “The account changed” despite a correct sync password. Pending-device overviews omit the private Vault catalog; unlock and offline recovery now verify the authenticated encrypted history before admission. Existing accounts, sync passwords and local data are retained.
