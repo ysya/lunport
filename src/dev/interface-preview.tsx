@@ -174,9 +174,11 @@ else {
           if (review?.token !== "fixture-library-review") throw new Error("Review the fixture library first.");
           return includeFixtureLibrary(review.renames);
         }
+        if (command === "mcp_setup_overview") return { sandbox: true, executable: "/fixture/sshelter", clients: ["codex", "claude_code", "claude_desktop", "cursor", "vscode"].map(client => ({ client, state: "not_added", config_path: null, message: null })) };
         if (command === "mcp_status") return mcp;
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
         if (command === "mcp_set_group_allowed") {
+          if (args.generation !== overview.generation) throw new Error("The fixture library changed. Refresh AI Access and try again.");
           const scope = args.scope as { kind: string; space_id?: string };
           const key = scope.kind === "local" ? `local/${args.groupId}` : `space/${scope.space_id}/${args.groupId}`;
           return mcp = { ...mcp, allowed_groups: args.allowed ? [...new Set([...mcp.allowed_groups, key])] : mcp.allowed_groups.filter((id) => id !== key) };

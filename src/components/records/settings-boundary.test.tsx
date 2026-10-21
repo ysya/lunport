@@ -64,7 +64,7 @@ describe("records settings compatibility", () => {
         expect(text(html)).toContain(
           "Only allowed hosts and Group members are available",
         );
-        expect(html).toContain("mcp-host-0000000000000001");
+        expect(html).toContain("Allow host web");
       }
     }
   });
