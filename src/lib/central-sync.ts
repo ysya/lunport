@@ -72,10 +72,6 @@ export const centralDevicesKey = (status: CentralStatus) =>
   ] as const;
 export const centralDevices = () =>
   tauriInvoke<CentralDeviceRegistry>("central_devices");
-export const centralPairingCode = () =>
-  tauriInvoke<{ code: string; expires_at_ms: string }>("central_pairing_code");
-export const centralApproveDevice = (code: string) =>
-  tauriInvoke<CentralStatus>("central_approve_device", { code });
 
 export type CentralRevokeResult = {
   status: CentralStatus;
