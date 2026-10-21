@@ -126,6 +126,8 @@ For example, a client can propose `create_host` with `{"alias":"web","hostname":
 
 Ask reviews the exact command and can request credentials through Lunport. Auto-log execution never prompts for credentials or silently trusts a new key; complete fingerprint verification first. Authentication answers and command output are not retained in the public audit log. This permission gate covers Lunport MCP requests; other local programs still have their own operating-system access.
 
+**Recent activity** shows the latest 10 public audit entries, retained across app restarts. **Requested** and **Completed** show the date and time, including seconds and this device's local time zone. Older entries show only the timestamps that were recorded; entries without a usable timestamp show **Time unavailable**.
+
 ## Existing Legacy workspaces
 
 Legacy mode keeps your OpenSSH configuration as the source of truth. It preserves comments, blank lines, ordering and unknown directives, changing only the edited lines. Included files remain part of the workspace. Every write is backed up; restoring also backs up the current file first.
