@@ -132,6 +132,29 @@ describe("signed central membership", () => {
     expect(restored).not.toBeNull();
     expect(Object.keys(restored!.devices)).toEqual([request.device.id]);
   });
+  it("allows account unlock only to append a fresh device using the current recovery authority", async () => {
+    const state = await current(), request = pending();
+    const body: MembershipBody = {
+      ...nodes[0].body, revision: "3", previous_head: state.head,
+      issued_at_ms: "1700000003000", action: "unlock", author: "recovery",
+      enrollment: request, devices: { ...state.devices, [request.device.id]: request.device.keys },
+      recovery: state.recovery,
+    };
+    expect(await applyMembership(state, sign(body, 1))).toBeNull();
+    expect(await applyMembership(state, sign(body, 6))).toBeNull();
+    const approved = sign(body, 4), next = await applyMembership(state, approved);
+    expect(next).not.toBeNull();
+    expect(next!.devices).toEqual(body.devices);
+    expect(next!.recovery).toEqual(state.recovery);
+    expect(await applyMembership(next!, approved)).toBeNull();
+    for (const patch of [
+      { devices: { [request.device.id]: request.device.keys } },
+      { author: "f".repeat(32) },
+      { previous_head: "0".repeat(64) },
+      { issued_at_ms: "1700000603000" },
+      { recovery: request.device.keys },
+    ]) expect(await applyMembership(state, sign({ ...body, ...patch }, 4))).toBeNull();
+  });
   it("binds current writes and key recipients to routed vault, epoch and authenticated actor", async () => {
     const first = await trustGenesis(fixture.genesis, fixture.anchor);
     const approved = await applyMembership(first!, nodes[0]);

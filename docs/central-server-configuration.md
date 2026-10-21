@@ -2,7 +2,9 @@
 
 Lunport starts locally without an account. Public Stable and Beta installers have a blank account-service URL; they do not select the maintainer's service. Deploy your own service using [Cloudflare Workers](../relay/security/README.md) or [Docker Compose](../relay/selfhost/central/README.md), then enter its HTTPS origin in Sync, for example `https://sync.example.com`. Use the same origin on your other devices.
 
-The first sign-in uses your existing local library. Passkey registration/sign-in authenticates the account; Vault setup and device approval provide the separate end-to-end encryption keys. Review the library before enabling sync. Managed SSH keys are then included automatically.
+Choose **Sign in and sync with Passkey** to connect your local library. Browser sign-in authorizes the app; set a **sync unlock password** in Lunport on the first device. On each new device, use the same server and account, then enter that password once. Vault initialization, device enrollment and the first library sync run automatically. Managed SSH private keys are included. The password is processed locally and is never sent to the server. Keep it in a password manager: Passkey sign-in cannot replace a forgotten encryption password.
+
+Automatic setup requires the server capability `account-unlock-v1`. Update both the independent security service and private core from the same release, retaining their bindings, namespaces and persistent volumes. This release targets fresh account setup; importing historical workspaces is a separate flow.
 
 To change an already selected server, edit the account-service URL and choose **Change server and restart**. Restart closes terminal sessions and opens a separate empty local workspace for the new service. Reimport the SSH configuration and sign in on that service. Old memberships, Vaults, migration journals and managed key archives are not uploaded or relabelled for the new service. Existing SSH configuration and source files are not modified.
 

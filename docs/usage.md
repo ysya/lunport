@@ -70,7 +70,7 @@ Open **Keys → Import private key → From a file** to choose a supported OpenS
 
 To change a key's name, select it in **Keys**, choose **Rename**, and save the new name. The key ID, fingerprint, private material and host references stay the same. Account key names sync to your other devices; a conflicting or deleted key must be resolved before renaming.
 
-Central library sync includes managed SSH private keys by default after you approve the whole-library review. There are no per-key sync switches or private-key download steps. The Keys page offers **Set up automatic sync** until this library has completed account setup and migration. Generating or importing a key then includes it in that encrypted library. Hardware and external-agent keys keep their private material on their original device. Saved passwords and separately stored key passphrases stay on each device.
+Central library sync includes managed SSH private keys by default after you sign in and unlock sync. There are no per-key sync switches or private-key download steps. The Keys page offers **Set up automatic sync** until this library has completed account setup and migration. Generating or importing a key then includes it in that encrypted library. Hardware and external-agent keys keep their private material on their original device. Saved passwords and separately stored key passphrases stay on each device.
 
 Lunport's SSH agent provides vault keys to compatible local SSH clients while the app is running and asks before a program uses a key. Keep the app running, or enable launch at login when you need that integration. Exporting a private key creates an ordinary key file outside the vault; other programs can then use that copy independently.
 
@@ -78,7 +78,7 @@ Lunport's SSH agent provides vault keys to compatible local SSH clients while th
 
 New installations open a local library immediately. Add and edit hosts, manage keys, import SSH configuration and connect to your servers without signing in. These actions do not enroll the device or upload your library to the sync service. SSH connections still need access to their destination servers.
 
-Sync is optional. Open **Sync** when you want to connect your devices; signing in alone does not enable library sync. Finish Vault setup and approve the whole-library review before upload begins. Until then, locally managed SSH private keys remain in the encrypted local vault. Once library sync is enabled, managed keys join the encrypted library by default.
+Sync is optional. Open **Sync** when you want to connect your devices; choose **Sign in and sync with Passkey**, then set or enter your sync unlock password. Library sync starts automatically after successful unlock. Until then, locally managed SSH private keys remain in the encrypted local vault. Once library sync is enabled, managed keys join the encrypted library by default.
 
 An existing synced library retains its device approval, recovery and migration checks. Local use does not bypass a revoked device or an unfinished safety review.
 
@@ -86,17 +86,17 @@ An existing synced library retains its device approval, recovery and migration c
 
 Passkey account sync is available on macOS, Windows and Linux.
 
-Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**. The account-service URL starts blank: deploy your own Cloudflare or Docker service, enter its HTTPS URL and choose **Sign in with Passkey**. Local use needs no account. Passkey needs no external identity provider; OIDC remains optional.
+Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**. The account-service URL starts blank: deploy your own Cloudflare or Docker service, enter its HTTPS URL and choose **Sign in and sync with Passkey**. Local use needs no account. Passkey needs no external identity provider; OIDC remains optional.
 
-On the first device, set up the encrypted Vault, save its offline recovery kit outside the device, and finish Vault setup. Choose **Prepare library review**, review the complete library and approve **Confirm library sync**. Hosts, Groups, tunnel rules and managed SSH private keys are included. The server stores encrypted library content.
+On the first device, create and confirm a **sync unlock password** of at least 12 characters. Lunport prepares and syncs your encrypted library automatically. Hosts, Groups, tunnel rules and managed SSH private keys are included. The server stores encrypted library content.
 
-On another device, sign in to the same account, reveal its pairing code and approve it from an already trusted device. Then review its local library before merging; imported host references and tunnel rules are remapped together. Passkey sign-in alone does not decrypt an existing Vault. Use your recovery kit if no approved device remains.
+On another device, sign in to the same account on the same server, then enter the same sync unlock password once. Lunport securely connects the device, downloads your library and merges local records automatically. Imported host references and tunnel rules are remapped together. No pairing code is required. Passkey signs you into the account; the sync password unlocks encrypted data inside the app.
 
 The former sync-code controls are removed. To change an already selected service, edit its URL and choose **Change server and restart**. This opens a separate empty local library and closes terminal sessions. Reimport your SSH config explicitly; old account, Vault and backup contents are not silently uploaded to the new service. First-time sign-in from a local library keeps that library.
 
-New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys are included after the whole-library review. The relay receives ciphertext; server passwords remain local.
+New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys are included automatically. The relay receives ciphertext; server passwords remain local.
 
-Use the account device controls to revoke a lost device. Revocation blocks subsequent authenticated sync; it does not erase content already decrypted on that device. Keep an offline recovery kit so you can recover the Vault if no approved device remains.
+Use the account device controls to revoke a lost device. Revocation blocks subsequent authenticated sync; it does not erase content already decrypted on that device. Save your sync unlock password in a password manager. It is not sent to the server and cannot be recovered through Passkey sign-in.
 
 The relay can run on Cloudflare Workers or your own server with Docker Compose. See [server configuration and deployment guides](central-server-configuration.md). Relay URLs require HTTPS; localhost HTTP is allowed for development.
 

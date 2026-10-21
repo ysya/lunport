@@ -217,6 +217,45 @@ impl PendingPairing {
             secret,
         })
     }
+    /// Only a fully verified native read can construct the account-unlock minimum.
+    /// The account root is independently authenticated by the decrypted unlock envelope.
+    pub(super) fn confirm_unlock(
+        &self,
+        read: &super::recovery_read::VerifiedRecovery,
+        node: &SignedMembership,
+    ) -> Result<PairingConfirmation, AppError> {
+        if read.request() != &self.request
+            || node.body.action != Action::Unlock
+            || node.body.author != "recovery"
+            || node.body.enrollment.as_ref() != Some(&self.request)
+        {
+            return Err(invalid());
+        }
+        let next = read.chain().current().apply(node)?;
+        let replica = read.replica();
+        let minimums = vec![VaultMinimum {
+            vault: replica.vault.clone(),
+            creation_head: replica.creation_head.clone(),
+            creation_authorization_epoch: replica.creation_authorization_epoch.to_string(),
+            key_epoch: read.checkpoint().epoch.to_string(),
+            sequence: read.checkpoint().sequence.to_string(),
+            history_hash: read.checkpoint().history_hash.clone(),
+        }];
+        let mut mac = HmacSha256::new_from_slice(&self.secret).map_err(|_| invalid())?;
+        mac.update(&confirmation_bytes(
+            &self.request,
+            next.head(),
+            &replica.vault,
+            &minimums,
+        )?);
+        Ok(PairingConfirmation {
+            request_id: self.request.request_id.clone(),
+            approved_head: next.head().into(),
+            personal_vault: replica.vault.clone(),
+            minimums,
+            mac: B64.encode(mac.finalize().into_bytes()),
+        })
+    }
     pub fn accept(
         &self,
         confirmation: &PairingConfirmation,
@@ -239,7 +278,7 @@ impl PendingPairing {
         let chain = proof.verify(&anchor(&self.request), None)?;
         confirmation.validate_minimums(&chain)?;
         let confirmed = proof.nodes.iter().enumerate().any(|(index, node)| {
-            node.body.action == Action::Add
+            matches!(node.body.action, Action::Add | Action::Unlock)
                 && node.body.enrollment.as_ref() == Some(&self.request)
                 && chain.head_at(index + 1) == Some(confirmation.approved_head.as_str())
         });

@@ -52,7 +52,7 @@ impl ControlProof {
         );
         let mut security_revision = 0;
         for (index, node) in self.nodes.iter().enumerate() {
-            if node.body.action != Action::Add {
+            if !matches!(node.body.action, Action::Add | Action::Unlock) {
                 security_revision = index + 1;
             }
             current = current.apply(node)?;

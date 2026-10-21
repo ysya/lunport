@@ -49,6 +49,8 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2"
 bip39 = { version = "2", features = ["rand", "zeroize"] }
 hkdf = "0.12"
+# Native one-time fallback unlock; reuse the existing locked Argon2 implementation.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 hmac = "0.12"
 chacha20poly1305 = "0.10"
 # Central sync: independent device signatures and RFC 9180 key wrapping.
@@ -157,4 +159,10 @@ opt-level = 3
 [profile.dev.package.pem-rfc7468]
 opt-level = 3
 [profile.dev.package.base64ct]
+opt-level = 3
+
+# Keep the fixed-memory fallback KDF practical in debug builds as well.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
 opt-level = 3

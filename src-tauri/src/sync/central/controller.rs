@@ -720,6 +720,7 @@ pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
     }
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     env.runtime.central_recovery_read.lock().unwrap().take();
+    super::unlock_flow::cancel(env);
     let (records, _) = record_runtime::snapshot(env)?;
     let before = records.local.central.as_ref().ok_or_else(invalid)?;
     let profile = before.control.profile.profile()?;
