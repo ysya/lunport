@@ -38,11 +38,16 @@ fn transcript(
     floors: &mut Vec<Checkpoint>,
     controls: &mut Vec<ControlMinimum>,
     owner: &Workspace,
-    identity: &DeviceIdentity,
+    identity: Option<&DeviceIdentity>,
+    recovered: Option<&VerifiedLibrary>,
     value: &Transcript,
     floor: Option<&Checkpoint>,
 ) -> Result<VerifiedLibrary, AppError> {
-    let read = value.verify(owner, identity, floor)?;
+    let read = if let Some(recovered) = recovered {
+        value.verify_reconnected(owner, recovered, floor)?
+    } else {
+        value.verify(owner, identity.ok_or_else(invalid)?, floor)?
+    };
     if read.phase() != "ready" || read.checkpoint().sequence == 0 {
         return Err(invalid());
     }
@@ -91,6 +96,23 @@ pub(in crate::sync::central) fn read_prepared_group(
     identity: &DeviceIdentity,
     package: Package,
 ) -> Result<Captured, AppError> {
+    read_prepared_inner(source, frames, Some(identity), None, package)
+}
+pub(in crate::sync::central) fn read_reconnected_group(
+    source: &Receipt,
+    frames: &[(Receipt, Zeroizing<Vec<u8>>)],
+    read: &VerifiedLibrary,
+    package: Package,
+) -> Result<Captured, AppError> {
+    read_prepared_inner(source, frames, None, Some(read), package)
+}
+fn read_prepared_inner(
+    source: &Receipt,
+    frames: &[(Receipt, Zeroizing<Vec<u8>>)],
+    identity: Option<&DeviceIdentity>,
+    recovered: Option<&VerifiedLibrary>,
+    package: Package,
+) -> Result<Captured, AppError> {
     let (_, bytes) = frames
         .iter()
         .find(|(r, _)| r == source)
@@ -98,7 +120,7 @@ pub(in crate::sync::central) fn read_prepared_group(
     package.require_captured_inputs(&Package::decode_local(bytes)?)?;
     let owner = package.state.local.central.as_ref().ok_or_else(invalid)?;
     source.matches_selected(owner)?;
-    if identity.device() != owner.control.device {
+    if identity.is_some_and(|identity| identity.device() != owner.control.device) {
         return Err(invalid());
     }
     let mut selected = vec![];
@@ -163,6 +185,7 @@ pub(in crate::sync::central) fn read_prepared_group(
                     &mut controls,
                     owner,
                     identity,
+                    recovered,
                     &value,
                     None,
                 )?;
@@ -197,6 +220,7 @@ pub(in crate::sync::central) fn read_prepared_group(
                     &mut controls,
                     owner,
                     identity,
+                    recovered,
                     &value,
                     Some(&floor),
                 )?;
@@ -213,6 +237,7 @@ pub(in crate::sync::central) fn read_prepared_group(
                     &mut controls,
                     owner,
                     identity,
+                    recovered,
                     &value,
                     Some(floor),
                 )?;

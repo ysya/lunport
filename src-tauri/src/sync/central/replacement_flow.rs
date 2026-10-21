@@ -172,6 +172,7 @@ pub fn start_invocation(
     match invocation.route {
         Route::TrustedDevice => begin_trusted_at(env, invocation.generation.clone()),
         Route::RecoveryKit => begin_recovery_at(env, encoded_kit, invocation.generation.clone()),
+        Route::SyncPassword => Err(invalid()),
     }
 }
 pub fn continue_invocation(
@@ -361,7 +362,7 @@ fn count(env: &SyncEnv) {
     let mut core = env.runtime.core.lock().unwrap();
     core.central_poll.requests = core.central_poll.requests.saturating_add(1);
 }
-fn selected_session(
+pub(super) fn selected_session(
     env: &SyncEnv,
     owner: &Workspace,
     operation: &str,
@@ -505,7 +506,7 @@ fn begin_trusted_at(env: &SyncEnv, generation: String) -> Result<Progress, AppEr
     env.events.status();
     status(env)
 }
-fn stage_active(
+pub(super) fn stage_active(
     env: &SyncEnv,
     operation: &str,
     generation: &str,

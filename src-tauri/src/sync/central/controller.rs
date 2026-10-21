@@ -37,6 +37,7 @@ pub struct Status {
     pub has_session: bool,
     pub account_authenticated: bool,
     pub needs_recovery: bool,
+    pub reconnect_available: bool,
     pub replacement_pending: bool,
     pub needs_reconciliation: bool,
     pub can_sync: bool,
@@ -75,6 +76,7 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
     let login_pending = env.runtime.central_login.lock().unwrap().is_some();
     // Status must not wait on a history read holding the unlock worker for network I/O.
     let connecting = env.runtime.central_unlock.try_lock().map(|work| work.is_some()).unwrap_or(true);
+    let connecting = connecting || env.runtime.central_replacement_read.try_lock().map(|work| work.is_some()).unwrap_or(true);
     let core = env.runtime.core.lock().unwrap();
     let records = record_runtime::active_state(&core)?;
     let ws = records.local.central.as_ref();
@@ -120,6 +122,9 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
                     .is_some_and(|d| d.device_state == DeviceState::Active)
                     && ws.is_some_and(|w| w.control.anchor.is_none())
         }),
+        reconnect_available: ws.is_some_and(|w| w.bootstrap.is_none()
+            && w.recovery.as_ref().is_none_or(|r| !r.requires_cleanup())
+            && w.replacement.as_ref().is_none_or(|i| i.route == super::replacement::Route::SyncPassword)),
         replacement_pending: ws.is_some_and(|w| w.replacement.is_some()),
         needs_reconciliation: ws.is_some_and(super::replacement_reconciliation::required),
         can_sync: ws.is_some_and(Workspace::can_upload)

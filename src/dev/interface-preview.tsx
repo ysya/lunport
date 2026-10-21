@@ -116,16 +116,16 @@ else {
         ];
         if (command === "records_hosts_export") return {path:"/fixture/lunport-hosts.json",hosts:21,groups:4};
         if (command === "central_server_capabilities") return {passkey:true,oidc:false};
-        if (["central_status","central_automatic_status","central_conflict_resolve"].includes(command) && ["sync-layout","sync-active","sync-conflicts","sync-cooldown","sync-revoked","sync-failure"].includes(scenario ?? "")) {
+        if (["central_status","central_automatic_status","central_conflict_resolve"].includes(command) && ["sync-layout","sync-active","sync-conflicts","sync-cooldown","sync-revoked","sync-reconnect","sync-reconnecting","sync-failure"].includes(scenario ?? "")) {
           if (command === "central_conflict_resolve") conflictResolved = true;
           const active = scenario !== "sync-layout";
           const status={
             available: true, configured: true, phase: scenario === "sync-revoked" ? "revoked" : active ? "active" : "setup", service: "https://sync.example.com",
             account_id: "a".repeat(64), device_id: "b".repeat(32), root_fingerprint: active ? "c".repeat(64) : null,
             membership_head: active ? "d".repeat(64) : null, authorization_epoch: "1", has_session: true, account_authenticated:true, login_pending: false,
-            needs_recovery: scenario === "sync-revoked", replacement_pending: false, needs_reconciliation: false,
+            needs_recovery: ["sync-revoked", "sync-reconnect", "sync-reconnecting"].includes(scenario ?? ""), replacement_pending: false, needs_reconciliation: false,
             can_sync: active && scenario !== "sync-revoked", pending: 0, conflicts: scenario === "sync-conflicts" && !conflictResolved ? 1 : 0,
-            automatic_sync:true, cooldown_seconds: scenario === "sync-cooldown" ? 25 : 0,
+            connecting: scenario === "sync-reconnecting", automatic_sync:true, cooldown_seconds: scenario === "sync-cooldown" ? 25 : 0,
             error: scenario === "sync-failure" ? "Invalid central sync protocol data." : null,
           } satisfies CentralStatus;
           return command === "central_automatic_status" ? {phase:active ? "ready" : "password_setup",status} : status;

@@ -58,6 +58,7 @@ const phaseText = {
   signed_out: "Use your own server to sync hosts, Groups, tunnels and all managed SSH keys.",
   sign_in_required: "Sign in again to resume automatic sync.",
   password_setup: "Set your sync unlock password once to protect your encrypted library.",
+  password_recovery: "Reconnect this device with your sync password. Your existing local library is retained.",
   password_unlock: "Enter the sync unlock password you set on your first device.",
   connecting: "Unlocking and connecting this device…",
   syncing: "Preparing and syncing your encrypted library…",
@@ -65,6 +66,7 @@ const phaseText = {
   needs_attention: "Sync needs your attention.",
 } as const;
 function fallbackPhase(status: CentralStatus): keyof typeof phaseText {
+  if (status.reconnect_available !== false && status.account_authenticated && (status.needs_recovery || status.phase === "revoked" || status.replacement_pending)) return status.connecting ? "connecting" : "password_recovery";
   if (!status.configured || status.phase === "signed_out") return "signed_out";
   if (status.needs_recovery) return "needs_attention";
   if (!status.has_session) return "sign_in_required";
@@ -99,8 +101,9 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
   const current = result && result.status.service === status.service && result.status.account_id === status.account_id && result.status.device_id === status.device_id &&
     result.status.phase === status.phase && result.status.has_session === status.has_session ? result : undefined;
   const attention = status.needs_recovery || status.replacement_pending || status.needs_reconciliation || status.phase === "revoked" || status.phase === "rekey";
-  const phase = attention ? "needs_attention" : current?.phase ?? fallbackPhase(status);
-  const setup = phase === "password_setup", unlock = phase === "password_unlock";
+  const recovering = status.reconnect_available !== false && !!status.account_authenticated && (status.needs_recovery || status.replacement_pending || status.phase === "revoked");
+  const phase = recovering ? fallbackPhase(status) : attention ? "needs_attention" : current?.phase ?? fallbackPhase(status);
+  const setup = phase === "password_setup", unlock = phase === "password_unlock" || phase === "password_recovery";
   const login = signingIn || status.login_pending;
   const blocked = disabled || busy || deviceBusy;
   const networkBlocked = blocked || cooldown > 0;
@@ -152,7 +155,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
   const serviceField = <RecordField label="Account service"><Input type="url" value={service} onChange={(e) => setService(e.target.value)}
     placeholder="https://sync.example.com" autoComplete="off" spellCheck={false} disabled={blocked || login} /></RecordField>;
   const StatusIcon = setup || unlock ? LockKeyhole : phase === "ready" ? CloudCheck : phase === "connecting" || phase === "syncing" ? LoaderCircle : Cloud;
-  const heading = setup ? "Create your sync password" : unlock ? "Unlock your library" : phase === "ready" ? "Automatic sync" : "Sync across your devices";
+  const heading = recovering ? phase === "connecting" ? "Reconnecting this device" : "Reconnect this device" : setup ? "Create your sync password" : unlock ? "Unlock your library" : phase === "ready" ? "Automatic sync" : "Sync across your devices";
   return <section className="app-notice w-full max-w-3xl space-y-5" aria-label="Sync account">
     <div className="flex items-start gap-3">
       <span className="rounded-xl bg-primary/10 p-2.5 text-primary"><StatusIcon className={`size-5 ${phase === "connecting" || phase === "syncing" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" /></span>
@@ -165,7 +168,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
     {!status.configured && discoveryOrigin === serviceOrigin && discovery.isError && <p className="text-sm text-muted-foreground">Could not read this server’s sign-in methods. Check the HTTPS address and server version, or retry sign-in.</p>}
     {status.account_id && <p className="text-xs text-muted-foreground">Account {status.account_id.slice(0,12)}… · This device</p>}
     {attention && <div className="space-y-3 rounded-lg border p-3">
-      <p className="text-sm">{status.phase === "revoked" ? "This device no longer has access to the encrypted library. Its saved local data has been retained." : status.replacement_pending ? "A saved device replacement is incomplete. Its original files and progress are retained. Export local host and Group settings, or continue using an already connected device." : status.needs_recovery ? "Lunport cannot use this device’s saved credentials. Your local data is retained. You can export host and Group settings, or sign in on another device and unlock with your sync password." : status.needs_reconciliation ? "Review the restored local history before merging it into the encrypted library." : "A device access change requires encryption key rotation. Keep an authorized device online and refresh to finish."}</p>
+      <p className="text-sm">{recovering ? phase === "connecting" ? "Verifying your encrypted library. Keep Lunport open; your local data and unsynced changes are retained." : "Enter your sync password to reconnect this library. Hosts, Groups, SSH keys and unsynced changes are retained." : status.phase === "revoked" ? "This device no longer has access to the encrypted library. Its saved local data has been retained." : status.replacement_pending ? "An older device recovery is incomplete. Its original files and progress are retained. If its original credentials are unavailable, export host and Group settings before rebuilding the library." : status.needs_recovery ? "Lunport cannot use this device’s saved credentials. Your local data is retained. Sign in to the same account and enter your sync password to reconnect here. Hosts, Groups, SSH keys and unsynced changes stay in this library." : status.needs_reconciliation ? "Review the restored local history before merging it into the encrypted library." : "A device access change requires encryption key rotation. Keep an authorized device online and refresh to finish."}</p>
 
       {status.phase === "rekey" && <Button variant="outline" disabled={networkBlocked} onClick={() => void run(async () => { update(await centralRefresh()); await client.invalidateQueries({queryKey:automaticSyncKey}); })}>Refresh and finish rotation</Button>}
       <Button variant="ghost" disabled={blocked} onClick={() => setTransferOpen(true)}>Export retained host and Group settings…</Button>
@@ -185,9 +188,9 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
         autoComplete={setup ? "new-password" : "current-password"} disabled={networkBlocked} maxLength={1024} required minLength={setup ? 12 : undefined} /></RecordField>
       {setup && <RecordField label="Confirm sync unlock password"><Input type="password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)}
         autoComplete="new-password" disabled={networkBlocked} maxLength={1024} minLength={12} required /></RecordField>}
-      <p className="text-sm text-muted-foreground">{setup ? "Use at least 12 characters. Enter this same password once on each new device. It is processed in Lunport and never sent to your server." : "After unlocking, this device will sync automatically."}</p>
+      <p className="text-sm text-muted-foreground">{setup ? "Use at least 12 characters. Enter this same password once on each new device. It is processed in Lunport and never sent to your server." : recovering ? "Your local library stays here. If local changes need merging, you can review them before sync resumes." : "After unlocking, this device will sync automatically."}</p>
       {setup && <p className="text-xs text-muted-foreground">Save this password in a password manager. Passkey sign-in cannot recover a forgotten sync password.</p>}
-      <Button type="submit" disabled={networkBlocked || !password || (setup && (password.length < 12 || password !== confirmation))}>{setup ? "Set password and sync" : "Unlock and sync"}</Button>
+      <Button type="submit" disabled={networkBlocked || !password || (setup && (password.length < 12 || password !== confirmation))}>{setup ? "Set password and sync" : recovering ? "Reconnect and sync" : "Unlock and sync"}</Button>
     </form>}
     {cooldown > 0 && <p role="status" className="rounded-lg border p-3 text-sm">Server cooldown: retry in {cooldown} seconds. Local changes are retained; automatic sync will resume.</p>}
     {(error || status.error || automatic.isError) && <div className="space-y-2" role="alert">
@@ -196,7 +199,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
     </div>}
     <div className="flex flex-wrap gap-2">
       {login ? <Button variant="outline" onClick={() => void centralCancelSignIn().then(centralStatus).then(update).catch(() => setError("Could not cancel sign-in."))}>Cancel sign-in</Button> : <>
-        {(!status.has_session || phase === "signed_out" || phase === "sign_in_required") && <Button disabled={networkBlocked || changed || !serviceOrigin} onClick={() => void signIn(status.configured ? undefined : "passkey")}>{status.configured ? "Sign in again" : "Sign in and sync with Passkey"}</Button>}
+        {((!status.has_session && !status.account_authenticated) || (attention && status.account_authenticated === false) || phase === "signed_out" || phase === "sign_in_required") && <Button disabled={networkBlocked || changed || !serviceOrigin} onClick={() => void signIn(status.configured ? undefined : "passkey")}>{status.configured ? "Sign in again" : "Sign in and sync with Passkey"}</Button>}
         {status.has_session && !attention && (phase === "ready" || error || status.error) && <Button variant="outline" disabled={networkBlocked} onClick={() => void run(async () => publish(await centralAutomaticStep()))}>{phase === "ready" && !error && !status.error ? "Sync now" : "Retry sync"}</Button>}
         {status.configured && <Button variant="outline" disabled={blocked} onClick={() => void run(async () => { update(await centralSignOut()); client.removeQueries({ queryKey: automaticSyncKey }); })}>Sign out</Button>}
       </>}

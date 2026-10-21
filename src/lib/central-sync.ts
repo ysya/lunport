@@ -22,6 +22,7 @@ export type CentralStatus = {
   account_authenticated?: boolean;
   login_pending: boolean;
   needs_recovery: boolean;
+  reconnect_available?: boolean;
   replacement_pending: boolean;
   needs_reconciliation: boolean;
   can_sync: boolean;
@@ -124,7 +125,7 @@ export const centralRevokeAccountDevice = (selection: {
   });
 
 export type AutomaticSyncProgress = {
-  phase: "signed_out" | "sign_in_required" | "password_setup" | "password_unlock" | "connecting" | "syncing" | "ready" | "needs_attention";
+  phase: "signed_out" | "sign_in_required" | "password_setup" | "password_unlock" | "password_recovery" | "connecting" | "syncing" | "ready" | "needs_attention";
   status: CentralStatus;
 };
 export const automaticSyncKey = ["central-automatic-sync"] as const;

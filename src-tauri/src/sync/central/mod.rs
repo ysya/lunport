@@ -68,6 +68,7 @@ mod unlock_credentials;
 mod unlock_store;
 pub(crate) mod automatic;
 pub(crate) mod unlock_flow;
+mod password_replacement;
 pub mod recovery;
 pub mod recovery_read;
 pub mod active_read;

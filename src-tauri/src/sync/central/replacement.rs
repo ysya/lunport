@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub enum Route {
     TrustedDevice,
     RecoveryKit,
+    SyncPassword,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +79,7 @@ impl Intent {
                 &candidate.recovery,
                 &self.recovery_confirmation,
             ) {
-                (Route::TrustedDevice, None, None) => {}
+                (Route::TrustedDevice | Route::SyncPassword, None, None) => {}
                 (Route::RecoveryKit, None, None) => {}
                 (
                     Route::RecoveryKit,
@@ -183,6 +184,61 @@ pub fn prepare(env: &SyncEnv, route: Route) -> Result<Intent, AppError> {
         .ok_or_else(invalid)?;
     if before.replacement.is_none() && env.runtime.central_recovery_read.lock().unwrap().is_some() {
         return Err(AppError::Other("Finish or pause the current recovery verification before replacing this device. Local data is retained.".into()));
+    }
+    if route == Route::SyncPassword {
+        let session = controller::context(env)?;
+        if session.profile != before.control.profile
+            || session
+                .tokens_started
+                .elapsed()
+                .saturating_add(std::time::Duration::from_secs(5))
+                >= session.tokens.expires_in
+        {
+            return Err(AppError::Other(
+                "Sign in again to reconnect this device.".into(),
+            ));
+        }
+        if before.replacement.is_none()
+            && before.control.phase != super::client_state::Phase::Revoked
+            && before.control.anchor.is_some()
+            && !session.device_access_denied
+            && session
+                .identity
+                .as_ref()
+                .is_some_and(|id| id.device() == before.control.device)
+        {
+            return Err(AppError::Other(
+                "This device is already connected. Refresh sync status before reconnecting.".into(),
+            ));
+        }
+        // Account login can resume the old public phase, never grant the old device access.
+        // Its original identity, trust floors and outbox remain until typed publication.
+        if before.control.phase == super::client_state::Phase::SignedOut {
+            use super::client_state::Phase;
+            let mut next = before.clone();
+            next.control.phase = if before.control.anchor.is_some() {
+                let chain = before.control.verified_chain()?;
+                if before
+                    .control
+                    .denied_devices
+                    .contains(&before.control.device.id)
+                    || chain.current().devices().get(&before.control.device.id)
+                        != Some(&before.control.device.keys)
+                {
+                    Phase::Revoked
+                } else if before.control.cutover {
+                    Phase::Active
+                } else {
+                    Phase::Enrolled
+                }
+            } else if before.control.pending_request.is_some() {
+                Phase::AwaitingApproval
+            } else {
+                Phase::Setup
+            };
+            publish(env, &before, &next)?;
+            before = next;
+        }
     }
     if before.control.phase == super::client_state::Phase::SignedOut {
         return Err(AppError::Other(

@@ -3707,3 +3707,221 @@ fn automatic_empty_library_resumes_after_signout_before_cutover() {
         });
     }
 }
+
+
+#[test]
+fn password_device_recovery_reuses_one_library_and_survives_a_committed_join_restart() {
+    use super::{automatic, unlock_flow, password_replacement, replacement::Route};
+    use crate::sync::env::Keychain;
+    for lost_identity in [false, true] {
+        let service = Service::automatic();
+        super::api::with_test_transport(&service.origin, &service.server.url(), || {
+            let first = TestDevice::new("password-reconnect", &FakeRelay::new(), &TestClock::new());
+            service.login(&first);
+            crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
+            automatic::start(&first.env()).unwrap();
+            let password = "synthetic reconnect password";
+            automatic::password(&first.env(), password).unwrap();
+            let original = record_runtime::snapshot(&first.env()).unwrap().0;
+            let owner = original.local.central.as_ref().unwrap();
+            let profile = owner.control.profile.profile().unwrap();
+            let original_identity = first.keychain.entry(&profile.slot("device"));
+            if lost_identity { first.keychain.delete(&profile.slot("device")).unwrap(); }
+            else { service.state.lock().unwrap().denied.push(owner.control.device.id.clone()); }
+            controller::sign_out(&first.env()).unwrap();
+            service.login(&first);
+            assert!(controller::status(&first.env()).unwrap().needs_recovery);
+            assert_eq!(automatic::status(&first.env()).unwrap().phase, "password_recovery");
+            let before_path = first.env().state_path.to_owned();
+            assert!(automatic::password(&first.env(), "incorrect password").is_err());
+            let staged = record_runtime::snapshot(&first.env()).unwrap().0;
+            assert_eq!(staged.local.central.as_ref().unwrap().control.device, owner.control.device);
+            let intent = staged.local.central.as_ref().unwrap().replacement.as_ref().unwrap();
+            assert_eq!(intent.route, Route::SyncPassword);
+            let operation = intent.operation.clone();
+            assert_eq!(service.state.lock().unwrap().unlock_joins, 0);
+            automatic::password(&first.env(), password).unwrap();
+            service.state.lock().unwrap().lose_unlock_join_reply = true;
+            assert!(unlock_flow::advance(&first.env()).is_err());
+            assert_eq!(service.state.lock().unwrap().unlock_joins, 1);
+            unlock_flow::cancel(&first.env());
+            super::replacement_flow::cancel(&first.env());
+            service.login(&first);
+            automatic::password(&first.env(), password).unwrap();
+            let mut report = super::round::Report::default();
+            for _ in 0..8 {
+                if !password_replacement::pending(&first.env()).unwrap() { break; }
+                password_replacement::background(&first.env(), &mut report).unwrap();
+            }
+            let recovered = record_runtime::snapshot(&first.env()).unwrap().0;
+            let next = recovered.local.central.as_ref().unwrap();
+            assert_eq!(first.env().state_path, before_path);
+            assert_eq!(next.identity_slot.as_deref(), Some(operation.as_str()));
+            assert_ne!(next.control.device, owner.control.device);
+            assert!(next.replacement.is_none());
+            assert_eq!(next.replacement_archives.len(), 1);
+            assert!(next.replacement_archives[0].needs_reconciliation);
+            assert_eq!(recovered.local.hosts, original.local.hosts);
+            assert_eq!(recovered.local.keys, original.local.keys);
+            assert_eq!(next.control.account_id, owner.control.account_id);
+            assert_eq!(next.control.anchor, owner.control.anchor);
+            assert_eq!(service.state.lock().unwrap().unlock_joins, 1);
+            assert_eq!(first.keychain.entry(&profile.slot("device")), if lost_identity { None } else { original_identity });
+            let restored = super::replacement_archive::restore(&first.env(), &profile, &next.replacement_archives[0].receipt).unwrap();
+            assert_eq!(restored.local.central.as_ref().unwrap().control.device, owner.control.device);
+            assert!(!controller::status(&first.env()).unwrap().needs_recovery);
+        });
+    }
+}
+
+
+#[test]
+fn password_device_recovery_preserves_hosts_groups_keys_and_an_unsent_edit_through_reviewed_merge() {
+    use super::{automatic, migration_flow, password_replacement};
+    use crate::sync::{env::Keychain, records_v3::{HostScope, HostPayload, GroupPayload}};
+    // Keep large native test runtimes out of the data/reconciliation driver's stack frame.
+    #[inline(never)]
+    fn device(name: &str) -> Box<TestDevice> { Box::new(TestDevice::new(name, &FakeRelay::new(), &TestClock::new())) }
+    struct NoPrompt<'a>(&'a dyn Keychain);
+    impl Keychain for NoPrompt<'_> {
+        fn get(&self, _: &str) -> Result<Option<String>, crate::error::AppError> { panic!("interactive recovery credential read") }
+        fn set(&self, _: &str, _: &str) -> Result<(), crate::error::AppError> { panic!("interactive recovery credential write") }
+        fn delete(&self, _: &str) -> Result<(), crate::error::AppError> { panic!("interactive recovery credential delete") }
+        fn get_noninteractive(&self, slot: &str) -> Result<Option<String>, crate::error::AppError> { self.0.get_noninteractive(slot) }
+        fn set_noninteractive(&self, slot: &str, value: &str) -> Result<(), crate::error::AppError> { self.0.set_noninteractive(slot, value) }
+    }
+    for (lost_identity, joined) in [(false, false), (true, false), (true, true)] {
+        let service = Service::automatic();
+        super::api::with_test_transport(&service.origin, &service.server.url(), || {
+            let first = device("reconnect-full-library");
+            first.keychain.windows_credentials.store(lost_identity, std::sync::atomic::Ordering::SeqCst);
+            service.login(&first);
+            crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
+            let group: GroupPayload = serde_json::from_value(json!({"schema":1,"name":"Retained Group","defaults":{}})).unwrap();
+            crate::sync::record_commands::edit_records(&first.env(), |state, now| crate::sync::record_groups::create_group(state, "e".repeat(16).as_str(), HostScope::Local, group.clone(), true, now).map_err(|_| super::wire::invalid())).unwrap();
+            let payload: HostPayload = serde_json::from_value(json!({"schema":3,"alias":"retained-host","hostname":"retained.invalid","group_id":"e".repeat(16),"auth":"password"})).unwrap();
+            crate::sync::record_commands::edit_records(&first.env(), |state, now| crate::sync::record_repository::create_host(state, "f".repeat(16).as_str(), HostScope::Local, payload.clone(), now).map_err(|_| super::wire::invalid())).unwrap();
+            let key_text = crate::sync::slot_rules::test_keys::plain();
+            let key = crate::sync::record_keys::import_local(&first.env(), "retained-key", Zeroizing::new(key_text.clone()), crate::vault::store::EntryOrigin::Imported).unwrap();
+            automatic::start(&first.env()).unwrap();
+            let password = "synthetic reconnect library password";
+            automatic::password(&first.env(), password).unwrap();
+            for _ in 0..40 { if controller::status(&first.env()).unwrap().can_sync { break; } automatic::step(&first.env()).unwrap(); }
+            assert!(controller::status(&first.env()).unwrap().can_sync);
+            let peer = device("reconnect-adopted-library");
+            if joined {
+                service.login(&peer);
+                crate::sync::testkit::private_directory(peer.env().state_path.parent().unwrap());
+                automatic::start(&peer.env()).unwrap();
+                automatic::password(&peer.env(), password).unwrap();
+                for _ in 0..40 { if controller::status(&peer.env()).unwrap().can_sync { break; } automatic::step(&peer.env()).unwrap(); }
+                assert!(controller::status(&peer.env()).unwrap().can_sync);
+            }
+            let selected = if joined { &peer } else { &first };
+            let changed: HostPayload = serde_json::from_value(json!({"schema":3,"alias":"unsent-host","hostname":"unsent.invalid","group_id":"e".repeat(16),"auth":"password"})).unwrap();
+            crate::sync::record_commands::edit_records(&selected.env(), |state, now| crate::sync::record_repository::create_host(state, "d".repeat(16).as_str(), HostScope::Local, changed.clone(), now).map_err(|_| super::wire::invalid())).unwrap();
+            assert!(super::active_dispatch::prepare(&selected.env(), None).unwrap().operation.is_some());
+            let original = record_runtime::snapshot(&selected.env()).unwrap().0;
+            let old = original.local.central.as_ref().unwrap();
+            assert!(!old.replica.as_ref().unwrap().pending.is_empty());
+            let profile = old.control.profile.profile().unwrap();
+            if lost_identity { selected.keychain.delete(&profile.slot("device")).unwrap(); }
+            else {
+                service.login(&peer);
+                automatic::start(&peer.env()).unwrap();
+                automatic::password(&peer.env(), password).unwrap();
+                assert!(!super::unlock_flow::advance(&peer.env()).unwrap());
+                joining::initialize(&peer.env()).unwrap();
+                let registry = devices::registry(&peer.env()).unwrap();
+                let selected_old = registry.devices.iter().find(|row| row.id == old.control.device.id).unwrap();
+                devices::revoke(&peer.env(), &selected_old.id, &registry.membership_head, &registry.authorization_epoch, &selected_old.fingerprint).unwrap();
+                for _ in 0..8 {
+                    super::round::sync_once(&peer.env()).unwrap();
+                    if !service.state.lock().unwrap().rekey_pending && record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref().unwrap().control.phase == super::client_state::Phase::Enrolled { break; }
+                }
+                assert_eq!(service.state.lock().unwrap().key_epoch, 2);
+                assert!(!service.state.lock().unwrap().rekey_pending);
+            }
+            controller::sign_out(&selected.env()).unwrap();
+            service.login(selected);
+            automatic::password(&selected.env(), password).unwrap();
+            let no_prompt = NoPrompt(&selected.keychain);
+            let background = crate::sync::env::SyncEnv { keychain: &no_prompt, ..selected.env() };
+            for step in 0..12 {
+                if !password_replacement::pending(&selected.env()).unwrap() { break; }
+                automatic::step(&background).unwrap_or_else(|e| panic!("reconnect step {step}, lost {lost_identity}: {e}"));
+            }
+            let restored = record_runtime::snapshot(&selected.env()).unwrap().0;
+            assert_eq!(restored.local.hosts, original.local.hosts);
+            assert_eq!(restored.local.groups, original.local.groups);
+            assert_eq!(restored.local.keys, original.local.keys);
+            let owner = restored.local.central.as_ref().unwrap();
+            assert!(owner.replacement.is_none());
+            assert!(owner.replacement_archives[0].needs_reconciliation);
+            assert!(!owner.can_upload());
+            let archived = super::replacement_archive::restore(&selected.env(), &profile, &owner.replacement_archives[0].receipt).unwrap();
+            assert_eq!(archived.local.central.as_ref().unwrap().replica, old.replica);
+            let mut approved = false;
+            for step in 0..40 {
+                let state = record_runtime::snapshot(&selected.env()).unwrap().0;
+                let scope = migration_flow::Scope::from_state(&state).unwrap();
+                if controller::status(&selected.env()).unwrap().can_sync { break; }
+                if !approved {
+                    let prepared = migration_flow::prepare(&selected.env(), &scope).unwrap_or_else(|e| panic!("prepare {step}, lost {lost_identity}: {e}"));
+                    if let Some(review) = prepared.review {
+                        migration_flow::confirm(&selected.env(), &scope, &review.ticket).unwrap();
+                        approved = true;
+                    }
+                } else { migration_flow::advance(&selected.env(), &scope).unwrap_or_else(|e| panic!("merge {step}, lost {lost_identity}: {e}")); }
+            }
+            let final_state = record_runtime::snapshot(&selected.env()).unwrap().0;
+            assert!(controller::status(&selected.env()).unwrap().can_sync);
+            let overview = serde_json::to_string(&crate::sync::record_commands::overview(&selected.env()).unwrap()).unwrap();
+            for name in ["retained-host", "unsent-host", "Retained Group"] { assert!(overview.contains(name), "missing {name}"); }
+            let vault = crate::vault::store::read_vault(&crate::vault::store::vault_path(&selected.env().state_path), &selected.keychain).unwrap();
+            let recovered_key = final_state.local.keys.values().find(|k| k.public.fingerprint == key.public.fingerprint).unwrap();
+            assert_eq!(vault.get(&recovered_key.vault_id).unwrap().unwrap().private_key, key_text);
+            assert!(final_state.local.central.as_ref().unwrap().replacement_archives.iter().all(|a| !a.needs_reconciliation));
+        });
+    }
+}
+
+
+#[test]
+fn password_device_recovery_rejects_corrupt_or_rolled_back_history_without_switching_identity() {
+    use super::{automatic, unlock_flow};
+    use crate::sync::env::Keychain;
+    for rollback in [false, true] {
+        let service = Service::automatic();
+        super::api::with_test_transport(&service.origin, &service.server.url(), || {
+            let first = TestDevice::new("reconnect-bad-history", &FakeRelay::new(), &TestClock::new());
+            service.login(&first);
+            crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
+            let payload: crate::sync::records_v3::HostPayload = serde_json::from_value(json!({"schema":2,"alias":"must-survive","hostname":"preserve.invalid","auth":"password"})).unwrap();
+            crate::sync::record_commands::edit_records(&first.env(), |state, now| crate::sync::record_repository::create_host(state, "f".repeat(16).as_str(), crate::sync::records_v3::HostScope::Local, payload.clone(), now).map_err(|_| super::wire::invalid())).unwrap();
+            automatic::start(&first.env()).unwrap();
+            let password = "synthetic integrity password";
+            automatic::password(&first.env(), password).unwrap();
+            for _ in 0..40 { if controller::status(&first.env()).unwrap().can_sync { break; } automatic::step(&first.env()).unwrap(); }
+            let before = record_runtime::snapshot(&first.env()).unwrap().0;
+            let old = before.local.central.as_ref().unwrap();
+            assert!(old.replica.as_ref().unwrap().checkpoint.sequence > 0);
+            first.keychain.delete(&old.control.profile.profile().unwrap().slot("device")).unwrap();
+            service.login(&first);
+            if rollback { service.state.lock().unwrap().history.clear(); }
+            else { service.state.lock().unwrap().corrupt_pull_once = true; }
+            let started = automatic::password(&first.env(), password);
+            if started.is_ok() { assert!(unlock_flow::advance(&first.env()).is_err()); }
+            assert_eq!(service.state.lock().unwrap().unlock_joins, 0);
+            let retained = record_runtime::snapshot(&first.env()).unwrap().0;
+            let owner = retained.local.central.as_ref().unwrap();
+            assert_eq!(owner.control.device, old.control.device);
+            assert_eq!(owner.replica, old.replica);
+            assert_eq!(retained.local.hosts, before.local.hosts);
+            assert!(owner.replacement_archives.is_empty());
+            controller::sign_out(&first.env()).unwrap();
+            assert!(!unlock_flow::active(&first.env()));
+            assert!(automatic::password(&first.env(), password).is_err());
+        });
+    }
+}

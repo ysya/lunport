@@ -126,6 +126,7 @@ impl VaultKeys {
         key.copy_from_slice(bytes);
         Ok(Self(key))
     }
+    pub(super) fn duplicate(&self) -> Self { Self(self.0.clone()) }
     pub fn record_id(&self, kind: &str, id: &str) -> Result<String, AppError> {
         let mut mac =
             <Hmac<Sha256> as Mac>::new_from_slice(&self.0[..32]).map_err(|_| invalid())?;

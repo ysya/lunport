@@ -9,6 +9,20 @@ impl Package {
         env: &SyncEnv,
         expected: &SyncStateV3,
     ) -> Result<Vec<snapshot::Group>, AppError> {
+        Self::replacement_history_groups_inner(env, expected, None)
+    }
+    pub(in crate::sync::central) fn reconnected_history_groups(
+        env: &SyncEnv,
+        expected: &SyncStateV3,
+        read: &super::super::active_read::VerifiedLibrary,
+    ) -> Result<Vec<snapshot::Group>, AppError> {
+        Self::replacement_history_groups_inner(env, expected, Some(read))
+    }
+    fn replacement_history_groups_inner(
+        env: &SyncEnv,
+        expected: &SyncStateV3,
+        read: Option<&super::super::active_read::VerifiedLibrary>,
+    ) -> Result<Vec<snapshot::Group>, AppError> {
         let name = env
             .state_path
             .file_name()
@@ -57,7 +71,7 @@ impl Package {
                 false,
             )
         };
-        let (_, mut groups) = package.retained_packages_inner(Some(&identities))?;
+        let (_, mut groups) = package.retained_packages_with_content(Some(&identities), read)?;
         if !groups.iter().any(|g| g.require_state(expected).is_ok()) {
             let owner = expected.local.central.as_ref().ok_or_else(invalid)?;
             let captured = if super::super::replacement_reconciliation::projected(expected) {
@@ -67,6 +81,8 @@ impl Package {
                     &package.decryptors,
                     &identities,
                 )?
+            } else if let Some(read) = read {
+                super::super::historical_state::read_reconnected(expected, read)?
             } else {
                 super::super::historical_state::read(expected, &identities(owner)?)?
             };
