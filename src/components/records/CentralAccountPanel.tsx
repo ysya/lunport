@@ -136,6 +136,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
     </div>
     {!status.configured && serviceField}
     {phase === "ready" && <p className="text-sm text-muted-foreground">{status.conflicts > 0 ? `${status.conflicts} conflicts need review in your library.` : status.pending > 0 ? `${status.pending} changes waiting to sync.` : "Hosts, Groups, tunnels and managed SSH keys sync across your devices."}</p>}
+    {!status.configured && <p className="text-sm text-muted-foreground">Create an account in your browser using an email as its name and a Passkey. Email verification and email recovery are not used.</p>}
     {!status.service && <p className="text-sm text-muted-foreground">Deploy your own sync server with Cloudflare Workers or Docker, then enter its HTTPS URL. Local mode works without an account.</p>}
     {(setup || unlock) && !login && !changed && <form className="max-w-lg space-y-3" onSubmit={(e) => {
       e.preventDefault();
@@ -162,6 +163,10 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
     {!status.has_session && !status.configured && !login && <p className="text-sm text-muted-foreground">Signing in enables automatic sync for this library and all managed SSH private keys.</p>}
     <details className="space-y-3"><summary className="cursor-pointer text-sm text-muted-foreground">Account and device settings</summary>
       {status.configured && serviceField}
+      {status.configured && !status.has_session && !login && !changed && <div className="space-y-2">
+        <p className="text-sm text-muted-foreground">To register a new account on this server, open an empty local library. Lunport restarts and open terminal sessions close.</p>
+        <Button variant="outline" disabled={blocked || !serviceOrigin} onClick={() => void run(async () => { await centralChangeServer(serviceOrigin); })}>Start with a new account and restart</Button>
+      </div>}
       {changed && <div className="space-y-2"><p className="text-sm text-muted-foreground">Changing servers restarts Lunport and opens an empty local library. Open terminal sessions will close.</p>
         <Button disabled={blocked || login || !serviceOrigin} onClick={() => void run(async () => { await centralChangeServer(serviceOrigin); })}>Change server and restart</Button></div>}
       {!status.configured && !login && <Button variant="outline" disabled={blocked || changed || !serviceOrigin} onClick={() => void signIn("oidc")}>Use external sign-in provider</Button>}

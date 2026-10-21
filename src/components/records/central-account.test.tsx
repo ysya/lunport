@@ -111,3 +111,11 @@ it("lets a first-time local library sign in to the typed server without resettin
   expect(buttonTag(html,"Sign in and sync with Passkey")).not.toContain(DISABLED);
   expect(text(html)).not.toContain("Change server and restart");
 });
+
+it("offers a separate fresh workspace for a new account while a signed-out library remains account-bound", () => {
+  const html=render({has_session:false,phase:"signed_out"});
+  expect(buttonTag(html,"Start with a new account and restart")).not.toContain(DISABLED);
+  expect(text(html)).toContain("open an empty local library");
+  expect(text(html)).toContain("open terminal sessions close");
+  expect(text(render({has_session:true}))).not.toContain("Start with a new account and restart");
+});
