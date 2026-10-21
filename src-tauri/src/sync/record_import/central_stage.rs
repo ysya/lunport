@@ -121,6 +121,7 @@ impl Staged {
 }
 fn summary(journal: &Journal) -> PendingImport {
     PendingImport {
+        group_count: 0,
         import_id: journal.operation.clone(),
         phase: match journal.phase {
             Phase::Prepared => "central_prepared",

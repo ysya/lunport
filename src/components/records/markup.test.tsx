@@ -183,6 +183,21 @@ describe("explicit import consent and key/account controls", () => {
     expect(html).not.toContain('data-state="checked"');
     expect(text(html)).toContain("Source files remain in place");
   });
+  it("shows imported Group hierarchy and host membership with escaped names", () => {
+    const preview = importPreview();
+    preview.preview.groups = [
+      { id: "0000000000000010", scope: { kind: "local" }, payload: { schema: 1, name: "<script>Ops</script>", parent_id: null, defaults: {} } },
+      { id: "0000000000000011", scope: { kind: "local" }, payload: { schema: 1, name: "Production", parent_id: "0000000000000010", defaults: {} } },
+      { id: "0000000000000012", scope: { kind: "local" }, payload: { schema: 1, name: "Empty", parent_id: null, defaults: {} } },
+    ];
+    preview.preview.candidates[0].payload.group_id = "0000000000000011";
+    const html = render(<ImportReview preview={preview} copies={[]} setCopies={vi.fn()} busy={false} />);
+    expect(text(html)).toContain("Groups to import (3)");
+    expect(text(html)).toContain("Empty");
+    expect(text(html)).toContain("Parent: &lt;script&gt;Ops&lt;/script&gt;");
+    expect(text(html)).toContain("Group: Production");
+    expect(html).not.toContain("<script>");
+  });
   it("disables unresolved copy candidates and preserves warning locations", () => {
     const preview = importPreview();
     preview.preview.key_references[0].resolved_path = null;

@@ -335,6 +335,7 @@ pub(super) fn validate_journal(j: &Journal) -> Result<(), AppError> {
         || j.import_id != intent.operation()
         || j.keys.len() != 1
         || !j.hosts.is_empty()
+        || !j.groups.is_empty()
         || !j.copies.is_empty()
         || j.authoritative.is_some()
         || j.source_digest != intent.digest()?

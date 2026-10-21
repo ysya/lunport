@@ -8,7 +8,7 @@ use crate::sync::record::{record_key, LocalRecord, Record, RecordKind};
 use crate::sync::record_runtime;
 use crate::sync::records_v3::importer::{self, ImportOptions, ImportPreview};
 use crate::sync::records_v3::{
-    HostRecord, HostScope, KeySlotPayload, LocalKeyMetadata, SyncStateV3,
+    GroupRecord, HostRecord, HostScope, KeySlotPayload, LocalKeyMetadata, SyncStateV3,
 };
 use crate::vault::store::{self, EntryOrigin, Vault, VaultEntry};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,8 @@ pub struct KeyCopyConsent {
 pub struct ImportReceipt {
     pub import_id: String,
     pub host_ids: Vec<String>,
+    #[serde(default)]
+    pub group_ids: Vec<String>,
     pub copied_key_ids: Vec<String>,
 }
 /// Public recovery status. Counts and phase are metadata; this function never opens a vault.
@@ -78,6 +80,7 @@ pub struct PendingImport {
     pub import_id: String,
     pub phase: String,
     pub host_count: usize,
+    pub group_count: usize,
     pub key_count: usize,
 }
 /// Bounded read-only recovery discovery, called without core. Corrupt journals remain visible.
@@ -125,6 +128,7 @@ pub fn pending_imports(env: &SyncEnv) -> Result<Vec<PendingImport>, AppError> {
                 import_id: id,
                 phase: "invalid".into(),
                 host_count: 0,
+                group_count: 0,
                 key_count: 0,
             });
             continue;
@@ -155,6 +159,7 @@ pub fn pending_imports(env: &SyncEnv) -> Result<Vec<PendingImport>, AppError> {
                         import_id: id,
                         phase,
                         host_count: journal.hosts.len(),
+                        group_count: journal.groups.len(),
                         key_count: journal.keys.len(),
                     });
                 }
@@ -163,6 +168,7 @@ pub fn pending_imports(env: &SyncEnv) -> Result<Vec<PendingImport>, AppError> {
                 import_id: id,
                 phase: "invalid".into(),
                 host_count: 0,
+                group_count: 0,
                 key_count: 0,
             }),
         }
@@ -185,6 +191,8 @@ struct PublicOptions {
     // Explicit environment values remain in memory; resolved provenance is the retry input.
     env_digest: String,
     host_ids: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    group_ids: BTreeMap<String, String>,
     key_ids: BTreeMap<String, String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +237,8 @@ struct Journal {
     provenance: Vec<Provenance>,
     copies: BTreeMap<String, KeyCopyConsent>,
     hosts: Vec<HostRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<GroupRecord>,
     keys: BTreeMap<String, LocalKeyMetadata>,
     device_id: String,
     at_ms: u64,
@@ -245,6 +255,7 @@ impl Journal {
         ImportReceipt {
             import_id: self.import_id.clone(),
             host_ids: self.hosts.iter().map(|h| h.id.clone()).collect(),
+            group_ids: self.groups.iter().map(|g| g.id.clone()).collect(),
             copied_key_ids: self.keys.keys().cloned().collect(),
         }
     }
@@ -434,6 +445,7 @@ pub fn prepare(source: &Path, options: &ImportOptions) -> Result<PreparedImport,
     }
     let mut options = options.clone();
     options.host_ids = preview.host_ids.clone();
+    options.group_ids = preview.group_ids.clone();
     for reference in &preview.key_references {
         let identity = reference
             .resolved_path
@@ -604,6 +616,7 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
                     .map_err(|_| failure("cannot fingerprint explicit import options"))?,
             ),
             host_ids: prepared.options.host_ids,
+            group_ids: prepared.options.group_ids,
             key_ids: prepared.options.key_ids,
         },
         provenance: actual
@@ -617,6 +630,7 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
             .collect(),
         copies: prepared.copies,
         hosts: actual.candidates,
+        groups: actual.groups,
         keys,
         device_id: state.device_id.clone(),
         at_ms,
@@ -712,11 +726,13 @@ pub(crate) fn publish_material(
             home: env.state_path.parent().unwrap().into(),
             env_digest: digest(b""),
             host_ids: BTreeMap::new(),
+            group_ids: BTreeMap::new(),
             key_ids: BTreeMap::from([(name.into(), key_id.clone())]),
         },
         provenance: vec![],
         copies: BTreeMap::new(),
         hosts: vec![],
+        groups: vec![],
         keys: BTreeMap::from([(
             key_id.clone(),
             LocalKeyMetadata {
@@ -825,11 +841,13 @@ pub(crate) fn publish_synced_material(
             home: env.state_path.parent().unwrap().into(),
             env_digest: digest(b""),
             host_ids: BTreeMap::new(),
+            group_ids: BTreeMap::new(),
             key_ids: BTreeMap::from([(public.name.clone(), key_id.into())]),
         },
         provenance: vec![],
         copies: BTreeMap::new(),
         hosts: vec![],
+        groups: vec![],
         keys: BTreeMap::from([(key_id.into(), LocalKeyMetadata { vault_id, public })]),
         device_id: state.device_id.clone(),
         at_ms,
@@ -892,14 +910,17 @@ fn validate_journal(journal: &Journal, id: &str) -> Result<(), AppError> {
             "import journal has an unsupported or invalid header",
         ));
     }
-    if journal.hosts.iter().any(|h| h.scope != HostScope::Local) {
-        return Err(failure("file import journal contains a non-local host"));
+    if journal.hosts.iter().any(|h| h.scope != HostScope::Local)
+        || journal.groups.iter().any(|g| g.scope != HostScope::Local)
+    {
+        return Err(failure("file import journal contains non-local records"));
     }
     if journal.source_kind == SourceKind::Files && journal.keys.len() != journal.copies.len() {
         return Err(failure("import journal has inconsistent copy consent"));
     }
     if journal.source_kind != SourceKind::Files
         && (!journal.hosts.is_empty()
+            || !journal.groups.is_empty()
             || !journal.copies.is_empty()
             || !journal.provenance.is_empty()
             || journal.keys.len() != journal.material_digests.len())
@@ -981,20 +1002,33 @@ fn validate_journal(journal: &Journal, id: &str) -> Result<(), AppError> {
             "import journal contains an untrusted credential account",
         ));
     }
+    importer::saved_hosts::validate_settings(&journal.hosts, &journal.groups, &journal.source)
+        .map_err(|_| failure("import journal has invalid host or Group relationships"))?;
     central_local::validate_journal(&journal)?;
     Ok(())
 }
 
-fn expected_receipt(journal: &Journal) -> crate::sync::records_v3::LocalImportReceipt {
-    crate::sync::records_v3::LocalImportReceipt {
-        source_digest: journal.source_digest.clone(),
+fn expected_receipt(journal: &Journal) -> Result<crate::sync::records_v3::LocalImportReceipt, AppError> {
+    // Bind the whole confirmed Group graph without extending the active-state receipt format.
+    // Existing host/key-only receipts retain their exact digest for older completed journals.
+    let source_digest = if journal.groups.is_empty() {
+        journal.source_digest.clone()
+    } else {
+        digest(&serde_json::to_vec(&(
+            "lunport-host-group-import-v2",
+            &journal.source_digest,
+            &journal.groups,
+        )).map_err(|_| failure("cannot fingerprint imported Groups"))?)
+    };
+    Ok(crate::sync::records_v3::LocalImportReceipt {
+        source_digest,
         host_ids: journal.hosts.iter().map(|h| h.id.clone()).collect(),
         key_ids: journal.keys.keys().cloned().collect(),
-    }
+    })
 }
 fn already_applied(state: &SyncStateV3, journal: &Journal) -> Result<bool, AppError> {
     match state.local.import_receipts.get(&journal.import_id) {
-        Some(receipt) if receipt == &expected_receipt(journal) => Ok(true),
+        Some(receipt) if receipt == &expected_receipt(journal)? => Ok(true),
         Some(_) => Err(failure(
             "import id conflicts with a different durable receipt",
         )),
@@ -1053,6 +1087,40 @@ fn overlay(state: &SyncStateV3, journal: &Journal) -> Result<SyncStateV3, AppErr
     }
     verify_authority(state, journal)?;
     let mut candidate = state.clone();
+    if !journal.groups.is_empty()
+        || journal.hosts.iter().any(|host| {
+            host.payload.schema == crate::sync::records_v3::GROUPED_HOST_SCHEMA
+        })
+    {
+        candidate.version = candidate.version.max(crate::sync::records_v3::GROUP_STATE_VERSION);
+    }
+    for group in &journal.groups {
+        crate::sync::records_v3::validate_group(group)
+            .map_err(|_| failure("confirmed import contains an invalid Group"))?;
+        let key = record_key(RecordKind::Group, &group.id);
+        if state.local.groups.contains_key(&key)
+            || state.spaces.values().any(|space| space.records.contains_key(&key))
+        {
+            return Err(failure("import Group id conflicts with an existing Group"));
+        }
+        candidate.local.groups.insert(
+            key,
+            LocalRecord {
+                record: Record {
+                    kind: RecordKind::Group,
+                    id: group.id.clone(),
+                    version: 1,
+                    updated_at_ms: journal.at_ms,
+                    device_id: journal.device_id.clone(),
+                    deleted: false,
+                    payload: serde_json::to_value(&group.payload)
+                        .map_err(|_| failure("cannot serialize imported Group"))?,
+                },
+                seq: 0,
+                dirty: false,
+            },
+        );
+    }
     for host in &journal.hosts {
         crate::sync::records_v3::validate_host(host)
             .map_err(|_| failure("confirmed import contains an invalid host"))?;
@@ -1103,7 +1171,7 @@ fn overlay(state: &SyncStateV3, journal: &Journal) -> Result<SyncStateV3, AppErr
     candidate
         .local
         .import_receipts
-        .insert(journal.import_id.clone(), expected_receipt(journal));
+        .insert(journal.import_id.clone(), expected_receipt(journal)?);
     crate::sync::records_v3::validate_state(&candidate)
         .map_err(|_| failure("import overlay is not valid record state"))?;
     let existing = crate::sync::record_repository::list_hosts(state)
@@ -1120,6 +1188,12 @@ fn overlay(state: &SyncStateV3, journal: &Journal) -> Result<SyncStateV3, AppErr
     }
     crate::sync::records_v3::validate_hosts(&journal.hosts)
         .map_err(|_| failure("import host relationships are not valid"))?;
+    if !journal.groups.is_empty() {
+        crate::sync::record_groups::validate_groups(&candidate, &HostScope::Local)
+            .map_err(|_| failure("import Group hierarchy or names conflict with the local library"))?;
+    }
+    crate::sync::record_repository::validate_transition(state, &candidate)
+        .map_err(|_| failure("import host or Group relationships are not valid"))?;
     Ok(candidate)
 }
 /// Only recognized vault accounts can cross this adapter. New writes stay in the import namespace.

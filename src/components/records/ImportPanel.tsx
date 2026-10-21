@@ -29,6 +29,8 @@ export function ImportReview({
   setCopies: (ids: string[]) => void;
   busy: boolean;
 }) {
+  const groups = preview.preview.groups ?? [];
+  const groupNames = new Map(groups.map((group) => [group.id, group.payload.name]));
   const refs = [
     ...new Map(
       preview.preview.key_references.map((reference) => [
@@ -39,6 +41,20 @@ export function ImportReview({
   ];
   return (
     <div className="space-y-4">
+      {groups.length > 0 && (
+        <FormSection title={`Groups to import (${groups.length})`} description="Groups, their hierarchy and connection defaults are saved to the local library.">
+          <div className="app-review-list">
+            {groups.map((group) => (
+              <div key={group.id} className="app-review-row">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{revealHidden(group.payload.name)}</p>
+                  {group.payload.parent_id && <p className="text-xs text-muted-foreground">Parent: {revealHidden(groupNames.get(group.payload.parent_id) ?? group.payload.parent_id)}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </FormSection>
+      )}
       <FormSection title={`Hosts to import (${preview.preview.candidates.length})`} description="Hosts are saved to the local library. Review any connection warnings before continuing.">
         <div className="app-review-list">
         {preview.preview.candidates.map((candidate) => (
@@ -51,6 +67,7 @@ export function ImportReview({
               {revealHidden(candidate.payload.hostname)}:
               {candidate.payload.port} · Local
             </p>
+            {candidate.payload.group_id && <p className="text-xs text-muted-foreground">Group: {revealHidden(groupNames.get(candidate.payload.group_id) ?? candidate.payload.group_id)}</p>}
             </div>
             {candidate.payload.imported?.unsupported.some(
               (setting) => setting.requires_review,
@@ -229,7 +246,7 @@ export function RecordsImportPanel() {
     });
   return (
     <div className="app-workflow-page space-y-6" aria-busy={busy}>
-      <PageHeader title="Import hosts" description="Review an SSH configuration, a Lunport host export, or an old Lunport sync-state.json. Saved-workspace imports restore host settings only; assign new SSH keys afterward. Source files stay in place." />
+      <PageHeader title="Import hosts" description="Review an SSH configuration, a Lunport host export, or an old Lunport sync-state.json. Saved-workspace imports restore hosts and Groups; assign new SSH keys afterward. Source files stay in place." />
       <WorkflowSteps steps={["Choose source", "Review", "Finish"]} current={preview ? 1 : receipt ? 2 : 0} complete={!!receipt && !preview} />
       {error && (
         <p
@@ -244,6 +261,7 @@ export function RecordsImportPanel() {
           <h2>Import completed</h2>
           <p>
           Import completed: {receipt.host_ids.length} hosts,{" "}
+          {(receipt.group_ids ?? []).length} Groups,{" "}
           {receipt.copied_key_ids.length} copied keys.
           </p>
         </section>
@@ -285,13 +303,13 @@ export function RecordsImportPanel() {
             </Button>
             <Button
               disabled={
-                busy || consumed || preview.preview.candidates.length === 0
+                busy || consumed || (preview.preview.candidates.length === 0 && (preview.preview.groups ?? []).length === 0)
               }
               onClick={confirm}
             >
               {busy
                 ? "Working…"
-                : `Import ${preview.preview.candidates.length} hosts`}
+                : `Import ${preview.preview.candidates.length} hosts${(preview.preview.groups ?? []).length > 0 ? ` and ${preview.preview.groups!.length} Groups` : ""}`}
             </Button>
           </ActionBar>
         </div>
@@ -322,7 +340,7 @@ export function RecordsImportPanel() {
                 <p className="font-mono text-xs">{entry.import_id}</p>
                 <p className="text-xs text-muted-foreground">
                   {revealHidden(entry.phase)} · {entry.host_count} hosts ·{" "}
-                  {entry.key_count} keys
+                  {entry.group_count ?? 0} Groups · {entry.key_count} keys
                 </p>
               </div>
               <Button

@@ -144,6 +144,23 @@ pub(in crate::sync) fn read_all(
                 return Err(failure("staged import host metadata differs"));
             }
         }
+        for group in &journal.groups {
+            let key = record_key(RecordKind::Group, &group.id);
+            let row = staged
+                .local
+                .groups
+                .get(&key)
+                .ok_or_else(|| failure("staged import Group is missing"))?;
+            if row.record.deleted
+                || row.record.id != group.id
+                || row.record.kind != RecordKind::Group
+                || row.record.payload
+                    != serde_json::to_value(&group.payload)
+                        .map_err(|_| failure("invalid import Group evidence"))?
+            {
+                return Err(failure("staged import Group metadata differs"));
+            }
+        }
         if journal
             .keys
             .iter()
