@@ -2,6 +2,10 @@
 
 ## [1.9.0](https://github.com/ysya/lunport/compare/v1.8.0...v1.9.0) (2026-10-21)
 
+Sign in with Passkey, then set a sync unlock password in Lunport on your first device. Enter the same password once on each new device to start automatic encrypted sync of hosts, Groups, tunnels and managed SSH keys. Local use remains available without an account.
+
+Update both self-hosted server components before using automatic sync. This release supports fresh encrypted-library setup; existing Vaults without a sync-password envelope are not upgraded automatically.
+
 
 ### Features
 
