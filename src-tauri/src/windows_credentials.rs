@@ -134,15 +134,19 @@ impl Backend for Store {
     }
     fn read_blob(&self, name: &str, limit: usize) -> Result<Vec<u8>, AppError> {
         self.path(name)?;
-        crate::sync::central_files_windows::Directory::private(&self.root, false)?
-            .read_private(name, limit as u64)
+        let pinned = crate::sync::central_files_windows::Directory::open(&self.root)?
+            .ok_or_else(blob::invalid)?;
+        pinned.check_private()?;
+        pinned.read_private(name, limit as u64)
     }
     fn write_blob(&self, name: &str, value: &[u8]) -> Result<(), AppError> {
         crate::sync::central_files_windows::write(&self.path(name)?, value, false)
     }
     fn remove_blob(&self, name: &str) -> Result<(), AppError> {
         let path = self.path(name)?;
-        let pinned = crate::sync::central_files_windows::Directory::private(&self.root, false)?;
+        crate::fsutil::check_write(&path)?;
+        let pinned = crate::sync::central_files_windows::Directory::open(&self.root)?
+            .ok_or_else(blob::invalid)?;
         pinned.check_private()?;
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
