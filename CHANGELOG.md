@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.10.0](https://github.com/ysya/lunport/compare/v1.9.0...v1.10.0) (2026-10-21)
+
+Create an account on your own server using an email as its name and a Passkey. Email is unverified and cannot recover the account; no SMTP or verification message is required. The sync unlock password stays in the app.
+
+Returning sign-ins stay bound to their library account, and a failed local retry no longer blocks fresh sign-in. To start over with a different account on the same server, sign out and choose **Account and device settings → Start with a new account and restart**. Cloudflare and Docker use the same flow.
+
+
+### Features
+
+* **auth:** use email account names and fix Passkey sign-in ([604cbe2](https://github.com/ysya/lunport/commit/604cbe2014cfb64cb7758f2550192edb1554bc01))
+
+## [1.9.0](https://github.com/ysya/lunport/compare/v1.8.0...v1.9.0) (2026-10-21)
+
+Sign in with Passkey, then set a sync unlock password in Lunport on your first device. Enter the same password once on each new device to start automatic encrypted sync of hosts, Groups, tunnels and managed SSH keys. Local use remains available without an account.
+
+Update both self-hosted server components before using automatic sync. This release supports fresh encrypted-library setup; existing Vaults without a sync-password envelope are not upgraded automatically.
+
+
+### Features
+
+* **sync:** automatic encrypted sync after Passkey sign-in and password unlock ([#63](https://github.com/ysya/lunport/issues/63)) ([fce6122](https://github.com/ysya/lunport/commit/fce6122f6c50f62cebf0f31d0818af52e6c21612))
+
+
+### Bug Fixes
+
+* inset sync page and separate macOS branding from controls ([#62](https://github.com/ysya/lunport/issues/62)) ([8e1740f](https://github.com/ysya/lunport/commit/8e1740f1c3b6d263669dc2e1e2235d9f438e5ec4))
+
+
+### Performance Improvements
+
+* reduce native test latency without reducing coverage ([#59](https://github.com/ysya/lunport/issues/59)) ([e93304c](https://github.com/ysya/lunport/commit/e93304c051087c06a3108addb77d86848d6456c9))
+
 ## [1.8.0](https://github.com/ysya/lunport/compare/v1.7.1...v1.8.0) (2026-10-20)
 
 The sync server starts blank: enter the HTTPS URL of your own deployed service. Local use remains available without an account. The client now uses central Passkey account sync; old sync-code setup and per-key sync controls have been removed.

@@ -12,6 +12,42 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
+pub async fn central_automatic_status(
+    app: AppHandle,
+) -> Result<super::automatic::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::automatic::status)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_automatic_start(
+    app: AppHandle,
+) -> Result<super::automatic::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::automatic::start)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_automatic_step(
+    app: AppHandle,
+) -> Result<super::automatic::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::automatic::step)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_unlock_password(
+    app: AppHandle,
+    password: String,
+) -> Result<super::automatic::Progress, AppError> {
+    let password = zeroize::Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::automatic::password(env, &password))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
 pub async fn central_status(app: AppHandle) -> Result<Status, AppError> {
     tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, controller::status)?)
         .await
@@ -53,14 +89,15 @@ pub async fn central_sign_in(app: AppHandle, service: String, method: Option<sup
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let info = Api::new(&service)?.info()?;
-            let config=engine::with_env(&app,|env|{
+            let (config, expected)=engine::with_env(&app,|env|{
                 let (state,_)=crate::sync::record_runtime::snapshot(env)?;
                 let config=info.login_for_method(&service,state.local.central.as_ref().map(|w|&w.control.profile),method)?;
                 controller::checked_config(env,&service,&config)?;
-                Ok::<_,AppError>(config)
+                let expected=state.local.central.as_ref().map(|w| w.control.profile.locator.clone());
+                Ok::<_,AppError>((config, expected))
             })??;
             let http = BoundedHttp::new()?;
-            let (login, url) = BrowserLogin::begin(config.clone(), &http)?;
+            let (login, url) = BrowserLogin::begin_for(config.clone(), expected, &http)?;
             {
                 let state = app.state::<AppState>();
                 let mut pending = state.sync.central_login.lock().unwrap();

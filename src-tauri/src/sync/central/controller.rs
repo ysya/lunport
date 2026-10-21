@@ -328,7 +328,9 @@ fn establish_locked(
         .as_ref()
         .is_some_and(|w| w.control.profile != profile_data)
     {
-        return Err(invalid());
+        return Err(AppError::Other(
+            "This sign-in belongs to a different account. Use the account originally used for this library. Local data is retained.".into(),
+        ));
     }
     if new_login {
         credentials::save_refresh(env.keychain, &profile, &config, &tokens)?;
@@ -534,6 +536,13 @@ fn establish_locked(
         } else {
             None
         };
+        if new_login {
+            // A verified fresh sign-in repairs local retry state. A server's
+            // separate Retry-After deadline is never cleared by signing in.
+            core.central_poll.retry_at = None;
+            core.central_poll.failures = 0;
+            core.central_poll.requests = 0;
+        }
         core.adoption_read = None;
         core.migration_plan = None;
         core.migration_verifier = None;
@@ -720,6 +729,7 @@ pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
     }
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     env.runtime.central_recovery_read.lock().unwrap().take();
+    super::unlock_flow::cancel(env);
     let (records, _) = record_runtime::snapshot(env)?;
     let before = records.local.central.as_ref().ok_or_else(invalid)?;
     let profile = before.control.profile.profile()?;

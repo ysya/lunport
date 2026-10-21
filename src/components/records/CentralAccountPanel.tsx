@@ -1,30 +1,14 @@
-import { CentralLibraryMigration } from "./CentralLibraryMigration";
-import { CentralReplacement } from "./CentralReplacement";
-import { CentralRecovery } from "./CentralRecovery";
-import { CentralAccountAccess } from "./CentralAccountAccess";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Cloud, CloudCheck, LoaderCircle, LockKeyhole } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { CentralDevices } from "./CentralDevices";
 import { RecordField } from "./form";
-import { revealHidden } from "@/lib/sync-approvals";
-import {
-  centralPairingCode,
-  centralStatus,
-  centralStatusKey,
-  centralSignIn,
-  centralChangeServer,
-  centralCancelSignIn,
-  centralRefresh,
-  centralSignOut,
-  centralPrepareVault,
-  centralRevealRecovery,
-  centralConfirmRecovery,
-  type CentralStatus,
-} from "@/lib/central-sync";
+import { centralStatus, centralStatusKey, centralSignIn, centralChangeServer, centralCancelSignIn,
+  centralRefresh, centralSignOut, centralAutomaticStatus, centralAutomaticStart, centralAutomaticStep,
+  centralUnlockPassword, automaticSyncKey, type CentralStatus, type AutomaticSyncProgress } from "@/lib/central-sync";
 
 export function CentralAccountSection({
   disabled = false,
@@ -63,450 +47,131 @@ export function CentralAccountSection({
     />
   );
 }
-const phaseText: Record<CentralStatus["phase"], string> = {
-  setup: "Account signed in. Set up your encrypted Vault to continue.",
-  awaiting_approval: "Waiting for approval from a trusted device.",
-  backup_required:
-    "Save your offline recovery kit before finishing Vault setup.",
-  enrolled: "Your device is approved. Library sync is not enabled yet.",
-  active: "Your encrypted library is connected.",
-  rekey: "Your encrypted library is waiting for key rotation.",
-  revoked: "This device no longer has account access.",
-  signed_out: "Sign in through your system browser when you want to enable encrypted sync.",
-};
-export function CentralAccountPanel({
-  status,
-  disabled = false,
-  onBusyChange,
-  update,
-}: {
-  status: CentralStatus;
-  disabled?: boolean;
-  onBusyChange?: (busy: boolean) => void;
-  update: (status: CentralStatus) => void;
+const phaseText = {
+  signed_out: "Use your own server to sync hosts, Groups, tunnels and all managed SSH keys.",
+  sign_in_required: "Sign in again to resume automatic sync.",
+  password_setup: "Set your sync unlock password once to protect your encrypted library.",
+  password_unlock: "Enter the sync unlock password you set on your first device.",
+  connecting: "Unlocking and connecting this device…",
+  syncing: "Preparing and syncing your encrypted library…",
+  ready: "Your encrypted library syncs automatically.",
+  needs_attention: "Sync needs your attention.",
+} as const;
+function fallbackPhase(status: CentralStatus): keyof typeof phaseText {
+  if (!status.configured || status.phase === "signed_out") return "signed_out";
+  if (status.needs_recovery) return "needs_attention";
+  if (!status.has_session) return "sign_in_required";
+  if (status.phase === "setup" || status.phase === "backup_required") return "password_setup";
+  if (status.phase === "awaiting_approval") return "password_unlock";
+  if (status.phase === "active") return "ready";
+  return status.phase === "enrolled" ? "syncing" : "needs_attention";
+}
+export function CentralAccountPanel({ status, disabled = false, onBusyChange, update }: {
+  status: CentralStatus; disabled?: boolean; onBusyChange?: (busy: boolean) => void; update: (status: CentralStatus) => void;
 }) {
   const [service, setService] = useState(status.service ?? "");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [deviceBusy, setDeviceBusy] = useState(false);
-  const [recoveryBusy, setRecoveryBusy] = useState(false);
-  const [replacementBusy, setReplacementBusy] = useState(false);
-  const [migrationBusy, setMigrationBusy] = useState(false);
-  const [pairing, setPairing] = useState<{
-    code: string;
-    expires_at_ms: string;
-  } | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [kit, setKit] = useState<{ root: string; kit: string } | null>(null);
-  const [saved, setSaved] = useState(false);
-  const inFlight = useRef(false);
-  const mounted = useRef(false);
-  const secretGeneration = useRef(0);
+  const mounted = useRef(false), inFlight = useRef(false);
+  const client = useQueryClient();
+  const automatic = useQuery({ queryKey: automaticSyncKey, queryFn: centralAutomaticStatus,
+    enabled: status.configured && !status.login_pending, retry: false, refetchOnWindowFocus: true,
+    refetchInterval: status.configured ? 2000 : false });
+  const result = automatic.data;
+  const current = result && result.status.service === status.service && result.status.account_id === status.account_id && result.status.device_id === status.device_id &&
+    result.status.phase === status.phase && result.status.has_session === status.has_session ? result : undefined;
+  const phase = current?.phase ?? fallbackPhase(status);
+  const setup = phase === "password_setup", unlock = phase === "password_unlock";
+  const login = signingIn || status.login_pending;
+  const blocked = disabled || busy || deviceBusy;
+  const serviceOrigin = service.trim().replace(/\/$/, "");
+  const changed = !!status.service && serviceOrigin !== status.service;
+  useEffect(() => { setService(status.service ?? ""); }, [status.service]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { onBusyChange?.(busy || deviceBusy); return () => onBusyChange?.(false); }, [busy, deviceBusy, onBusyChange]);
+  useEffect(() => { setPassword(""); setConfirmation(""); }, [status.service, status.account_id, status.device_id, phase]);
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      secretGeneration.current += 1;
-    };
-  }, []);
-  useEffect(() => {
-    onBusyChange?.(
-      busy || deviceBusy || recoveryBusy || replacementBusy || migrationBusy,
-    );
-    return () => onBusyChange?.(false);
-  }, [
-    busy,
-    deviceBusy,
-    recoveryBusy,
-    replacementBusy,
-    migrationBusy,
-    onBusyChange,
-  ]);
-  useEffect(() => {
-    secretGeneration.current += 1;
-    setKit(null);
-    setPairing(null);
-    setSaved(false);
-  }, [status.root_fingerprint, status.phase]);
-  useEffect(() => {
-    const hide = () => {
-      if (document.hidden) {
-        secretGeneration.current += 1;
-        setKit(null);
-        setPairing(null);
-        setSaved(false);
-      }
-    };
+    const hide = () => { if (document.hidden) { setPassword(""); setConfirmation(""); } };
     document.addEventListener("visibilitychange", hide);
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
-  const run = async (operation: () => Promise<void>) => {
-    if (inFlight.current || disabled || deviceBusy || recoveryBusy) return;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      await operation();
-    } catch (error) {
-      if (mounted.current)
-        setError(
-          typeof error === "string"
-            ? error
-            : "Could not update this account. Your local data is retained.",
-        );
+  useEffect(() => {
+    if (result && result.status.service === status.service && result.status.account_id === status.account_id && result.status.device_id === status.device_id) update(result.status);
+  }, [result, status.service, status.account_id, status.device_id, update]);
+  const publish = (value: AutomaticSyncProgress) => {
+    if (!mounted.current) return;
+    client.setQueryData(automaticSyncKey, value); update(value.status);
+    void client.invalidateQueries({ queryKey: ["records"] });
+  };
+  const run = async (action: () => Promise<void>) => {
+    if (inFlight.current || blocked) return;
+    inFlight.current = true; setBusy(true); setError(null);
+    try { await action(); } catch (value) {
+      if (mounted.current) setError(typeof value === "string" ? value : "Could not complete sync. Try again.");
     } finally {
       inFlight.current = false;
-      if (mounted.current) {
-        setBusy(false);
-        setSigningIn(false);
-      }
+      if (mounted.current) { setBusy(false); setSigningIn(false); }
     }
   };
-  const updateAfter = async (operation: Promise<CentralStatus>) => {
-    const next = await operation;
-    if (mounted.current) update(next);
-  };
-  const blocked =
-    busy ||
-    deviceBusy ||
-    recoveryBusy ||
-    replacementBusy ||
-    migrationBusy ||
-    disabled;
-  const login = signingIn || status.login_pending;
-  const serviceOrigin = service.trim().replace(/\/$/, "");
-  const serverChanged = !!status.service && serviceOrigin !== status.service;
-  const backup = status.phase === "backup_required";
-  return (
-    <section
-      className="app-notice space-y-4"
-      aria-label="Sync account"
-    >
-      <div>
-        <h2 className="font-medium">Account and encrypted sync</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {phaseText[status.phase]}
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">Enable library sync once to automatically sync all managed SSH private keys with your approved devices. Newly imported or generated keys are included automatically.</p>
+  const signIn = (method?: "passkey" | "oidc") => run(async () => {
+    setSigningIn(true);
+    await centralSignIn(serviceOrigin, method);
+    publish(await centralAutomaticStart());
+  });
+  const serviceField = <RecordField label="Account service"><Input type="url" value={service} onChange={(e) => setService(e.target.value)}
+    placeholder="https://sync.example.com" autoComplete="off" spellCheck={false} disabled={blocked || login} /></RecordField>;
+  const StatusIcon = setup || unlock ? LockKeyhole : phase === "ready" ? CloudCheck : phase === "connecting" || phase === "syncing" ? LoaderCircle : Cloud;
+  const heading = setup ? "Create your sync password" : unlock ? "Unlock your library" : phase === "ready" ? "Automatic sync" : "Sync across your devices";
+  return <section className="app-notice w-full max-w-3xl space-y-5" aria-label="Sync account">
+    <div className="flex items-start gap-3">
+      <span className="rounded-xl bg-primary/10 p-2.5 text-primary"><StatusIcon className={`size-5 ${phase === "connecting" || phase === "syncing" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" /></span>
+      <div className="min-w-0"><h2 className="font-medium">{heading}</h2>
+        <p className="mt-1 text-sm text-muted-foreground" role="status">{phaseText[phase]}</p>
+        {status.service && <p className="mt-1 break-all text-xs text-muted-foreground">{status.service}</p>}
       </div>
-      <RecordField label="Account service">
-        <Input
-          type="url"
-          value={service}
-          onChange={(e) => setService(e.target.value)}
-          placeholder="https://sync.example.com"
-          autoComplete="off"
-          spellCheck={false}
-          disabled={blocked || login}
-        />
-      </RecordField>
-      {!status.service && <p className="text-sm text-muted-foreground">Deploy your own sync server with Cloudflare Workers or Docker, then enter its HTTPS URL. You can keep using Lunport locally without an account.</p>}
-      {serverChanged && <div className="space-y-2">
-        <p className="text-sm text-muted-foreground">Changing servers restarts Lunport and opens an empty local library. Sign in on the new server, then import your SSH config. Existing SSH files are not changed. Open terminal sessions will close.</p>
-        <Button disabled={blocked || login || !service.trim()} onClick={() => void run(async () => { await centralChangeServer(serviceOrigin); })}>Change server and restart</Button>
+    </div>
+    {!status.configured && serviceField}
+    {phase === "ready" && <p className="text-sm text-muted-foreground">{status.conflicts > 0 ? `${status.conflicts} conflicts need review in your library.` : status.pending > 0 ? `${status.pending} changes waiting to sync.` : "Hosts, Groups, tunnels and managed SSH keys sync across your devices."}</p>}
+    {!status.configured && <p className="text-sm text-muted-foreground">Create an account in your browser using an email as its name and a Passkey. Email verification and email recovery are not used.</p>}
+    {!status.service && <p className="text-sm text-muted-foreground">Deploy your own sync server with Cloudflare Workers or Docker, then enter its HTTPS URL. Local mode works without an account.</p>}
+    {(setup || unlock) && !login && !changed && <form className="max-w-lg space-y-3" onSubmit={(e) => {
+      e.preventDefault();
+      if (setup && password !== confirmation) { setError("The passwords do not match."); return; }
+      const value = password; setPassword(""); setConfirmation("");
+      void run(async () => { publish(await centralUnlockPassword(value)); });
+    }}>
+      <RecordField label="Sync unlock password"><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+        autoComplete={setup ? "new-password" : "current-password"} disabled={blocked} maxLength={1024} required minLength={setup ? 12 : undefined} /></RecordField>
+      {setup && <RecordField label="Confirm sync unlock password"><Input type="password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)}
+        autoComplete="new-password" disabled={blocked} maxLength={1024} minLength={12} required /></RecordField>}
+      <p className="text-sm text-muted-foreground">{setup ? "Use at least 12 characters. Enter this same password once on each new device. It is processed in Lunport and never sent to your server." : "After unlocking, this device will sync automatically."}</p>
+      {setup && <p className="text-xs text-muted-foreground">Save this password in a password manager. Passkey sign-in cannot recover a forgotten sync password.</p>}
+      <Button type="submit" disabled={blocked || !password || (setup && (password.length < 12 || password !== confirmation))}>{setup ? "Set password and sync" : "Unlock and sync"}</Button>
+    </form>}
+    {(error || status.error) && <p className="app-error" role="alert">{error ?? status.error}</p>}
+    <div className="flex flex-wrap gap-2">
+      {login ? <Button variant="outline" onClick={() => void centralCancelSignIn().then(centralStatus).then(update).catch(() => setError("Could not cancel sign-in."))}>Cancel sign-in</Button> : <>
+        {(!status.has_session || phase === "signed_out" || phase === "sign_in_required") && <Button disabled={blocked || changed || !serviceOrigin} onClick={() => void signIn(status.configured ? undefined : "passkey")}>{status.configured ? "Sign in again" : "Sign in and sync with Passkey"}</Button>}
+        {status.has_session && (phase === "ready" || error || status.error || phase === "needs_attention") && <Button variant="outline" disabled={blocked} onClick={() => void run(async () => publish(await centralAutomaticStep()))}>{phase === "ready" && !error && !status.error ? "Sync now" : "Retry sync"}</Button>}
+        {status.configured && <Button variant="outline" disabled={blocked} onClick={() => void run(async () => { update(await centralSignOut()); client.removeQueries({ queryKey: automaticSyncKey }); })}>Sign out</Button>}
+      </>}
+    </div>
+    {!status.has_session && !status.configured && !login && <p className="text-sm text-muted-foreground">Signing in enables automatic sync for this library and all managed SSH private keys.</p>}
+    <details className="space-y-3"><summary className="cursor-pointer text-sm text-muted-foreground">Account and device settings</summary>
+      {status.configured && serviceField}
+      {status.configured && !status.has_session && !login && !changed && <div className="space-y-2">
+        <p className="text-sm text-muted-foreground">To register a new account on this server, open an empty local library. Lunport restarts and open terminal sessions close.</p>
+        <Button variant="outline" disabled={blocked || !serviceOrigin} onClick={() => void run(async () => { await centralChangeServer(serviceOrigin); })}>Start with a new account and restart</Button>
       </div>}
-      <div className="flex flex-wrap gap-2">
-        {!login && (
-          <Button
-            disabled={blocked || serverChanged || !service.trim()}
-            onClick={() =>
-              void run(async () => {
-                setSigningIn(true);
-                await updateAfter(
-                  centralSignIn(
-                    serviceOrigin,
-                    status.configured ? undefined : "passkey",
-                  ),
-                );
-              })
-            }
-          >
-            {status.configured ? "Sign in again" : "Sign in with Passkey"}
-          </Button>
-        )}
-        {!status.configured && !login && (
-          <Button
-            variant="outline"
-            disabled={blocked || serverChanged || !service.trim()}
-            onClick={() =>
-              void run(async () => {
-                setSigningIn(true);
-                await updateAfter(centralSignIn(serviceOrigin, "oidc"));
-              })
-            }
-          >
-            Use external sign-in provider
-          </Button>
-        )}
-        {login && (
-          <Button
-            variant="outline"
-            onClick={() =>
-              void centralCancelSignIn()
-                .then(centralStatus)
-                .then(update)
-                .catch(() => setError("Could not cancel sign-in. Try again."))
-            }
-          >
-            Cancel sign-in
-          </Button>
-        )}
-        {status.has_session && !login && (
-          <Button
-            variant="outline"
-            disabled={blocked}
-            onClick={() => void run(() => updateAfter(centralRefresh()))}
-          >
-            Refresh account
-          </Button>
-        )}
-        {status.configured && !login && (
-          <Button
-            variant="outline"
-            disabled={
-              busy || deviceBusy || recoveryBusy || migrationBusy || disabled
-            }
-            onClick={() =>
-              void run(async () => {
-                secretGeneration.current += 1;
-                setKit(null);
-                setPairing(null);
-                setSaved(false);
-                await updateAfter(centralSignOut());
-              })
-            }
-          >
-            Sign out
-          </Button>
-        )}
-      </div>
-      {status.phase === "awaiting_approval" &&
-        !status.replacement_pending &&
-        !status.needs_recovery && (
-          <div className="space-y-3">
-            <p className="text-sm text-muted-foreground">
-              On a trusted device, open the same account and approve this device
-              using its pairing code.
-            </p>
-            <Button
-              variant="outline"
-              disabled={blocked || !status.has_session}
-              onClick={() =>
-                void run(async () => {
-                  const generation = secretGeneration.current;
-                  const code = await centralPairingCode();
-                  if (
-                    mounted.current &&
-                    generation === secretGeneration.current &&
-                    !document.hidden
-                  )
-                    setPairing(code);
-                })
-              }
-            >
-              Show pairing code
-            </Button>
-            {pairing && (
-              <div className="space-y-2">
-                <Textarea
-                  aria-label="Device pairing code"
-                  readOnly
-                  value={pairing.code}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="font-mono text-xs"
-                />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    secretGeneration.current += 1;
-                    setPairing(null);
-                  }}
-                >
-                  Hide pairing code
-                </Button>
-              </div>
-            )}
-          </div>
-        )}
-      {status.has_session &&
-        !status.replacement_pending &&
-        status.root_fingerprint &&
-        ["enrolled", "active", "rekey"].includes(status.phase) && (
-          <CentralDevices
-            status={status}
-            disabled={
-              busy ||
-              recoveryBusy ||
-              replacementBusy ||
-              migrationBusy ||
-              disabled
-            }
-            onBusyChange={setDeviceBusy}
-            update={update}
-          />
-        )}
-      {status.configured && status.needs_recovery && !status.has_session && (
-        <CentralAccountAccess
-          status={status}
-          disabled={
-            busy ||
-            recoveryBusy ||
-            replacementBusy ||
-            migrationBusy ||
-            disabled ||
-            status.login_pending
-          }
-          update={update}
-          onBusyChange={setDeviceBusy}
-        />
-      )}
-      {status.configured &&
-        !status.replacement_pending &&
-        !status.needs_recovery && (
-          <CentralRecovery
-            status={status}
-            disabled={
-              busy || deviceBusy || replacementBusy || migrationBusy || disabled
-            }
-            update={update}
-            onBusyChange={setRecoveryBusy}
-          />
-        )}
-      {status.configured && (
-        <CentralReplacement
-          status={status}
-          disabled={
-            busy ||
-            deviceBusy ||
-            recoveryBusy ||
-            migrationBusy ||
-            disabled ||
-            status.login_pending
-          }
-          update={update}
-          onBusyChange={setReplacementBusy}
-          resetGeneration={secretGeneration.current}
-        />
-      )}
-      {status.needs_recovery && (
-        <p className="text-sm">
-          Unlock this Vault with an offline recovery kit or approval from a
-          trusted device. Sign-in alone cannot unlock it.
-        </p>
-      )}
-      {status.phase === "setup" && !status.needs_recovery && (
-        <Button
-          variant="outline"
-          disabled={blocked || !status.has_session}
-          onClick={() => void run(() => updateAfter(centralPrepareVault()))}
-        >
-          Set up encrypted Vault
-        </Button>
-      )}
-      {backup && (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Keep your recovery kit somewhere safe outside this device. Anyone
-            with the kit can recover your encrypted library.
-          </p>
-          <Button
-            variant="outline"
-            disabled={blocked || !status.has_session}
-            onClick={() =>
-              void run(async () => {
-                const generation = secretGeneration.current;
-                const revealed = await centralRevealRecovery();
-                if (
-                  mounted.current &&
-                  generation === secretGeneration.current &&
-                  !document.hidden &&
-                  revealed.root === status.root_fingerprint
-                )
-                  setKit(revealed);
-              })
-            }
-          >
-            Show recovery kit
-          </Button>
-          {kit && (
-            <div className="space-y-2">
-              <Textarea
-                aria-label="Offline recovery kit"
-                value={kit.kit}
-                readOnly
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-              />
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  secretGeneration.current += 1;
-                  setKit(null);
-                }}
-              >
-                Hide recovery kit
-              </Button>
-            </div>
-          )}
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={saved}
-              disabled={blocked}
-              onChange={(e) => setSaved(e.target.checked)}
-            />
-            I have saved my recovery kit somewhere safe outside this device.
-          </label>
-          <Button
-            disabled={
-              blocked ||
-              !saved ||
-              !status.has_session ||
-              !status.root_fingerprint
-            }
-            onClick={() =>
-              void run(async () => {
-                if (!status.root_fingerprint) return;
-                secretGeneration.current += 1;
-                setKit(null);
-                await updateAfter(
-                  centralConfirmRecovery(status.root_fingerprint),
-                );
-              })
-            }
-          >
-            Finish Vault setup
-          </Button>
-        </div>
-      )}
-      <CentralLibraryMigration
-        status={status}
-        disabled={
-          busy || deviceBusy || recoveryBusy || replacementBusy || disabled
-        }
-        onBusyChange={setMigrationBusy}
-        update={update}
-      />
-      {(status.phase === "setup" ||
-        status.phase === "backup_required" ||
-        status.phase === "enrolled") && (
-        <p className="text-sm text-muted-foreground">
-          Your local library is still stored on this device. Library sync
-          requires a separate whole-library review.
-        </p>
-      )}
-      {(error || status.error) && (
-        <p
-          role="alert"
-          className="text-sm text-destructive whitespace-pre-wrap"
-        >
-          {revealHidden(error ?? status.error ?? "")}
-        </p>
-      )}
-    </section>
-  );
+      {changed && <div className="space-y-2"><p className="text-sm text-muted-foreground">Changing servers restarts Lunport and opens an empty local library. Open terminal sessions will close.</p>
+        <Button disabled={blocked || login || !serviceOrigin} onClick={() => void run(async () => { await centralChangeServer(serviceOrigin); })}>Change server and restart</Button></div>}
+      {!status.configured && !login && <Button variant="outline" disabled={blocked || changed || !serviceOrigin} onClick={() => void signIn("oidc")}>Use external sign-in provider</Button>}
+      {status.has_session && <Button variant="outline" disabled={blocked} onClick={() => void run(async () => { update(await centralRefresh()); await client.invalidateQueries({ queryKey: automaticSyncKey }); })}>Refresh account</Button>}
+      {status.root_fingerprint && status.has_session && <CentralDevices status={status} disabled={blocked} update={update} onBusyChange={setDeviceBusy} />}
+    </details>
+  </section>;
 }

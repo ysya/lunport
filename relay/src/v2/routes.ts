@@ -96,6 +96,8 @@ const paths = new Set([
   "/v2/account",
   "/v2/bootstrap",
   "/v2/enrollment",
+  "/v2/unlock/join",
+  "/v2/unlock",
   "/v2/membership",
   "/v2/vaults",
   "/v2/barrier/resume",
@@ -159,6 +161,7 @@ async function route(
             protocol: 2,
             features: [
               "central-accounts",
+              "account-unlock-v1",
               "anchored-membership",
               "exact-revision",
               "operation-receipts",
@@ -408,10 +411,19 @@ async function route(
     }
     return response({ status: 405 });
   }
+  if (url.pathname === "/v2/unlock" && request.method === "GET") return account.unlockRegistry(actor);
   if (request.method !== "POST") return response({ status: 405 });
   const parsed = await body(request);
   if (parsed instanceof Response) return parsed;
   switch (url.pathname) {
+    case "/v2/unlock":
+      return exactObject(parsed, ["registry"])
+        ? response(await account.updateUnlock(actor, parsed.registry as any))
+        : response({ status: 400 });
+    case "/v2/unlock/join":
+      return exactObject(parsed, ["node", "wraps", "confirmation", "read_proof"])
+        ? response(await account.unlockJoin(actor, parsed.node as any, parsed.wraps as any, parsed.confirmation as any, parsed.read_proof as any))
+        : response({ status: 400 });
     case "/v2/recovery/wraps":
       return exactObject(parsed, ["proof"])
         ? response(await account.recoveryWraps(actor, parsed.proof as any))

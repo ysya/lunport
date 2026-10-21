@@ -28,7 +28,7 @@ pub(super) struct Summary {
 }
 #[derive(Serialize)]
 pub struct Preview {
-    ticket: String,
+    pub(in crate::sync::central) ticket: String,
     approved: bool,
     summary: Summary,
 }
