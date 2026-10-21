@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import {
   Check,
+  Download,
   Folder,
   FolderPlus,
   LoaderCircle,
@@ -66,6 +67,7 @@ export function RecordHostList({
   filter = { kind: "all" },
   changeFilter,
   importHosts,
+  exportHosts,
   searchShortcut = "Ctrl F",
 }: {
   overview: RecordOverview;
@@ -90,6 +92,7 @@ export function RecordHostList({
   filter?: LibraryFilter;
   changeFilter?: (filter: LibraryFilter) => void;
   importHosts?: () => void;
+  exportHosts?: (previousWorkspace: boolean) => void;
   searchShortcut?: string;
 }) {
   const recent = useSettingsStore((state) => state.recentConnections);
@@ -189,7 +192,7 @@ export function RecordHostList({
               New host
             </Button>
           )}
-          {(createGroup || importHosts) && (
+          {(createGroup || importHosts || exportHosts) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -207,6 +210,14 @@ export function RecordHostList({
                     Import hosts
                   </DropdownMenuItem>
                 )}
+                {exportHosts && <>
+                  <DropdownMenuItem disabled={disabled} onSelect={() => exportHosts(false)}>
+                    <Download />Export host settings…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={disabled} onSelect={() => exportHosts(true)}>
+                    <Download />Export previous workspace hosts…
+                  </DropdownMenuItem>
+                </>}
                 {createGroup && (
                   <DropdownMenuItem disabled={disabled} onSelect={createGroup}>
                     <FolderPlus />

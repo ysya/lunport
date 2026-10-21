@@ -388,6 +388,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_connect,
             connection_probe::records_host_probe,
             sync::record_commands::records_import_preview,
+            sync::record_export::records_hosts_export,
             sync::record_commands::records_import_confirm,
             sync::record_commands::records_import_cancel,
             sync::record_commands::records_import_resume,
