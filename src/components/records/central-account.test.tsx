@@ -67,7 +67,7 @@ describe("automatic encrypted sync", () => {
   });
   it("keeps credential recovery separate from creating a fresh encrypted root", () => {
     const html=render({needs_recovery:true,has_session:false});
-    expect(text(html)).toContain("Sync needs your attention");
+    expect(text(html)).toContain("saved credentials");
     expect(text(html)).not.toContain("Set password and sync");
   });
   it("offers cancellation while waiting for browser authorization", () => {
@@ -97,7 +97,7 @@ it("explains unavailable platform support without offering a broken sign-in flow
 it("requires applying a changed server before login and explains the empty library and restart", () => {
   vi.mocked(useState).mockReturnValueOnce(["https://other.example.com", vi.fn()]);
   const html=render();
-  expect(buttonTag(html,"Change server and restart")).not.toContain(DISABLED);
+  expect(buttonTag(html,"Change server…")).not.toContain(DISABLED);
   expect(text(html)).not.toContain("Set password and sync");
   expect(text(html)).toContain("empty local library");
   expect(text(html)).toContain("Open terminal sessions will close");
@@ -114,8 +114,8 @@ it("lets a first-time local library sign in to the typed server without resettin
 
 it("offers a separate fresh workspace for a new account while a signed-out library remains account-bound", () => {
   const html=render({has_session:false,phase:"signed_out"});
-  expect(buttonTag(html,"Start with a new account and restart")).not.toContain(DISABLED);
+  expect(buttonTag(html,"Use a separate account…")).not.toContain(DISABLED);
   expect(text(html)).toContain("open an empty local library");
   expect(text(html)).toContain("open terminal sessions close");
-  expect(text(render({has_session:true}))).not.toContain("Start with a new account and restart");
+  expect(text(render({has_session:true}))).not.toContain("Use a separate account…");
 });

@@ -27,6 +27,7 @@ pub struct Session {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Status {
+    pub observation: String,
     pub available: bool,
     pub configured: bool,
     pub phase: String,
@@ -34,6 +35,7 @@ pub struct Status {
     pub account_id: Option<String>,
     pub device_id: Option<String>,
     pub has_session: bool,
+    pub account_authenticated: bool,
     pub needs_recovery: bool,
     pub replacement_pending: bool,
     pub needs_reconciliation: bool,
@@ -45,6 +47,10 @@ pub struct Status {
     pub pending: usize,
     pub conflicts: usize,
     pub error: Option<String>,
+    pub cooldown_seconds: u64,
+    pub syncing: bool,
+    pub connecting: bool,
+    pub automatic_sync: bool,
 }
 pub fn enabled() -> bool {
     cfg!(any(
@@ -67,6 +73,8 @@ pub fn require_enabled() -> Result<(), AppError> {
 }
 pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
     let login_pending = env.runtime.central_login.lock().unwrap().is_some();
+    // Status must not wait on a history read holding the unlock worker for network I/O.
+    let connecting = env.runtime.central_unlock.try_lock().map(|work| work.is_some()).unwrap_or(true);
     let core = env.runtime.core.lock().unwrap();
     let records = record_runtime::active_state(&core)?;
     let ws = records.local.central.as_ref();
@@ -80,7 +88,9 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         Phase::Revoked => "revoked",
         Phase::SignedOut => "signed_out",
     });
+    static OBSERVATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Ok(Status {
+        observation: OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst).to_string(),
         available: enabled(),
         login_pending,
         root_fingerprint: ws
@@ -97,6 +107,7 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
             .or_else(|| super::server_change::service_for(&env.state_path)),
         account_id: ws.map(|w| w.control.account_id.clone()),
         device_id: ws.map(|w| w.control.device.id.clone()),
+        account_authenticated: core.central_session.as_ref().is_some_and(|s| s.tokens_started.elapsed() < s.tokens.expires_in),
         has_session: core
             .central_session
             .as_ref()
@@ -123,6 +134,13 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
             .and_then(|w| w.replica.as_ref())
             .map_or(0, |r| r.conflicts.values().map(Vec::len).sum()),
         error: core.central_user_action.clone(),
+        cooldown_seconds: core.central_poll.service_retry_at.map_or(0, |deadline| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            left.as_secs() + u64::from(left.subsec_nanos() > 0)
+        }),
+        connecting,
+        syncing: env.runtime.syncing.load(std::sync::atomic::Ordering::SeqCst),
+        automatic_sync: ws.is_some_and(|w| w.automatic_sync),
     })
 }
 /// A lost Recover reply or an account-only barrier can leave a fresh API grant ahead

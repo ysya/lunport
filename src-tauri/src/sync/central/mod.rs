@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod client_state;
 pub mod credentials;
 pub mod controller;
+pub mod conflicts;
 pub(crate) mod server_change;
 pub mod devices;
 pub mod joining;

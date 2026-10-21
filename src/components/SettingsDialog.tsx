@@ -79,7 +79,6 @@ import {
 } from "@/components/ui/select";
 import { searchSettings, settingsDestinations, type SettingsMode } from "@/lib/settings-navigation";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
-import { CentralAccountSection } from "@/components/records/CentralAccountPanel";
 import { revealHidden } from "@/lib/sync-approvals";
 import { chooseMcpMode } from "@/lib/mcp-flow";
 import { McpAttribution } from "@/components/McpAttribution";
@@ -93,6 +92,7 @@ export function SettingsCategoryPane({
   category,
   recordOverview,
   onOpenImport,
+  onOpenDataTools,
   onOpenSync,
   onConfigDirtyChange,
   onConfigBusyChange,
@@ -102,6 +102,7 @@ export function SettingsCategoryPane({
   category: SettingsCategory;
   recordOverview?: RecordOverview;
   onOpenImport?: () => void;
+  onOpenDataTools?: () => void;
   onOpenSync?: () => void;
 }) {
   if (category === "general") return <GeneralPane />;
@@ -110,10 +111,11 @@ export function SettingsCategoryPane({
   if (category === "appearance") return <AppearancePane />;
   if (category === "connection") return <ConnectionPane recordOverview={recordOverview} />;
   if (category === "files") return <>
-    {recordOverview ? <Section title="Library & workspace tools" description="Hosts and keys stay in this local library unless you explicitly share them. Import copies selected entries and leaves the source files in place.">
+    {recordOverview ? <Section title="Library & workspace tools" description="Use the library locally without an account. Signing in and unlocking enables automatic encrypted sync, including all managed SSH keys. Import copies settings and leaves the source files in place.">
       <SettingsGroup>
-        <SettingsRow label="Import SSH configuration" description="Review hosts and keys before adding them to the library."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
-        <SettingsRow label="Library sync" description="Manage your relay, devices and shared library in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
+        <SettingsRow label="Import hosts and Groups" description="Review SSH configuration, host exports or saved workspaces before adding settings."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
+        <SettingsRow label="Automatic sync" description="Manage your account, devices and self-hosted server in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
+        <SettingsRow label="Host and Group settings" description="Export this library or choose a retained workspace. SSH private keys and account credentials are excluded."><Button variant="outline" size="sm" onClick={onOpenDataTools}>Export / saved workspaces…</Button></SettingsRow>
       </SettingsGroup>
     </Section> : <FilesPane onDirtyChange={onConfigDirtyChange} onBusyChange={onConfigBusyChange} />}
     <PreferencesDataPane />
@@ -145,7 +147,7 @@ export function SettingsCategoryPane({
         </Button>
       </Section>
     ) : (
-      <CentralAccountSection />
+      <p className="text-sm text-muted-foreground">Automatic sync is available in the local library. Import your OpenSSH configuration into the library to get started.</p>
     );
   return <>
     <DiagnosticsPane />
@@ -170,9 +172,10 @@ const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: Te
  * `useSyncBackendSettings`. Open state lives in the UI store so the toolbar
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
-export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
+export function SettingsDialog({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync }: {
   recordOverview?: RecordOverview;
   onOpenImport?: () => void;
+  onOpenDataTools?: () => void;
   onOpenSync?: () => void;
 } = {}) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -204,7 +207,6 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [target, setTarget] = useState<string | null>(null);
   const [filesVisited, setFilesVisited] = useState(false);
-  const [syncVisited, setSyncVisited] = useState(false);
   const [configDirty, setConfigDirty] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -213,10 +215,9 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
 
   useEffect(() => {
     if (open && active.id === "files") setFilesVisited(true);
-    if (open && active.id === "sync") setSyncVisited(true);
   }, [open, active.id]);
   useEffect(() => {
-    if (!open) { setSearch(""); setFilesVisited(false); setSyncVisited(false); setConfigDirty(false); setConfigBusy(false); setConfirmClose(false); }
+    if (!open) { setSearch(""); setFilesVisited(false); setConfigDirty(false); setConfigBusy(false); setConfirmClose(false); }
   }, [open]);
   useEffect(() => {
     if (!open || searching) return;
@@ -289,14 +290,13 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
           <div className="settings-detail">
             <header className="settings-category-header"><h2 id="settings-category-title" tabIndex={-1}>{searching ? "Search results" : active.label}</h2><p>{searching ? `${results.length} matching sections` : active.description}</p></header>
             <div className="settings-content" ref={scrollRef}>
-              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} onConfigDirtyChange={setConfigDirty} onConfigBusyChange={setConfigBusy} /></div>}
-              {!recordOverview && (syncVisited || active.id === "sync") && <div hidden={searching || active.id !== "sync"} className="settings-pane"><SettingsCategoryPane category="sync" /></div>}
+              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} onConfigDirtyChange={setConfigDirty} onConfigBusyChange={setConfigBusy} /></div>}
               {searching ? <div className="settings-results">
                 {results.length ? results.map((result) => <button key={`${result.category}-${result.title}`} type="button" onClick={() => jump(result.category, result.target)}>
                   <span><small>{result.categoryLabel}</small><strong>{result.title}</strong><span>{result.detail}</span></span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
                 </button>) : <div className="app-empty-state"><h2>No matching settings</h2><p>Try a preference name such as “theme”, “terminal” or “logs”.</p><Button variant="outline" size="sm" onClick={() => { setSearch(""); searchRef.current?.focus(); }}>Clear search</Button></div>}
               </div> : <>
-                {active.id !== "files" && active.id !== "sync" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} /></div>}
+                {active.id !== "files" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} /></div>}
               </>}
             </div>
           </div>
@@ -478,7 +478,7 @@ function PreferencesDataPane() {
       >
         <SettingsGroup>
           <SettingsRow
-            label="Export settings"
+            label="Export app preferences"
             description="Save all preferences to a JSON file."
           >
             <Button
@@ -492,7 +492,7 @@ function PreferencesDataPane() {
             </Button>
           </SettingsRow>
           <SettingsRow
-            label="Import settings"
+            label="Import app preferences"
             description="Replace all preferences from a JSON file."
           >
             <Button

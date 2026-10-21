@@ -1,5 +1,6 @@
 import { tauriInvoke } from "@/lib/ipc";
 export type CentralStatus = {
+  observation?: string;
   available: boolean;
   configured: boolean;
   phase:
@@ -18,6 +19,7 @@ export type CentralStatus = {
   membership_head: string | null;
   authorization_epoch: string | null;
   has_session: boolean;
+  account_authenticated?: boolean;
   login_pending: boolean;
   needs_recovery: boolean;
   replacement_pending: boolean;
@@ -26,7 +28,13 @@ export type CentralStatus = {
   pending: number;
   conflicts: number;
   error: string | null;
+  cooldown_seconds?: number;
+  syncing?: boolean;
+  connecting?: boolean;
+  automatic_sync?: boolean;
 };
+export const centralServerCapabilities = (service: string) =>
+  tauriInvoke<{ passkey: boolean; oidc: boolean }>("central_server_capabilities", { service });
 export const centralStatusKey = ["central-account-status"] as const;
 export const centralStatus = () => tauriInvoke<CentralStatus>("central_status");
 export const centralSignIn = (service: string, method?: "passkey" | "oidc") =>
@@ -42,14 +50,6 @@ export const centralRefresh = () =>
   tauriInvoke<CentralStatus>("central_refresh");
 export const centralSignOut = () =>
   tauriInvoke<CentralStatus>("central_sign_out");
-export const centralPrepareVault = () =>
-  tauriInvoke<CentralStatus>("central_prepare_vault");
-// A dedicated reveal result stays in component memory, never React Query or a mutation cache.
-export const centralRevealRecovery = () =>
-  tauriInvoke<{ root: string; kit: string }>("central_reveal_recovery");
-export const centralConfirmRecovery = (root: string) =>
-  tauriInvoke<CentralStatus>("central_confirm_recovery", { root });
-
 export type CentralDevice = {
   id: string;
   name: string;
@@ -123,52 +123,6 @@ export const centralRevokeAccountDevice = (selection: {
     selection,
   });
 
-export type CentralRecoveryProgress = {
-  phase:
-    | "idle"
-    | "reading"
-    | "backup_required"
-    | "submitted"
-    | "cleanup_required"
-    | "complete";
-  operation: string | null;
-  backup_confirmed: boolean;
-  verified: number;
-  total: number;
-  root_fingerprint: string | null;
-};
-export const centralRecoveryKey = (status: CentralStatus) =>
-  [
-    "central-recovery",
-    status.service,
-    status.account_id,
-    status.device_id,
-    status.root_fingerprint,
-    status.authorization_epoch,
-    status.phase,
-  ] as const;
-export const centralRecoveryStatus = () =>
-  tauriInvoke<CentralRecoveryProgress>("central_recovery_status");
-// Kit inputs and reveal responses are passed directly; neither belongs in a query/mutation cache.
-export const centralBeginAccountRecovery = (kit: string) =>
-  tauriInvoke<CentralRecoveryProgress>("central_begin_account_recovery", {
-    kit,
-  });
-export const centralRevalidateAccountRecovery = (kit: string | null) =>
-  tauriInvoke<CentralRecoveryProgress>("central_revalidate_account_recovery", {
-    kit,
-  });
-export const centralAdvanceAccountRecovery = () =>
-  tauriInvoke<CentralRecoveryProgress>("central_advance_account_recovery");
-export const centralCancelAccountRecovery = () =>
-  tauriInvoke<void>("central_cancel_account_recovery");
-export const centralRevealNewRecovery = () =>
-  tauriInvoke<{ root: string; kit: string }>("central_reveal_new_recovery");
-export const centralConfirmAccountRecovery = (operation: string) =>
-  tauriInvoke<CentralRecoveryProgress>("central_confirm_account_recovery", {
-    operation,
-  });
-
 export type AutomaticSyncProgress = {
   phase: "signed_out" | "sign_in_required" | "password_setup" | "password_unlock" | "connecting" | "syncing" | "ready" | "needs_attention";
   status: CentralStatus;
@@ -179,3 +133,8 @@ export const centralAutomaticStart = () => tauriInvoke<AutomaticSyncProgress>("c
 export const centralAutomaticStep = () => tauriInvoke<AutomaticSyncProgress>("central_automatic_step");
 // Password stays in the form/call only; never put it in a Query or mutation cache.
 export const centralUnlockPassword = (password: string) => tauriInvoke<AutomaticSyncProgress>("central_unlock_password", { password });
+
+export type CentralConflict = { id: string; token: string; kind: string; name: string; local: Record<string, unknown> | null; remote: Record<string, unknown> | null; local_deleted: boolean; remote_deleted: boolean; remote_revision: string; can_resolve: boolean; can_remote: boolean; can_copy: boolean };
+export const centralConflicts = () => tauriInvoke<CentralConflict[]>("central_conflicts");
+export const centralResolveConflict = (row: CentralConflict, choice: "local" | "remote" | "copy_remote", copyAlias?: string) =>
+  tauriInvoke<CentralStatus>("central_conflict_resolve", { id: row.id, token: row.token, choice, copyAlias: copyAlias ?? null });

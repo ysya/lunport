@@ -93,7 +93,7 @@ pub(crate) fn status(env: &SyncEnv) -> Result<Progress, AppError> {
         "signed_out"
     } else if status.needs_recovery {
         "needs_attention"
-    } else if super::unlock_flow::active(env) {
+    } else if status.connecting {
         "connecting"
     } else if !status.has_session {
         "sign_in_required"

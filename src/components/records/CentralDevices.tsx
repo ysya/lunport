@@ -22,7 +22,7 @@ import {
 import { revealHidden } from "@/lib/sync-approvals";
 const stateLabel = {
   approved: "Approved",
-  pending: "Pending approval",
+  pending: "Waiting for password unlock",
   revoked: "Revoked",
   access_blocked: "Revocation requested",
 };
