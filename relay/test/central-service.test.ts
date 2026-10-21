@@ -207,6 +207,11 @@ async function setup() {
 it("account unlock joins a fresh device without replacing the first device or trusting a login alone", async () => {
   const s = await setup(), added = device(), credential = random();
   const pending = await s.renew(added, credential), now = Date.now();
+  const locked = await (await s.account.overview(pending.actor!)).json();
+  expect(locked).toMatchObject({ device_state: "pending", phase: "ready" });
+  for (const field of ["vaults", "devices", "denied", "barrier"]) {
+    expect(locked).not.toHaveProperty(field);
+  }
   const request: Enrollment = {
     origin, account_id: s.trusted.anchor.account_id, genesis_hash: s.trusted.anchor.genesis_hash,
     request_id: random(16), device: added, nonce: random(),
