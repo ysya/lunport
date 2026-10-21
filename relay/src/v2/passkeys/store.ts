@@ -10,6 +10,7 @@ import {
 } from "@simplewebauthn/server";
 import { hash, hex } from "../protocol";
 import type { Identity } from "../auth";
+import { accountName } from "./account";
 // A concrete RPC-serializable object boundary; unknown would erase the DO stub return type.
 type Result = { status: number; body?: object };
 import {
@@ -34,6 +35,7 @@ type Flow = Begin & {
   expires: number;
   options: number;
   subject: string | null;
+  email?: string;
   kind: "register" | "login" | "manage" | "add" | null;
   manager?: { subject: string; witness: string; at: number; key_hash: string };
   challenge: string | null;
@@ -61,6 +63,7 @@ type Family = {
   renewed: number;
 };
 const SCHEMA = `CREATE TABLE IF NOT EXISTS auth_meta(id INTEGER PRIMARY KEY CHECK(id=1),origin TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_accounts(subject TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,locator TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS passkeys(id TEXT PRIMARY KEY,subject TEXT NOT NULL,public_key TEXT NOT NULL,counter INTEGER NOT NULL,device_type TEXT NOT NULL,backed_up INTEGER NOT NULL,version INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS passkey_subject ON passkeys(subject);
 CREATE TABLE IF NOT EXISTS flows(id TEXT PRIMARY KEY,value TEXT NOT NULL,expires INTEGER NOT NULL);
@@ -168,7 +171,7 @@ export class PasskeyStore extends DurableObject<Env> {
     this.open(origin);
     const flow = await this.flow(id, key, Date.now());
     return flow
-      ? { status: 200, body: { existing_only: !!flow.expected_locator } }
+      ? { status: 200, body: { existing_only: !!flow.expected_locator, account_name: flow.expected_locator ? this.ctx.storage.sql.exec<{email:string}>("SELECT email FROM auth_accounts WHERE locator=?", flow.expected_locator).toArray()[0]?.email ?? null : null } }
       : failed(403);
   }
   async options(
@@ -178,6 +181,7 @@ export class PasskeyStore extends DurableObject<Env> {
     kind: "register" | "login" | "manage" | "add",
     managementKey = "",
     now = Date.now(),
+    email?: string,
   ): Promise<Result> {
     const cfg = this.open(origin),
       flow = await this.flow(id, key, now),
@@ -192,6 +196,10 @@ export class PasskeyStore extends DurableObject<Env> {
       (kind === "register" && flow.expected_locator)
     )
       return failed(403);
+    const name = kind === "register" ? accountName(email) : null;
+    if (kind === "register" && !name) return failed();
+    if (name && this.ctx.storage.sql.exec("SELECT subject FROM auth_accounts WHERE email=?", name).toArray().length)
+      return { status: 409, body: { error: "account_exists" } };
     const subject =
       kind === "register"
         ? random()
@@ -208,7 +216,7 @@ export class PasskeyStore extends DurableObject<Env> {
             userID: Uint8Array.from(subject!.match(/../g)!, (b) =>
               parseInt(b, 16),
             ),
-            userName: `Lunport ${subject!.slice(0, 12)}`,
+            userName: name ?? this.ctx.storage.sql.exec<{email:string}>("SELECT email FROM auth_accounts WHERE subject=?", subject!).toArray()[0]?.email ?? `Lunport ${subject!.slice(0, 12)}`,
             excludeCredentials: this.credentials(subject!).map((c) => ({
               id: c.id,
             })),
@@ -241,6 +249,7 @@ export class PasskeyStore extends DurableObject<Env> {
         ...current,
         options: current.options + 1,
         subject,
+        ...(name ? { email: name } : {}),
         kind,
         challenge: options.challenge,
         consumed: false,
@@ -265,6 +274,7 @@ export class PasskeyStore extends DurableObject<Env> {
       !flow.challenge ||
       !flow.kind ||
       flow.consumed ||
+      (flow.kind === "register" && !accountName(flow.email)) ||
       (flow.kind === "add" && !this.manager(flow, now, managementHash)) ||
       JSON.stringify(response).length > 32768
     )
@@ -383,6 +393,7 @@ export class PasskeyStore extends DurableObject<Env> {
     } catch {
       return failed(403);
     }
+    const accountLocator = await locator(origin, subject);
     const codeId = random(16),
       codeSecret = random(),
       digest = await hash(new TextEncoder().encode(codeSecret));
@@ -398,9 +409,14 @@ export class PasskeyStore extends DurableObject<Env> {
         !current.consumed ||
         current.completed ||
         current.challenge !== flow.challenge ||
+        current.email !== flow.email ||
         current.expires <= Math.max(now, Date.now())
       )
         return false;
+      if (flow.kind === "register") {
+        if (this.ctx.storage.sql.exec("SELECT subject FROM auth_accounts WHERE email=?", flow.email!).toArray().length) return false;
+        // Commit the name and first credential together, after verified WebAuthn and all capacity checks below.
+      }
       if (previous) {
         const live = this.ctx.storage.sql
           .exec<Credential>("SELECT * FROM passkeys WHERE id=?", previous.id)
@@ -426,6 +442,8 @@ export class PasskeyStore extends DurableObject<Env> {
             !this.manager(current, Math.max(now, Date.now()), managementHash))
         )
           return false;
+        if (flow.kind === "register")
+          this.ctx.storage.sql.exec("INSERT INTO auth_accounts VALUES(?,?,?)", subject, flow.email!, accountLocator);
         this.ctx.storage.sql.exec(
           "INSERT INTO passkeys VALUES(?,?,?,?,?,?,?)",
           credential!.id,
@@ -516,7 +534,7 @@ export class PasskeyStore extends DurableObject<Env> {
       status: 200,
       body: {
         managing: true,
-        account: flow.manager!.subject.slice(0, 12),
+        account: this.ctx.storage.sql.exec<{email:string}>("SELECT email FROM auth_accounts WHERE subject=?", flow.manager!.subject).toArray()[0]?.email ?? flow.manager!.subject.slice(0, 12),
         credentials: this.credentials(flow.manager!.subject).map((c) => ({
           id: c.id,
           current: c.id === flow.manager!.witness,

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub struct Polling {
     pub retry_at: Option<Instant>,
+    pub service_retry_at: Option<Instant>,
     pub failures: u32,
     pub requests: usize,
     pub(super) dispatch_cursor: Option<String>,
@@ -45,21 +46,23 @@ impl Drop for Running<'_> {
     }
 }
 pub fn cooldown(env: &SyncEnv) -> Duration {
-    env.runtime
-        .core
-        .lock()
-        .unwrap()
-        .central_poll
-        .retry_at
-        .map_or(Duration::ZERO, |deadline| {
-            deadline.saturating_duration_since(Instant::now())
-        })
+    let core = env.runtime.core.lock().unwrap();
+    [core.central_poll.retry_at, core.central_poll.service_retry_at]
+        .into_iter()
+        .flatten()
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .max()
+        .unwrap_or_default()
 }
 pub fn check_cooldown(env: &SyncEnv) -> Result<(), AppError> {
-    if cooldown(env).is_zero() {
-        Ok(())
-    } else {
+    // Foreground repair actions must honor HTTP 429, but an earlier local/network
+    // failure must not prevent a fresh sign-in from repairing the failed session.
+    let limited = env.runtime.core.lock().unwrap().central_poll.service_retry_at
+        .is_some_and(|deadline| deadline > Instant::now());
+    if limited {
         Err(AppError::Other("The account service requested a cooldown. Local changes are retained; retry after the waiting period.".into()))
+    } else {
+        Ok(())
     }
 }
 pub fn next_delay(env: &SyncEnv) -> Duration {
@@ -82,6 +85,9 @@ pub fn next_delay(env: &SyncEnv) -> Duration {
     .max(core.central_poll.retry_at.map_or(Duration::ZERO, |t| {
         t.saturating_duration_since(Instant::now())
     }))
+    .max(core.central_poll.service_retry_at.map_or(Duration::ZERO, |t| {
+        t.saturating_duration_since(Instant::now())
+    }))
 }
 pub(crate) fn require_success(env: &SyncEnv, reply: &Reply) -> Result<(), AppError> {
     if reply.status == 429 {
@@ -91,9 +97,9 @@ pub(crate) fn require_success(env: &SyncEnv, reply: &Reply) -> Result<(), AppErr
             .max(Duration::from_secs(90));
         let mut core = env.runtime.core.lock().unwrap();
         let deadline = Instant::now() + duration;
-        core.central_poll.retry_at = Some(
+        core.central_poll.service_retry_at = Some(
             core.central_poll
-                .retry_at
+                .service_retry_at
                 .map_or(deadline, |known| known.max(deadline)),
         );
     }
@@ -135,6 +141,9 @@ pub fn sync_once(env: &SyncEnv) -> Result<Report, AppError> {
                 .is_some_and(|t| t <= Instant::now())
             {
                 core.central_poll.retry_at = None;
+            }
+            if core.central_poll.service_retry_at.is_some_and(|t| t <= Instant::now()) {
+                core.central_poll.service_retry_at = None;
             }
             if report.requests > 0 {
                 core.central_user_action = None;

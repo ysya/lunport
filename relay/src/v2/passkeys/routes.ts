@@ -123,8 +123,9 @@ export async function route(
         ? reply(await store.context(origin, parsed.flow, key))
         : reply({ status: 400 });
     if (action === "options")
-      return exactObject(parsed, ["flow", "kind"]) &&
-        ["login", "register", "manage", "add"].includes(parsed.kind as string)
+      return exactObject(parsed, parsed.kind === "register" ? ["flow", "kind", "email"] : ["flow", "kind"]) &&
+        ["login", "register", "manage", "add"].includes(parsed.kind as string) &&
+        (parsed.kind !== "register" || typeof parsed.email === "string")
         ? reply(
             await store.options(
               origin,
@@ -132,6 +133,8 @@ export async function route(
               key,
               parsed.kind as "login" | "register" | "manage" | "add",
               managementKey,
+              Date.now(),
+              parsed.kind === "register" ? parsed.email as string : undefined,
             ),
           )
         : reply({ status: 400 });

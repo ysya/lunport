@@ -1,6 +1,6 @@
 # Lunport sync relay
 
-The current desktop client uses central accounts with Passkey sign-in, device approval and end-to-end encrypted library sync. Public installers start with a blank server URL; users deploy their own service. See [client server configuration](../docs/central-server-configuration.md).
+The current desktop client uses self-hosted, email-named accounts with Passkey sign-in and end-to-end encrypted library sync. Email names are unverified and do not provide email recovery; no SMTP setup is required. The sync unlock password is processed only in the desktop app. Public installers start with a blank server URL; users deploy their own service. See [client server configuration](../docs/central-server-configuration.md).
 
 - [Cloudflare gateway and private core](security/README.md): independent account/device authority and SQLite-backed Durable Object storage.
 - [Central Docker Compose](selfhost/central/README.md): equivalent independent security storage and private application runtime.

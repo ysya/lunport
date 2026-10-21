@@ -171,11 +171,11 @@ async function begin(
     redirect,
   };
 }
-async function enroll() {
+async function enroll(email = `${random()}@homelab.test`) {
   const store = env.PASSKEY.getByName(random()),
     virtual = await authenticator(),
     flow = await begin(store);
-  const options = await store.options(origin, flow.id, flow.key, "register");
+  const options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), email);
   expect(options.status).toBe(200);
   const challenge = (options.body as any).options.challenge,
     user = (options.body as any).options.user.id;
@@ -195,6 +195,7 @@ async function enroll() {
   return {
     store,
     virtual,
+    email,
     flow,
     response,
     code,
@@ -242,12 +243,7 @@ describe("built-in Passkey authentication on actual workerd", () => {
       const store = env.PASSKEY.getByName(random()),
         virtual = await authenticator(),
         flow = await begin(store);
-      const options = await store.options(
-          origin,
-          flow.id,
-          flow.key,
-          "register",
-        ),
+      const options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@homelab.test`),
         challenge = (options.body as any).options.challenge;
       const response = await virtual.registration(
         bad === "challenge" ? encode(new Uint8Array(32)) : challenge,
@@ -339,12 +335,7 @@ describe("built-in Passkey authentication on actual workerd", () => {
     ).toBe(400);
     const another = await begin(store),
       virtual = await authenticator(),
-      options = await store.options(
-        origin,
-        another.id,
-        another.key,
-        "register",
-      );
+      options = await store.options(origin, another.id, another.key, "register", "", Date.now(), `${random()}@homelab.test`);
     const finished = await store.finish(
       origin,
       another.id,
@@ -446,14 +437,14 @@ it("serves built-in login through the private ingress without an OIDC provider",
     (
       await call(
         "/v2/auth/passkey/options",
-        { flow, kind: "register" },
+        { flow, kind: "register", email: "browser@homelab.test" },
         { origin: "https://evil.test", "x-lunport-flow": key },
       )
     ).status,
   ).toBe(403);
   const options = await call(
     "/v2/auth/passkey/options",
-    { flow, kind: "register" },
+    { flow, kind: "register", email: "browser@homelab.test" },
     { origin, "x-lunport-flow": key },
   );
   expect(options.status).toBe(200);
@@ -530,7 +521,7 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
       .status,
   ).toBe(409);
   expect(
-    (await store.options(origin, flow.id, flow.key, "register")).status,
+    (await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@homelab.test`)).status,
   ).toBe(403);
   const backup = await authenticator(),
     add = await store.options(origin, flow.id, flow.key, "add", managementKey);
@@ -568,12 +559,7 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
     ).status,
   ).toBe(403);
   const otherFlow = await begin(store),
-    otherOptions = await store.options(
-      origin,
-      otherFlow.id,
-      otherFlow.key,
-      "register",
-    ),
+    otherOptions = await store.options(origin, otherFlow.id, otherFlow.key, "register", "", Date.now(), `${random()}@homelab.test`),
     other = await authenticator();
   const otherResponse = await other.registration(
     (otherOptions.body as any).options.challenge,
@@ -660,7 +646,7 @@ it("allows only one concurrent code exchange and expires codes, access tokens an
   ).toBeNull();
   const flow = await begin(store),
     virtual = await authenticator(),
-    options = await store.options(origin, flow.id, flow.key, "register");
+    options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@homelab.test`);
   const result = await store.finish(
     origin,
     flow.id,
@@ -684,12 +670,7 @@ it("allows only one concurrent code exchange and expires codes, access tokens an
     ).status,
   ).toBe(401);
   const expired = await begin(store),
-    expiredOptions = await store.options(
-      origin,
-      expired.id,
-      expired.key,
-      "register",
-    );
+    expiredOptions = await store.options(origin, expired.id, expired.key, "register", "", Date.now(), `${random()}@homelab.test`);
   const completed = await store.finish(
     origin,
     expired.id,
@@ -769,4 +750,40 @@ it("does not grant credential management to a party that only knows the pre-auth
   );
   expect(completed.status).toBe(200);
   expect((completed.body as any).management_key).toBeUndefined();
+});
+
+
+it("uses a normalized email as an unverified name while keeping the opaque identity and Passkey authentication", async () => {
+  const {store, email, tokens, flow} = await enroll("  Owner+Lab@Example.Test  ");
+  const rows = await runInDurableObject(store, (_instance, state) => state.storage.sql.exec<{email:string,subject:string}>("SELECT email,subject FROM auth_accounts").toArray());
+  expect(rows).toEqual([{email:"owner+lab@example.test",subject:tokens.subject}]);
+  expect(tokens.subject).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(tokens)).not.toContain(email);
+  const fresh = await begin(store);
+  expect((await store.options(origin,fresh.id,fresh.key,"register","",Date.now(),"OWNER+LAB@example.test")).status).toBe(409);
+  expect((await store.context(origin, fresh.id, fresh.key)).body).toMatchObject({account_name:null});
+  const identity = await store.identity(origin,tokens.access_token);
+  const pinned = await begin(store,identity!.locator);
+  expect((await store.context(origin,pinned.id,pinned.key)).body).toMatchObject({existing_only:true,account_name:"owner+lab@example.test"});
+  expect((await store.options(origin,pinned.id,pinned.key,"register","",Date.now(),"another@example.test")).status).toBe(403);
+  expect((await store.context(origin,flow.id,flow.key)).status).toBe(403);
+});
+it("requires a valid email for registration and never exposes password or email-based recovery endpoints", async () => {
+  const store=env.PASSKEY.getByName(random()), flow=await begin(store);
+  for (const email of [undefined, "", "name", "a@b@c.test", "x\r\nBcc: other@example.test", ".a@example.test", "a..b@example.test", "a@-bad.test", "a@bad..test", "x".repeat(65)+"@example.test"]) {
+    expect((await store.options(origin,flow.id,flow.key,"register","",Date.now(),email)).status).toBe(400);
+  }
+  const options=await store.options(origin,flow.id,flow.key,"register","",Date.now(),"owner@example.test");
+  expect((options.body as any).options.user.name).toBe("owner@example.test");
+  expect((options.body as any).options.user.id).not.toContain("owner");
+});
+it("atomically binds only one account to a name when registration ceremonies race", async () => {
+  const store=env.PASSKEY.getByName(random());
+  const flows=await Promise.all([begin(store),begin(store)]), authenticators=await Promise.all([authenticator(),authenticator()]);
+  const options=await Promise.all(flows.map((f)=>store.options(origin,f.id,f.key,"register","",Date.now(),"same@example.test")));
+  const responses=await Promise.all(authenticators.map((a,i)=>a.registration((options[i].body as any).options.challenge)));
+  const results=await Promise.all(flows.map((f,i)=>store.finish(origin,f.id,f.key,responses[i])));
+  expect(results.map(r=>r.status).sort()).toEqual([200,409]);
+  const counts=await runInDurableObject(store, (_instance,state)=>({accounts:state.storage.sql.exec<{n:number}>("SELECT count(*) n FROM auth_accounts").one().n,credentials:state.storage.sql.exec<{n:number}>("SELECT count(*) n FROM passkeys").one().n}));
+  expect(counts).toEqual({accounts:1,credentials:1});
 });

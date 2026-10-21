@@ -89,14 +89,15 @@ pub async fn central_sign_in(app: AppHandle, service: String, method: Option<sup
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let info = Api::new(&service)?.info()?;
-            let config=engine::with_env(&app,|env|{
+            let (config, expected)=engine::with_env(&app,|env|{
                 let (state,_)=crate::sync::record_runtime::snapshot(env)?;
                 let config=info.login_for_method(&service,state.local.central.as_ref().map(|w|&w.control.profile),method)?;
                 controller::checked_config(env,&service,&config)?;
-                Ok::<_,AppError>(config)
+                let expected=state.local.central.as_ref().map(|w| w.control.profile.locator.clone());
+                Ok::<_,AppError>((config, expected))
             })??;
             let http = BoundedHttp::new()?;
-            let (login, url) = BrowserLogin::begin(config.clone(), &http)?;
+            let (login, url) = BrowserLogin::begin_for(config.clone(), expected, &http)?;
             {
                 let state = app.state::<AppState>();
                 let mut pending = state.sync.central_login.lock().unwrap();
