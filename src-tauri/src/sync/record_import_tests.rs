@@ -923,3 +923,36 @@ fn atomic_state_receipt_supersedes_an_older_journal_phase_and_unavailable_source
     );
     assert!(pending_imports(&fixture.env()).unwrap().is_empty());
 }
+
+#[test]
+fn saved_host_settings_recover_into_a_new_account_without_old_authority_or_credentials() {
+    let f=Fixture::new();
+    let old=crate::sync::record_round::tests::pin_fixture();
+    let mut source=crate::sync::record_runtime::snapshot(&old.env()).unwrap().0;
+    for space in source.spaces.values_mut() { space.missing=true;space.selected=false; }
+    let path=f.device.home.path().join("sync-state.json");
+    let (json,count)=crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
+    assert_eq!(count,1);
+    let bytes=json.into_bytes();fs::write(&path,&bytes).unwrap();
+    let owner=crate::sync::central::workspace::tests::enrolled();
+    crate::sync::record_runtime::mutate_records(&f.env(),|state|{
+        let mut next=state.clone();next.local.central=Some(owner.clone());Ok(next)
+    }).unwrap();
+    let prepared=prepare(&path,&ImportOptions::new(f.device.home.path().into())).unwrap();
+    assert_eq!(prepared.preview().candidates.len(),1);
+    assert!(prepared.preview().key_references.is_empty());
+    assert_eq!(f.credentials.reads.load(Ordering::SeqCst),0);
+    // The real OS adapter supplies bounded noninteractive reads for the target's
+    // own recovery inventory. No credential from the old source is consulted.
+    let mut env=f.env();env.keychain=&f.device.keychain;
+    let receipt=confirm(&env,prepared).unwrap();
+    assert_eq!(receipt.host_ids.len(),1);assert!(receipt.copied_key_ids.is_empty());
+    let target=f.state();assert!(target.account.is_none());assert!(target.spaces.is_empty());
+    assert!(target.local.keys.is_empty());assert_eq!(target.local.central,Some(owner));
+    let hosts=crate::sync::record_repository::list_hosts(&target).unwrap();
+    assert_eq!(hosts[0].effective_payload.hostname,"host.test");
+    assert_eq!(hosts[0].host.scope,HostScope::Local);
+    assert!(target.local.credential_approvals.is_empty());
+    assert_eq!(fs::read(&path).unwrap(),bytes);
+    assert!(!vault_path(&f.env().state_path).exists());
+}

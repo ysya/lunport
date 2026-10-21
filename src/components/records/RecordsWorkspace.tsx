@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   applyRecordOverview,
+  exportRecordHosts,
   recordsStatusKey,
   syncRecordsNow,
   setRecordGroupOrder,
@@ -120,6 +121,23 @@ export function RecordsWorkspace({
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const connectInFlight = useRef(false);
   const syncInFlight = useRef(false);
+  const exportInFlight = useRef(false);
+  const exportHosts = async (previousWorkspace: boolean) => {
+    if (exportInFlight.current) return;
+    exportInFlight.current = true;
+    setEditorBusy(true);
+    try {
+      const receipt = await exportRecordHosts(previousWorkspace);
+      if (receipt) toast.success(`Exported ${receipt.hosts} host settings`, {
+        description: "SSH private keys and account credentials are excluded. Import this file on your other device, then assign SSH keys.",
+      });
+    } catch (failure) {
+      toast.error("Could not export host settings", { description: revealHidden(String(failure)) });
+    } finally {
+      exportInFlight.current = false;
+      setEditorBusy(false);
+    }
+  };
   const nonce = useRef(0);
   const platform = usePlatform();
   const terminals = useTerminals();
@@ -461,6 +479,7 @@ export function RecordsWorkspace({
               changeFilter={changeFilter}
               searchShortcut={platform.data === "macos" ? "⌘ F" : "Ctrl F"}
               importHosts={() => setPanel("import")}
+              exportHosts={(previous) => void exportHosts(previous)}
             />
           </main>
           {panel === "hosts" && <DetailPresence>{inspected ? (

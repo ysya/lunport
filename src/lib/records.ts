@@ -658,3 +658,7 @@ export const cancelRecordDeploy = (previewId: string) =>
 export async function resolveRecordConflict(conflict: RecordConflict, choice: "local" | "remote" | "copy_remote", copyAlias?: string): Promise<RecordOverview> {
   return tauriInvoke("records_conflict_resolve", { spaceId: conflict.space_id, key: conflict.key, token: conflict.token, choice, copyAlias: copyAlias ?? null });
 }
+
+export function exportRecordHosts(previousWorkspace = false): Promise<{ path: string; hosts: number } | null> {
+  return tauriInvoke("records_hosts_export", { previousWorkspace });
+}

@@ -36,6 +36,7 @@ pub mod group_order;
 pub mod record_library;
 pub mod record_runtime;
 pub mod record_commands;
+pub mod record_export;
 pub mod record_merge;
 pub mod record_conflicts;
 pub mod central;
