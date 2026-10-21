@@ -91,7 +91,7 @@ describe("trusted device management", () => {
     expect(buttonTag(html, "Finish revocation…")).toContain(DISABLED);
     expect(text(html)).toContain("Revocation requested");
   });
-  it("requires a pairing code and explains that approval unlocks the library", () => {
+  it("keeps device management and directs new devices to password unlock", () => {
     const client = new QueryClient();
     client.setQueryData(centralDevicesKey(status), {
       membership_head: "d",
@@ -108,9 +108,11 @@ describe("trusted device management", () => {
         />
       </QueryClientProvider>,
     );
-    expect(buttonTag(html, "Approve device")).toContain(DISABLED);
-    expect(text(html)).toContain("Approval unlocks your encrypted library");
-    expect(html).not.toContain("LPPAIR2:");
+    expect(buttonTag(html, "Refresh devices")).not.toContain(DISABLED);
+    expect(text(html)).toContain("sync unlock password on that device");
+    expect(text(html)).not.toContain("Pairing code");
+    expect(text(html)).not.toContain("Approve device");
+    expect(html).not.toContain("<textarea");
   });
   it("uses separate public list cache entries after a membership or access barrier", () => {
     expect(centralDevicesKey({ ...status, membership_head: "e" })).not.toEqual(
