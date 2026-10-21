@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -12,11 +11,9 @@ import {
   AlertDialogCancel,
   AlertDialogAction,
 } from "@/components/ui/alert-dialog";
-import { RecordField } from "./form";
 import {
   centralDevices,
   centralDevicesKey,
-  centralApproveDevice,
   centralRevokeDevice,
   type CentralDevice,
   type CentralStatus,
@@ -90,7 +87,6 @@ export function CentralDevices({
     staleTime: 30000,
     refetchOnWindowFocus: false,
   });
-  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -110,13 +106,6 @@ export function CentralDevices({
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  useEffect(() => {
-    const hide = () => {
-      if (document.hidden) setCode("");
-    };
-    document.addEventListener("visibilitychange", hide);
-    return () => document.removeEventListener("visibilitychange", hide);
-  }, []);
   useEffect(() => {
     setRevoking(null);
   }, [status.membership_head, status.authorization_epoch]);
@@ -156,31 +145,6 @@ export function CentralDevices({
         setBusy(false);
         void client.invalidateQueries({ queryKey });
       }
-    }
-  };
-  const approve = async () => {
-    if (inFlight.current || disabled || !code.trim()) return;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    const submitted = code.trim();
-    setCode("");
-    try {
-      const next = await centralApproveDevice(submitted);
-      if (mounted.current) {
-        update(next);
-        void client.invalidateQueries({ queryKey });
-      }
-    } catch (error) {
-      if (mounted.current)
-        setError(
-          typeof error === "string"
-            ? error
-            : "Could not verify this device approval. Refresh the account and retry.",
-        );
-    } finally {
-      inFlight.current = false;
-      if (mounted.current) setBusy(false);
     }
   };
   return (
@@ -253,30 +217,10 @@ export function CentralDevices({
       >
         Refresh devices
       </Button>
-      {(status.phase === "enrolled" || status.phase === "active") && (
-        <div className="space-y-3">
-          <RecordField label="Pairing code from your new device">
-            <Textarea
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-              disabled={disabled || busy}
-              className="font-mono text-xs"
-            />
-          </RecordField>
-          <p className="text-sm text-muted-foreground">
-            Only approve a code shown on a device you own. Approval unlocks your
-            encrypted library for that device.
-          </p>
-          <Button
-            disabled={disabled || busy || !code.trim()}
-            onClick={() => void approve()}
-          >
-            Approve device
-          </Button>
-        </div>
-      )}
+      <p className="text-sm text-muted-foreground">
+        To connect another device, sign in to the same account and enter your
+        sync unlock password on that device.
+      </p>
       {error && (
         <p
           role="alert"
