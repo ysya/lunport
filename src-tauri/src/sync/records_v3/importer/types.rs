@@ -1,4 +1,4 @@
-use super::super::{HostRecord, RecordValidationError};
+use super::super::{GroupRecord, HostRecord, RecordValidationError};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ pub struct ImportOptions {
     pub at_ms: u64,
     /// An existing confirmation journal may supply stable IDs for retries.
     pub host_ids: BTreeMap<String, String>,
+    pub group_ids: BTreeMap<String, String>,
     pub key_ids: BTreeMap<String, String>,
     /// Managed copies of already-synced hosts must not be imported again.
     pub excluded_sources: BTreeSet<PathBuf>,
@@ -29,6 +30,7 @@ impl ImportOptions {
             env: BTreeMap::new(),
             at_ms: 0,
             host_ids: BTreeMap::new(),
+            group_ids: BTreeMap::new(),
             key_ids: BTreeMap::new(),
             excluded_sources: BTreeSet::new(),
             reserved_host_ids: BTreeSet::new(),
@@ -68,6 +70,8 @@ pub struct KeyReferenceSuggestion {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ImportPreview {
     pub candidates: Vec<HostRecord>,
+    pub groups: Vec<GroupRecord>,
+    pub group_ids: BTreeMap<String, String>,
     pub warnings: Vec<ImportWarning>,
     pub provenance: Vec<SourceFile>,
     pub key_references: Vec<KeyReferenceSuggestion>,

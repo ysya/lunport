@@ -128,7 +128,7 @@ export function RecordsWorkspace({
     setEditorBusy(true);
     try {
       const receipt = await exportRecordHosts(previousWorkspace);
-      if (receipt) toast.success(`Exported ${receipt.hosts} host settings`, {
+      if (receipt) toast.success(`Exported ${receipt.hosts} hosts and ${receipt.groups} Groups`, {
         description: "SSH private keys and account credentials are excluded. Import this file on your other device, then assign SSH keys.",
       });
     } catch (failure) {
