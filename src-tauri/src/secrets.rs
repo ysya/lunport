@@ -5,6 +5,22 @@
 
 use crate::error::AppError;
 
+#[cfg(any(windows, test))]
+#[path = "credential_blob.rs"]
+pub(crate) mod credential_blob;
+#[cfg(windows)]
+#[path = "windows_credentials.rs"]
+mod windows_credentials;
+
+// Small credentials retain the legacy encoding. Large Windows values use DPAPI
+// files whose exact current contents are pinned by the OS credential entry.
+#[cfg(windows)]
+pub fn get(account: &str) -> Result<Option<String>, AppError> { windows_credentials::get(account) }
+#[cfg(windows)]
+pub fn set(account: &str, value: &str) -> Result<(), AppError> { windows_credentials::set(account, value) }
+#[cfg(windows)]
+pub fn delete(account: &str) -> Result<(), AppError> { windows_credentials::delete(account) }
+
 #[cfg(target_os = "macos")]
 #[path = "macos_credential_helper.rs"]
 mod macos_helper;
@@ -41,6 +57,7 @@ fn map_err(e: keyring::Error) -> AppError {
 }
 
 /// 讀取一筆密碼。沒有這筆項目時回 `Ok(None)`（不是錯誤）。
+#[cfg(not(windows))]
 pub fn get(account: &str) -> Result<Option<String>, AppError> {
     #[cfg(target_os = "macos")]
     let _access = access_guard();
@@ -121,6 +138,7 @@ pub fn contains(account: &str) -> Result<bool, AppError> {
 }
 
 /// 寫入（或覆蓋）一筆密碼。
+#[cfg(not(windows))]
 pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let _access = access_guard();
@@ -133,6 +151,7 @@ pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
 }
 
 /// 刪除一筆密碼。項目本來就不存在時視為成功（清理路徑要能重複執行）。
+#[cfg(not(windows))]
 pub fn delete(account: &str) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let _access = access_guard();

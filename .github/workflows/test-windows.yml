@@ -109,6 +109,9 @@ jobs:
           cargo test --locked --manifest-path windows-sync-check/Cargo.toml -- --test-threads=2 --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Windows central filesystem security boundary failed' }
 
+      - name: Native Credential Manager capacity and DPAPI
+        run: cargo test --locked --lib -- --ignored --exact secrets::windows_credentials::tests::native_large_credentials --nocapture
+
       - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
