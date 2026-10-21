@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.2](https://github.com/ysya/lunport/compare/v1.10.1...v1.10.2) (2026-10-21)
+
+Fix **Unlock and sync** rejecting a new device with “The account changed” despite a correct sync password. Pending-device overviews omit the private Vault catalog; unlock and offline recovery now verify the authenticated encrypted history before admission. Existing accounts, sync passwords and local data are retained.
+
+
+### Bug Fixes
+
+* **sync:** unlock pending devices without a private vault catalog ([#67](https://github.com/ysya/lunport/issues/67)) ([8afe347](https://github.com/ysya/lunport/commit/8afe347d3b6b32d5b3cea7775beaa53d849f5712))
+
 ## [1.10.1](https://github.com/ysya/lunport/compare/v1.10.0...v1.10.1) (2026-10-21)
 
 Export saved host settings offline from **All hosts → More library actions → Export host settings…**. Choose **Export previous workspace hosts…** when changing the account server left your old hosts in the original workspace. Import the resulting `lunport-hosts.json` on another device, review the hosts, then assign SSH keys.
