@@ -345,6 +345,7 @@ pub(super) fn execute(
         owner,
         approve,
         RequestContext::default(),
+        &ensure_allowed,
     )
 }
 pub(super) fn execute_context(
@@ -357,6 +358,7 @@ pub(super) fn execute_context(
     owner: &dyn Owner,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
     mut context: RequestContext,
+    authorize: &(dyn Fn(&McpPolicy, &str) -> Result<(), String> + Sync),
 ) -> Result<Value, String> {
     if !display_safe_command(command) {
         return Err("Command is empty, unsafe to display, or exceeds 16384 bytes.".into());
@@ -436,7 +438,7 @@ pub(super) fn execute_context(
         if !current.enabled || current.approval_mode != mode {
             return Err("MCP policy changed; request approval again.".into());
         }
-        ensure_allowed(&current, &host_id)?;
+        authorize(&current, &host_id)?;
         approved.check(connector, &query)
     };
     struct Stop<'a>(&'a AtomicBool);
@@ -451,11 +453,7 @@ pub(super) fn execute_context(
         scope.spawn(|| {
             while !done.load(Ordering::SeqCst) {
                 let p = runtime.policy.lock().unwrap().clone();
-                if policy.enabled
-                    && policy.allowed_hosts.contains(&host_id)
-                    && (!p.enabled
-                        || p.approval_mode != mode
-                        || !p.allowed_hosts.contains(&host_id))
+                if !p.enabled || p.approval_mode != mode || authorize(&p, &host_id).is_err()
                 {
                     cancel.cancel();
                     break;
@@ -465,7 +463,7 @@ pub(super) fn execute_context(
         });
         let _stop = Stop(&done);
         let result = (|| {
-            if !policy.enabled || !policy.allowed_hosts.contains(&host_id) {
+            if !policy.enabled || authorize(&policy, &host_id).is_err() {
                 return Err("MCP request was denied by host policy".into());
             }
             if mode == ApprovalMode::Ask {
@@ -794,13 +792,14 @@ pub(crate) fn dispatch(
                 context,
                 cancel,
                 &owner,
+                &|policy, id| permissions::authorize(&state, policy, id),
             )
         }
         "list_hosts" => {
             let hosts = repo::list_hosts(&records)
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .filter(|v| policy.allowed_hosts.contains(&v.host.id))
+                .filter(|v| permissions::record_allowed(&policy, &records, v))
                 .map(|v| metadata(&records, &v))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(json!({"hosts":hosts}))
@@ -810,7 +809,7 @@ pub(crate) fn dispatch(
             let host = repo::get_host(&records, alias)
                 .or_else(|_| repo::find_by_alias(&records, alias))
                 .map_err(|e| e.to_string())?;
-            ensure_allowed(&policy, &host.host.id)?;
+            permissions::ensure_record(&policy, &records, &host.host.id)?;
             metadata(&records, &host)
         }
         "ssh_exec" => {
@@ -851,6 +850,7 @@ pub(crate) fn dispatch(
                         })
                 },
                 context,
+                &|policy, id| permissions::authorize(&state, policy, id),
             )
         }
         _ => Err(format!("Unknown MCP method: {method}")),
@@ -894,6 +894,7 @@ mod behavior_tests {
             enabled: true,
             allowed_hosts: BTreeSet::from(["id-web".into()]),
             approval_mode: mode,
+            ..Default::default()
         };
         r
     }

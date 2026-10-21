@@ -37,6 +37,22 @@ impl Evidence {
             .author_at(&wrap.header.membership_head, &wrap.header.author)
             .ok_or_else(invalid)?;
         let keys = wrap.open(&identity.keys, &wrap.header, &author.signing)?;
+        self.capture_keys(package, &keys)
+    }
+    pub(super) fn capture_reconnected(
+        &self,
+        package: &Package,
+        read: &super::super::super::active_read::VerifiedLibrary,
+    ) -> Result<History, AppError> {
+        let owner = package.state.local.central.as_ref().ok_or_else(invalid)?;
+        super::super::super::historical_state::require_reconnected_owner(owner, read)?;
+        if owner.replica.as_ref().ok_or_else(invalid)?.checkpoint.epoch != read.checkpoint().epoch {
+            return Err(AppError::Other("A retained central content epoch still needs its original device credentials. Original files are retained.".into()));
+        }
+        self.capture_keys(package, read.keys())
+    }
+    fn capture_keys(&self, package: &Package, keys: &VaultKeys) -> Result<History, AppError> {
+        let owner = package.state.local.central.as_ref().ok_or_else(invalid)?;
         // Only the exact source and complete original progress chain can validate a plan. Its
         // target rows are never promoted to an accepted central checkpoint.
         let context = package.migration_context(&self.source)?;

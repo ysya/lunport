@@ -110,7 +110,7 @@ impl Context {
 pub struct Receipt {
     pub context: Context,
     pub file_hash: String,
-    #[serde(default,skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_hash: Option<String>,
 }
 impl Receipt {
@@ -228,18 +228,14 @@ fn decode(context: &Context, key: &[u8; 32], bytes: &[u8]) -> Result<Zeroizing<V
     }
     Ok(plaintext)
 }
-const HISTORY_MAGIC: &[u8;8]=b"LPRAHS1\0";
-const MAX_HISTORY_FILE: usize=32*1024*1024+128*1024+MAX_HEADER+28;
+const HISTORY_MAGIC: &[u8; 8] = b"LPRAHS1\0";
+const MAX_HISTORY_FILE: usize = 32 * 1024 * 1024 + 128 * 1024 + MAX_HEADER + 28;
 fn history_aad(context: &Context) -> Result<Vec<u8>, AppError> {
     let mut aad = b"lunport-replacement-logical-history-v1\0".to_vec();
     aad.extend(context.aad()?);
     Ok(aad)
 }
-fn encode_history(
-    context: &Context,
-    key: &[u8; 32],
-    plain: &[u8],
-) -> Result<Vec<u8>, AppError> {
+fn encode_history(context: &Context, key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, AppError> {
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce).map_err(|_| invalid())?;
     let header = serde_json::to_vec(&Header {
@@ -369,7 +365,46 @@ pub fn prepare(
     generation: u64,
     operation: &str,
 ) -> Result<Permit, AppError> {
-    records_v3::validate_state(state).map_err(|_| invalid())?;
+    prepare_inner(env, state, generation, operation, None)
+}
+pub(super) fn prepare_reconnected(
+    env: &SyncEnv,
+    state: &SyncStateV3,
+    generation: u64,
+    operation: &str,
+    identity: &super::credentials::DeviceIdentity,
+    read: &super::active_read::VerifiedLibrary,
+) -> Result<Permit, AppError> {
+    prepare_inner(env, state, generation, operation, Some((identity, read)))
+}
+/// Foreground reservation avoids an OS prompt during the later background archive publication.
+/// Existing operation markers never permit replacement of a lost protected archive key.
+pub(super) fn reserve_reconnected_key(env: &SyncEnv) -> Result<(), AppError> {
+    let (state, generation) = record_runtime::snapshot(env)?;
+    let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+    let intent = owner.replacement.as_ref().ok_or_else(invalid)?;
+    if intent.route != super::replacement::Route::SyncPassword {
+        return Err(invalid());
+    }
+    let (context, _) = archive_context(&state, generation, &intent.operation)?;
+    let dir = ArchiveDirectory::open(env, ArchiveKind::Replacement)?;
+    let marker = dir.read(&format!("{}-key.sha256", intent.operation))?;
+    let key = archive_key(
+        env,
+        &owner.control.profile.profile()?,
+        &context,
+        marker.is_none(),
+    )?;
+    if marker.is_some_and(|m| m.as_slice() != crypto::hash(key.as_slice()).as_bytes()) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+fn archive_context(
+    state: &SyncStateV3,
+    generation: u64,
+    operation: &str,
+) -> Result<(Context, Zeroizing<Vec<u8>>), AppError> {
     let workspace = state.local.central.as_ref().ok_or_else(invalid)?;
     let plain = Zeroizing::new(serde_json::to_vec(state).map_err(|_| invalid())?);
     let context = Context {
@@ -388,6 +423,21 @@ pub fn prepare(
         plaintext_bytes: plain.len() as u64,
     };
     context.validate()?;
+    Ok((context, plain))
+}
+fn prepare_inner(
+    env: &SyncEnv,
+    state: &SyncStateV3,
+    generation: u64,
+    operation: &str,
+    reconnected: Option<(
+        &super::credentials::DeviceIdentity,
+        &super::active_read::VerifiedLibrary,
+    )>,
+) -> Result<Permit, AppError> {
+    records_v3::validate_state(state).map_err(|_| invalid())?;
+    let workspace = state.local.central.as_ref().ok_or_else(invalid)?;
+    let (context, plain) = archive_context(state, generation, operation)?;
     let dir = ArchiveDirectory::open(env, ArchiveKind::Replacement)?;
     let name = context.filename()?;
     let existing = dir.read(&name)?;
@@ -438,7 +488,22 @@ pub fn prepare(
                     // Recovery may begin after the old identity was already lost. Preserve the
                     // exact encrypted original; no logical-history completeness is claimed.
                     // A later source merge must still fail closed if it cannot read this history.
-                    Vec::new()
+                    if let Some((identity, read)) = reconnected {
+                        let snapshot =
+                            super::source_package::snapshot::StateSnapshot::create_reconnected(
+                                state,
+                                identity,
+                                read,
+                                super::source_package::Package::reconnected_history_groups(
+                                    env, state, read,
+                                )?,
+                            )?;
+                        let bytes = encode_history(&context, &key, snapshot.bytes())?;
+                        dir.publish(&history_name, &bytes)?;
+                        bytes
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     let identity = super::credentials::DeviceIdentity::load_selected(
                         env.keychain,
@@ -448,10 +513,9 @@ pub fn prepare(
                     )?;
                     let groups =
                         super::source_package::Package::replacement_history_groups(env, state)?;
-                    let snapshot =
-                        super::source_package::snapshot::StateSnapshot::create_groups(
-                            state, &identity, groups,
-                        )?;
+                    let snapshot = super::source_package::snapshot::StateSnapshot::create_groups(
+                        state, &identity, groups,
+                    )?;
                     let bytes = encode_history(&context, &key, snapshot.bytes())?;
                     dir.publish(&history_name, &bytes)?;
                     bytes

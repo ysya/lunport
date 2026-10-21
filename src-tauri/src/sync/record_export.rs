@@ -1,4 +1,5 @@
 //! Offline host and Group settings export. Reads public cached records without contacting a relay or Vault.
+pub mod workspaces;
 use crate::error::AppError;
 use tauri_plugin_dialog::DialogExt;
 
@@ -31,17 +32,16 @@ fn write_export(
 pub async fn records_hosts_export(
     app: tauri::AppHandle,
     previous_workspace: bool,
+    workspace: Option<String>,
 ) -> Result<Option<ExportReceipt>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = crate::fsutil::app_data_root()?;
-        let (json, count, groups) = if previous_workspace {
-            let home = dirs::home_dir()
-                .ok_or_else(|| AppError::Other("Cannot find your saved workspace.".into()))?;
-            crate::sync::records_v3::importer::saved_hosts::export_workspace(
-                &root.join("sync-state.json"),
-                home,
-            )
-            .map_err(|e| AppError::Other(e.to_string()))?
+        let (json, count, groups) = if previous_workspace || workspace.is_some() {
+            let state = crate::sync::record_runtime::read_saved_records(
+                &workspaces::source(&root, workspace.as_deref().unwrap_or("original"))?,
+            )?;
+            crate::sync::records_v3::importer::saved_hosts::export_state(&state)
+                .map_err(|e| AppError::Other(e.to_string()))?
         } else {
             crate::sync::engine::with_env(&app, |env| {
                 let (state, _) = crate::sync::record_runtime::snapshot(env)?;

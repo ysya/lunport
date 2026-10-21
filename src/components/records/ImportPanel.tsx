@@ -246,7 +246,7 @@ export function RecordsImportPanel() {
     });
   return (
     <div className="app-workflow-page space-y-6" aria-busy={busy}>
-      <PageHeader title="Import hosts" description="Review an SSH configuration, a Lunport host export, or an old Lunport sync-state.json. Saved-workspace imports restore hosts and Groups; assign new SSH keys afterward. Source files stay in place." />
+      <PageHeader title="Import hosts and Groups" description="Review an SSH configuration, a Lunport host export, or an old Lunport sync-state.json. Saved-workspace imports restore hosts and Groups; assign new SSH keys afterward. Source files stay in place." />
       <WorkflowSteps steps={["Choose source", "Review", "Finish"]} current={preview ? 1 : receipt ? 2 : 0} complete={!!receipt && !preview} />
       {error && (
         <p

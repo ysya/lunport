@@ -67,8 +67,34 @@ describe("automatic encrypted sync", () => {
   });
   it("keeps credential recovery separate from creating a fresh encrypted root", () => {
     const html=render({needs_recovery:true,has_session:false});
-    expect(text(html)).toContain("Sync needs your attention");
+    expect(text(html)).toContain("saved credentials");
     expect(text(html)).not.toContain("Set password and sync");
+  });
+  it("reconnects missing or revoked credentials in the same library after account sign-in", () => {
+    for (const patch of [{ needs_recovery: true, has_session: false }, {phase: "revoked" as const}, {replacement_pending: true}]) {
+      const html = render({...patch, account_authenticated: true});
+      expect(text(html)).toContain("Reconnect this device");
+      expect(buttonTag(html, "Reconnect and sync")).toContain(DISABLED);
+      expect(text(html)).toContain("Sync unlock password");
+      expect(text(html)).not.toContain("Confirm sync unlock password");
+      expect(text(html)).not.toContain("Set password and sync");
+      expect(text(html)).not.toContain("Show pairing code");
+    }
+  });
+  it("waits during native recovery without offering another password submission", () => {
+    const html = render({needs_recovery: true, replacement_pending: true, account_authenticated: true, has_session: false, connecting: true});
+    expect(text(html)).toContain("Unlocking and connecting this device");
+    expect(text(html)).not.toContain("Reconnect and sync");
+  });
+  it("offers browser sign-in when account authentication expires during recovery", () => {
+    const html = render({needs_recovery: true, has_session: true, account_authenticated: false});
+    expect(buttonTag(html, "Sign in again")).not.toContain(DISABLED);
+    expect(text(html)).not.toContain("Reconnect and sync");
+  });
+  it("keeps unsupported older replacement journals on their retained-data review path", () => {
+    const html = render({replacement_pending: true, reconnect_available: false, account_authenticated: true});
+    expect(text(html)).not.toContain("Reconnect and sync");
+    expect(text(html)).toContain("original files and progress are retained");
   });
   it("offers cancellation while waiting for browser authorization", () => {
     expect(buttonTag(render({login_pending:true}),"Cancel sign-in")).not.toContain(DISABLED);
@@ -97,7 +123,7 @@ it("explains unavailable platform support without offering a broken sign-in flow
 it("requires applying a changed server before login and explains the empty library and restart", () => {
   vi.mocked(useState).mockReturnValueOnce(["https://other.example.com", vi.fn()]);
   const html=render();
-  expect(buttonTag(html,"Change server and restart")).not.toContain(DISABLED);
+  expect(buttonTag(html,"Change server…")).not.toContain(DISABLED);
   expect(text(html)).not.toContain("Set password and sync");
   expect(text(html)).toContain("empty local library");
   expect(text(html)).toContain("Open terminal sessions will close");
@@ -114,8 +140,8 @@ it("lets a first-time local library sign in to the typed server without resettin
 
 it("offers a separate fresh workspace for a new account while a signed-out library remains account-bound", () => {
   const html=render({has_session:false,phase:"signed_out"});
-  expect(buttonTag(html,"Start with a new account and restart")).not.toContain(DISABLED);
+  expect(buttonTag(html,"Use a separate account…")).not.toContain(DISABLED);
   expect(text(html)).toContain("open an empty local library");
   expect(text(html)).toContain("open terminal sessions close");
-  expect(text(render({has_session:true}))).not.toContain("Start with a new account and restart");
+  expect(text(render({has_session:true}))).not.toContain("Use a separate account…");
 });

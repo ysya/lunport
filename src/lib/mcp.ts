@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import type { ApprovalMode } from "@/bindings/ApprovalMode";
+import type { HostScope } from "@/lib/records";
 import type { McpStatus } from "@/bindings/McpStatus";
 import { tauriInvoke } from "@/lib/ipc";
 
@@ -37,6 +38,19 @@ export function useSetMcpHostAllowed() {
     onSuccess: (status) => queryClient.setQueryData(mcpStatusKey, status),
     onError: (error) =>
       toast.error("Could not update host access", { description: errorMessage(error) }),
+  });
+}
+
+export function mcpGroupKey(scope: HostScope, id: string): string {
+  return scope.kind === "local" ? `local/${id}` : `space/${scope.space_id}/${id}`;
+}
+
+export function useSetMcpGroupAllowed() {
+  const queryClient = useQueryClient();
+  return useMutation<McpStatus, unknown, { groupId: string; scope: HostScope; generation: string; allowed: boolean }>({
+    mutationFn: (args) => tauriInvoke<McpStatus>("mcp_set_group_allowed", args),
+    onSuccess: (status) => queryClient.setQueryData(mcpStatusKey, status),
+    onError: (error) => toast.error("Could not update Group access", { description: errorMessage(error) }),
   });
 }
 

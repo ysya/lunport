@@ -233,8 +233,8 @@ describe("explicit import consent and key/account controls", () => {
       const html = render(<SelectedKeysPanel overview={recordOverview({ keys: [key], account: { chain_id: "b".repeat(64), device_name: "Laptop" } })} openSync={vi.fn()} />);
       const rendered = text(html);
       expect(buttonTag(html, "Set up automatic sync")).not.toContain(DISABLED);
-      expect(rendered).toContain("All managed SSH private keys then sync automatically");
-      expect(rendered).toContain("existing library is reviewed and preserved");
+      expect(rendered).toContain("all managed SSH private keys then sync automatically");
+      expect(rendered).toContain("unlock with your sync password");
       for (const legacy of ["Download synced key", "Restore synced key", "Sync key", "Stop syncing", "Confirm sync", "Confirm stop"]) expect(rendered).not.toContain(legacy);
       if (status === "conflict") expect(rendered).toContain("metadata conflict");
     }
@@ -268,7 +268,7 @@ describe("explicit import consent and key/account controls", () => {
       const rendered = text(html);
       for (const legacy of ["Download synced key", "Sync key", "Stop syncing", "This device only", "Sync disabled", "Sharing unknown"]) expect(rendered).not.toContain(legacy);
       expect(rendered).toContain("Automatic encrypted sync");
-      if (status === "needs_material") expect(rendered).toContain("will become available automatically");
+      if (status === "needs_material") expect(rendered).toContain("matching private key is not available");
       if (status === "conflict") expect(rendered).toContain("identity conflict");
     }
   });
@@ -277,7 +277,7 @@ describe("explicit import consent and key/account controls", () => {
       const html = render(<SelectedKeysPanel overview={recordOverview({ central_mode: true, keys: [{ id: "a".repeat(32), authority: "account", synced: false, public: null, status: "needs_material", storage }] })} />);
       expect(text(html)).toContain("Key reference syncs automatically");
       expect(text(html)).toContain(storage === "hardware" ? "Connect this key’s hardware device" : "Connect the SSH agent");
-      expect(text(html)).not.toContain("will become available automatically");
+      expect(text(html)).not.toContain("matching private key is not available");
       expect(text(html)).not.toContain("Download synced key");
       expect(html).not.toContain('data-attention="true"');
     }

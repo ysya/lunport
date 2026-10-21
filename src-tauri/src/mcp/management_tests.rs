@@ -35,6 +35,7 @@ fn runtime(mode: ApprovalMode) -> McpRuntime {
         enabled: true,
         approval_mode: mode,
         allowed_hosts: BTreeSet::new(),
+        ..Default::default()
     };
     r
 }
@@ -228,7 +229,8 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
             "web",
             RequestContext::default(),
             &CancelToken::default(),
-            &FakeOwner::default()
+            &FakeOwner::default(),
+            &ensure_allowed,
         )
         .is_err());
         assert!(confirmer.asked().is_empty());
@@ -244,6 +246,7 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
             RequestContext::default(),
             &CancelToken::default(),
             &FakeOwner::default(),
+            &ensure_allowed,
         )
         .unwrap();
         assert_eq!(value["fingerprint"], default_server_key().fingerprint);
@@ -335,6 +338,7 @@ fn revoked_permission_or_cancel_during_trust_never_saves_a_pin() {
             RequestContext::default(),
             &CancelToken::default(),
             &FakeOwner::default(),
+            &ensure_allowed,
         );
         assert!(result.is_err());
         assert!(directory
@@ -342,5 +346,34 @@ fn revoked_permission_or_cancel_during_trust_never_saves_a_pin() {
             .unwrap()
             .is_none());
         assert!(r.records_active.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn native_creation_review_discloses_existing_group_access_and_rejects_stale_grant() {
+    let group_id = "0000000000000001";
+    for revoke in [false, true] {
+        let d = device();
+        crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+            crate::sync::record_groups::create_group(state, group_id, HostScope::Local,
+                serde_json::from_value(json!({"schema":1,"name":"Operations","defaults":{}})).unwrap(), true, now)
+                .map_err(|e| AppError::Other(e.to_string()))
+        }).unwrap();
+        let r = runtime(ApprovalMode::AutoLog);
+        permissions::change_group(&r.policy, &snapshot(&d), &HostScope::Local, group_id, true, |_| Ok(())).unwrap();
+        let mut proposal = input();
+        proposal["group_id"] = json!(group_id);
+        let value = create(&d.env(), &r, &proposal, RequestContext::default(), &CancelToken::default(), &|request| {
+            assert!(request.host_proposal.as_ref().unwrap().settings.contains(&("AI access".into(), "Allowed by existing Group permission".into())));
+            if revoke { r.policy.lock().unwrap().allowed_groups.clear(); }
+            ApprovalDecision::Allow
+        });
+        if revoke {
+            assert!(value.is_err());
+            assert!(repo::list_hosts(&snapshot(&d)).unwrap().is_empty());
+        } else {
+            assert_eq!(value.unwrap()["ai_access_allowed"], true);
+            assert!(r.policy.lock().unwrap().allowed_hosts.is_empty());
+        }
     }
 }

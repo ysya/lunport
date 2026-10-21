@@ -52,7 +52,7 @@ import { isWildcardOnly } from "@/lib/host-display";
 import {
   useMcpStatus,
   useSetMcpEnabled,
-  useSetMcpHostAllowed,
+  mcpGroupKey,
   useSetMcpApprovalMode,
 } from "@/lib/mcp";
 
@@ -79,20 +79,22 @@ import {
 } from "@/components/ui/select";
 import { searchSettings, settingsDestinations, type SettingsMode } from "@/lib/settings-navigation";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
-import { CentralAccountSection } from "@/components/records/CentralAccountPanel";
 import { revealHidden } from "@/lib/sync-approvals";
 import { chooseMcpMode } from "@/lib/mcp-flow";
 import { McpAttribution } from "@/components/McpAttribution";
-import { groupPath } from "@/components/records/group-tree";
+import { groupPath, groupAncestors } from "@/components/records/group-tree";
+import { groupComparator } from "@/components/records/group-order";
 import type { RecordOverview } from "@/lib/records";
 import { KnownHostsManager } from "@/components/records/KnownHostsManager";
 import { ColorThemePicker } from "@/components/ColorThemePicker";
 import { McpClientSetup } from "@/components/McpClientSetup";
+import { McpHostAccess, type McpAccessHost, type McpAccessGroup } from "@/components/McpHostAccess";
 
 export function SettingsCategoryPane({
   category,
   recordOverview,
   onOpenImport,
+  onOpenDataTools,
   onOpenSync,
   onConfigDirtyChange,
   onConfigBusyChange,
@@ -102,6 +104,7 @@ export function SettingsCategoryPane({
   category: SettingsCategory;
   recordOverview?: RecordOverview;
   onOpenImport?: () => void;
+  onOpenDataTools?: () => void;
   onOpenSync?: () => void;
 }) {
   if (category === "general") return <GeneralPane />;
@@ -110,10 +113,11 @@ export function SettingsCategoryPane({
   if (category === "appearance") return <AppearancePane />;
   if (category === "connection") return <ConnectionPane recordOverview={recordOverview} />;
   if (category === "files") return <>
-    {recordOverview ? <Section title="Library & workspace tools" description="Hosts and keys stay in this local library unless you explicitly share them. Import copies selected entries and leaves the source files in place.">
+    {recordOverview ? <Section title="Library & workspace tools" description="Use the library locally without an account. Signing in and unlocking enables automatic encrypted sync, including all managed SSH keys. Import copies settings and leaves the source files in place.">
       <SettingsGroup>
-        <SettingsRow label="Import SSH configuration" description="Review hosts and keys before adding them to the library."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
-        <SettingsRow label="Library sync" description="Manage your relay, devices and shared library in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
+        <SettingsRow label="Import hosts and Groups" description="Review SSH configuration, host exports or saved workspaces before adding settings."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
+        <SettingsRow label="Automatic sync" description="Manage your account, devices and self-hosted server in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
+        <SettingsRow label="Host and Group settings" description="Export this library or choose a retained workspace. SSH private keys and account credentials are excluded."><Button variant="outline" size="sm" onClick={onOpenDataTools}>Export / saved workspaces…</Button></SettingsRow>
       </SettingsGroup>
     </Section> : <FilesPane onDirtyChange={onConfigDirtyChange} onBusyChange={onConfigBusyChange} />}
     <PreferencesDataPane />
@@ -122,6 +126,17 @@ export function SettingsCategoryPane({
     return recordOverview ? (
       <McpPane
         records
+        generation={recordOverview.generation}
+        groups={[...recordOverview.groups].sort(groupComparator(recordOverview.group_order?.ids ?? [])).map((group) => {
+          const chain = groupAncestors(recordOverview, group.id, group.scope);
+          return {
+            id: group.id, name: revealHidden(group.payload.name), scope: group.scope,
+            key: mcpGroupKey(group.scope, group.id),
+            path: revealHidden(groupPath(recordOverview, group.id, group.scope)),
+            error: chain.error,
+            ancestorKeys: chain.groups.slice(1).map((parent) => mcpGroupKey(parent.scope, parent.id)),
+          };
+        })}
         hosts={recordOverview.hosts.map((host) => ({
           id: host.id,
           alias: revealHidden(host.payload.alias),
@@ -129,6 +144,10 @@ export function SettingsCategoryPane({
           user: revealHidden(host.effective_payload.user),
           port: host.effective_payload.port,
           groupPath: revealHidden(groupPath(recordOverview, host.payload.group_id, host.scope)),
+          groupKeys: host.group_error ? [] : (() => {
+            const chain = groupAncestors(recordOverview, host.payload.group_id, host.scope);
+            return chain.error ? [] : chain.groups.map((group) => mcpGroupKey(group.scope, group.id));
+          })(),
         }))}
       />
     ) : (
@@ -145,12 +164,12 @@ export function SettingsCategoryPane({
         </Button>
       </Section>
     ) : (
-      <CentralAccountSection />
+      <p className="text-sm text-muted-foreground">Automatic sync is available in the local library. Import your OpenSSH configuration into the library to get started.</p>
     );
   return <>
     <DiagnosticsPane />
     {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
-      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect individually allowed hosts and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Group defaults never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Connection defaults alone never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
     </Section> : <AdvancedPane />}
   </>;
 }
@@ -170,9 +189,10 @@ const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: Te
  * `useSyncBackendSettings`. Open state lives in the UI store so the toolbar
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
-export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
+export function SettingsDialog({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync }: {
   recordOverview?: RecordOverview;
   onOpenImport?: () => void;
+  onOpenDataTools?: () => void;
   onOpenSync?: () => void;
 } = {}) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -204,7 +224,6 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [target, setTarget] = useState<string | null>(null);
   const [filesVisited, setFilesVisited] = useState(false);
-  const [syncVisited, setSyncVisited] = useState(false);
   const [configDirty, setConfigDirty] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -213,10 +232,9 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
 
   useEffect(() => {
     if (open && active.id === "files") setFilesVisited(true);
-    if (open && active.id === "sync") setSyncVisited(true);
   }, [open, active.id]);
   useEffect(() => {
-    if (!open) { setSearch(""); setFilesVisited(false); setSyncVisited(false); setConfigDirty(false); setConfigBusy(false); setConfirmClose(false); }
+    if (!open) { setSearch(""); setFilesVisited(false); setConfigDirty(false); setConfigBusy(false); setConfirmClose(false); }
   }, [open]);
   useEffect(() => {
     if (!open || searching) return;
@@ -289,14 +307,13 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
           <div className="settings-detail">
             <header className="settings-category-header"><h2 id="settings-category-title" tabIndex={-1}>{searching ? "Search results" : active.label}</h2><p>{searching ? `${results.length} matching sections` : active.description}</p></header>
             <div className="settings-content" ref={scrollRef}>
-              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} onConfigDirtyChange={setConfigDirty} onConfigBusyChange={setConfigBusy} /></div>}
-              {!recordOverview && (syncVisited || active.id === "sync") && <div hidden={searching || active.id !== "sync"} className="settings-pane"><SettingsCategoryPane category="sync" /></div>}
+              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} onConfigDirtyChange={setConfigDirty} onConfigBusyChange={setConfigBusy} /></div>}
               {searching ? <div className="settings-results">
                 {results.length ? results.map((result) => <button key={`${result.category}-${result.title}`} type="button" onClick={() => jump(result.category, result.target)}>
                   <span><small>{result.categoryLabel}</small><strong>{result.title}</strong><span>{result.detail}</span></span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
                 </button>) : <div className="app-empty-state"><h2>No matching settings</h2><p>Try a preference name such as “theme”, “terminal” or “logs”.</p><Button variant="outline" size="sm" onClick={() => { setSearch(""); searchRef.current?.focus(); }}>Clear search</Button></div>}
               </div> : <>
-                {active.id !== "files" && active.id !== "sync" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} /></div>}
+                {active.id !== "files" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} /></div>}
               </>}
             </div>
           </div>
@@ -478,7 +495,7 @@ function PreferencesDataPane() {
       >
         <SettingsGroup>
           <SettingsRow
-            label="Export settings"
+            label="Export app preferences"
             description="Save all preferences to a JSON file."
           >
             <Button
@@ -492,7 +509,7 @@ function PreferencesDataPane() {
             </Button>
           </SettingsRow>
           <SettingsRow
-            label="Import settings"
+            label="Import app preferences"
             description="Replace all preferences from a JSON file."
           >
             <Button
@@ -797,13 +814,14 @@ function LegacyMcpPane() {
   return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
 }
 
-export function McpPane({ hosts, records = false }: {
-  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null; port?: number; groupPath?: string}>;
+export function McpPane({ hosts, groups = [], generation, records = false }: {
+  hosts: McpAccessHost[];
+  generation?: string;
+  groups?: McpAccessGroup[];
   records?: boolean;
 }) {
   const status = useMcpStatus(2_000);
   const setEnabled = useSetMcpEnabled();
-  const setHostAllowed = useSetMcpHostAllowed();
   const setMode = useSetMcpApprovalMode();
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
@@ -814,9 +832,7 @@ export function McpPane({ hosts, records = false }: {
         setRiskAcknowledged(false);
       },
     });
-  const allowed = new Set(status.data?.allowed_hosts ?? []);
-  const [hostSearch, setHostSearch] = useState("");
-  const matchingHosts = hosts.filter((host) => `${host.alias} ${host.hostname ?? ""} ${host.user ?? ""} ${host.id} ${host.groupPath ?? ""}`.toLowerCase().includes(hostSearch.trim().toLowerCase()));
+
 
   return (
     <>
@@ -831,7 +847,7 @@ export function McpPane({ hosts, records = false }: {
           <SettingsRow
             id="set-mcp-enabled"
             label="Enable AI access"
-            description="Only individually allowed hosts are available. Turning this off cancels pending requests."
+            description={records ? "Only allowed hosts and Group members are available. Turning this off cancels pending requests." : "Only selected host aliases are available. Turning this off cancels pending requests."}
           >
             <Switch
               id="set-mcp-enabled"
@@ -895,7 +911,7 @@ export function McpPane({ hosts, records = false }: {
           <AlertDialogHeader>
             <AlertDialogTitle>Allow commands without review?</AlertDialogTitle>
             <AlertDialogDescription>
-              Auto-log lets local MCP clients execute arbitrary shell commands on every individually allowed host without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
+              Auto-log lets local MCP clients execute arbitrary shell commands on every allowed host, including current and future members of allowed Groups, without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <label className="flex items-start gap-2 text-sm">
@@ -917,36 +933,7 @@ export function McpPane({ hosts, records = false }: {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Section
-        title="Allowed hosts"
-        description={records ? "Select individual host IDs. Groups and inherited settings never grant access; Legacy alias permissions do not apply." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
-      >
-        <div className="mb-3 space-y-2"><Input type="search" value={hostSearch} onChange={(event) => setHostSearch(event.target.value)} placeholder="Search hosts, destinations or IDs…" aria-label="Search AI host permissions" /><p className="text-xs text-muted-foreground" role="status">{matchingHosts.length} of {hosts.length} hosts · {hosts.filter((host) => allowed.has(host.id)).length} allowed</p></div>
-        <div className="[&_label]:break-all [&_p]:break-all"><SettingsGroup>
-          {hosts.length === 0 ? (
-            <p className="px-3 py-3 text-sm text-muted-foreground">No SSH hosts loaded.</p>
-          ) : matchingHosts.length === 0 ? <p className="p-3 text-sm text-muted-foreground">No hosts match this search.</p> : (
-            matchingHosts.map((host) => (
-              <SettingsRow
-                key={host.id}
-                id={`mcp-host-${host.id}`}
-                label={host.alias}
-                description={`${host.hostname ? `${host.user ? `${host.user}@` : ""}${host.hostname}${host.port ? `:${host.port}` : ""}` : "Uses the alias as its destination."}${records ? ` · ID: ${host.id} · Group: ${host.groupPath || "Ungrouped"}` : ""}`}
-                mono
-              >
-                <Switch
-                  id={`mcp-host-${host.id}`}
-                  checked={allowed.has(host.id)}
-                  disabled={!status.data || setHostAllowed.isPending}
-                  onCheckedChange={(value) =>
-                    setHostAllowed.mutate({ alias: host.id, allowed: value })
-                  }
-                />
-              </SettingsRow>
-            ))
-          )}
-        </SettingsGroup></div>
-      </Section>
+      <McpHostAccess hosts={hosts} groups={groups} generation={generation} records={records} status={status.data} unavailable={status.isError} />
 
       <Section
         title="Recent activity"

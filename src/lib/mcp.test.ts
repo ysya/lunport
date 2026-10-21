@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AuthRequest } from "@/bindings/AuthRequest";
 import type { McpStatus } from "@/bindings/McpStatus";
 import { renderHook, stubBackend } from "./test-ipc";
-import { useSetMcpApprovalMode, mcpStatusKey } from "./mcp";
+import { useSetMcpApprovalMode, useSetMcpGroupAllowed, mcpStatusKey } from "./mcp";
 import { resolveAuthentication, followAuthentication } from "./authentication";
 
 const eventSource = vi.hoisted(() => ({
@@ -31,7 +31,7 @@ describe("native MCP frontend boundary", () => {
       approval_mode: "auto_log", enabled: true, bridge_active: true,
       noninteractive_credentials_supported: false,
       noninteractive_credentials_notice: "Use Ask for stored credentials.",
-      audit_error: null, allowed_hosts: [], pending: [], recent: [],
+      audit_error: null, allowed_hosts: [], allowed_groups: [], pending: [], recent: [],
       executable: "/fixture/sshelter", last_client_at_ms: null,
     };
     const calls = stubBackend(async () => result);
@@ -39,6 +39,16 @@ describe("native MCP frontend boundary", () => {
     const mutation = renderHook(client, useSetMcpApprovalMode);
     await mutation.mutateAsync({ approvalMode: "auto_log", riskAcknowledged: true });
     expect(calls).toEqual([["mcp_set_approval_mode", { approvalMode: "auto_log", riskAcknowledged: true }]]);
+    expect(client.getQueryData(mcpStatusKey)).toEqual(result);
+  });
+
+  it("sends the explicit Group and scope instead of expanding to host grants", async () => {
+    const result = { allowed_hosts: [], allowed_groups: ["space/fixture/group-1"] };
+    const calls = stubBackend(async () => result);
+    const client = new QueryClient();
+    const mutation = renderHook(client, useSetMcpGroupAllowed);
+    await mutation.mutateAsync({ groupId: "group-1", scope: { kind: "space", space_id: "fixture" }, generation: "9007199254740993", allowed: true });
+    expect(calls).toEqual([["mcp_set_group_allowed", { groupId: "group-1", scope: { kind: "space", space_id: "fixture" }, generation: "9007199254740993", allowed: true }]]);
     expect(client.getQueryData(mcpStatusKey)).toEqual(result);
   });
 

@@ -522,7 +522,9 @@ impl StateSnapshot {
     }
     pub(in crate::sync::central) fn decode(bytes: &[u8]) -> Result<Self, AppError> {
         if bytes.len() > MAX_HISTORY + 128 * 1024
-            || !(bytes.starts_with(b"LPSTATE1") || bytes.starts_with(b"LPSTATE2"))
+            || !(bytes.starts_with(b"LPSTATE1")
+                || bytes.starts_with(b"LPSTATE2")
+                || bytes.starts_with(b"LPSTATE3"))
         {
             return Err(invalid());
         }
@@ -538,20 +540,53 @@ impl StateSnapshot {
         identity: &DeviceIdentity,
         groups: Vec<Group>,
     ) -> Result<Self, AppError> {
-        if identity.device()
-            != state
-                .local
-                .central
-                .as_ref()
-                .ok_or_else(invalid)?
-                .control
-                .device
+        Self::create_signed_groups(state, identity, groups, false)
+    }
+    pub(in crate::sync::central) fn create_reconnected(
+        state: &SyncStateV3,
+        identity: &DeviceIdentity,
+        read: &super::super::active_read::VerifiedLibrary,
+        groups: Vec<Group>,
+    ) -> Result<Self, AppError> {
+        // This native capability includes the exact staged owner and original membership/history floors.
+        super::super::replacement_proof::active_read(
+            state.local.central.as_ref().ok_or_else(invalid)?,
+            read,
+            &[],
+        )?;
+        Self::create_signed_groups(state, identity, groups, true)
+    }
+    fn create_signed_groups(
+        state: &SyncStateV3,
+        identity: &DeviceIdentity,
+        groups: Vec<Group>,
+        reconnected: bool,
+    ) -> Result<Self, AppError> {
+        let expected = if reconnected {
+            Self::reconnected_signing_key(state)?
+        } else {
+            Self::signing_key(state)?
+        };
+        if identity.device().keys.signing != expected
+            || !reconnected
+                && identity.device()
+                    != state
+                        .local
+                        .central
+                        .as_ref()
+                        .ok_or_else(invalid)?
+                        .control
+                        .device
             || groups.is_empty()
             || groups.len() > 256
         {
             return Err(invalid());
         }
-        let mut bytes = Zeroizing::new(b"LPSTATE2".to_vec());
+        let mut bytes = Zeroizing::new(if reconnected {
+            b"LPSTATE3".to_vec()
+        } else {
+            b"LPSTATE2".to_vec()
+        });
         put(&mut bytes, Group::state_key(state)?.as_bytes())?;
         bytes.extend_from_slice(&(groups.len() as u32).to_be_bytes());
         let mut logical = 0usize;
@@ -574,7 +609,11 @@ impl StateSnapshot {
                 return Err(invalid());
             }
         }
-        let mut signed = Zeroizing::new(b"lunport-native-state-history-v2\0".to_vec());
+        let mut signed = Zeroizing::new(if reconnected {
+            b"lunport-native-state-history-v3\0".to_vec()
+        } else {
+            b"lunport-native-state-history-v2\0".to_vec()
+        });
         signed.extend_from_slice(&bytes);
         put(&mut bytes, identity.keys.sign(&signed).as_bytes())?;
         let result = Self { bytes };
@@ -588,10 +627,17 @@ impl StateSnapshot {
         if self.bytes.starts_with(b"LPSTATE1") {
             return Ok(vec![self.verify_one(state)?]);
         }
-        if !self.bytes.starts_with(b"LPSTATE2") || self.bytes.len() > MAX_HISTORY + 128 * 1024 {
+        let reconnected = self.bytes.starts_with(b"LPSTATE3");
+        if !(self.bytes.starts_with(b"LPSTATE2") || reconnected)
+            || self.bytes.len() > MAX_HISTORY + 128 * 1024
+        {
             return Err(invalid());
         }
-        let signing = Self::signing_key(state)?;
+        let signing = if reconnected {
+            Self::reconnected_signing_key(state)?
+        } else {
+            Self::signing_key(state)?
+        };
         let mut input = &self.bytes[8..];
         if section(&mut input, 70)? != Group::state_key(state)?.as_bytes() || input.len() < 4 {
             return Err(invalid());
@@ -624,7 +670,11 @@ impl StateSnapshot {
         if !input.is_empty() {
             return Err(invalid());
         }
-        let mut signed = Zeroizing::new(b"lunport-native-state-history-v2\0".to_vec());
+        let mut signed = Zeroizing::new(if reconnected {
+            b"lunport-native-state-history-v3\0".to_vec()
+        } else {
+            b"lunport-native-state-history-v2\0".to_vec()
+        });
         signed.extend_from_slice(&self.bytes[..signed_len]);
         crypto::verify(signing, &signed, signature)?;
         if !groups.iter().any(|g| g.require_state(state).is_ok()) {
@@ -634,6 +684,48 @@ impl StateSnapshot {
             drop(group.history()?);
         }
         Ok(groups)
+    }
+    fn reconnected_signing_key(state: &SyncStateV3) -> Result<&str, AppError> {
+        records_v3::validate_state(state).map_err(|_| invalid())?;
+        let source = state.local.central.as_ref().ok_or_else(invalid)?;
+        let intent = source.replacement.as_ref().ok_or_else(invalid)?;
+        let candidate = intent.candidate.as_deref().ok_or_else(invalid)?;
+        let chain = candidate.control.verified_chain()?;
+        let confirmation = candidate
+            .control
+            .pairing_confirmation
+            .as_ref()
+            .ok_or_else(invalid)?;
+        let revision = chain
+            .revision_of(&confirmation.approved_head)
+            .ok_or_else(invalid)?;
+        let node = candidate
+            .control
+            .proof
+            .as_ref()
+            .ok_or_else(invalid)?
+            .nodes
+            .get(revision.checked_sub(1).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+        if intent.route != super::super::replacement::Route::SyncPassword
+            || source.control.anchor.as_ref() != candidate.control.anchor.as_ref()
+            || candidate.control.auth_epoch < source.control.auth_epoch
+            || node.body.action != super::super::membership::Action::Unlock
+            || node
+                .body
+                .enrollment
+                .as_ref()
+                .is_none_or(|r| r.device != candidate.control.device)
+        {
+            return Err(invalid());
+        }
+        candidate
+            .control
+            .proof
+            .as_ref()
+            .ok_or_else(invalid)?
+            .verify(chain.current().anchor(), source.control.highwater.as_ref())?;
+        Ok(&candidate.control.device.keys.signing)
     }
     fn signing_key(state: &SyncStateV3) -> Result<&str, AppError> {
         records_v3::validate_state(state).map_err(|_| invalid())?;
@@ -704,6 +796,12 @@ mod order_tests {
             StateSnapshot::create_groups(&state, signer, vec![current.clone(), old.clone()])
                 .unwrap();
         assert_eq!(complete.verify_all(&state).unwrap().len(), 2);
+        let mut substituted = complete.bytes().to_vec();
+        substituted[..8].copy_from_slice(b"LPSTATE3");
+        assert!(StateSnapshot::decode(&substituted)
+            .unwrap()
+            .verify_all(&state)
+            .is_err());
         assert!(complete.verify_all(&older).is_err());
         assert!(StateSnapshot::create_groups(&state, signer, vec![old]).is_err());
         assert!(

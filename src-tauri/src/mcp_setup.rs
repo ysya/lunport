@@ -8,9 +8,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const SERVER_ID: &str = "sshelter";
+const SERVER_ID: &str = "lunport";
+const LEGACY_SERVER_ID: &str = "sshelter";
 const MAX_CONFIG: u64 = 8 * 1024 * 1024;
-const ALIASES: [&str; 2] = [SERVER_ID, "lunport"];
+const ALIASES: [&str; 2] = [SERVER_ID, LEGACY_SERVER_ID];
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -198,8 +199,8 @@ fn owned_json(entry: &Value, executable: &Path) -> bool {
 }
 fn select_id(entries: &[(&str, bool)]) -> Result<&'static str, AppError> {
     if let Some((id, _)) = entries.iter().find(|(_, owned)| *owned) {
-        return Ok(if *id == "lunport" {
-            "lunport"
+        return Ok(if *id == LEGACY_SERVER_ID {
+            LEGACY_SERVER_ID
         } else {
             SERVER_ID
         });

@@ -54,6 +54,29 @@ impl Plan {
         proof: ControlProof,
         snapshot: Snapshot,
     ) -> Result<Self, AppError> {
+        Self::new_inner(before, Some(identity), proof, snapshot, None)
+    }
+    pub(super) fn reconnected(
+        before: &Workspace,
+        proof: ControlProof,
+        snapshot: Snapshot,
+        read: &VerifiedLibrary,
+    ) -> Result<Self, AppError> {
+        super::historical_state::require_reconnected_owner(before, read)?;
+        if snapshot.vault.epoch != read.checkpoint().epoch
+            || snapshot.vault.commits != read.epochs()
+        {
+            return Err(AppError::Other("A retained central content epoch still needs its original device credentials. Original files are retained.".into()));
+        }
+        Self::new_inner(before, None, proof, snapshot, Some(read))
+    }
+    fn new_inner(
+        before: &Workspace,
+        identity: Option<&DeviceIdentity>,
+        proof: ControlProof,
+        snapshot: Snapshot,
+        recovered: Option<&VerifiedLibrary>,
+    ) -> Result<Self, AppError> {
         before.validate()?;
         let Snapshot {
             membership_head,
@@ -68,18 +91,25 @@ impl Plan {
             Phase::Enrolled | Phase::Active | Phase::Rekey
         ) || before.replacement.is_some()
             || before.bootstrap.is_some()
-            || control.device != identity.device()
-            || control.denied_devices.contains(&identity.id)
+            || identity.is_some_and(|id| control.device != id.device())
+            || control.denied_devices.contains(&control.device.id)
             || auth_epoch < control.auth_epoch
             || auth_epoch > MAX_SAFE_INTEGER
-            || identity.slot(&profile, "device")?
-                != profile.device_slot("device", before.identity_slot.as_deref())?
+            || identity
+                .map(|id| id.slot(&profile, "device"))
+                .transpose()?
+                .is_some_and(|slot| {
+                    Some(slot)
+                        != profile
+                            .device_slot("device", before.identity_slot.as_deref())
+                            .ok()
+                })
         {
             return Err(invalid());
         }
         let chain = proof.verify(anchor, control.highwater.as_ref())?;
         if membership_head != chain.current().head()
-            || chain.current().devices().get(&identity.id) != Some(&identity.keys.public())
+            || chain.current().devices().get(&control.device.id) != Some(&control.device.keys)
             || control.personal_vault.as_deref() != Some(source.vault.as_str())
             || !source.commits.starts_with(&before.epochs)
             || !source.commits.starts_with(&before.observed_epochs)
@@ -94,8 +124,8 @@ impl Plan {
             || h.account_id != anchor.account_id
             || h.genesis_hash != anchor.genesis_hash
             || h.vault_id != source.vault
-            || h.recipient != identity.id
-            || h.recipient_key != identity.keys.public().encryption
+            || h.recipient != control.device.id
+            || h.recipient_key != control.device.keys.encryption
             || number(&h.key_epoch, false)? != target.epoch
             || !chain.contains_device(&h.membership_head, &control.device)
         {
@@ -104,7 +134,12 @@ impl Plan {
         let author = chain
             .author_at(&h.membership_head, &h.author)
             .ok_or_else(invalid)?;
-        let keys = source.wrap.open(&identity.keys, h, &author.signing)?;
+        let keys = if let Some(identity) = identity {
+            source.wrap.open(&identity.keys, h, &author.signing)?
+        } else {
+            source.wrap.verify_author(&author.signing)?;
+            recovered.ok_or_else(invalid)?.keys().duplicate()
+        };
         if let Some(bundle) = &source.committed {
             let body = &bundle.manifest.body;
             if chain.revision_of(&h.membership_head).ok_or_else(invalid)?
@@ -115,11 +150,12 @@ impl Plan {
             {
                 return Err(invalid());
             }
-            if bundle
-                .wraps
-                .iter()
-                .any(|wrap| wrap.header.recipient == identity.id)
-            {
+            if let Some(identity) = identity.filter(|identity| {
+                bundle
+                    .wraps
+                    .iter()
+                    .any(|wrap| wrap.header.recipient == identity.id)
+            }) {
                 let committed = rekey::open_committed_keys(
                     &chain,
                     &bundle.manifest,

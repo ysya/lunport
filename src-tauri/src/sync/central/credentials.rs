@@ -115,7 +115,7 @@ impl DeviceIdentity {
         } else {
             keychain.get_noninteractive(&slot)
         }?;
-        let encoded=Zeroizing::new(saved.ok_or_else(||AppError::Other("This device's account keys are unavailable. Use device approval or your recovery kit; local data is retained.".into()))?);
+        let encoded=Zeroizing::new(saved.ok_or_else(||AppError::Other("This device's account keys are unavailable. Sign in again and reconnect with your sync password; local data is retained.".into()))?);
         let mut identity = Self::decode(&encoded, profile)?;
         identity.replacement = replacement.map(str::to_string);
         Ok(identity)

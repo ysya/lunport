@@ -35,7 +35,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
         <DialogTitle>{proposal ? "Add this SSH host?" : "Allow this AI SSH command?"}</DialogTitle>
         <DialogDescription>
           {proposal
-            ? "Review these connection settings before saving. This does not connect, trust a server key or grant AI access. The MCP client cannot approve this request."
+            ? "Review these connection settings before saving. A host in an already allowed Group inherits AI access. Saving does not connect or trust a server key. The MCP client cannot approve this request."
             : "Lunport will run this command once. Review the complete command and resolved target; the MCP client cannot approve it."}
         </DialogDescription>
       </DialogHeader>

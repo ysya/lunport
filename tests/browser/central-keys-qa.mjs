@@ -22,10 +22,6 @@ try {
     `${process.env.CENTRAL_KEYS_QA_URL ?? "http://127.0.0.1:1420"}/tests/browser/central-keys.html`,
   );
   await page.locator("[data-key-id]").click();
-  await page.getByRole("button", { name: "Sync key", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Confirm sync", exact: true })
-    .waitFor();
   await call("central", true);
   await page.locator('main[data-central="true"]').waitFor();
   await page.locator('[data-key-id][aria-pressed="false"]').click();
@@ -41,12 +37,12 @@ try {
       0,
     );
   console.log(
-    "PASS central cutover removes legacy actions and an open sharing confirmation",
+    "PASS central cutover removes legacy sharing actions",
   );
   await call("status", "needs_material");
   await page
     .getByText(
-      "This key will become available automatically after encrypted sync completes.",
+      "The matching private key is not available on this device. Check sync, or import the matching key and select it in the host’s authentication settings.",
       { exact: true },
     )
     .waitFor();
@@ -57,7 +53,7 @@ try {
     0,
   );
   console.log(
-    "PASS pending material uses automatic sync with no download action",
+    "PASS missing material offers sync and import repair with no download action",
   );
   await call("storage", "hardware");
   await page

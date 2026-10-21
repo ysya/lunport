@@ -3,4 +3,4 @@ import type { ApprovalMode } from "./ApprovalMode";
 import type { McpAuditEntry } from "./McpAuditEntry";
 import type { McpPendingRequest } from "./McpPendingRequest";
 
-export type McpStatus = { noninteractive_credentials_supported: boolean, noninteractive_credentials_notice: string, approval_mode: ApprovalMode, audit_error: string | null, enabled: boolean, bridge_active: boolean, allowed_hosts: Array<string>, pending: Array<McpPendingRequest>, recent: Array<McpAuditEntry>, executable: string, last_client_at_ms: number | null, };
+export type McpStatus = { noninteractive_credentials_supported: boolean, noninteractive_credentials_notice: string, approval_mode: ApprovalMode, audit_error: string | null, enabled: boolean, bridge_active: boolean, allowed_hosts: Array<string>, allowed_groups: Array<string>, pending: Array<McpPendingRequest>, recent: Array<McpAuditEntry>, executable: string, last_client_at_ms: number | null, };

@@ -267,6 +267,7 @@ mod ipc_tests {
                 &FakeOwner::default(),
                 &|_| ApprovalDecision::Allow,
                 context,
+                &ensure_allowed,
             )
         }));
         let (a, b) = UnixStream::pair().unwrap();

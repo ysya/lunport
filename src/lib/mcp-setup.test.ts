@@ -6,7 +6,7 @@ describe("portable MCP setup", () => {
 
   it("exports the same adapter for Claude, Cursor and other mcpServers clients", () => {
     expect(JSON.parse(mcpSetupConfig(executable))).toEqual({
-      mcpServers: { [MCP_SERVER_ID]: { command: executable, args: ["--mcp"] } },
+      mcpServers: { lunport: { command: executable, args: ["--mcp"] } },
     });
   });
 
@@ -22,20 +22,20 @@ describe("portable MCP setup", () => {
     expect(mcpSetupConfig(path, "toml")).toContain(`command = ${JSON.stringify(path)}\n`);
   });
 
-  it("uses user scope for Claude Code and retains the existing server identity", () => {
+  it("uses user scope for Claude Code and the Lunport server name", () => {
     expect(mcpSetupCommand(executable, "claude_code", "macos"))
-      .toBe(`claude mcp add --scope user --transport stdio sshelter -- '${executable}' --mcp`);
+      .toBe(`claude mcp add --scope user --transport stdio lunport -- '${executable}' --mcp`);
     expect(mcpSetupCommand(executable, "codex", "macos"))
-      .toBe(`codex mcp add sshelter -- '${executable}' --mcp`);
+      .toBe(`codex mcp add lunport -- '${executable}' --mcp`);
   });
 
   it("does not expand PowerShell variables, backticks or apostrophes", () => {
     expect(mcpSetupCommand("C:\\O'Brien $env:HOME `x\\sshelter.exe", "codex", "windows"))
-      .toBe("codex mcp add sshelter -- 'C:\\O''Brien $env:HOME `x\\sshelter.exe' --mcp");
+      .toBe("codex mcp add lunport -- 'C:\\O''Brien $env:HOME `x\\sshelter.exe' --mcp");
   });
 
   it("quotes apostrophes and shell syntax literally for POSIX manual setup", () => {
     expect(mcpSetupCommand("/tmp/O'Brien $(touch ignored)/sshelter", "codex", "macos"))
-      .toBe("codex mcp add sshelter -- '/tmp/O'\\''Brien $(touch ignored)/sshelter' --mcp");
+      .toBe("codex mcp add lunport -- '/tmp/O'\\''Brien $(touch ignored)/sshelter' --mcp");
   });
 });

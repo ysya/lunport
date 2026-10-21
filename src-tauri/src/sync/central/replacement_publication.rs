@@ -66,6 +66,7 @@ impl Archive {
         if node.body.action
             != match self.route {
                 Route::TrustedDevice => Action::Add,
+                Route::SyncPassword => Action::Unlock,
                 Route::RecoveryKit => Action::Recover,
             }
             || node
@@ -159,7 +160,7 @@ impl Authorization {
             return Err(invalid());
         }
         match intent.route {
-            Route::TrustedDevice => {
+            Route::TrustedDevice | Route::SyncPassword => {
                 if staged.recovery.is_some() || intent.recovery_confirmation.is_some() {
                     return Err(invalid());
                 }
@@ -202,12 +203,15 @@ impl Authorization {
             .control
             .denied_devices
             .extend(source.control.denied_devices.iter().cloned());
-        candidate
-            .control
-            .denied_devices
-            .insert(source.control.device.id.clone());
+        if intent.route != Route::SyncPassword {
+            candidate
+                .control
+                .denied_devices
+                .insert(source.control.device.id.clone());
+        }
         candidate.control.cutover = source.control.cutover;
         candidate.control.library = source.control.library.clone();
+        candidate.automatic_sync = source.automatic_sync;
         candidate.replica = Some(read.replica().clone());
         candidate.epochs = read.epochs().to_vec();
         candidate.observed_epochs = vec![];
@@ -282,13 +286,30 @@ impl Authorization {
         for _ in 0..3 {
             let (source, generation) = crate::sync::record_runtime::snapshot(env)?;
             self.source(source.local.central.as_ref().ok_or_else(invalid)?)?;
-            let archive = super::replacement_archive::prepare(
-                env,
-                lifecycle,
-                &source,
-                generation,
-                &self.operation,
-            )?;
+            let archive = if source
+                .local
+                .central
+                .as_ref()
+                .and_then(|o| o.replacement.as_ref())
+                .is_some_and(|i| i.route == Route::SyncPassword)
+            {
+                super::replacement_archive::prepare_reconnected(
+                    env,
+                    &source,
+                    generation,
+                    &self.operation,
+                    self.session.identity.as_ref().ok_or_else(invalid)?,
+                    &self.read,
+                )?
+            } else {
+                super::replacement_archive::prepare(
+                    env,
+                    lifecycle,
+                    &source,
+                    generation,
+                    &self.operation,
+                )?
+            };
             match crate::sync::record_runtime::publish_replacement(env, self, archive) {
                 Err(error) if crate::sync::runtime::is_superseded(&error) => continue,
                 result => return result,
@@ -334,6 +355,7 @@ impl Authorization {
             .extend(source.control.denied_devices.iter().cloned());
         candidate.control.cutover = source.control.cutover;
         candidate.control.library = source.control.library.clone();
+        candidate.automatic_sync = source.automatic_sync;
         if self
             .read
             .chain()
@@ -351,7 +373,7 @@ impl Authorization {
             };
         let intent = source.replacement.as_ref().ok_or_else(invalid)?;
         let approved_head = match intent.route {
-            Route::TrustedDevice => candidate
+            Route::TrustedDevice | Route::SyncPassword => candidate
                 .control
                 .pairing_confirmation
                 .as_ref()

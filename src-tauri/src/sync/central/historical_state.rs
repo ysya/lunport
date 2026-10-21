@@ -155,6 +155,50 @@ impl Reader<'_> {
 }
 /// All scope checks precede use of epoch wraps. Keys remain ephemeral and cannot be serialized.
 pub(super) fn read(state: &SyncStateV3, identity: &DeviceIdentity) -> Result<Captured, AppError> {
+    read_inner(state, Some(identity), BTreeMap::new())
+}
+/// Password recovery may reopen same-epoch signed local history with keys obtained by a complete
+/// authenticated replacement read. It never fabricates the lost device's private identity.
+pub(super) fn read_reconnected(
+    state: &SyncStateV3,
+    read: &super::active_read::VerifiedLibrary,
+) -> Result<Captured, AppError> {
+    require_reconnected_owner(state.local.central.as_ref().ok_or_else(invalid)?, read)?;
+    let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+    if owner.rotation.is_some() || owner.recovery.is_some() {
+        return Err(AppError::Other("Saved key rotation or recovery needs its original credentials. Original files are retained.".into()));
+    }
+    read_inner(
+        state,
+        None,
+        BTreeMap::from([(read.checkpoint().epoch, read.keys().duplicate())]),
+    )
+}
+pub(super) fn require_reconnected_owner(
+    owner: &Workspace,
+    read: &super::active_read::VerifiedLibrary,
+) -> Result<(), AppError> {
+    owner.validate()?;
+    if owner.control.profile != read.previous_owner().control.profile
+        || owner.control.account_id != read.previous_owner().control.account_id
+        || owner.control.anchor.as_ref() != Some(read.chain().current().anchor())
+        || owner.control.auth_epoch > read.auth_epoch()
+        || !read.epochs().starts_with(&owner.epochs)
+        || !read.epochs().starts_with(&owner.observed_epochs)
+    {
+        return Err(invalid());
+    }
+    read.proof().verify(
+        read.chain().current().anchor(),
+        owner.control.highwater.as_ref(),
+    )?;
+    Ok(())
+}
+fn read_inner(
+    state: &SyncStateV3,
+    identity: Option<&DeviceIdentity>,
+    recovered: BTreeMap<u64, VaultKeys>,
+) -> Result<Captured, AppError> {
     records_v3::validate_state(state).map_err(|_| invalid())?;
     if zeroize::Zeroizing::new(serde_json::to_vec(state).map_err(|_| invalid())?).len() as u64
         > crate::sync::record_runtime::MAX_STATE_BYTES
@@ -163,7 +207,7 @@ pub(super) fn read(state: &SyncStateV3, identity: &DeviceIdentity) -> Result<Cap
     }
     let owner = state.local.central.as_ref().ok_or_else(invalid)?;
     owner.validate()?;
-    if identity.device() != owner.control.device {
+    if identity.is_some_and(|identity| identity.device() != owner.control.device) {
         return Err(invalid());
     }
     let mut reader = Reader {
@@ -174,13 +218,17 @@ pub(super) fn read(state: &SyncStateV3, identity: &DeviceIdentity) -> Result<Cap
                 .verify(&package.admission.anchor, None)?,
             _ => owner.control.verified_chain()?,
         },
-        keys: BTreeMap::new(),
+        keys: recovered,
         rows: History::empty_retained(),
         floors: vec![],
     };
-    reader.wraps(identity, &owner.own_wraps)?;
+    if let Some(identity) = identity {
+        reader.wraps(identity, &owner.own_wraps)?;
+    }
     if let Some(bootstrap) = &owner.bootstrap {
-        reader.wraps(identity, &bootstrap.wraps)?;
+        if let Some(identity) = identity {
+            reader.wraps(identity, &bootstrap.wraps)?;
+        }
     }
     if let Some(rotation) = &owner.rotation {
         use super::rotation::Journal;
@@ -205,7 +253,9 @@ pub(super) fn read(state: &SyncStateV3, identity: &DeviceIdentity) -> Result<Cap
                 rows,
                 ..
             } => {
-                reader.wraps(identity, wraps)?;
+                if let Some(identity) = identity {
+                    reader.wraps(identity, wraps)?;
+                }
                 // Target drafts are retained content, never evidence of server acceptance.
                 reader.floors.push(from.clone());
                 reader.floors.push(Checkpoint {
@@ -300,7 +350,7 @@ pub(super) fn read(state: &SyncStateV3, identity: &DeviceIdentity) -> Result<Cap
             rows: reader.rows,
             floors: reader.floors,
         };
-        pending.wraps(identity, &package.wraps)?;
+        pending.wraps(identity.ok_or_else(invalid)?, &package.wraps)?;
         pending.replica(&package.replica)?;
         reader = Reader {
             owner,
