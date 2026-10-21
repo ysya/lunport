@@ -161,6 +161,7 @@ async function route(
             protocol: 2,
             features: [
               "central-accounts",
+              "account-unlock-v1",
               "anchored-membership",
               "exact-revision",
               "operation-receipts",

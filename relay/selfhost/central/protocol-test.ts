@@ -23,6 +23,7 @@ import {
   membershipCanonical,
   applyMembership,
 } from "../../src/v2/membership";
+import { unlockCanonical, type SignedUnlock } from "../../src/v2/unlock";
 import { freezeCanonical } from "../../src/v2/migration-freeze";
 import { migrationCanonical } from "../../src/v2/migration";
 import { rekeyCanonical, wrapsDigest } from "../../src/v2/rekey";
@@ -122,7 +123,7 @@ export async function checkCentralProtocol({
       oldContext,
     ),
   );
-  const wrap = async (trusted: typeof member, epoch = "1") => {
+  const wrap = async (trusted: typeof member, epoch = "1", author = firstDevice.id, seed = 1) => {
     const result = [];
     for (const [recipient, publicKeys] of Object.entries({
       ...trusted.devices,
@@ -135,7 +136,7 @@ export async function checkCentralProtocol({
         vault_id: vault,
         key_epoch: epoch,
         membership_head: trusted.head,
-        author: firstDevice.id,
+        author,
         recipient,
         recipient_key: publicKeys.encryption,
       };
@@ -163,6 +164,7 @@ export async function checkCentralProtocol({
             encapsulated_key,
             new Uint8Array(sealed.ct),
           ),
+          seed,
         ),
       });
     }
@@ -314,6 +316,18 @@ export async function checkCentralProtocol({
     ).phase,
     "retired",
   );
+  const info = await json(await fetch(`http://${address}/v2/info`));
+  assert.ok(info.features.includes("account-unlock-v1"));
+  // Ciphertext is opaque to the service; native integration tests exercise password decryption.
+  const registry: SignedUnlock = { body: {
+    version: 1, anchor, revision: "1", previous_digest: "", membership_head: member.head,
+    authorization_epoch: String(first.info.auth_epoch), author: firstDevice.id, recovery: member.recovery,
+    slots: [{header:{version:1,anchor,generation:"1",binding:{kind:"password"},salt:base64(randomBytes(32))},
+      nonce:base64(randomBytes(24)),ciphertext:base64(randomBytes(64))}],
+  }, signature: "" };
+  registry.signature = sign(unlockCanonical(registry.body));
+  await json(await request("/v2/unlock", first.bearer, {registry}));
+  assert.deepEqual((await json(await request("/v2/unlock", first.bearer))).registry,registry);
   let other = await register(peer);
   assert.equal(other.info.device_state, "pending");
   const denied = await request(path + "records", other.bearer);
@@ -337,6 +351,14 @@ export async function checkCentralProtocol({
   });
   assert.equal(en.status, 204);
   await en.arrayBuffer();
+  assert.deepEqual((await json(await request("/v2/unlock", other.bearer))).registry,registry);
+  const readProof = { request_id: enrollment.request_id, membership_head: member.head,
+    auth_epoch: String(other.info.auth_epoch), signature: sign(canonical([
+      "lunport-recovery-read-v2", origin, anchor.account_id, anchor.genesis_hash, member.head,
+      String(other.info.auth_epoch), base64(enrollmentCanonical(enrollment)), enrollment.signature,
+    ]), 4) };
+  const snapshot = await json(await request("/v2/recovery/wraps", other.bearer, {proof:readProof}));
+  assert.ok(snapshot);
   const node = {
     body: {
       origin,
@@ -344,8 +366,8 @@ export async function checkCentralProtocol({
       genesis_hash: anchor.genesis_hash,
       revision: "1",
       previous_head: member.head,
-      author: firstDevice.id,
-      action: "add" as const,
+      author: "recovery",
+      action: "unlock" as const,
       issued_at_ms: String(now),
       enrollment,
       devices: { ...member.devices, [peer.id]: peer.keys },
@@ -353,7 +375,7 @@ export async function checkCentralProtocol({
     },
     signature: "",
   };
-  node.signature = sign(membershipCanonical(node.body));
+  node.signature = sign(membershipCanonical(node.body), 4);
   member = (await applyMembership(member, node))!;
   assert.ok(member);
   const minimum = {
@@ -395,12 +417,13 @@ export async function checkCentralProtocol({
     minimums: [minimum],
     mac,
   };
-  const peerWraps = await wrap(member);
+  const peerWraps = await wrap(member, "1", peer.id, 6);
   await json(
-    await request("/v2/membership", first.bearer, {
+    await request("/v2/unlock/join", other.bearer, {
       node,
       wraps: { [vault]: peerWraps },
       confirmation,
+      read_proof: readProof,
     }),
   );
   first = await register(firstDevice);
@@ -455,6 +478,7 @@ export async function checkCentralProtocol({
   const removal = {
     body: {
       ...node.body,
+      author: firstDevice.id,
       revision: "2",
       previous_head: member.head,
       action: "revoke" as const,
@@ -596,7 +620,7 @@ export async function checkCentralProtocol({
   secret.fill(0);
   original.forEach((bytes) => bytes.fill(0));
   console.log(
-    "PASS: deployed central encrypted migration, permanent legacy retirement, pending-device denial, authenticated approval, peer decryption, device revocation and epoch-2 content rotation",
+    "PASS: deployed central encrypted migration, permanent legacy retirement, signed password envelope readback, additive account unlock, pending-device denial, peer decryption, device revocation and epoch-2 content rotation",
   );
   return {
     positive: {

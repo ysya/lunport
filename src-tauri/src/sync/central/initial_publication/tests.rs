@@ -115,36 +115,46 @@ fn unknown_or_changed_reservation_is_never_replaced_and_stale_source_cannot_rese
         "unknown",
         "corrupt",
     ] {
-        let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
-        let env = d.env();
-        make_private(&env);
-        let context = prepare(&env, verified, &keys).unwrap();
-        let role = role(&context.loaded).unwrap();
-        let mut value = serde_json::to_value(&context.reservation).unwrap();
-        match case {
-            "policy" => value[case] = "unknown".into(),
-            "operation" => value[case] = "invalid".into(),
-            "manifest" => value[case] = "9".repeat(64).into(),
-            "cursor" => value[case]["revision"] = 0.into(),
-            "observed" => value[case] = u64::MAX.into(),
-            "unknown" => value[case] = true.into(),
-            _ => {}
-        }
-        let encoded = if case == "corrupt" {
-            "broken".into()
-        } else {
-            serde_json::to_string(&value).unwrap()
-        };
-        d.keychain.set(&role, &encoded).unwrap();
-        assert!(context.check(&env, &keys).is_err());
-        assert!(prepare(
-            &env,
-            migration_dispatch::verified_for_test(&env, &keys),
-            &keys
-        )
-        .is_err());
-        assert_eq!(d.keychain.entry(&role).unwrap(), encoded);
+        check_bad_reservation(case);
     }
+    check_stale_reservation();
+}
+
+#[inline(never)]
+fn check_bad_reservation(case: &str) {
+    let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let context = prepare(&env, verified, &keys).unwrap();
+    let role = role(&context.loaded).unwrap();
+    let mut value = serde_json::to_value(&context.reservation).unwrap();
+    match case {
+        "policy" => value[case] = "unknown".into(),
+        "operation" => value[case] = "invalid".into(),
+        "manifest" => value[case] = "9".repeat(64).into(),
+        "cursor" => value[case]["revision"] = 0.into(),
+        "observed" => value[case] = u64::MAX.into(),
+        "unknown" => value[case] = true.into(),
+        _ => {}
+    }
+    let encoded = if case == "corrupt" {
+        "broken".into()
+    } else {
+        serde_json::to_string(&value).unwrap()
+    };
+    d.keychain.set(&role, &encoded).unwrap();
+    assert!(context.check(&env, &keys).is_err());
+    assert!(prepare(
+        &env,
+        migration_dispatch::verified_for_test(&env, &keys),
+        &keys
+    )
+    .is_err());
+    assert_eq!(d.keychain.entry(&role).unwrap(), encoded);
+}
+
+#[inline(never)]
+fn check_stale_reservation() {
     let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
     let env = d.env();
     make_private(&env);

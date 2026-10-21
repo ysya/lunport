@@ -22,6 +22,15 @@ use std::{
 use zeroize::Zeroizing;
 #[derive(Default)]
 struct Account {
+    unlock: Option<super::unlock_registry::SignedRegistry>,
+    reject_unlock: bool,
+    lose_unlock_join_reply: bool,
+    unlock_joins: usize,
+    migration: Option<(
+        super::migration::SignedMigration,
+        String,
+        Vec<super::rekey::Version>,
+    )>,
     proof: Option<ControlProof>,
     wraps: Vec<WrappedKeys>,
     vault: Option<String>,
@@ -244,6 +253,8 @@ impl Service {
         install_account_access_routes(&mut server, &state, locator);
         install_rotation_routes(&mut server, &state);
         install_recovery_routes(&mut server, &state, &config);
+        install_unlock_routes(&mut server, &state);
+        install_fresh_library_routes(&mut server, &state);
         Self {
             server,
             state,
@@ -262,14 +273,7 @@ impl Service {
             refresh: Some(Zeroizing::new("synthetic refresh".into())),
             expires_in: std::time::Duration::from_secs(300),
         };
-        controller::establish(
-            &d.env(),
-            &self.origin,
-            self.config.clone(),
-            tokens,
-            None,
-        )
-        .unwrap();
+        controller::establish(&d.env(), &self.origin, self.config.clone(), tokens, None).unwrap();
     }
 }
 fn install_recovery_routes(
@@ -278,7 +282,7 @@ fn install_recovery_routes(
     config: &OidcConfig,
 ) {
     server.mock("GET", "/v2/info").with_header("content-type", "application/json")
-        .with_body(json!({"protocol":2,"features":["central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history","recovery-source-proofs"],"oidc":config}).to_string()).create();
+        .with_body(json!({"protocol":2,"features":["account-unlock-v1","central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history","recovery-source-proofs"],"oidc":config}).to_string()).create();
     let account = Arc::clone(state);
     let barrier = Arc::clone(state);
     server.mock("POST", "/v2/recovery/wraps").with_status_code_from_request(move |_| {let s = barrier.lock().unwrap(); if s.barrier_pending && s.hold_barrier {202} else {200}}).with_header("content-type", "application/json").with_body_from_request(move |request| {
@@ -401,6 +405,206 @@ fn verify_recovery_read(s: &Account, request: &mockito::Request, body: &Value) {
         proof["signature"].as_str().unwrap(),
     )
     .unwrap();
+}
+fn append_automatic_row(
+    rows: &mut Vec<super::rekey::Version>,
+    envelope: crypto::RecordEnvelope,
+) -> super::rekey::Version {
+    if let Some(row) = rows
+        .iter()
+        .find(|row| row.envelope.header.operation_id == envelope.header.operation_id)
+    {
+        assert_eq!(row.envelope, envelope);
+        return row.clone();
+    }
+    let revision = rows
+        .iter()
+        .rev()
+        .find(|row| row.envelope.header.record_id == envelope.header.record_id)
+        .map_or(0, |r| r.revision.parse::<u64>().unwrap());
+    assert_eq!(envelope.header.expected_revision, revision.to_string());
+    let sequence = (rows.len() + 1).to_string();
+    let digest = super::rekey::envelope_digest(&envelope).unwrap();
+    let history_hash = crypto::hash(
+        &super::wire::canonical(&[
+            "lunport-history-v2",
+            rows.last()
+                .map_or(super::rotation::ZERO, |r| r.history_hash.as_str()),
+            &sequence,
+            &digest,
+        ])
+        .unwrap(),
+    );
+    let row = super::rekey::Version {
+        revision: (revision + 1).to_string(),
+        sequence,
+        envelope,
+        digest,
+        history_hash,
+    };
+    rows.push(row.clone());
+    row
+}
+fn migration_progress(s: &Account) -> Value {
+    let (manifest, phase, rows) = s.migration.as_ref().unwrap();
+    json!({"manifest":manifest,"manifest_digest":manifest.digest().unwrap(),"phase":phase,"staged":rows.len().to_string(),"history_hash":rows.last().map_or(super::rotation::ZERO,|r|r.history_hash.as_str()),"retired":if phase=="retired"{manifest.body.sources.len().to_string()}else{"0".into()}})
+}
+fn install_fresh_library_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Account>>) {
+    let account = Arc::clone(state);
+    server.mock("POST",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/migration/freeze$".into())).with_body_from_request(move |r|{
+        let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();
+        let intent:super::migration_freeze::SignedFreeze=serde_json::from_value(body["intent"].clone()).unwrap();
+        let s=account.lock().unwrap();assert!(intent.body.chains.is_empty());
+        assert_eq!(intent.body.author,s.device(r));
+        json!({"proof":[{"digest":intent.digest().unwrap(),"intent":intent}],"sources":[],"phase":"frozen","next":[]}).to_string().into_bytes()
+    }).create();
+    let account = Arc::clone(state);
+    let exists = Arc::clone(state);
+    server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/migration$".into()),
+        )
+        .with_status_code_from_request(move |_| {
+            if exists.lock().unwrap().migration.is_some() {
+                200
+            } else {
+                404
+            }
+        })
+        .with_body_from_request(move |_| {
+            let s = account.lock().unwrap();
+            if s.migration.is_some() {
+                migration_progress(&s).to_string().into_bytes()
+            } else {
+                b"{}".to_vec()
+            }
+        })
+        .create();
+    for action in ["begin", "stage", "commit", "retire"] {
+        let account = Arc::clone(state);
+        server
+            .mock(
+                "POST",
+                mockito::Matcher::Regex(format!("^/v2/vaults/[0-9a-f]{{64}}/migration/{action}$")),
+            )
+            .with_body_from_request(move |r| {
+                let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
+                let mut s = account.lock().unwrap();
+                if action == "begin" {
+                    let manifest: super::migration::SignedMigration =
+                        serde_json::from_value(body["manifest"].clone()).unwrap();
+                    manifest.body.canonical().unwrap();
+                    s.wraps = serde_json::from_value(body["wraps"].clone()).unwrap();
+                    s.migration = Some((manifest, "staging".into(), vec![]));
+                } else if action == "stage" {
+                    let chain = s.chain().unwrap();
+                    let (_, _, rows) = s.migration.as_mut().unwrap();
+                    assert_eq!(body["after"], rows.len().to_string());
+                    let incoming: Vec<crypto::RecordEnvelope> =
+                        serde_json::from_value(body["rows"].clone()).unwrap();
+                    for envelope in incoming {
+                        envelope
+                            .verify(&chain.current().devices()[&envelope.header.author].signing)
+                            .unwrap();
+                        append_automatic_row(rows, envelope);
+                    }
+                } else {
+                    let (_, phase, rows) = s.migration.as_mut().unwrap();
+                    *phase = "retired".into();
+                    let rows = rows.clone();
+                    s.history = rows;
+                }
+                migration_progress(&s).to_string().into_bytes()
+            })
+            .create();
+    }
+    let account = Arc::clone(state);
+    server.mock("POST",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into())).with_body_from_request(move |r| {
+        let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let mut s=account.lock().unwrap();let chain=s.chain().unwrap();let mut receipts=vec![];
+        let incoming:Vec<crypto::RecordEnvelope>=serde_json::from_value(body["records"].clone()).unwrap();
+        for envelope in incoming { envelope.verify(&chain.current().devices()[&envelope.header.author].signing).unwrap();let row=append_automatic_row(&mut s.history,envelope);
+            receipts.push(json!({"operation_id":row.envelope.header.operation_id,"record_id":row.envelope.header.record_id,"revision":row.revision,"sequence":row.sequence,"digest":row.digest,"history_hash":row.history_hash})); }
+        json!({"receipts":receipts,"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or(super::rotation::ZERO,|r|r.history_hash.as_str())}).to_string().into_bytes()
+    }).create();
+}
+fn install_unlock_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Account>>) {
+    let account = Arc::clone(state);
+    server
+        .mock("GET", "/v2/unlock")
+        .with_header("content-type", "application/json")
+        .with_body_from_request(move |_| {
+            json!({"registry":account.lock().unwrap().unlock})
+                .to_string()
+                .into_bytes()
+        })
+        .create();
+    let account = Arc::clone(state);
+    let reject = Arc::clone(state);
+    server
+        .mock("POST", "/v2/unlock")
+        .with_status_code_from_request(move |_| {
+            if reject.lock().unwrap().reject_unlock {
+                503
+            } else {
+                200
+            }
+        })
+        .with_body_from_request(move |r| {
+            let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
+            let registry: super::unlock_registry::SignedRegistry =
+                serde_json::from_value(body["registry"].clone()).unwrap();
+            let mut s = account.lock().unwrap();
+            let chain = s.chain().unwrap();
+            registry.verify(&chain, None).unwrap();
+            assert_eq!(registry.body.author, s.device(r));
+            assert_eq!(registry.body.authorization_epoch, s.epoch.to_string());
+            if !s.reject_unlock {
+                s.unlock = Some(registry);
+            }
+            b"{}".to_vec()
+        })
+        .create();
+    let account = Arc::clone(state);
+    let response = Arc::clone(state);
+    server
+        .mock("POST", "/v2/unlock/join")
+        .with_status_code_from_request(move |_| {
+            if std::mem::take(&mut response.lock().unwrap().lose_unlock_join_reply) {
+                503
+            } else {
+                200
+            }
+        })
+        .with_body_from_request(move |r| {
+            let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
+            let mut s = account.lock().unwrap();
+            let node: SignedMembership = serde_json::from_value(body["node"].clone()).unwrap();
+            let previous = s.chain().unwrap();
+            if previous.current().head() == crypto::hash(&node.body.canonical().unwrap()) {
+                return b"{}".to_vec();
+            }
+            verify_recovery_read(&s, r, &json!({"proof":body["read_proof"]}));
+            assert_eq!(node.body.action, super::membership::Action::Unlock);
+            let next = previous.current().apply(&node).unwrap();
+            assert_eq!(next.devices().len(), previous.current().devices().len() + 1);
+            let own = s.device(r);
+            assert_eq!(node.body.enrollment.as_ref().unwrap().device.id, own);
+            let confirmation: super::pairing::PairingConfirmation =
+                serde_json::from_value(body["confirmation"].clone()).unwrap();
+            assert_eq!(
+                confirmation.minimums[0].sequence,
+                s.history.len().to_string()
+            );
+            let vault = s.vault.as_ref().unwrap().clone();
+            s.wraps = serde_json::from_value(body["wraps"][&vault].clone()).unwrap();
+            s.confirmations.insert(own, confirmation);
+            s.proof.as_mut().unwrap().nodes.push(node);
+            s.epoch += 1;
+            s.unlock_joins += 1;
+            b"{}".to_vec()
+        })
+        .create();
 }
 fn install_account_access_routes(
     server: &mut mockito::ServerGuard,
@@ -2359,69 +2563,193 @@ fn selected_replacement_identity_is_used_for_sign_in_and_background_resume_witho
 }
 
 #[test]
-fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_only_the_new_device_keys() {
-    use super::{active_read, recovery_flow, recovery_read::{RecoveryVault,EpochBundle}};
-    for recovered in [false,true] {
-        let (service,peer,kit,keys,original)=recovery_fixture_with_source(33);
+fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_only_the_new_device_keys(
+) {
+    use super::{
+        active_read, recovery_flow,
+        recovery_read::{EpochBundle, RecoveryVault},
+    };
+    for recovered in [false, true] {
+        let (service, peer, kit, keys, original) = recovery_fixture_with_source(33);
         if recovered {
-            let ready=recovery_flow::begin(&peer.env(),Some(&kit.kit)).unwrap();
-            recovery_flow::confirm(&peer.env(),ready.operation.as_deref().unwrap()).unwrap();
+            let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+            recovery_flow::confirm(&peer.env(), ready.operation.as_deref().unwrap()).unwrap();
         } else {
             super::round::sync_once(&original.env()).unwrap();
-            let code=devices::pairing_code(&peer.env()).unwrap();devices::approve(&original.env(),&code.code).unwrap();
-            controller::refresh(&peer.env()).unwrap();joining::initialize(&peer.env()).unwrap();
+            let code = devices::pairing_code(&peer.env()).unwrap();
+            devices::approve(&original.env(), &code.code).unwrap();
+            controller::refresh(&peer.env()).unwrap();
+            joining::initialize(&peer.env()).unwrap();
         }
-        let session=controller::context(&peer.env()).unwrap();let identity=session.identity.as_ref().unwrap();
-        let before=record_runtime::snapshot(&peer.env()).unwrap().0;
-        let owner=before.local.central.as_ref().unwrap();
-        let (proof,snapshot,rows)={
-            let state=service.state.lock().unwrap();
-            let head=state.chain().unwrap().current().head().to_string();
-            let committed=if state.key_epoch==1 {None} else {Some(EpochBundle{
-                manifest:state.commits.last().unwrap().clone(),wraps:state.committed_wraps[&state.key_epoch].clone()})};
-            (state.proof.clone().unwrap(),active_read::Snapshot{membership_head:head,auth_epoch:state.epoch,vault:RecoveryVault{
-                vault:state.vault.clone().unwrap(),epoch:state.key_epoch,
-                phase:if state.rekey_pending {"rekey_pending"} else {"ready"}.into(),
-                wrap:state.wraps.iter().find(|w|w.header.recipient==identity.id).unwrap().clone(),committed,
-                commits:state.commits.clone(),sequence:state.history.len().to_string(),
-                history_hash:state.history.last().map_or("0".repeat(64),|r|r.history_hash.clone()),
-            }},state.history.clone())
+        let session = controller::context(&peer.env()).unwrap();
+        let identity = session.identity.as_ref().unwrap();
+        let before = record_runtime::snapshot(&peer.env()).unwrap().0;
+        let owner = before.local.central.as_ref().unwrap();
+        let (proof, snapshot, rows) = {
+            let state = service.state.lock().unwrap();
+            let head = state.chain().unwrap().current().head().to_string();
+            let committed = if state.key_epoch == 1 {
+                None
+            } else {
+                Some(EpochBundle {
+                    manifest: state.commits.last().unwrap().clone(),
+                    wraps: state.committed_wraps[&state.key_epoch].clone(),
+                })
+            };
+            (
+                state.proof.clone().unwrap(),
+                active_read::Snapshot {
+                    membership_head: head,
+                    auth_epoch: state.epoch,
+                    vault: RecoveryVault {
+                        vault: state.vault.clone().unwrap(),
+                        epoch: state.key_epoch,
+                        phase: if state.rekey_pending {
+                            "rekey_pending"
+                        } else {
+                            "ready"
+                        }
+                        .into(),
+                        wrap: state
+                            .wraps
+                            .iter()
+                            .find(|w| w.header.recipient == identity.id)
+                            .unwrap()
+                            .clone(),
+                        committed,
+                        commits: state.commits.clone(),
+                        sequence: state.history.len().to_string(),
+                        history_hash: state
+                            .history
+                            .last()
+                            .map_or("0".repeat(64), |r| r.history_hash.clone()),
+                    },
+                },
+                state.history.clone(),
+            )
         };
-        let mut reader=active_read::ReadSession::begin(owner,identity,proof,snapshot.clone(),&[]).unwrap();
+        let mut reader =
+            active_read::ReadSession::begin(owner, identity, proof, snapshot.clone(), &[]).unwrap();
         for page in rows.chunks(32) {
-            reader.append(super::recovery_read::HistoryPage{records:page.to_vec(),sequence:snapshot.vault.sequence.clone(),
-                history_hash:snapshot.vault.history_hash.clone(),membership_head:snapshot.membership_head.clone(),epoch:snapshot.vault.epoch,phase:snapshot.vault.phase.clone()}).unwrap();
+            reader
+                .append(super::recovery_read::HistoryPage {
+                    records: page.to_vec(),
+                    sequence: snapshot.vault.sequence.clone(),
+                    history_hash: snapshot.vault.history_hash.clone(),
+                    membership_head: snapshot.membership_head.clone(),
+                    epoch: snapshot.vault.epoch,
+                    phase: snapshot.vault.phase.clone(),
+                })
+                .unwrap();
         }
-        let verified=reader.finish().unwrap();assert_eq!(verified.replica().current.len(),33);
-        verified.keys().verify_same(&keys).unwrap();assert_eq!(verified.previous_owner(),owner);
-        let operation="c".repeat(32);
-        let profile=owner.control.profile.profile().unwrap();
+        let verified = reader.finish().unwrap();
+        assert_eq!(verified.replica().current.len(), 33);
+        verified.keys().verify_same(&keys).unwrap();
+        assert_eq!(verified.previous_owner(), owner);
+        let operation = "c".repeat(32);
+        let profile = owner.control.profile.profile().unwrap();
         use crate::sync::env::Keychain;
-        let saved=peer.keychain.entry(&profile.slot("device")).unwrap();
-        peer.keychain.set(&profile.device_slot("device",Some(&operation)).unwrap(),&saved).unwrap();
-        let selected=super::credentials::DeviceIdentity::load_selected(&peer.keychain,&profile,Some(&operation),true).unwrap();
-        let mut candidate=owner.clone();candidate.identity_slot=Some(operation.clone());
-        let mut source=record_runtime::snapshot(&original.env()).unwrap().0.local.central.unwrap();
-        let old_chain=source.control.verified_chain().unwrap();
-        let existing=source.replica.as_ref().unwrap();
-        let partial=super::replica::Replica::new(existing.vault.clone(),existing.creation_head.clone(),existing.creation_authorization_epoch).unwrap();
-        let old=partial.prepare_page(&old_chain,&keys,&rows[..1],&super::rekey::Checkpoint{
-            epoch:1,sequence:1,history_hash:rows[0].history_hash.clone()}).unwrap().next;
-        source.replica=Some(old);source.replacement=Some(super::replacement::Intent{operation:operation.clone(),
-            route:if recovered{super::replacement::Route::RecoveryKit}else{super::replacement::Route::TrustedDevice},device:Some(selected.device()), candidate: None, recovery_confirmation: None, });
+        let saved = peer.keychain.entry(&profile.slot("device")).unwrap();
+        peer.keychain
+            .set(
+                &profile.device_slot("device", Some(&operation)).unwrap(),
+                &saved,
+            )
+            .unwrap();
+        let selected = super::credentials::DeviceIdentity::load_selected(
+            &peer.keychain,
+            &profile,
+            Some(&operation),
+            true,
+        )
+        .unwrap();
+        let mut candidate = owner.clone();
+        candidate.identity_slot = Some(operation.clone());
+        let mut source = record_runtime::snapshot(&original.env())
+            .unwrap()
+            .0
+            .local
+            .central
+            .unwrap();
+        let old_chain = source.control.verified_chain().unwrap();
+        let existing = source.replica.as_ref().unwrap();
+        let partial = super::replica::Replica::new(
+            existing.vault.clone(),
+            existing.creation_head.clone(),
+            existing.creation_authorization_epoch,
+        )
+        .unwrap();
+        let old = partial
+            .prepare_page(
+                &old_chain,
+                &keys,
+                &rows[..1],
+                &super::rekey::Checkpoint {
+                    epoch: 1,
+                    sequence: 1,
+                    history_hash: rows[0].history_hash.clone(),
+                },
+            )
+            .unwrap()
+            .next;
+        source.replica = Some(old);
+        source.replacement = Some(super::replacement::Intent {
+            operation: operation.clone(),
+            route: if recovered {
+                super::replacement::Route::RecoveryKit
+            } else {
+                super::replacement::Route::TrustedDevice
+            },
+            device: Some(selected.device()),
+            candidate: None,
+            recovery_confirmation: None,
+        });
         source.validate().unwrap();
-        let mut reader=active_read::ReadSession::begin(&candidate,&selected,verified.proof().clone(),snapshot.clone(),&[]).unwrap();
-        super::replacement_proof::pin_active_read(&source,&mut reader,&[]).unwrap();
-        for page in rows.chunks(32){reader.append(super::recovery_read::HistoryPage{records:page.to_vec(),sequence:snapshot.vault.sequence.clone(),
-            history_hash:snapshot.vault.history_hash.clone(),membership_head:snapshot.membership_head.clone(),epoch:snapshot.vault.epoch,phase:snapshot.vault.phase.clone()}).unwrap();}
-        let completed=reader.finish().unwrap();super::replacement_proof::active_read(&source,&completed,&[]).unwrap();
-        let newer=source.replica.as_ref().unwrap().prepare_page(&old_chain,&keys,&rows[1..2],&super::rekey::Checkpoint{
-            epoch:1,sequence:2,history_hash:rows[1].history_hash.clone()}).unwrap().next;
-        source.replica=Some(newer);source.validate().unwrap();
-        super::replacement_proof::active_read(&source,&completed,&[]).unwrap();
-        source.replica.as_mut().unwrap().checkpoint.history_hash="f".repeat(64);
-        assert!(super::replacement_proof::active_read(&source,&completed,&[]).is_err());
-        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0,before);
+        let mut reader = active_read::ReadSession::begin(
+            &candidate,
+            &selected,
+            verified.proof().clone(),
+            snapshot.clone(),
+            &[],
+        )
+        .unwrap();
+        super::replacement_proof::pin_active_read(&source, &mut reader, &[]).unwrap();
+        for page in rows.chunks(32) {
+            reader
+                .append(super::recovery_read::HistoryPage {
+                    records: page.to_vec(),
+                    sequence: snapshot.vault.sequence.clone(),
+                    history_hash: snapshot.vault.history_hash.clone(),
+                    membership_head: snapshot.membership_head.clone(),
+                    epoch: snapshot.vault.epoch,
+                    phase: snapshot.vault.phase.clone(),
+                })
+                .unwrap();
+        }
+        let completed = reader.finish().unwrap();
+        super::replacement_proof::active_read(&source, &completed, &[]).unwrap();
+        let newer = source
+            .replica
+            .as_ref()
+            .unwrap()
+            .prepare_page(
+                &old_chain,
+                &keys,
+                &rows[1..2],
+                &super::rekey::Checkpoint {
+                    epoch: 1,
+                    sequence: 2,
+                    history_hash: rows[1].history_hash.clone(),
+                },
+            )
+            .unwrap()
+            .next;
+        source.replica = Some(newer);
+        source.validate().unwrap();
+        super::replacement_proof::active_read(&source, &completed, &[]).unwrap();
+        source.replica.as_mut().unwrap().checkpoint.history_hash = "f".repeat(64);
+        assert!(super::replacement_proof::active_read(&source, &completed, &[]).is_err());
+        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
     }
 }
 
@@ -2698,64 +3026,243 @@ fn trusted_replacement_driver_uses_account_only_login_and_fences_cancelled_or_co
 }
 
 #[test]
-fn scoped_kit_replacement_keeps_the_original_owner_until_backup_recovery_and_a_newer_full_baseline() {
-    use super::{active_flow,owner::OwnerPath,recovery_flow::{self,Scope},recovery_credentials,replacement::{self,Route},replacement_publication::Authorization};
+fn scoped_kit_replacement_keeps_the_original_owner_until_backup_recovery_and_a_newer_full_baseline()
+{
+    use super::{
+        active_flow,
+        owner::OwnerPath,
+        recovery_credentials,
+        recovery_flow::{self, Scope},
+        replacement::{self, Route},
+        replacement_publication::Authorization,
+    };
     use crate::sync::env::Keychain;
-    for interrupted in [false,true] {
-        let (service,_peer,kit,keys,first)=recovery_fixture_with_source(33);super::round::sync_once(&first.env()).unwrap();
-        let original=record_runtime::snapshot(&first.env()).unwrap().0;let old_session=controller::context(&first.env()).unwrap();
-        let profile=old_session.profile.profile().unwrap();first.keychain.delete(&profile.slot("device")).unwrap();controller::refresh(&first.env()).unwrap();
-        assert!(controller::context(&first.env()).unwrap().identity.is_none());
-        first.keychain.set(&profile.slot("recovery-intent"),"unrelated-old-protected-authority").unwrap();
-        let intent=replacement::prepare(&first.env(),Route::RecoveryKit).unwrap();let operation=intent.operation.clone();let path=OwnerPath::Replacement(operation.clone());
-        let selected=super::credentials::DeviceIdentity::load_selected(&first.keychain,&profile,Some(&operation),true).unwrap();
-        let account=controller::context(&first.env()).unwrap();let template=controller::Session{profile:account.profile.clone(),identity:Some(Arc::new(selected)),tokens:Arc::clone(&account.tokens),device:None,device_access_denied:false,tokens_started:account.tokens_started};
-        let api=super::api::Api::new(&service.server.url()).unwrap();let session=Arc::new(bootstrap::register(&first.env(),&template,&api).unwrap());
-        {let _lifecycle=first.runtime.lifecycle.lock().unwrap();replacement::initialize_candidate(&first.env(),&operation,&session).unwrap();}
-        let generation="b".repeat(32);*first.runtime.central_replacement_generation.lock().unwrap()=Some(generation.clone());
-        let scope=Scope::replacement(&operation,Arc::clone(&session),&generation,std::time::Instant::now()).unwrap();
+    for interrupted in [false, true] {
+        let (service, _peer, kit, keys, first) = recovery_fixture_with_source(33);
+        super::round::sync_once(&first.env()).unwrap();
+        let original = record_runtime::snapshot(&first.env()).unwrap().0;
+        let old_session = controller::context(&first.env()).unwrap();
+        let profile = old_session.profile.profile().unwrap();
+        first.keychain.delete(&profile.slot("device")).unwrap();
+        controller::refresh(&first.env()).unwrap();
+        assert!(controller::context(&first.env())
+            .unwrap()
+            .identity
+            .is_none());
+        first
+            .keychain
+            .set(
+                &profile.slot("recovery-intent"),
+                "unrelated-old-protected-authority",
+            )
+            .unwrap();
+        let intent = replacement::prepare(&first.env(), Route::RecoveryKit).unwrap();
+        let operation = intent.operation.clone();
+        let path = OwnerPath::Replacement(operation.clone());
+        let selected = super::credentials::DeviceIdentity::load_selected(
+            &first.keychain,
+            &profile,
+            Some(&operation),
+            true,
+        )
+        .unwrap();
+        let account = controller::context(&first.env()).unwrap();
+        let template = controller::Session {
+            profile: account.profile.clone(),
+            identity: Some(Arc::new(selected)),
+            tokens: Arc::clone(&account.tokens),
+            device: None,
+            device_access_denied: false,
+            tokens_started: account.tokens_started,
+        };
+        let api = super::api::Api::new(&service.server.url()).unwrap();
+        let session = Arc::new(bootstrap::register(&first.env(), &template, &api).unwrap());
+        {
+            let _lifecycle = first.runtime.lifecycle.lock().unwrap();
+            replacement::initialize_candidate(&first.env(), &operation, &session).unwrap();
+        }
+        let generation = "b".repeat(32);
+        *first.runtime.central_replacement_generation.lock().unwrap() = Some(generation.clone());
+        let scope = Scope::replacement(
+            &operation,
+            Arc::clone(&session),
+            &generation,
+            std::time::Instant::now(),
+        )
+        .unwrap();
         if interrupted {
-            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||{super::replacement_flow::cancel(&local.env());assert_eq!(super::replacement_flow::status(&local.env()).unwrap().phase,"paused");}));
-            assert!(recovery_flow::start_at(&first.env(),scope.clone(),Some(&kit.kit),false).is_err());
-            assert!(OwnerPath::Current.snapshot(&first.env()).unwrap().replacement_archives.is_empty());
+            let local = Arc::clone(&first);
+            service.state.lock().unwrap().on_pull = Some(Box::new(move || {
+                super::replacement_flow::cancel(&local.env());
+                assert_eq!(
+                    super::replacement_flow::status(&local.env()).unwrap().phase,
+                    "paused"
+                );
+            }));
+            assert!(
+                recovery_flow::start_at(&first.env(), scope.clone(), Some(&kit.kit), false)
+                    .is_err()
+            );
+            assert!(OwnerPath::Current
+                .snapshot(&first.env())
+                .unwrap()
+                .replacement_archives
+                .is_empty());
             assert!(path.snapshot(&first.env()).unwrap().recovery.is_none());
-            *first.runtime.central_replacement_generation.lock().unwrap()=Some(generation.clone());
+            *first.runtime.central_replacement_generation.lock().unwrap() =
+                Some(generation.clone());
         }
         if !interrupted {
-            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||recovery_flow::cancel(&local.env())));
+            let local = Arc::clone(&first);
+            service.state.lock().unwrap().on_pull =
+                Some(Box::new(move || recovery_flow::cancel(&local.env())));
         }
-        let ready=recovery_flow::start_at(&first.env(),scope.clone(),Some(&kit.kit),false).unwrap();assert_eq!(ready.phase,"backup_required");assert_eq!(ready.operation.as_deref(),Some(operation.as_str()));
-        let shown={let _lifecycle=first.runtime.lifecycle.lock().unwrap();recovery_credentials::reveal_at(&first.env(),&path).unwrap()};assert_ne!(shown.kit,kit.kit);
-        assert!(recovery_flow::confirm(&first.env(),&operation).is_err());
+        let ready =
+            recovery_flow::start_at(&first.env(), scope.clone(), Some(&kit.kit), false).unwrap();
+        assert_eq!(ready.phase, "backup_required");
+        assert_eq!(ready.operation.as_deref(), Some(operation.as_str()));
+        let shown = {
+            let _lifecycle = first.runtime.lifecycle.lock().unwrap();
+            recovery_credentials::reveal_at(&first.env(), &path).unwrap()
+        };
+        assert_ne!(shown.kit, kit.kit);
+        assert!(recovery_flow::confirm(&first.env(), &operation).is_err());
         assert!(recovery_flow::advance(&first.env()).is_err());
-        assert_eq!(controller::context(&first.env()).unwrap().identity.is_none(),true);
-        assert_eq!(OwnerPath::Current.snapshot(&first.env()).unwrap().control.device,original.local.central.as_ref().unwrap().control.device);
+        assert_eq!(
+            controller::context(&first.env())
+                .unwrap()
+                .identity
+                .is_none(),
+            true
+        );
+        assert_eq!(
+            OwnerPath::Current
+                .snapshot(&first.env())
+                .unwrap()
+                .control
+                .device,
+            original.local.central.as_ref().unwrap().control.device
+        );
         // Another old authorized device may append after the initial 33-row verification.
-        let id=super::payload::Identity{kind:"host".into(),id:"0000000000000022".into(),scope:Some(crate::sync::records_v3::HostScope::Local)};
+        let id = super::payload::Identity {
+            kind: "host".into(),
+            id: "0000000000000022".into(),
+            scope: Some(crate::sync::records_v3::HostScope::Local),
+        };
         let data=super::payload::Data::Host(serde_json::from_value(json!({"schema":2,"alias":"late-before-recover","hostname":"late.invalid","auth":"password"})).unwrap());
-        let plain=super::payload::encode(&id,&data).unwrap();
-        {let mut state=service.state.lock().unwrap();let chain=state.chain().unwrap();let anchor=chain.current().anchor();
-            let envelope=crypto::seal_record(&keys,&old_session.identity.as_ref().unwrap().keys,RecordHeader{origin:anchor.origin.clone(),account_id:anchor.account_id.clone(),genesis_hash:anchor.genesis_hash.clone(),
-                vault_id:state.vault.clone().unwrap(),record_id:id.opaque(&keys).unwrap(),key_epoch:"1".into(),membership_head:chain.current().head().into(),author:old_session.identity.as_ref().unwrap().id.clone(),operation_id:"d".repeat(32),expected_revision:"0".into(),kind:"host".into(),deleted:false},&plain).unwrap();
-            let digest=super::rekey::envelope_digest(&envelope).unwrap();let previous=state.history.last().unwrap().history_hash.clone();let history_hash=crypto::hash(&super::wire::canonical(&["lunport-history-v2",&previous,"34",&digest]).unwrap());
-            state.history.push(super::rekey::Version{envelope,digest,history_hash,sequence:"34".into(),revision:"1".into()});}
-        service.state.lock().unwrap().lose_control_response_once=true;
-        assert!(recovery_flow::confirm_at(&first.env(),&scope,&operation).is_err());
-        let complete=recovery_flow::confirm_at(&first.env(),&scope,&operation).unwrap();assert_eq!(complete.phase,"complete");
-        assert!(controller::context(&first.env()).unwrap().identity.is_none());
-        assert_eq!(first.keychain.get(&profile.slot("recovery-intent")).unwrap().as_deref(),Some("unrelated-old-protected-authority"));
-        assert!(first.keychain.get(&profile.device_slot("recovery-intent",Some(&operation)).unwrap()).unwrap().is_none());
-        assert!(OwnerPath::Current.snapshot(&first.env()).unwrap().replacement_archives.is_empty());
-        let lifecycle=first.runtime.lifecycle.lock().unwrap();let renewed=Arc::new(bootstrap::register(&first.env(),&template,&api).unwrap());
-        let mut active=active_flow::Reading::begin(&first.env(),path.clone(),Arc::clone(&renewed),Some(OwnerPath::Current.snapshot(&first.env()).unwrap()),&||super::replacement_flow::check(&first.env(),&generation)).unwrap();
-        assert_eq!(active.total(),34);assert!(active.advance(&first.env(),&||super::replacement_flow::check(&first.env(),&generation)).unwrap());
-        let (read,own,source)=active.finish().unwrap();let authority=Authorization::prepare(&first.env(),renewed,read,own,source).unwrap();
-        authority.publish(&first.env(),&lifecycle).unwrap();
-        let published=record_runtime::snapshot(&first.env()).unwrap().0;let owner=published.local.central.as_ref().unwrap();
-        assert_eq!(owner.replica.as_ref().unwrap().checkpoint.sequence,34);assert_eq!(owner.replica.as_ref().unwrap().current.len(),34);
-        assert_eq!(owner.recovery.as_ref().unwrap().admission().checkpoint.sequence,33);assert_eq!(owner.identity_slot.as_deref(),Some(operation.as_str()));
-        assert_eq!(owner.control.device,session.identity.as_ref().unwrap().device());assert_eq!(owner.replacement_archives.len(),1);
-        assert!(first.keychain.get(&profile.slot("device")).unwrap().is_none());
+        let plain = super::payload::encode(&id, &data).unwrap();
+        {
+            let mut state = service.state.lock().unwrap();
+            let chain = state.chain().unwrap();
+            let anchor = chain.current().anchor();
+            let envelope = crypto::seal_record(
+                &keys,
+                &old_session.identity.as_ref().unwrap().keys,
+                RecordHeader {
+                    origin: anchor.origin.clone(),
+                    account_id: anchor.account_id.clone(),
+                    genesis_hash: anchor.genesis_hash.clone(),
+                    vault_id: state.vault.clone().unwrap(),
+                    record_id: id.opaque(&keys).unwrap(),
+                    key_epoch: "1".into(),
+                    membership_head: chain.current().head().into(),
+                    author: old_session.identity.as_ref().unwrap().id.clone(),
+                    operation_id: "d".repeat(32),
+                    expected_revision: "0".into(),
+                    kind: "host".into(),
+                    deleted: false,
+                },
+                &plain,
+            )
+            .unwrap();
+            let digest = super::rekey::envelope_digest(&envelope).unwrap();
+            let previous = state.history.last().unwrap().history_hash.clone();
+            let history_hash = crypto::hash(
+                &super::wire::canonical(&["lunport-history-v2", &previous, "34", &digest]).unwrap(),
+            );
+            state.history.push(super::rekey::Version {
+                envelope,
+                digest,
+                history_hash,
+                sequence: "34".into(),
+                revision: "1".into(),
+            });
+        }
+        service.state.lock().unwrap().lose_control_response_once = true;
+        assert!(recovery_flow::confirm_at(&first.env(), &scope, &operation).is_err());
+        let complete = recovery_flow::confirm_at(&first.env(), &scope, &operation).unwrap();
+        assert_eq!(complete.phase, "complete");
+        assert!(controller::context(&first.env())
+            .unwrap()
+            .identity
+            .is_none());
+        assert_eq!(
+            first
+                .keychain
+                .get(&profile.slot("recovery-intent"))
+                .unwrap()
+                .as_deref(),
+            Some("unrelated-old-protected-authority")
+        );
+        assert!(first
+            .keychain
+            .get(
+                &profile
+                    .device_slot("recovery-intent", Some(&operation))
+                    .unwrap()
+            )
+            .unwrap()
+            .is_none());
+        assert!(OwnerPath::Current
+            .snapshot(&first.env())
+            .unwrap()
+            .replacement_archives
+            .is_empty());
+        let lifecycle = first.runtime.lifecycle.lock().unwrap();
+        let renewed = Arc::new(bootstrap::register(&first.env(), &template, &api).unwrap());
+        let mut active = active_flow::Reading::begin(
+            &first.env(),
+            path.clone(),
+            Arc::clone(&renewed),
+            Some(OwnerPath::Current.snapshot(&first.env()).unwrap()),
+            &|| super::replacement_flow::check(&first.env(), &generation),
+        )
+        .unwrap();
+        assert_eq!(active.total(), 34);
+        assert!(active
+            .advance(&first.env(), &|| super::replacement_flow::check(
+                &first.env(),
+                &generation
+            ))
+            .unwrap());
+        let (read, own, source) = active.finish().unwrap();
+        let authority = Authorization::prepare(&first.env(), renewed, read, own, source).unwrap();
+        authority.publish(&first.env(), &lifecycle).unwrap();
+        let published = record_runtime::snapshot(&first.env()).unwrap().0;
+        let owner = published.local.central.as_ref().unwrap();
+        assert_eq!(owner.replica.as_ref().unwrap().checkpoint.sequence, 34);
+        assert_eq!(owner.replica.as_ref().unwrap().current.len(), 34);
+        assert_eq!(
+            owner
+                .recovery
+                .as_ref()
+                .unwrap()
+                .admission()
+                .checkpoint
+                .sequence,
+            33
+        );
+        assert_eq!(owner.identity_slot.as_deref(), Some(operation.as_str()));
+        assert_eq!(
+            owner.control.device,
+            session.identity.as_ref().unwrap().device()
+        );
+        assert_eq!(owner.replacement_archives.len(), 1);
+        assert!(first
+            .keychain
+            .get(&profile.slot("device"))
+            .unwrap()
+            .is_none());
     }
 }
 
@@ -2815,45 +3322,277 @@ fn replacement_recovery_commands_resume_after_lost_reply_barrier_cancel_and_rest
 
 #[test]
 fn replacement_ui_invocations_cannot_revive_cancelled_starts_or_control_a_newer_reader() {
-    use super::{replacement_flow as flow,replacement::Route};
+    use super::{replacement::Route, replacement_flow as flow};
     use crate::sync::env::Keychain;
     use std::sync::atomic::Ordering;
-    let (service,_peer,kit,_keys,first)=recovery_fixture_with_source(33);super::round::sync_once(&first.env()).unwrap();
-    let profile=controller::context(&first.env()).unwrap().profile.profile().unwrap();
-    first.keychain.delete(&profile.slot("device")).unwrap();controller::refresh(&first.env()).unwrap();
-    let before=record_runtime::snapshot(&first.env()).unwrap();
-    first.keychain.fail_reads.store(true,Ordering::SeqCst);
-    let cancelled=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();assert!(cancelled.operation.is_none());
-    flow::cancel_invocation(&first.env(),&cancelled).unwrap();
-    assert!(flow::start_invocation(&first.env(),&cancelled,Some(&kit.kit)).is_err());
-    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(),before);
-    first.keychain.fail_reads.store(false,Ordering::SeqCst);
-    let current=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();
-    flow::cancel_invocation(&first.env(),&cancelled).unwrap();
-    assert_eq!(first.runtime.central_replacement_generation.lock().unwrap().as_deref(),Some(current.generation.as_str()));
-    let mut forged=current.clone();forged.route=Route::TrustedDevice;assert!(flow::start_invocation(&first.env(),&forged,None).is_err());
-    let mut forged=current.clone();forged.scope="f".repeat(64);assert!(flow::start_invocation(&first.env(),&forged,None).is_err());
-    let ready=flow::start_invocation(&first.env(),&current,Some(&kit.kit)).unwrap();assert_eq!(ready.phase,"backup_required");let operation=ready.operation.unwrap();
-    let shown=flow::reveal_kit_invocation(&first.env(),&current,&operation).unwrap();
-    flow::cancel_invocation(&first.env(),&current).unwrap();
-    let next=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();assert_eq!(next.operation.as_deref(),Some(operation.as_str()));
-    let retained=record_runtime::snapshot(&first.env()).unwrap();
-    assert!(flow::confirm_invocation(&first.env(),&current,&operation).is_err());
-    assert!(flow::revalidate_invocation(&first.env(),&current,&operation,None).is_err());
-    assert!(flow::reveal_kit_invocation(&first.env(),&current,&operation).is_err());
-    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(),retained);
-    assert_eq!(flow::reveal_kit_invocation(&first.env(),&next,&operation).unwrap().kit,shown.kit);
-    let reading=flow::confirm_invocation(&first.env(),&next,&operation).unwrap();assert_eq!(reading.phase,"reading");
-    let latest=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();
-    assert_eq!(flow::start_invocation(&first.env(),&latest,None).unwrap().phase,"reading");
-    let pulls=service.state.lock().unwrap().pulls;
-    assert!(flow::continue_invocation(&first.env(),&next,&operation).is_err());
-    flow::cancel_invocation(&first.env(),&next).unwrap();assert_eq!(service.state.lock().unwrap().pulls,pulls);
-    assert_eq!(flow::status(&first.env()).unwrap().verified,0);
-    assert_eq!(flow::continue_invocation(&first.env(),&latest,&operation).unwrap().phase,"complete");
-    assert_eq!(flow::cancel_invocation(&first.env(),&latest).unwrap().phase,"complete");
+    let (service, _peer, kit, _keys, first) = recovery_fixture_with_source(33);
+    super::round::sync_once(&first.env()).unwrap();
+    let profile = controller::context(&first.env())
+        .unwrap()
+        .profile
+        .profile()
+        .unwrap();
+    first.keychain.delete(&profile.slot("device")).unwrap();
+    controller::refresh(&first.env()).unwrap();
+    let before = record_runtime::snapshot(&first.env()).unwrap();
+    first.keychain.fail_reads.store(true, Ordering::SeqCst);
+    let cancelled = flow::reserve_invocation(&first.env(), Route::RecoveryKit).unwrap();
+    assert!(cancelled.operation.is_none());
+    flow::cancel_invocation(&first.env(), &cancelled).unwrap();
+    assert!(flow::start_invocation(&first.env(), &cancelled, Some(&kit.kit)).is_err());
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(), before);
+    first.keychain.fail_reads.store(false, Ordering::SeqCst);
+    let current = flow::reserve_invocation(&first.env(), Route::RecoveryKit).unwrap();
+    flow::cancel_invocation(&first.env(), &cancelled).unwrap();
+    assert_eq!(
+        first
+            .runtime
+            .central_replacement_generation
+            .lock()
+            .unwrap()
+            .as_deref(),
+        Some(current.generation.as_str())
+    );
+    let mut forged = current.clone();
+    forged.route = Route::TrustedDevice;
+    assert!(flow::start_invocation(&first.env(), &forged, None).is_err());
+    let mut forged = current.clone();
+    forged.scope = "f".repeat(64);
+    assert!(flow::start_invocation(&first.env(), &forged, None).is_err());
+    let ready = flow::start_invocation(&first.env(), &current, Some(&kit.kit)).unwrap();
+    assert_eq!(ready.phase, "backup_required");
+    let operation = ready.operation.unwrap();
+    let shown = flow::reveal_kit_invocation(&first.env(), &current, &operation).unwrap();
+    flow::cancel_invocation(&first.env(), &current).unwrap();
+    let next = flow::reserve_invocation(&first.env(), Route::RecoveryKit).unwrap();
+    assert_eq!(next.operation.as_deref(), Some(operation.as_str()));
+    let retained = record_runtime::snapshot(&first.env()).unwrap();
+    assert!(flow::confirm_invocation(&first.env(), &current, &operation).is_err());
+    assert!(flow::revalidate_invocation(&first.env(), &current, &operation, None).is_err());
+    assert!(flow::reveal_kit_invocation(&first.env(), &current, &operation).is_err());
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(), retained);
+    assert_eq!(
+        flow::reveal_kit_invocation(&first.env(), &next, &operation)
+            .unwrap()
+            .kit,
+        shown.kit
+    );
+    let reading = flow::confirm_invocation(&first.env(), &next, &operation).unwrap();
+    assert_eq!(reading.phase, "reading");
+    let latest = flow::reserve_invocation(&first.env(), Route::RecoveryKit).unwrap();
+    assert_eq!(
+        flow::start_invocation(&first.env(), &latest, None)
+            .unwrap()
+            .phase,
+        "reading"
+    );
+    let pulls = service.state.lock().unwrap().pulls;
+    assert!(flow::continue_invocation(&first.env(), &next, &operation).is_err());
+    flow::cancel_invocation(&first.env(), &next).unwrap();
+    assert_eq!(service.state.lock().unwrap().pulls, pulls);
+    assert_eq!(flow::status(&first.env()).unwrap().verified, 0);
+    assert_eq!(
+        flow::continue_invocation(&first.env(), &latest, &operation)
+            .unwrap()
+            .phase,
+        "complete"
+    );
+    assert_eq!(
+        flow::cancel_invocation(&first.env(), &latest)
+            .unwrap()
+            .phase,
+        "complete"
+    );
 }
 
 #[cfg(any(unix, windows))]
 #[path = "active_cycle_tests.rs"]
 mod active_cycle_tests;
+
+#[test]
+fn automatic_password_setup_commits_only_ciphertext_before_cleanup_and_new_device_unlock_is_additive(
+) {
+    use super::{automatic, unlock_flow};
+    let service = Service::at_origin(Some("https://sync.example"));
+    super::api::with_test_transport(&service.origin, &service.server.url(), || {
+        let relay = FakeRelay::new();
+        let clock = TestClock::new();
+        let first = TestDevice::new("automatic-first", &relay, &clock);
+        let peer = TestDevice::new("automatic-peer", &relay, &clock);
+        service.login(&first);
+        assert_eq!(
+            automatic::start(&first.env()).unwrap().phase,
+            "password_setup"
+        );
+        let password = "synthetic long unlock password";
+        service.state.lock().unwrap().reject_unlock = true;
+        assert!(automatic::password(&first.env(), password).is_err());
+        let session = controller::context(&first.env()).unwrap();
+        let profile = session.profile.profile().unwrap();
+        assert!(
+            crate::sync::env::Keychain::get(&first.keychain, &profile.slot("bootstrap"))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            controller::status(&first.env()).unwrap().phase,
+            "backup_required"
+        );
+        assert!(!controller::status(&first.env()).unwrap().can_sync);
+        service.state.lock().unwrap().reject_unlock = false;
+        automatic::password(&first.env(), password).unwrap();
+        assert!(
+            crate::sync::env::Keychain::get(&first.keychain, &profile.slot("bootstrap"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !serde_json::to_string(&service.state.lock().unwrap().unlock)
+                .unwrap()
+                .contains(password)
+        );
+        let first_id = controller::context(&first.env())
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap()
+            .id
+            .clone();
+        service.login(&peer);
+        automatic::start(&peer.env()).unwrap();
+        let before = record_runtime::snapshot(&peer.env()).unwrap();
+        assert!(automatic::password(&peer.env(), "wrong password").is_err());
+        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap(), before);
+        assert_eq!(service.state.lock().unwrap().unlock_joins, 0);
+        automatic::password(&peer.env(), password).unwrap();
+        assert!(unlock_flow::active(&peer.env()));
+        assert!(!unlock_flow::advance(&peer.env()).unwrap());
+        joining::initialize(&peer.env()).unwrap();
+        assert_eq!(controller::status(&peer.env()).unwrap().phase, "enrolled");
+        let s = service.state.lock().unwrap();
+        assert!(s
+            .chain()
+            .unwrap()
+            .current()
+            .devices()
+            .contains_key(&first_id));
+        assert_eq!(s.chain().unwrap().current().devices().len(), 2);
+        assert_eq!(s.unlock_joins, 1);
+    });
+}
+#[test]
+fn automatic_unlock_resumes_a_committed_join_after_lost_reply_and_process_restart() {
+    use super::{automatic, unlock_flow};
+    let service = Service::at_origin(Some("https://sync.example"));
+    super::api::with_test_transport(&service.origin, &service.server.url(), || {
+        let relay = FakeRelay::new();
+        let clock = TestClock::new();
+        let first = TestDevice::new("automatic-a", &relay, &clock);
+        let peer = TestDevice::new("automatic-b", &relay, &clock);
+        service.login(&first);
+        automatic::start(&first.env()).unwrap();
+        let password = "synthetic recovery password";
+        automatic::password(&first.env(), password).unwrap();
+        service.login(&peer);
+        automatic::start(&peer.env()).unwrap();
+        automatic::password(&peer.env(), password).unwrap();
+        service.state.lock().unwrap().lose_unlock_join_reply = true;
+        assert!(unlock_flow::advance(&peer.env()).is_err());
+        assert_eq!(service.state.lock().unwrap().unlock_joins, 1);
+        assert_eq!(
+            controller::status(&peer.env()).unwrap().phase,
+            "awaiting_approval"
+        );
+        unlock_flow::cancel(&peer.env());
+        service.login(&peer);
+        joining::initialize(&peer.env()).unwrap();
+        assert_eq!(controller::status(&peer.env()).unwrap().phase, "enrolled");
+        assert_eq!(service.state.lock().unwrap().unlock_joins, 1);
+    });
+}
+
+#[test]
+fn automatic_fresh_library_publishes_and_second_device_materializes_hosts_without_manual_review() {
+    use super::automatic;
+    let service = Service::at_origin(Some("https://sync.example"));
+    super::api::with_test_transport(&service.origin, &service.server.url(), || {
+        let relay = FakeRelay::new();
+        let clock = TestClock::new();
+        let first = TestDevice::new("automatic-library-a", &relay, &clock);
+        let peer = TestDevice::new("automatic-library-b", &relay, &clock);
+        service.login(&first);
+        crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
+        let payload:crate::sync::records_v3::HostPayload=serde_json::from_value(json!({"schema":2,"alias":"automatic-host","hostname":"synthetic.invalid","user":"fixture","port":22,"auth":"password"})).unwrap();
+        crate::sync::record_commands::edit_records(&first.env(), |state, now| {
+            crate::sync::record_repository::create_host(
+                state,
+                "f".repeat(16).as_str(),
+                crate::sync::records_v3::HostScope::Local,
+                payload.clone(),
+                now,
+            )
+            .map_err(|_| super::wire::invalid())
+        })
+        .unwrap();
+        let key_text = crate::sync::slot_rules::test_keys::plain();
+        let key = crate::sync::record_keys::import_local(
+            &first.env(),
+            "automatic-key",
+            Zeroizing::new(key_text.clone()),
+            crate::vault::store::EntryOrigin::Imported,
+        )
+        .unwrap();
+        automatic::start(&first.env()).unwrap();
+        automatic::password(&first.env(), "automatic test password").unwrap();
+        // Renew a missing device grant without repeating the sync password setup.
+        let previous = controller::context(&first.env()).unwrap();
+        first.runtime.core.lock().unwrap().central_session = Some(Arc::new(controller::Session {
+            profile: previous.profile.clone(), identity: previous.identity.clone(),
+            tokens: previous.tokens.clone(), device: None, device_access_denied: false,
+            tokens_started: previous.tokens_started,
+        }));
+        for _ in 0..40 {
+            if controller::status(&first.env()).unwrap().can_sync {
+                break;
+            }
+            automatic::step(&first.env()).unwrap();
+        }
+        assert!(controller::status(&first.env()).unwrap().can_sync);
+        assert!(!service.state.lock().unwrap().history.is_empty());
+        service.login(&peer);
+        crate::sync::testkit::private_directory(peer.env().state_path.parent().unwrap());
+        automatic::start(&peer.env()).unwrap();
+        automatic::password(&peer.env(), "automatic test password").unwrap();
+        service.state.lock().unwrap().corrupt_pull_once = true;
+        assert!(super::unlock_flow::advance(&peer.env()).is_err());
+        assert_eq!(service.state.lock().unwrap().unlock_joins, 0);
+        assert_eq!(
+            controller::status(&peer.env()).unwrap().phase,
+            "awaiting_approval"
+        );
+        super::unlock_flow::cancel(&peer.env());
+        automatic::password(&peer.env(), "automatic test password").unwrap();
+        for _ in 0..40 {
+            if controller::status(&peer.env()).unwrap().can_sync {
+                break;
+            }
+            automatic::step(&peer.env()).unwrap();
+        }
+        assert!(controller::status(&peer.env()).unwrap().can_sync);
+        let records = record_runtime::snapshot(&peer.env()).unwrap().0;
+        let overview = crate::sync::record_commands::overview(&peer.env()).unwrap();
+        assert!(serde_json::to_string(&overview)
+            .unwrap()
+            .contains("automatic-host"));
+        assert!(records.local.central.as_ref().unwrap().control.cutover);
+        let vault = crate::vault::store::read_vault(
+            &crate::vault::store::vault_path(&peer.env().state_path),
+            &peer.keychain,
+        )
+        .unwrap();
+        assert_eq!(
+            vault.get(&records.local.keys.values().find(|k| k.public.fingerprint == key.public.fingerprint).unwrap().vault_id).unwrap().unwrap().private_key,
+            key_text
+        );
+    });
+}
