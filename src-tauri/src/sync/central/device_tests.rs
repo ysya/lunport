@@ -3647,3 +3647,39 @@ fn automatic_fresh_library_publishes_and_second_device_materializes_hosts_withou
         );
     });
 }
+
+#[test]
+fn automatic_empty_library_resumes_after_signout_before_cutover() {
+    use super::automatic;
+    for prepared_steps in [0, 2] {
+        let service = Service::automatic();
+        super::api::with_test_transport(&service.origin, &service.server.url(), || {
+            let first = TestDevice::new("resume-empty", &FakeRelay::new(), &TestClock::new());
+            service.login(&first);
+            crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
+            automatic::start(&first.env()).unwrap();
+            automatic::password(&first.env(), "synthetic resume password").unwrap();
+            for _ in 0..prepared_steps { automatic::step(&first.env()).unwrap(); }
+            controller::sign_out(&first.env()).unwrap();
+            let signed_out = record_runtime::snapshot(&first.env()).unwrap().0;
+            let other = LoginTokens {
+                issuer: service.config.issuer.clone(), subject: "another-account".into(),
+                nonce: Zeroizing::new("synthetic nonce".into()),
+                access: Zeroizing::new("synthetic access".into()),
+                refresh: Some(Zeroizing::new("synthetic refresh".into())),
+                expires_in: std::time::Duration::from_secs(300),
+            };
+            let error = controller::establish(&first.env(), &service.origin, service.config.clone(), other, None).unwrap_err().to_string();
+            assert!(error.contains("different account"));
+            assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, signed_out);
+            service.login(&first);
+            joining::initialize(&first.env()).unwrap();
+            automatic::start(&first.env()).unwrap();
+            for step in 0..40 {
+                if controller::status(&first.env()).unwrap().can_sync { break; }
+                automatic::step(&first.env()).unwrap_or_else(|error| panic!("resume step {step}, prepared {prepared_steps}: {error}"));
+            }
+            assert!(controller::status(&first.env()).unwrap().can_sync);
+        });
+    }
+}

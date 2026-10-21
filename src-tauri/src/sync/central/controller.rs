@@ -328,7 +328,9 @@ fn establish_locked(
         .as_ref()
         .is_some_and(|w| w.control.profile != profile_data)
     {
-        return Err(invalid());
+        return Err(AppError::Other(
+            "This sign-in belongs to a different account. Use the account originally used for this library. Local data is retained.".into(),
+        ));
     }
     if new_login {
         credentials::save_refresh(env.keychain, &profile, &config, &tokens)?;
