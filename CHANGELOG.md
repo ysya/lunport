@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/ysya/lunport/compare/v1.10.0...v1.10.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* export and recover cached host settings ([#61](https://github.com/ysya/lunport/issues/61)) ([976083b](https://github.com/ysya/lunport/commit/976083bd40ed8ea1db5e040c6c93b996bd3a86ca))
+
 ## [1.10.0](https://github.com/ysya/lunport/compare/v1.9.0...v1.10.0) (2026-10-21)
 
 Create an account on your own server using an email as its name and a Passkey. Email is unverified and cannot recover the account; no SMTP or verification message is required. The sync unlock password stays in the app.
