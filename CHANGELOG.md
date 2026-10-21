@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.4](https://github.com/ysya/lunport/compare/v1.10.3...v1.10.4) (2026-10-21)
+
+
+### Bug Fixes
+
+* **import:** preserve Groups in host settings exports ([#72](https://github.com/ysya/lunport/issues/72)) ([fdbc45c](https://github.com/ysya/lunport/commit/fdbc45c6582c4f3046795f174adefca263254632))
+* recover sync in one library and streamline MCP access ([#74](https://github.com/ysya/lunport/issues/74)) ([ccc0adc](https://github.com/ysya/lunport/commit/ccc0adc9c6515ce52da95c66c839dcce52c519ca))
+* **sync:** remove obsolete manual device pairing UI ([#71](https://github.com/ysya/lunport/issues/71)) ([f62c738](https://github.com/ysya/lunport/commit/f62c738b7ea0eb2075ff29f74cfb46cb7e6862c2))
+
 ## [1.10.3](https://github.com/ysya/lunport/compare/v1.10.2...v1.10.3) (2026-10-21)
 
 Fix Windows failing after **Unlock and sync** when structured state exceeds Credential Manager’s 2,560-byte limit. Large local values now use current-user Windows DPAPI with a small OS-protected descriptor that pins the current ciphertext. Legacy small credentials, noninteractive operation and interrupted-write recovery remain supported. Accounts, local hosts, SSH keys and sync passwords are preserved; no server reset is required.
