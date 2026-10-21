@@ -102,7 +102,7 @@ The relay can run on Cloudflare Workers or your own server with Docker Compose. 
 
 ## AI access through MCP
 
-Open **Settings → AI access**, enable access and choose the individual hosts a client may use. Under **Connect an AI tool**, select Codex, Claude Code, Claude Desktop, Cursor or VS Code and choose **Add**. Codex and Claude settings are backed up before the app saves its entry; Cursor and VS Code open their own installation review. Existing unrelated servers and settings are preserved. Adding a tool does not grant host permissions or change command review.
+Open **Settings → AI access**, enable access and choose the hosts or Groups a client may use. An explicitly allowed Group includes subgroups and current or future members, including synced hosts. Moving a host out removes that Group permission; individual grants remain until removed separately. Group permissions are local to this device and library, use stable IDs, and are independent of the display name. Renaming retains permission; another Group with the same name receives none. Under **Connect an AI tool**, select Codex, Claude Code, Claude Desktop, Cursor or VS Code and choose **Add**. Codex and Claude settings are backed up before the app saves its entry; Cursor and VS Code open their own installation review. Existing unrelated servers and settings are preserved. Adding a tool does not grant host permissions or change command review.
 
 **Configured** means the settings were saved, not that the client is connected. Start a new Codex or Claude Code session, or quit and reopen Claude Desktop, to load the server. Cursor and VS Code finish installation in their own UI. **Refresh status** checks the local settings again; **Repair setup** can update an existing Lunport entry. A conflicting server name, malformed settings or a managed settings symlink is left untouched, with manual setup available.
 
@@ -112,13 +112,13 @@ The Records adapter uses an OS-authenticated local session broker. It can start 
 
 | Tool | Behavior |
 | --- | --- |
-| `list_hosts` | List individually permitted hosts. |
+| `list_hosts` | List hosts allowed individually or through a Group. |
 | `get_host` | Read sanitized public settings for a permitted host. |
 | `ssh_exec` | Execute a bounded command under Ask or explicitly acknowledged Auto-log. |
 | `create_host` | Propose public connection settings for your review. Saving does not grant AI access or trust a server key. |
 | `verify_host_key` | Verify a permitted host's fingerprint, with an in-app trust decision for a new or changed key. |
 
-For example, a client can propose `create_host` with `{"alias":"web","hostname":"server.example.com","user":"deploy","port":22}`. Review the settings in Lunport, then separately allow that host in AI access before inspection, fingerprint verification or command execution. Creation fields cannot supply passwords, private keys, host-key pins or AI permission grants.
+For example, a client can propose `create_host` with `{"alias":"web","hostname":"server.example.com","user":"deploy","port":22}`. Review the settings in Lunport, then allow that host in AI access, or save it in an already allowed Group, before inspection, fingerprint verification or command execution. The native creation review shows whether existing Group permission applies. Creation fields cannot supply passwords, private keys, host-key pins or AI permission grants.
 
 `verify_host_key` accepts a host ID or exact alias; the client cannot supply a trust decision. You can also use **Edit host → Server identity → Verify server fingerprint**. Verification stops before destination login or remote commands. Jump hosts may need their own credentials. A matching saved fingerprint does not prompt again; a changed destination, route, permission or pin requires verification again.
 

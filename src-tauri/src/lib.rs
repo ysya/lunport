@@ -48,7 +48,7 @@ use deploy::{
 };
 use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
 use known_hosts::{known_hosts_list, known_hosts_remove};
-use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
+use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_set_group_allowed, mcp_status};
 use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
 use sync::engine::sync_overview;
@@ -455,6 +455,7 @@ fn run_app(host: bool, start_hidden: bool) {
             session::auth_window::auth_resolve,
             mcp_set_enabled,
             mcp_set_host_allowed,
+            mcp_set_group_allowed,
             mcp_resolve_request,
             sync_overview,
             sync::engine::sync_key_candidates,

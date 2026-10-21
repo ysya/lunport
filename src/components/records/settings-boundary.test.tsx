@@ -32,7 +32,7 @@ describe("records settings compatibility", () => {
       audit_error: null,
       enabled: false,
       bridge_active: true,
-      allowed_hosts: [],
+      allowed_hosts: [], allowed_groups: [],
       pending: [],
       recent: [],
       executable: "/fixture/sshelter",
@@ -62,7 +62,7 @@ describe("records settings compatibility", () => {
       if (category === "ai") {
         expect(text(html)).toContain("MCP");
         expect(text(html)).toContain(
-          "Only individually allowed hosts are available",
+          "Only allowed hosts and Group members are available",
         );
         expect(html).toContain("mcp-host-0000000000000001");
       }

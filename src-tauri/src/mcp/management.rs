@@ -231,7 +231,9 @@ pub(super) fn create(
     let payload = payload(input)?;
     let id = crate::sync::record_commands::new_host_id().map_err(|e| e.to_string())?;
     let state = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
-    let (_, proposal) = candidate(&state, &id, &payload, env.now())?;
+    let (candidate_state, mut proposal) = candidate(&state, &id, &payload, env.now())?;
+    let access = |s: &SyncStateV3, policy: &McpPolicy| repo::get_host(s, &id).is_ok_and(|host| permissions::record_allowed(policy, s, &host));
+    proposal.settings.push(("AI access".into(), if access(&candidate_state, &policy) { "Allowed by existing Group permission" } else { "Not allowed" }.into()));
     let _active = active(runtime, &mut context, &id, cancel)?;
     live(runtime, policy.approval_mode, cancel)?;
     let request = McpPendingRequest {
@@ -259,14 +261,16 @@ pub(super) fn create(
         live(runtime, policy.approval_mode, cancel)?;
         crate::sync::record_commands::edit_records(env,|state,now|{
             live(runtime,policy.approval_mode,cancel).map_err(AppError::Other)?;
-            let (next,current)=candidate(state,&id,&payload,now).map_err(AppError::Other)?;
+            let (next,mut current)=candidate(state,&id,&payload,now).map_err(AppError::Other)?;
+            let current_policy = runtime.policy.lock().unwrap().clone();
+            current.settings.push(("AI access".into(), if access(&next, &current_policy) { "Allowed by existing Group permission" } else { "Not allowed" }.into()));
             if current!=proposal{return Err(AppError::Other("Connection settings or storage changed while awaiting approval. Request creation again.".into()));}
             Ok(next)
         }).map_err(|e|e.to_string())?;
         let state = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
         let host = repo::get_host(&state, &id).map_err(|e| e.to_string())?;
         Ok(
-            json!({"host":records::metadata(&state,&host)?,"ai_access_allowed":runtime.policy.lock().unwrap().allowed_hosts.contains(&id),"message":"Host saved. Creating a host does not grant AI access or trust its server key; allow the host separately in Lunport AI Access."}),
+            json!({"host":records::metadata(&state,&host)?,"ai_access_allowed":permissions::record_allowed(&runtime.policy.lock().unwrap(), &state, &host),"message":"Host saved. AI access follows existing individual and Group permissions; server trust is still verified separately."}),
         )
     })();
     runtime.record(McpAuditEntry {
@@ -298,6 +302,7 @@ pub(super) fn verify(
     mut context: RequestContext,
     cancel: &CancelToken,
     owner: &dyn crate::session::auth::Owner,
+    authorize: &(dyn Fn(&McpPolicy, &str) -> Result<(), String> + Sync),
 ) -> Result<Value, String> {
     let target = connector
         .directory
@@ -317,12 +322,13 @@ pub(super) fn verify(
         .to_owned();
     let query = HostQuery::Id(host.clone());
     let policy = runtime.policy.lock().unwrap().clone();
-    ensure_allowed(&policy, &host)?;
+    authorize(&policy, &host)?;
     let approved = records::ApprovedTarget::capture(&target, connector.keys)?;
     let _active = active(runtime, &mut context, &host, cancel)?;
     let check = || {
         live(runtime, policy.approval_mode, cancel)?;
-        ensure_allowed(&runtime.policy.lock().unwrap(), &host)?;
+        let current_policy = runtime.policy.lock().unwrap().clone();
+        authorize(&current_policy, &host)?;
         let current = connector
             .directory
             .resolve_host_key(&query)
@@ -369,7 +375,7 @@ pub(super) fn verify(
 
 pub(super) fn tool_definitions() -> Vec<Value> {
     vec![
-        json!({"name":"create_host","title":"Propose a new SSH host","description":"Propose public connection settings. Lunport always asks the user before saving, including in Auto-log mode. Does not connect, trust a host key, import private keys or grant AI access.","inputSchema":{"type":"object","properties":{
+        json!({"name":"create_host","title":"Propose a new SSH host","description":"Propose public connection settings. Lunport always asks the user before saving, including in Auto-log mode. Does not connect, trust a host key or import private keys. A host in an explicitly allowed Group inherits its AI access.","inputSchema":{"type":"object","properties":{
         "alias":{"type":"string","maxLength":128},"hostname":{"type":"string","maxLength":255},"port":{"type":"integer","minimum":1,"maximum":65535,"default":22},"user":{"type":"string","maxLength":128},"auth":{"type":"string","enum":["password","key","interactive"],"default":"password"},"key_id":{"type":"string","description":"Existing Lunport key ID; no private key or password."},"group_id":{"type":"string","description":"Optional existing Group ID; settings remain explicit overrides."},"jump":{"type":"array","items":{"type":"string"},"maxItems":5},"keepalive_secs":{"type":"integer","minimum":0},"keepalive_max_missed":{"type":"integer","minimum":0},"connect_timeout_secs":{"type":"integer","minimum":1},"tags":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":64}}},"required":["alias","hostname"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}),
         json!({"name":"verify_host_key","title":"Verify and review a server fingerprint","description":"For an AI-approved host, perform the SSH handshake and show Lunport's native trust window for a new or changed server key. New or changed keys always need a human trust decision; never authenticates to the destination or runs a command. Jump hosts may require login. Does not bypass Auto-log's no-interaction policy for ssh_exec.","inputSchema":{"type":"object","properties":{"alias":{"type":"string","description":"AI-approved stable host ID or exact unambiguous alias."}},"required":["alias"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}}),
     ]

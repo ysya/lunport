@@ -13,7 +13,7 @@ const status: McpStatus = {
   enabled: true, bridge_active: true, approval_mode: "ask",
   noninteractive_credentials_supported: false,
   noninteractive_credentials_notice: "Stored credentials require Ask on macOS.",
-  audit_error: "Audit file unavailable", allowed_hosts: ["0000000000000001"], pending: [],
+  audit_error: "Audit file unavailable", allowed_hosts: ["0000000000000001"], allowed_groups: [], pending: [],
   recent: [{
     id: "a", client: "mcp", host_id: "0000000000000001", alias: "web", command: "sleep 4", mode: "ask",
     requested_by: ["observed-process"], requester_id: "42", client_info: { name: "claimed-client", title: null, version: "1" },
@@ -46,7 +46,7 @@ describe("Records AI Access", () => {
     expect(html).toContain("claimed-client");
   });
 
-  it("shows effective endpoint and nested Group path without a Group grant control", () => {
+  it("shows effective endpoint, nested Group controls and separate individual access", () => {
     const parent = groupView({ id: "group-1", payload: { schema: 1, name: "Operations", parent_id: null, defaults: {} } });
     const child = groupView({ id: "group-2", payload: { schema: 1, name: "Fleet", parent_id: "group-1", defaults: {} } });
     const html = render(recordOverview({
@@ -56,7 +56,22 @@ describe("Records AI Access", () => {
     expect(html).toContain("ops@fixture.invalid:2222");
     expect(html).toContain("Group: Operations / Fleet");
     expect(html).not.toContain("fallback@");
-    expect((html.match(/role="switch"/g) ?? []).length).toBe(2);
+    expect((html.match(/role="switch"/g) ?? []).length).toBe(4);
+    expect(html).toContain("Allow Group Operations / Fleet");
+    expect(html).toContain("hosts added or moved into the Group later");
+  });
+
+  it("shows effective Group access while preserving a separate individual switch", () => {
+    const parent = groupView({ id: "group-1", payload: { schema: 1, name: "Operations", parent_id: null, defaults: {} } });
+    const child = groupView({ id: "group-2", payload: { schema: 1, name: "Fleet", parent_id: "group-1", defaults: {} } });
+    const overview = recordOverview({ groups: [parent, child], hosts: [hostView({ payload: hostPayload({ group_id: "group-2" }) })] });
+    const policy = { ...status, allowed_hosts: [], allowed_groups: ["local/group-1"] };
+    expect(render(overview, policy)).toContain("1 of 1 hosts · 1 allowed");
+    expect(render(overview, policy)).toContain("Allowed through Group; individual grant is separate");
+    expect(render(overview, policy)).toContain("Allow web individually");
+    expect(render(overview, policy)).toContain("Covered by an allowed parent; this switch adds a separate grant");
+    expect(render({ ...overview, groups: [child] }, policy)).toContain("1 of 1 hosts · 0 allowed");
+    expect(render({ ...overview, hosts: [hostView()] }, policy)).toContain("1 of 1 hosts · 0 allowed");
   });
 
   it("renders only the latest ten real endings without inferring success", () => {

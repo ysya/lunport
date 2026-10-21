@@ -29,6 +29,7 @@ use crate::state::AppState;
 pub(crate) mod records;
 mod adapter;
 mod management;
+mod permissions;
 pub use records::RequestContext;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -42,6 +43,8 @@ struct McpPolicy {
     enabled: bool,
     #[serde(default)]
     allowed_hosts: BTreeSet<String>,
+    #[serde(default)]
+    allowed_groups: BTreeSet<String>,
     #[serde(default)]
     approval_mode: ApprovalMode,
 }
@@ -129,6 +132,7 @@ pub struct McpStatus {
     pub enabled: bool,
     pub bridge_active: bool,
     pub allowed_hosts: Vec<String>,
+    pub allowed_groups: Vec<String>,
     pub pending: Vec<McpPendingRequest>,
     pub recent: Vec<McpAuditEntry>,
     pub executable: String,
@@ -228,6 +232,7 @@ impl McpRuntime {
             enabled: policy.enabled,
             bridge_active: self.bridge_active.load(Ordering::Relaxed),
             allowed_hosts: policy.allowed_hosts.into_iter().collect(),
+            allowed_groups: vec![],
             pending,
             recent,
             executable: std::env::current_exe()
@@ -1136,6 +1141,12 @@ pub fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
 }
 fn status_for(state:&AppState)->McpStatus{
     let mut status=state.mcp.status();
+    {
+        let core = state.sync.core.lock().unwrap();
+        if let Ok(records) = crate::sync::record_runtime::active_state(&core) {
+            status.allowed_groups = permissions::active_groups(&state.mcp.policy.lock().unwrap(), records);
+        }
+    }
     if state.sync.core.lock().unwrap().format==crate::sync::record_runtime::RuntimeFormat::Records {status.bridge_active=matches!(*state.session.status.lock().unwrap(),crate::session::app::BrokerStatus::Running);}
     status
 }
@@ -1210,6 +1221,29 @@ pub fn mcp_set_host_allowed(
             let _ = request.decision.send(ApprovalDecision::Deny);
         }
     }
+    Ok(status_for(&state))
+}
+
+#[tauri::command]
+pub fn mcp_set_group_allowed(
+    state: tauri::State<AppState>,
+    group_id: String,
+    scope: crate::sync::records_v3::HostScope,
+    generation: String,
+    allowed: bool,
+) -> Result<McpStatus, AppError> {
+    // Bind grants to the selected library and scope; never authorize by a display name.
+    let _lifecycle = state.sync.lifecycle.lock().unwrap();
+    let core = state.sync.core.lock().unwrap();
+    let records = crate::sync::record_runtime::active_state(&core)?;
+    if generation != core.generation.to_string() {
+        return Err(AppError::Other("The library changed. Refresh AI Access and try again.".into()));
+    }
+    permissions::change_group(&state.mcp.policy, records, &scope, &group_id, allowed, save_policy)?;
+    drop(core);
+    drop(_lifecycle);
+    state.mcp.cancel_records(None);
+    state.mcp.deny_all_pending();
     Ok(status_for(&state))
 }
 
@@ -1315,7 +1349,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "sshelter", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed only when individually allowed in Lunport AI Access. Records create_host always needs native human approval and never grants AI access. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -1546,7 +1580,7 @@ mod tests {
     fn revoking_a_host_does_not_wait_for_an_active_run_lifecycle_lock() {
         let lifecycle = Mutex::new(());
         let _active_run = lifecycle.lock().unwrap();
-        let policy = Mutex::new(McpPolicy { enabled: true, allowed_hosts: BTreeSet::from(["web".into()]), approval_mode: ApprovalMode::Ask });
+        let policy = Mutex::new(McpPolicy { enabled: true, allowed_hosts: BTreeSet::from(["web".into()]), approval_mode: ApprovalMode::Ask, ..Default::default() });
         change_host_permission(&policy, "web", false, || {
             let _guard = lifecycle.try_lock().map_err(|_| AppError::Other("an active run owns lifecycle".into()))?;
             Ok(())

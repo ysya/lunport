@@ -47,7 +47,7 @@ else {
   const passwords = new Map<string, string>();
   let passwordSaveFailed = false;
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
-  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
   if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
   if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
   const updateOverview = (patch: Partial<RecordOverview>) => {
@@ -176,6 +176,11 @@ else {
         }
         if (command === "mcp_status") return mcp;
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
+        if (command === "mcp_set_group_allowed") {
+          const scope = args.scope as { kind: string; space_id?: string };
+          const key = scope.kind === "local" ? `local/${args.groupId}` : `space/${scope.space_id}/${args.groupId}`;
+          return mcp = { ...mcp, allowed_groups: args.allowed ? [...new Set([...mcp.allowed_groups, key])] : mcp.allowed_groups.filter((id) => id !== key) };
+        }
         if (command === "mcp_set_host_allowed") return mcp = { ...mcp, allowed_hosts: args.allowed ? [...new Set([...mcp.allowed_hosts, String(args.alias)])] : mcp.allowed_hosts.filter((id) => id !== args.alias) };
         if (command === "mcp_set_approval_mode") return mcp = { ...mcp, approval_mode: String(args.approvalMode) };
         if (command === "records_key_generate" || command === "records_key_import" || command === "records_key_import_file") {

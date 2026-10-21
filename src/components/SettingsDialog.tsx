@@ -53,6 +53,8 @@ import {
   useMcpStatus,
   useSetMcpEnabled,
   useSetMcpHostAllowed,
+  useSetMcpGroupAllowed,
+  mcpGroupKey,
   useSetMcpApprovalMode,
 } from "@/lib/mcp";
 
@@ -82,8 +84,8 @@ import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primi
 import { revealHidden } from "@/lib/sync-approvals";
 import { chooseMcpMode } from "@/lib/mcp-flow";
 import { McpAttribution } from "@/components/McpAttribution";
-import { groupPath } from "@/components/records/group-tree";
-import type { RecordOverview } from "@/lib/records";
+import { groupPath, groupAncestors } from "@/components/records/group-tree";
+import type { HostScope, RecordOverview } from "@/lib/records";
 import { KnownHostsManager } from "@/components/records/KnownHostsManager";
 import { ColorThemePicker } from "@/components/ColorThemePicker";
 import { McpClientSetup } from "@/components/McpClientSetup";
@@ -124,6 +126,15 @@ export function SettingsCategoryPane({
     return recordOverview ? (
       <McpPane
         records
+        generation={recordOverview.generation}
+        groups={recordOverview.groups.map((group) => ({
+          id: group.id,
+          scope: group.scope,
+          key: mcpGroupKey(group.scope, group.id),
+          path: revealHidden(groupPath(recordOverview, group.id, group.scope)),
+          error: groupAncestors(recordOverview, group.id, group.scope).error,
+          ancestorKeys: groupAncestors(recordOverview, group.id, group.scope).groups.slice(1).map((parent) => mcpGroupKey(parent.scope, parent.id)),
+        }))}
         hosts={recordOverview.hosts.map((host) => ({
           id: host.id,
           alias: revealHidden(host.payload.alias),
@@ -131,6 +142,10 @@ export function SettingsCategoryPane({
           user: revealHidden(host.effective_payload.user),
           port: host.effective_payload.port,
           groupPath: revealHidden(groupPath(recordOverview, host.payload.group_id, host.scope)),
+          groupKeys: host.group_error ? [] : (() => {
+            const chain = groupAncestors(recordOverview, host.payload.group_id, host.scope);
+            return chain.error ? [] : chain.groups.map((group) => mcpGroupKey(group.scope, group.id));
+          })(),
         }))}
       />
     ) : (
@@ -152,7 +167,7 @@ export function SettingsCategoryPane({
   return <>
     <DiagnosticsPane />
     {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
-      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect individually allowed hosts and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Group defaults never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Connection defaults alone never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
     </Section> : <AdvancedPane />}
   </>;
 }
@@ -797,13 +812,16 @@ function LegacyMcpPane() {
   return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
 }
 
-export function McpPane({ hosts, records = false }: {
-  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null; port?: number; groupPath?: string}>;
+export function McpPane({ hosts, groups = [], generation, records = false }: {
+  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null; port?: number; groupPath?: string; groupKeys?: string[]}>;
+  generation?: string;
+  groups?: Array<{ id: string; scope: HostScope; key: string; path: string; error: string | null; ancestorKeys?: string[] }>;
   records?: boolean;
 }) {
   const status = useMcpStatus(2_000);
   const setEnabled = useSetMcpEnabled();
   const setHostAllowed = useSetMcpHostAllowed();
+  const setGroupAllowed = useSetMcpGroupAllowed();
   const setMode = useSetMcpApprovalMode();
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
@@ -815,6 +833,9 @@ export function McpPane({ hosts, records = false }: {
       },
     });
   const allowed = new Set(status.data?.allowed_hosts ?? []);
+  const allowedGroups = new Set(status.data?.allowed_groups ?? []);
+  const viaGroups = (host: typeof hosts[number]) => (host.groupKeys ?? []).filter((key) => allowedGroups.has(key));
+  const effectivelyAllowed = (host: typeof hosts[number]) => allowed.has(host.id) || viaGroups(host).length > 0;
   const [hostSearch, setHostSearch] = useState("");
   const matchingHosts = hosts.filter((host) => `${host.alias} ${host.hostname ?? ""} ${host.user ?? ""} ${host.id} ${host.groupPath ?? ""}`.toLowerCase().includes(hostSearch.trim().toLowerCase()));
 
@@ -831,7 +852,7 @@ export function McpPane({ hosts, records = false }: {
           <SettingsRow
             id="set-mcp-enabled"
             label="Enable AI access"
-            description="Only individually allowed hosts are available. Turning this off cancels pending requests."
+            description={records ? "Only allowed hosts and Group members are available. Turning this off cancels pending requests." : "Only selected host aliases are available. Turning this off cancels pending requests."}
           >
             <Switch
               id="set-mcp-enabled"
@@ -895,7 +916,7 @@ export function McpPane({ hosts, records = false }: {
           <AlertDialogHeader>
             <AlertDialogTitle>Allow commands without review?</AlertDialogTitle>
             <AlertDialogDescription>
-              Auto-log lets local MCP clients execute arbitrary shell commands on every individually allowed host without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
+              Auto-log lets local MCP clients execute arbitrary shell commands on every allowed host, including current and future members of allowed Groups, without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <label className="flex items-start gap-2 text-sm">
@@ -919,10 +940,28 @@ export function McpPane({ hosts, records = false }: {
 
       <Section
         title="Allowed hosts"
-        description={records ? "Select individual host IDs. Groups and inherited settings never grant access; Legacy alias permissions do not apply." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
+        description={records ? "Allow a Group and its subgroups, or grant individual host access. Permissions apply only on this device; connection defaults and Legacy aliases do not grant access." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
       >
-        <div className="mb-3 space-y-2"><Input type="search" value={hostSearch} onChange={(event) => setHostSearch(event.target.value)} placeholder="Search hosts, destinations or IDs…" aria-label="Search AI host permissions" /><p className="text-xs text-muted-foreground" role="status">{matchingHosts.length} of {hosts.length} hosts · {hosts.filter((host) => allowed.has(host.id)).length} allowed</p></div>
-        <div className="[&_label]:break-all [&_p]:break-all"><SettingsGroup>
+        {records && <div className="mb-5 space-y-2">
+          <h3 className="text-sm font-medium">Allowed Groups</h3>
+          <p className="text-xs text-muted-foreground">Includes subgroups and hosts added or moved into the Group later, including synced hosts. Moving a host out removes Group access. Individual grants remain until removed separately.</p>
+          <div className="[&_label]:break-words [&_p]:break-words"><SettingsGroup>
+            {groups.length === 0 ? <p className="p-3 text-sm text-muted-foreground">No Groups in this library.</p> : groups.map((group) => <SettingsRow
+              key={group.key}
+              id={`mcp-group-${group.key}`}
+              label={group.path}
+              description={group.error ? "Group needs review. Existing access can still be removed." : `${hosts.filter((host) => host.groupKeys?.includes(group.key)).length} hosts including subgroups · ${group.scope.kind === "local" ? "Local library" : "Synced library"} · ID: ${group.id}${group.ancestorKeys?.some((key) => allowedGroups.has(key)) ? " · Covered by an allowed parent; this switch adds a separate grant" : ""}`}
+            >
+              <Switch id={`mcp-group-${group.key}`} aria-label={`Allow Group ${group.path}`}
+                checked={allowedGroups.has(group.key)}
+                disabled={!status.data || !generation || status.isError || setGroupAllowed.isPending || (!!group.error && !allowedGroups.has(group.key))}
+                onCheckedChange={(allowed) => setGroupAllowed.mutate({ groupId: group.id, scope: group.scope, generation: generation!, allowed })} />
+            </SettingsRow>)}
+          </SettingsGroup></div>
+        </div>}
+        {records && <h3 className="mb-2 text-sm font-medium">Individual host access</h3>}
+        <div className="mb-3 space-y-2"><Input type="search" value={hostSearch} onChange={(event) => setHostSearch(event.target.value)} placeholder="Search hosts, destinations or IDs…" aria-label="Search AI host permissions" /><p className="text-xs text-muted-foreground" role="status">{matchingHosts.length} of {hosts.length} hosts · {hosts.filter(effectivelyAllowed).length} allowed</p></div>
+        <div className="[&_label]:break-words [&_p]:break-words"><SettingsGroup>
           {hosts.length === 0 ? (
             <p className="px-3 py-3 text-sm text-muted-foreground">No SSH hosts loaded.</p>
           ) : matchingHosts.length === 0 ? <p className="p-3 text-sm text-muted-foreground">No hosts match this search.</p> : (
@@ -931,13 +970,14 @@ export function McpPane({ hosts, records = false }: {
                 key={host.id}
                 id={`mcp-host-${host.id}`}
                 label={host.alias}
-                description={`${host.hostname ? `${host.user ? `${host.user}@` : ""}${host.hostname}${host.port ? `:${host.port}` : ""}` : "Uses the alias as its destination."}${records ? ` · ID: ${host.id} · Group: ${host.groupPath || "Ungrouped"}` : ""}`}
+                description={`${host.hostname ? `${host.user ? `${host.user}@` : ""}${host.hostname}${host.port ? `:${host.port}` : ""}` : "Uses the alias as its destination."}${records ? ` · ID: ${host.id} · Group: ${host.groupPath || "Ungrouped"}${viaGroups(host).length ? " · Allowed through Group; individual grant is separate" : ""}` : ""}`}
                 mono
               >
                 <Switch
                   id={`mcp-host-${host.id}`}
+                  aria-label={`Allow ${host.alias} individually`}
                   checked={allowed.has(host.id)}
-                  disabled={!status.data || setHostAllowed.isPending}
+                  disabled={!status.data || status.isError || setHostAllowed.isPending}
                   onCheckedChange={(value) =>
                     setHostAllowed.mutate({ alias: host.id, allowed: value })
                   }

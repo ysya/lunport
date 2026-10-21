@@ -60,7 +60,7 @@ export function McpClientSetup({ fallbackExecutable, accessControl, connectionNo
     catch (error) { toast.error("Could not copy", { description: String(error) }); }
   };
   const statusLabel = (value: string | undefined) => value === "configured" ? "Configured" : value === "needs_repair" ? "Needs repair" : value === "disabled" ? "Disabled" : value === "unavailable" ? "Manual setup" : value === "external" ? "Open in app" : "Not added";
-  return <Section title="Connect an AI tool" description="Choose your tool to add Lunport. Then allow the individual hosts it can use below.">
+  return <Section title="Connect an AI tool" description="Choose your tool to add Lunport. Then choose which hosts it can use below.">
     {accessControl && <div className="mb-3">{accessControl}</div>}
     {setup.data?.sandbox && <p className="mb-3 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">Development preview uses sandbox client settings. External app installation is disabled.</p>}
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" role="group" aria-label="AI tools">
