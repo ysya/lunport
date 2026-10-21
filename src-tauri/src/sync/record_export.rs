@@ -1,4 +1,4 @@
-//! Offline host-only export. Reads public cached records without contacting a relay or Vault.
+//! Offline host and Group settings export. Reads public cached records without contacting a relay or Vault.
 use crate::error::AppError;
 use tauri_plugin_dialog::DialogExt;
 
@@ -6,6 +6,7 @@ use tauri_plugin_dialog::DialogExt;
 pub struct ExportReceipt {
     path: String,
     hosts: usize,
+    groups: usize,
 }
 
 fn write_export(
@@ -33,7 +34,7 @@ pub async fn records_hosts_export(
 ) -> Result<Option<ExportReceipt>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = crate::fsutil::app_data_root()?;
-        let (json, count) = if previous_workspace {
+        let (json, count, groups) = if previous_workspace {
             let home = dirs::home_dir()
                 .ok_or_else(|| AppError::Other("Cannot find your saved workspace.".into()))?;
             crate::sync::records_v3::importer::saved_hosts::export_workspace(
@@ -51,9 +52,9 @@ pub async fn records_hosts_export(
         let Some(file) = app
             .dialog()
             .file()
-            .set_title(format!("Export {count} hosts — settings only"))
+            .set_title(format!("Export {count} hosts and {groups} Groups — settings only"))
             .set_file_name("lunport-hosts.json")
-            .add_filter("Lunport host settings", &["json"])
+            .add_filter("Lunport host and Group settings", &["json"])
             .blocking_save_file()
         else {
             return Ok(None);
@@ -65,6 +66,7 @@ pub async fn records_hosts_export(
         Ok(Some(ExportReceipt {
             path: path.to_string_lossy().into_owned(),
             hosts: count,
+            groups,
         }))
     })
     .await

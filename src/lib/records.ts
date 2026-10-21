@@ -180,6 +180,7 @@ export type RecordsStatus = {
   overview: RecordOverview | null;
 };
 export type ImportPreview = {
+  groups?: Array<{ id: string; scope: HostScope; payload: GroupPayload }>;
   candidates: Array<{ id: string; scope: HostScope; payload: HostPayload }>;
   warnings: Array<{
     location: { path: string; line: number };
@@ -207,7 +208,7 @@ export type ImportPreview = {
 };
 export type ImportPreviewResult = { token: string; preview: ImportPreview };
 export type ImportResult = {
-  receipt: { import_id: string; host_ids: string[]; copied_key_ids: string[] };
+  receipt: { import_id: string; host_ids: string[]; group_ids?: string[]; copied_key_ids: string[] };
   overview: RecordOverview;
 };
 export const recordsStatusKey = ["records", "status"] as const;
@@ -418,6 +419,7 @@ export type PendingRecordImport = {
   import_id: string;
   phase: string;
   host_count: number;
+  group_count?: number;
   key_count: number;
 };
 export const recordsPendingImportsKey = [
@@ -659,6 +661,6 @@ export async function resolveRecordConflict(conflict: RecordConflict, choice: "l
   return tauriInvoke("records_conflict_resolve", { spaceId: conflict.space_id, key: conflict.key, token: conflict.token, choice, copyAlias: copyAlias ?? null });
 }
 
-export function exportRecordHosts(previousWorkspace = false): Promise<{ path: string; hosts: number } | null> {
+export function exportRecordHosts(previousWorkspace = false): Promise<{ path: string; hosts: number; groups: number } | null> {
   return tauriInvoke("records_hosts_export", { previousWorkspace });
 }

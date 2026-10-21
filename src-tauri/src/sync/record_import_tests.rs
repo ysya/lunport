@@ -931,7 +931,7 @@ fn saved_host_settings_recover_into_a_new_account_without_old_authority_or_crede
     let mut source=crate::sync::record_runtime::snapshot(&old.env()).unwrap().0;
     for space in source.spaces.values_mut() { space.missing=true;space.selected=false; }
     let path=f.device.home.path().join("sync-state.json");
-    let (json,count)=crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
+    let (json,count,_)=crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
     assert_eq!(count,1);
     let bytes=json.into_bytes();fs::write(&path,&bytes).unwrap();
     let owner=crate::sync::central::workspace::tests::enrolled();
@@ -955,4 +955,91 @@ fn saved_host_settings_recover_into_a_new_account_without_old_authority_or_crede
     assert!(target.local.credential_approvals.is_empty());
     assert_eq!(fs::read(&path).unwrap(),bytes);
     assert!(!vault_path(&f.env().state_path).exists());
+}
+
+#[test]
+fn group_settings_import_is_atomic_and_resumes_without_replaying_later_edits() {
+    use crate::sync::{record_groups, record_repository, records_v3::{GroupPayload, HostPayload}};
+    let f = Fixture::new();
+    let original = f.state();
+    let mut source = original.clone();
+    for (id, name, parent) in [
+        ("aaaaaaaaaaaaaaaa", "Ops", None),
+        ("bbbbbbbbbbbbbbbb", "Production", Some("aaaaaaaaaaaaaaaa")),
+        ("cccccccccccccccc", "Empty", Some("aaaaaaaaaaaaaaaa")),
+    ] {
+        let payload: GroupPayload = serde_json::from_value(serde_json::json!({"schema":1,"name":name,"parent_id":parent,"defaults":{"port":2222,"user":"ops"}})).unwrap();
+        source = record_groups::create_group(&source, id, HostScope::Local, payload, true, 1).unwrap();
+    }
+    let payload: HostPayload = serde_json::from_value(serde_json::json!({"schema":3,"alias":"prod","hostname":"prod.example","auth":"password","group_id":"bbbbbbbbbbbbbbbb","inherit":["port","user"]})).unwrap();
+    source = record_repository::create_host(&source, "1111111111111111", HostScope::Local, payload, 2).unwrap();
+    let path = f.device.home.path().join("groups.json");
+    let (json, hosts, groups) = crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
+    assert_eq!((hosts, groups), (1, 3));
+    fs::write(&path, &json).unwrap();
+    let prepared = prepare(&path, &ImportOptions::new(f.device.home.path().into())).unwrap();
+    let expected_groups = prepared.preview().groups.clone();
+    let expected_hosts = prepared.preview().candidates.clone();
+    let mut env = f.env(); env.keychain = &f.device.keychain;
+    let error = with_test_step(|step| {
+        if step == PublishStep::BeforeStateSave { Err(failure("interrupted before publication")) } else { Ok(()) }
+    }, || confirm(&env, prepared));
+    assert!(error.is_err());
+    assert_eq!(f.state(), original);
+    let pending = pending_imports(&env).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!((pending[0].host_count, pending[0].group_count), (1, 3));
+    let receipt = resume(&env, &pending[0].import_id).unwrap();
+    assert_eq!(receipt.group_ids, expected_groups.iter().map(|g| g.id.clone()).collect::<Vec<_>>());
+    assert_eq!(receipt.host_ids, expected_hosts.iter().map(|h| h.id.clone()).collect::<Vec<_>>());
+    let restored = f.state();
+    let groups = record_groups::list_groups(&restored).unwrap();
+    assert_eq!(groups.len(), 3);
+    assert!(groups.iter().all(|g| g.group_error.is_none()));
+    let host = &record_repository::list_hosts(&restored).unwrap()[0];
+    assert_eq!(host.effective_payload.port, 2222);
+    assert_eq!(host.effective_payload.user, "ops");
+    assert_eq!(host.host.payload.group_id, expected_hosts[0].payload.group_id);
+    assert!(record_groups::ancestor_path(&restored, &HostScope::Local, host.host.payload.group_id.as_deref()).unwrap().iter().map(|g| g.payload.name.as_str()).eq(["Production", "Ops"]));
+    assert!(!vault_path(&env.state_path).exists());
+    assert_eq!(fs::read_to_string(&path).unwrap(), json);
+    record_runtime::mutate_records(&env, |state| {
+        let mut next = state.clone();
+        let row = next.local.groups.values_mut().find(|row| row.record.payload["name"] == "Empty").unwrap();
+        row.record.deleted = true; row.record.version += 1;
+        Ok(next)
+    }).unwrap();
+    let edited = f.state();
+    resume(&env, &receipt.import_id).unwrap();
+    assert_eq!(f.state(), edited);
+    assert!(pending_imports(&env).unwrap().is_empty());
+    let paths = Paths::new(&env, &receipt.import_id).unwrap();
+    let mut journal: Journal = serde_json::from_slice(&fs::read(&paths.journal).unwrap()).unwrap();
+    journal.groups[0].payload.name = "Tampered Group".into();
+    save_journal(&paths, &journal).unwrap();
+    assert!(resume(&env, &receipt.import_id).is_err());
+    assert_eq!(f.state(), edited);
+}
+
+#[test]
+fn group_only_import_preserves_existing_data_and_rejects_name_collisions() {
+    use crate::sync::{record_groups, records_v3::GroupPayload};
+    let f = Fixture::new();
+    let payload: GroupPayload = serde_json::from_value(serde_json::json!({"schema":1,"name":"Empty","defaults":{"port":2222}})).unwrap();
+    let source = record_groups::create_group(&f.state(), "aaaaaaaaaaaaaaaa", HostScope::Local, payload, true, 1).unwrap();
+    let path = f.device.home.path().join("empty-group.json");
+    let (json, host_count, group_count) = crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
+    assert_eq!((host_count, group_count), (0, 1));
+    fs::write(&path, json).unwrap();
+    let options = ImportOptions::new(f.device.home.path().into());
+    let mut env = f.env(); env.keychain = &f.device.keychain;
+    let receipt = confirm(&env, prepare(&path, &options).unwrap()).unwrap();
+    assert!(receipt.host_ids.is_empty());
+    assert_eq!(receipt.group_ids.len(), 1);
+    let state = f.state();
+    assert_eq!(record_groups::list_groups(&state).unwrap()[0].group.payload.defaults.port, Some(2222));
+    assert!(confirm(&env, prepare(&path, &options).unwrap()).is_err());
+    assert_eq!(f.state(), state);
+    assert!(pending_imports(&env).unwrap().is_empty());
+    assert!(!vault_path(&env.state_path).exists());
 }
