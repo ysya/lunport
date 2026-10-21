@@ -79,6 +79,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-on-failure: true
       # tauri::generate_context! reads frontendDist (../dist) at compile time and fails when it is missing.
       # This job only runs Rust tests, so a placeholder page is enough.
       - name: Placeholder frontend
@@ -91,6 +92,9 @@ jobs:
         run: |
           ls -l /usr/sbin/sshd
           ssh -V
+      # Keep cold-cache compilation outside the test-process watchdog.
+      - name: Compile safe Rust suite
+        run: cargo test --locked --lib --no-run
       # SSHELTER_REQUIRE_OPENSSH=1: a missing sshd is a failure here, not a skipped test.
       - name: Complete safe Rust suite
         env:
