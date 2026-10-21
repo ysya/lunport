@@ -52,6 +52,13 @@ impl BrowserLogin {
     ) -> Result<(Self, String), AppError> {
         Self::begin_mode(config.into(), http, false, None)
     }
+    pub fn begin_for(
+        config: impl Into<LoginConfig>,
+        expected: Option<String>,
+        http: &impl openidconnect::SyncHttpClient,
+    ) -> Result<(Self, String), AppError> {
+        Self::begin_mode(config.into(), http, false, expected)
+    }
     pub fn begin_fresh(
         config: impl Into<LoginConfig>,
         http: &impl openidconnect::SyncHttpClient,

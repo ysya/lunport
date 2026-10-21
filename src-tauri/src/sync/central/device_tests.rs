@@ -280,6 +280,53 @@ impl Service {
         controller::establish(&d.env(), &self.origin, self.config.clone(), tokens, None).unwrap();
     }
 }
+#[test]
+fn fresh_sign_in_repairs_local_backoff_but_cannot_bypass_server_retry_after() {
+    use super::{api::Reply, round};
+    use std::time::{Duration, Instant};
+    let mut service = Service::new();
+    let d = TestDevice::new("sign-in-cooldown", &FakeRelay::new(), &TestClock::new());
+    service.login(&d);
+    let before = record_runtime::snapshot(&d.env()).unwrap().0;
+    let sign_in = || controller::establish(
+        &d.env(), &service.origin, service.config.clone(),
+        LoginTokens {
+            issuer: service.config.issuer.clone(), subject: "opaque".into(),
+            nonce: Zeroizing::new("synthetic nonce".into()),
+            access: Zeroizing::new("synthetic access".into()),
+            refresh: Some(Zeroizing::new("synthetic refresh".into())),
+            expires_in: Duration::from_secs(300),
+        }, None,
+    );
+    {
+        let mut core = d.runtime.core.lock().unwrap();
+        core.central_poll.retry_at = Some(Instant::now() + Duration::from_secs(600));
+        core.central_poll.failures = 4;
+        core.central_user_action = Some("Synthetic local sync failure".into());
+    }
+    assert!(round::cooldown(&d.env()) > Duration::from_secs(599));
+    round::check_cooldown(&d.env()).unwrap();
+    assert!(sign_in().unwrap().has_session);
+    // This is also the post-browser-login step that used to surface the false cooldown.
+    joining::initialize(&d.env()).unwrap();
+    assert!(round::cooldown(&d.env()).is_zero());
+    assert_eq!(d.runtime.core.lock().unwrap().central_poll.failures, 0);
+    assert!(controller::status(&d.env()).unwrap().error.is_none());
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0, before);
+
+    let mut limited = Reply::for_test(429, &json!({}));
+    limited.retry_after = Some(Duration::from_secs(200));
+    assert!(round::require_success(&d.env(), &limited).is_err());
+    assert!(round::cooldown(&d.env()) > Duration::from_secs(199));
+    assert!(round::next_delay(&d.env()) > Duration::from_secs(199));
+    let no_registration = service.server.mock("POST", "/v2/session").expect(0).create();
+    let expected = round::check_cooldown(&d.env()).unwrap_err().to_string();
+    assert_eq!(sign_in().unwrap_err().to_string(), expected);
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0, before);
+    assert!(round::cooldown(&d.env()) > Duration::from_secs(199));
+    no_registration.assert();
+}
+
 fn install_recovery_routes(
     server: &mut mockito::ServerGuard,
     state: &Arc<Mutex<Account>>,
@@ -3599,4 +3646,40 @@ fn automatic_fresh_library_publishes_and_second_device_materializes_hosts_withou
             key_text
         );
     });
+}
+
+#[test]
+fn automatic_empty_library_resumes_after_signout_before_cutover() {
+    use super::automatic;
+    for prepared_steps in [0, 2] {
+        let service = Service::automatic();
+        super::api::with_test_transport(&service.origin, &service.server.url(), || {
+            let first = TestDevice::new("resume-empty", &FakeRelay::new(), &TestClock::new());
+            service.login(&first);
+            crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
+            automatic::start(&first.env()).unwrap();
+            automatic::password(&first.env(), "synthetic resume password").unwrap();
+            for _ in 0..prepared_steps { automatic::step(&first.env()).unwrap(); }
+            controller::sign_out(&first.env()).unwrap();
+            let signed_out = record_runtime::snapshot(&first.env()).unwrap().0;
+            let other = LoginTokens {
+                issuer: service.config.issuer.clone(), subject: "another-account".into(),
+                nonce: Zeroizing::new("synthetic nonce".into()),
+                access: Zeroizing::new("synthetic access".into()),
+                refresh: Some(Zeroizing::new("synthetic refresh".into())),
+                expires_in: std::time::Duration::from_secs(300),
+            };
+            let error = controller::establish(&first.env(), &service.origin, service.config.clone(), other, None).unwrap_err().to_string();
+            assert!(error.contains("different account"));
+            assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, signed_out);
+            service.login(&first);
+            joining::initialize(&first.env()).unwrap();
+            automatic::start(&first.env()).unwrap();
+            for step in 0..40 {
+                if controller::status(&first.env()).unwrap().can_sync { break; }
+                automatic::step(&first.env()).unwrap_or_else(|error| panic!("resume step {step}, prepared {prepared_steps}: {error}"));
+            }
+            assert!(controller::status(&first.env()).unwrap().can_sync);
+        });
+    }
 }

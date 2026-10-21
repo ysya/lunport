@@ -10,6 +10,12 @@ const buttons = Array.from(
   document.querySelectorAll<HTMLButtonElement>("button[data-kind]"),
 );
 const list = document.querySelector<HTMLElement>("#credentials")!;
+const signIn = document.querySelector<HTMLElement>("#sign-in")!;
+const signup = document.querySelector<HTMLFormElement>("#signup")!;
+const email = document.querySelector<HTMLInputElement>("#email")!;
+const switcher = document.querySelector<HTMLElement>("#switcher")!;
+const newAccount = document.querySelector<HTMLButtonElement>('[data-view="signup"]')!;
+const pageHeading = document.querySelector<HTMLElement>("h1")!;
 let busy = true;
 let managing = false;
 let managementKey = "";
@@ -27,7 +33,13 @@ async function call(path: string, body: object): Promise<any> {
     },
     body: JSON.stringify({ flow, ...body }),
   });
-  if (!response.ok) throw new Error("Passkey request failed.");
+  if (!response.ok) {
+    if (response.status === 409) {
+      const result = await response.json().catch(() => null);
+      if (result?.error === "account_exists") throw new Error("This email already names an account on this server. Sign in with its passkey or use another email.");
+    }
+    throw new Error(response.status === 429 ? "Too many requests. Wait a minute, then try again." : "Passkey request failed.");
+  }
   return response.json();
 }
 function setBusy(value: boolean) {
@@ -65,6 +77,8 @@ function showManagement(result: any) {
   }
   if (!managementKey) throw new Error("Missing management capability.");
   managing = true;
+  signIn.hidden = true; signup.hidden = true; switcher.hidden = true;
+  pageHeading.textContent = "Your passkeys";
   buttons.forEach((b) => {
     b.hidden = !["add", "complete"].includes(b.dataset.kind!);
   });
@@ -103,8 +117,8 @@ async function run(action: () => Promise<void>) {
   setBusy(true);
   try {
     await action();
-  } catch {
-    message.textContent = managing
+  } catch (error) {
+    message.textContent = error instanceof Error && (error.message.startsWith("This email") || error.message.startsWith("Too many")) ? error.message : managing
       ? "The passkey change could not be completed. Try again, or return to Lunport and start a new sign-in."
       : "Sign-in failed or was cancelled. Try again, or return to Lunport to start a new sign-in.";
   } finally {
@@ -121,8 +135,9 @@ buttons.forEach((button) =>
           redirect((await call("complete", {})).redirect);
           return;
         }
+        if (kind === "register" && !signup.reportValidity()) return;
         message.textContent = "Waiting for your passkey…";
-        const { options } = await call("options", { kind });
+        const { options } = await call("options", { kind, ...(kind === "register" ? { email: email.value.trim() } : {}) });
         const response =
           kind === "register" || kind === "add"
             ? await startRegistration({ optionsJSON: options })
@@ -133,16 +148,25 @@ buttons.forEach((button) =>
       }),
   ),
 );
+document.querySelectorAll<HTMLButtonElement>("button[data-view]").forEach((button) => button.addEventListener("click", () => {
+  if (busy) return;
+  const creating = button.dataset.view === "signup";
+  signIn.hidden = creating; signup.hidden = !creating;
+  pageHeading.textContent = creating ? "Create your account" : "Sign in to Lunport";
+  newAccount.hidden = creating;
+  document.querySelector<HTMLButtonElement>('[data-view="login"]')!.hidden = !creating;
+  message.textContent = creating ? "Use an email as your account name, then create a passkey." : "Sign in with the passkey for your account.";
+  if (creating) email.focus();
+}));
+signup.addEventListener("submit", (event) => { event.preventDefault(); document.querySelector<HTMLButtonElement>('[data-kind="register"]')!.click(); });
 setBusy(true);
 if (!/^[0-9a-f]{32}$/.test(flow) || !/^[0-9a-f]{64}$/.test(key))
   message.textContent = "Open sign-in from the Lunport app.";
 else
   call("context", {})
     .then((context) => {
-      if (context.existing_only)
-        document.querySelector<HTMLButtonElement>(
-          '[data-kind="register"]',
-        )!.hidden = true;
+      if (context.existing_only) newAccount.hidden = true;
+      if (context.account_name) document.querySelector<HTMLElement>("#account-name")!.textContent = context.account_name;
       setBusy(false);
     })
     .catch(() => {
