@@ -1,6 +1,6 @@
 //! Explicit read-only configuration previews. No config repair, credential access or command execution.
 mod resolve;
-mod saved_hosts;
+pub(crate) mod saved_hosts;
 mod source;
 mod types;
 use std::collections::BTreeMap;

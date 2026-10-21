@@ -220,7 +220,7 @@ export function RecordsImportPanel() {
       const path = await open({
         multiple: false,
         directory: false,
-        title: "Choose SSH configuration or saved Lunport hosts",
+        title: "Choose SSH configuration or Lunport hosts",
       });
       if (typeof path === "string" && mounted.current) {
         cancel();
@@ -229,7 +229,7 @@ export function RecordsImportPanel() {
     });
   return (
     <div className="app-workflow-page space-y-6" aria-busy={busy}>
-      <PageHeader title="Import hosts" description="Review an SSH configuration or an old Lunport sync-state.json. Saved-workspace imports restore host settings only; assign new SSH keys afterward. Source files stay in place." />
+      <PageHeader title="Import hosts" description="Review an SSH configuration, a Lunport host export, or an old Lunport sync-state.json. Saved-workspace imports restore host settings only; assign new SSH keys afterward. Source files stay in place." />
       <WorkflowSteps steps={["Choose source", "Review", "Finish"]} current={preview ? 1 : receipt ? 2 : 0} complete={!!receipt && !preview} />
       {error && (
         <p
@@ -255,7 +255,7 @@ export function RecordsImportPanel() {
               ref={sourceInput}
               value={source}
               disabled={busy}
-              placeholder="/path/to/ssh/config or sync-state.json"
+              placeholder="/path/to/ssh/config or lunport-hosts.json"
               className="font-mono"
               onChange={(event) => setSource(event.target.value)}
             />

@@ -931,7 +931,9 @@ fn saved_host_settings_recover_into_a_new_account_without_old_authority_or_crede
     let mut source=crate::sync::record_runtime::snapshot(&old.env()).unwrap().0;
     for space in source.spaces.values_mut() { space.missing=true;space.selected=false; }
     let path=f.device.home.path().join("sync-state.json");
-    let bytes=serde_json::to_vec(&source).unwrap();fs::write(&path,&bytes).unwrap();
+    let (json,count)=crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
+    assert_eq!(count,1);
+    let bytes=json.into_bytes();fs::write(&path,&bytes).unwrap();
     let owner=crate::sync::central::workspace::tests::enrolled();
     crate::sync::record_runtime::mutate_records(&f.env(),|state|{
         let mut next=state.clone();next.local.central=Some(owner.clone());Ok(next)

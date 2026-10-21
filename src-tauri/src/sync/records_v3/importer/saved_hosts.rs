@@ -5,6 +5,14 @@ use crate::sync::{record_repository as repo, records_v3::*};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs::File, io::Read};
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostSettings {
+    format: String,
+    version: u32,
+    hosts: Vec<HostRecord>,
+}
+
 fn invalid(path: &Path, reason: &str) -> ImportError {
     ImportError::InvalidSource {
         location: SourceLocation {
@@ -54,17 +62,80 @@ pub(super) fn preview(path: &Path, options: &ImportOptions) -> Result<ImportPrev
             },
         });
     }
-    let state: SyncStateV3 = serde_json::from_slice(&bytes)
-        .map_err(|_| invalid(path, "expected a supported Lunport saved workspace"))?;
-    validate_state(&state)
-        .map_err(|_| invalid(path, "saved workspace is invalid or needs a newer version"))?;
     let provenance = vec![SourceFile {
         path: path.into(),
         canonical_path: canonical,
         digest: source::hex(&Sha256::digest(&bytes)),
         bytes: bytes.len(),
     }];
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| invalid(path, "expected a Lunport host export or saved workspace"))?;
+    if value.get("format").is_some() {
+        let settings: HostSettings = serde_json::from_value(value)
+            .map_err(|_| invalid(path, "invalid Lunport host export"))?;
+        if settings.format != "lunport-host-settings" || settings.version != 1 {
+            return Err(invalid(path, "unsupported Lunport host export"));
+        }
+        validate_hosts(&settings.hosts)
+            .map_err(|_| invalid(path, "exported host relationships need review"))?;
+        if settings.hosts.iter().any(|host| {
+            host.scope != HostScope::Local
+                || host.payload.group_id.is_some()
+                || !host.payload.inherit.is_empty()
+        }) {
+            return Err(invalid(
+                path,
+                "exported hosts must contain resolved local settings",
+            ));
+        }
+        return from_hosts(settings.hosts, provenance, options, path);
+    }
+    let state: SyncStateV3 = serde_json::from_value(value)
+        .map_err(|_| invalid(path, "expected a supported Lunport saved workspace"))?;
+    validate_state(&state)
+        .map_err(|_| invalid(path, "saved workspace is invalid or needs a newer version"))?;
     from_state(state, provenance, options, path)
+}
+
+/// Serialize only reviewed public host settings, never a workspace or its authority.
+pub(crate) fn export_state(state: &SyncStateV3) -> Result<(String, usize), ImportError> {
+    let home = std::env::temp_dir();
+    let path = home.join("lunport-hosts.json");
+    export_preview(
+        from_state(state.clone(), vec![], &ImportOptions::new(home), &path)?,
+        &path,
+    )
+}
+
+pub(crate) fn export_workspace(path: &Path, home: PathBuf) -> Result<(String, usize), ImportError> {
+    export_preview(preview(path, &ImportOptions::new(home))?, path)
+}
+
+fn export_preview(mut preview: ImportPreview, path: &Path) -> Result<(String, usize), ImportError> {
+    if preview.candidates.is_empty() {
+        return Err(invalid(
+            path,
+            "This workspace has no saved hosts to export.",
+        ));
+    }
+    for host in &mut preview.candidates {
+        // Old import paths and unsupported commands are not portable connection settings.
+        host.payload.imported = None;
+    }
+    let count = preview.candidates.len();
+    let json = serde_json::to_string_pretty(&HostSettings {
+        format: "lunport-host-settings".into(),
+        version: 1,
+        hosts: preview.candidates,
+    })
+    .map_err(|_| invalid(path, "cannot serialize host settings"))?;
+    if json.len() > MAX_FILE_BYTES {
+        return Err(invalid(
+            path,
+            "host export exceeds the supported import size",
+        ));
+    }
+    Ok((json, count))
 }
 
 fn from_state(
@@ -81,20 +152,40 @@ fn from_state(
     }
     let views = repo::list_hosts(&state)
         .map_err(|_| invalid(path, "saved host relationships need review"))?;
+    let mut hosts = Vec::new();
+    for view in views {
+        if view.group_error.is_some() {
+            return Err(invalid(path, "saved Group inheritance needs review"));
+        }
+        hosts.push(HostRecord {
+            id: view.host.id,
+            scope: HostScope::Local,
+            payload: view.effective_payload,
+        });
+    }
+    from_hosts(hosts, provenance, options, path)
+}
+
+fn from_hosts(
+    hosts: Vec<HostRecord>,
+    provenance: Vec<SourceFile>,
+    options: &ImportOptions,
+    path: &Path,
+) -> Result<ImportPreview, ImportError> {
     let mut result = ImportPreview {
         source_digest: source::snapshot_digest(&provenance, options),
         provenance,
         ..Default::default()
     };
     let mut used = options.reserved_host_ids.clone();
-    for view in &views {
-        if view.group_error.is_some() || result.host_ids.contains_key(&view.host.id) {
+    for host in &hosts {
+        if result.host_ids.contains_key(&host.id) {
             return Err(invalid(
                 path,
                 "saved Group inheritance or host identities need review",
             ));
         }
-        let id = if let Some(id) = options.host_ids.get(&view.host.id) {
+        let id = if let Some(id) = options.host_ids.get(&host.id) {
             id.clone()
         } else {
             let mut value = [0u8; 8];
@@ -105,16 +196,16 @@ fn from_state(
         if !is_host_id(&id) || !used.insert(id.clone()) {
             return Err(invalid(path, "recovered host identity is occupied"));
         }
-        result.host_ids.insert(view.host.id.clone(), id);
+        result.host_ids.insert(host.id.clone(), id);
     }
     let mut aliases = BTreeSet::new();
-    for view in views {
-        let mut payload = view.effective_payload;
+    for host in hosts {
+        let mut payload = host.payload;
         payload.schema = HOST_SCHEMA;
         payload.group_id = None;
         payload.inherit.clear();
         payload.host_key = None;
-        let id = result.host_ids[&view.host.id].clone();
+        let id = result.host_ids[&host.id].clone();
         if !aliases.insert(payload.alias.clone()) {
             payload.alias = format!("{}-{}", payload.alias, id);
             if !aliases.insert(payload.alias.clone()) {
@@ -223,6 +314,72 @@ mod tests {
             std::fs::read(dir.path().join("vault.json")).unwrap(),
             b"unreadable private source"
         );
+    }
+    #[test]
+    fn host_export_roundtrip_preserves_routes_and_settings_but_drops_old_identity() {
+        let (dir, path, options) = fixture();
+        let mut old: SyncStateV3 = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        old.legacy_v1_backup = Some("PRIVATE_BACKUP_SENTINEL".into());
+        for row in old.local.hosts.values_mut() {
+            row.record.payload["imported"] = json!({"source":"PRIVATE_PATH_SENTINEL","at_ms":1,"unsupported":[{"keyword":"ProxyCommand","value":"PRIVATE_COMMAND_SENTINEL","requires_review":true}]});
+        }
+        let before = old.clone();
+        let (json, count) = export_state(&old).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(old, before);
+        for excluded in [
+            "PRIVATE_",
+            "retired.example",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "device_id",
+            "account",
+            "vault",
+            "host_key\": {",
+        ] {
+            assert!(
+                !json.contains(excluded),
+                "unexpected export content: {excluded}"
+            );
+        }
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value["format"], "lunport-host-settings");
+        let export = dir.path().join("lunport-hosts.json");
+        std::fs::write(&export, &json).unwrap();
+        let recovered = preview_file(&export, &options).unwrap();
+        assert_eq!(recovered.candidates.len(), 2);
+        assert!(recovered.key_references.is_empty());
+        let jump = recovered
+            .candidates
+            .iter()
+            .find(|h| h.payload.alias == "jump")
+            .unwrap();
+        let web = recovered
+            .candidates
+            .iter()
+            .find(|h| h.payload.alias == "web")
+            .unwrap();
+        assert_eq!(web.payload.jump, vec![jump.id.clone()]);
+        for host in recovered.candidates {
+            assert_eq!(host.payload.port, 2222);
+            assert_eq!(host.payload.user, "ops");
+            assert_eq!(host.payload.notes, "keep my host notes");
+            assert_eq!(host.payload.tags, vec!["saved"]);
+            assert!(host.payload.imported.is_none());
+            assert!(host.payload.host_key.is_none());
+        }
+    }
+
+    #[test]
+    fn export_refuses_empty_snapshots_and_unknown_transfer_versions() {
+        assert!(export_state(&state()).is_err());
+        let (_dir, path, options) = fixture();
+        let old: SyncStateV3 = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let (json, _) = export_state(&old).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["version"] = json!(99);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(preview_file(&path, &options).is_err());
     }
     #[test]
     fn source_changes_invalidate_the_confirmation_preview_and_future_or_private_files_fail() {
