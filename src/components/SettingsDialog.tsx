@@ -814,6 +814,19 @@ function LegacyMcpPane() {
   return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
 }
 
+function McpAuditTimes({ requested, completed }: { requested: number; completed: number }) {
+  const times = [{ label: "Requested", ms: requested }, { label: "Completed", ms: completed }]
+    .map(({ label, ms }) => ({ label, ms, date: new Date(ms) }))
+    .filter(({ ms, date }) => Number.isFinite(ms) && ms > 0 && Number.isFinite(date.getTime()));
+  return <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground">
+    {times.length === 0 ? "Time unavailable" : times.map(({ label, date }) => (
+      <span key={label}>{label}: <time dateTime={date.toISOString()}>
+        {date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "long" })}
+      </time></span>
+    ))}
+  </p>;
+}
+
 export function McpPane({ hosts, groups = [], generation, records = false }: {
   hosts: McpAccessHost[];
   generation?: string;
@@ -957,6 +970,7 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
                     ? " · Connection management · No remote command"
                     : ` · Ended: ${entry.ended ?? "unknown"} · Exit: ${entry.exit_code ?? "unknown"} · Signal: ${entry.signal ?? "none reported"}`}
                 </p>
+                <McpAuditTimes requested={entry.at_ms} completed={entry.completed_at_ms} />
                 <McpAttribution requestedBy={entry.requested_by} requesterId={entry.requester_id} clientInfo={entry.client_info} />
                 <p className="truncate font-mono text-xs text-muted-foreground" title={entry.command}>
                   {entry.command}

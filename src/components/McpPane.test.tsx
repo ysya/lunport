@@ -46,6 +46,35 @@ describe("Records AI Access", () => {
     expect(html).toContain("claimed-client");
   });
 
+  it("shows request and completion dates with seconds and the local time zone", () => {
+    const requested = new Date("2026-10-21T23:59:58.000Z");
+    const completed = new Date("2026-10-22T00:00:02.000Z");
+    const html = render(recordOverview(), { ...status, recent: [{
+      ...status.recent[0], at_ms: requested.getTime(), completed_at_ms: completed.getTime(),
+    }] });
+    const times = [...html.matchAll(/<time dateTime="([^"]+)">([^<]+)<\/time>/g)];
+    expect(times.map(match => match[1])).toEqual([requested.toISOString(), completed.toISOString()]);
+    expect(html).toContain("Requested:");
+    expect(html).toContain("Completed:");
+    [requested, completed].forEach((date, index) => {
+      expect(times[index][2]).toContain(date.toLocaleDateString(undefined, { dateStyle: "medium" }));
+      expect(times[index][2]).toContain(date.toLocaleTimeString(undefined, { timeStyle: "long" }));
+    });
+  });
+
+  it("shows only the known time for older entries and avoids invented or invalid dates", () => {
+    const entry = { ...status.recent[0], at_ms: 0, completed_at_ms: Date.parse("2026-10-22T00:00:02.000Z") };
+    const html = render(recordOverview(), { ...status, recent: [entry] });
+    expect(html).not.toContain("Requested:");
+    expect(html).toContain('dateTime="2026-10-22T00:00:02.000Z"');
+    expect(html).toContain("Completed:");
+    const missing = render(recordOverview(), { ...status, recent: [{ ...entry, completed_at_ms: Number.MAX_SAFE_INTEGER }] });
+    expect(missing).toContain("Time unavailable");
+    expect(missing).not.toContain("<time");
+    expect(missing).not.toContain("1970");
+    expect(missing).not.toContain("Invalid Date");
+  });
+
   it("offers nested Group rules and a separate Hosts tab without misleading switches", () => {
     const parent = groupView({ id: "group-1", payload: { schema: 1, name: "Operations", parent_id: null, defaults: {} } });
     const child = groupView({ id: "group-2", payload: { schema: 1, name: "Fleet", parent_id: "group-1", defaults: {} } });
