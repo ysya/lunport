@@ -2,6 +2,10 @@
 
 ## [1.10.1](https://github.com/ysya/lunport/compare/v1.10.0...v1.10.1) (2026-10-21)
 
+Export saved host settings offline from **All hosts → More library actions → Export host settings…**. Choose **Export previous workspace hosts…** when changing the account server left your old hosts in the original workspace. Import the resulting `lunport-hosts.json` on another device, review the hosts, then assign SSH keys.
+
+Connection settings, resolved Group defaults, jump-host relationships, tags and notes are retained. SSH private keys, old key bindings, fingerprint approvals, imported commands and account authority are excluded. The original workspaces remain in place.
+
 
 ### Bug Fixes
 
