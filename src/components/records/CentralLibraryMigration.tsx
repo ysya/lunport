@@ -69,8 +69,8 @@ export function LibraryReviewDetails({ review }: { review: LibraryReview }) {
       <p>
         Managed SSH private keys are encrypted before upload and become
         available on your approved devices. Hardware and external agent keys
-        remain public references. Passwords and key passphrases stay on this
-        device.
+        remain public references. Saved SSH passwords are encrypted with your
+        library. Key passphrases stay on this device.
       </p>
     </div>
   );
@@ -274,7 +274,7 @@ export function CentralLibraryMigration({
               onChange={(event) => setAcknowledged(event.target.checked)}
             />
             <span>
-              I agree to sync this complete library, including the managed SSH
+              I agree to sync this complete library, including saved SSH passwords and the managed SSH
               private keys shown above, to my approved devices.
             </span>
           </label>

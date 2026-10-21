@@ -162,6 +162,7 @@ async function route(
             features: [
               "central-accounts",
               "account-unlock-v1",
+              "ssh-password-sync-v1",
               "anchored-membership",
               "exact-revision",
               "operation-receipts",

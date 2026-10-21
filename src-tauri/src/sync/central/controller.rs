@@ -459,7 +459,42 @@ fn establish_locked(
                 if public.anchor.is_some() {
                     match remote.proof {
                         Some(proof) => {
+                            // A changed history head first quiesces all old ciphertext operations.
+                            // Resume only a strictly additive signed extension at the SAME key epoch,
+                            // with no extra access barrier, denied recipient or unfinished rotation.
+                            let old_chain = public.verified_chain()?;
+                            let new_chain = proof.verify(
+                                public.anchor.as_ref().ok_or_else(super::wire::invalid)?,
+                                public.highwater.as_ref(),
+                            )?;
+                            let revision_delta = new_chain.current().revision()
+                                .checked_sub(old_chain.current().revision());
+                            let resume_addition = public.phase == Phase::Rekey
+                                && public.cutover
+                                && revision_delta.is_some_and(|delta| delta > 0
+                                    && public.auth_epoch.checked_add(delta) == Some(remote.auth_epoch))
+                                && old_chain.security_revision() == new_chain.security_revision()
+                                && remote.phase == "ready"
+                                && remote.vaults.values().all(|vault| !vault.rekey)
+                                && previous.as_ref().is_some_and(|owner| {
+                                    owner.rotation.is_none()
+                                        && owner.replacement.is_none()
+                                        && owner.observed_epochs.len() == owner.epochs.len()
+                                        && owner.replica.as_ref().is_some_and(|replica| {
+                                            remote.vaults.get(&replica.vault).is_some_and(|vault|
+                                                vault.epoch == replica.checkpoint.epoch)
+                                                && replica.verify_write_authority(
+                                                    &new_chain, remote.auth_epoch,
+                                                    replica.checkpoint.epoch, &owner.epochs,
+                                                ).is_ok()
+                                        })
+                                });
                             public = public.observe_proof(proof, remote.auth_epoch)?;
+                            if resume_addition && public.phase == Phase::Rekey
+                                && public.require_key_recipients().is_ok()
+                            {
+                                public.phase = Phase::Active;
+                            }
                             if public.phase == Phase::SignedOut {
                                 public.phase =
                                     if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) {

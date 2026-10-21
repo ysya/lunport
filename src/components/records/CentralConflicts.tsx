@@ -28,7 +28,7 @@ export function CentralConflicts({status, disabled, update, onBusyChange, overvi
     {query.isPending&&<p role="status">Loading verified versions…</p>}
     {query.isError&&<p role="alert" className="app-error">Could not load conflict review. Refresh the account or retry loading.</p>}
     {query.data?.map(row=><div className="space-y-2 rounded-md border p-3" key={row.id}>
-      <h4 className="text-sm font-medium break-all">{revealHidden(row.name)} · {row.kind}</h4>
+      <h4 className="text-sm font-medium break-all">{revealHidden(row.name)} · {row.kind === "password" ? "SSH password" : row.kind}</h4>
       {row.local_deleted&&<p className="text-sm">Deleted on this device</p>}{row.remote_deleted&&<p className="text-sm">Deleted on another device</p>}
       <ConflictComparison row={row} overview={overview} />
       {!row.can_resolve&&<p className="text-sm text-muted-foreground">Sync must verify the pending write receipt before this conflict can be resolved.</p>}
@@ -72,6 +72,6 @@ export function ConflictComparison({ row, overview }: { row: CentralConflict; ov
     if (Array.isArray(value) && value.every(item => typeof item === "string")) return value.map(item => revealHidden(item)).join(", ") || "—";
     return typeof value === "object" ? JSON.stringify(value, (_, item) => typeof item === "string" ? revealHidden(item) : item) : revealHidden(String(value));
   };
-  if (!fields.length) return <p className="text-sm text-muted-foreground">{row.kind === "key" ? "Private key material differs. It stays inside Lunport and is never displayed." : "The saved versions differ in protected metadata. Review the choice before continuing."}</p>;
+  if (!fields.length) return <p className="text-sm text-muted-foreground">{row.kind === "password" ? "Saved SSH passwords differ. Choose which version to keep; passwords are never displayed." : row.kind === "key" ? "Private key material differs. It stays inside Lunport and is never displayed." : "The saved versions differ in protected metadata. Review the choice before continuing."}</p>;
   return <div className="max-h-72 overflow-auto rounded-md border"><table className="w-full table-fixed text-left text-xs" aria-label="Version differences"><thead><tr className="border-b bg-muted"><th className="w-1/4 p-2">Setting</th><th className="p-2">This device</th><th className="p-2">Synced version</th></tr></thead><tbody>{fields.map(field => <tr key={field} className="border-b last:border-0"><th className="p-2 align-top font-medium break-words">{labels[field] ?? field.replace(/_/g, " ")}</th><td className="p-2 align-top whitespace-pre-wrap break-all">{row.local_deleted ? "Deleted" : display(field, left[field])}</td><td className="p-2 align-top whitespace-pre-wrap break-all">{row.remote_deleted ? "Deleted" : display(field, right[field])}</td></tr>)}</tbody></table></div>;
 }

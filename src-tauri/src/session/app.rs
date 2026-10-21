@@ -135,8 +135,15 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
             env.events.wake();Ok::<_,AppError>(())
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
     };
+    let for_password = app.clone();
     let app = app.clone();
-    super::record_directory::RecordDirectory::new(sources).with_confirmed_pin(Box::new(
+    super::record_directory::RecordDirectory::new(sources).with_password_reader(Box::new(move |hop,keychain| {
+        crate::sync::engine::with_env(&for_password, |env| {
+            let safe=crate::sync::env::SyncEnv{doc:env.doc,backed_up:env.backed_up,retention:env.retention,runtime:env.runtime,ssh_dir:env.ssh_dir.clone(),state_path:env.state_path.clone(),home:env.home.clone(),keychain,relays:env.relays,events:env.events,clock:env.clock,platform:env.platform};
+            crate::sync::central::passwords::read(&safe,hop.id.as_str())
+        }).map_err(|_|super::directory::DirectoryError::Failed("The saved password is unavailable.".into()))?
+          .map_err(|_|super::directory::DirectoryError::Failed("Unlock your library to use its saved password.".into()))
+    })).with_confirmed_pin(Box::new(
         move |hop, previous, key, cancel, guard| {
             // Native host-key trust authorizes this one credential read, without lifting the
             // background gate or changing Auto-log's no-pin policy.

@@ -29,7 +29,7 @@ fn token_number(value: &str) -> Result<u64, AppError> {
         .map_err(|_| AppError::Other("invalid revision token".into()))
 }
 impl RevisionToken {
-    fn revision(&self) -> Result<RecordRevision, AppError> {
+    pub(in crate::sync) fn revision(&self) -> Result<RecordRevision, AppError> {
         Ok(RecordRevision {
             version: token_number(&self.version)?,
             updated_at_ms: token_number(&self.updated_at_ms)?,

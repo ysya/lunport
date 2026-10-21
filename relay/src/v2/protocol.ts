@@ -164,7 +164,7 @@ export function recordCanonical(
     ].every((value) => hex(value, 64)) ||
     !hex(header.author, 32) ||
     !hex(header.operation_id, 32) ||
-    !["host", "group", "keyslot", "key", "meta"].includes(header.kind)
+    !["host", "group", "keyslot", "key", "password", "meta"].includes(header.kind)
   )
     invalid();
   safeNumber(header.key_epoch, false);

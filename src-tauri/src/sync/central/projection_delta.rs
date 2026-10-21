@@ -355,6 +355,14 @@ impl Delta {
                 }
             }
         }
+        for (opaque, receipt) in plan.receipts() {
+            if receipt.kind == "password"
+                && !replica.pending.contains_key(opaque)
+                && !replica.conflicts.contains_key(opaque)
+            {
+                accepted.insert(opaque.clone());
+            }
+        }
         let next = ledger.merge_bases(&plan, &accepted, keys)?;
         candidate.local.central_projection = Some(next);
         Ok(Self {
