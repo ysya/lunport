@@ -513,9 +513,8 @@ pub(super) fn start_at(
             proof.verify(anchor, source.control.highwater.as_ref())?;
         }
     }
-    if remote.vaults.len() != 1 {
-        return Err(invalid());
-    }
+    // Pending-device overviews omit private metadata. The authenticated recovery
+    // read validates the personal Vault, enrollment and checkpoint below.
     old_kit.current_keys(&chain)?;
     let mut read_owner = before.clone();
     read_owner.recovery = None;
@@ -582,8 +581,7 @@ pub(super) fn start_at(
         .devices
         .iter()
         .find(|d| d.device == before.control.device)
-        .and_then(|d| d.request.as_ref())
-        != before.control.pending_request.as_ref()
+        .is_some_and(|d| d.request.as_ref() != before.control.pending_request.as_ref())
     {
         return Err(invalid());
     }
@@ -651,9 +649,6 @@ pub(super) fn start_at(
         if work.current.epoch == read.epochs().len() as u64 + 1 {
             read.pin_prefixes(work.current_prefixes()?)?;
         }
-    }
-    if !remote.vaults.contains_key(read.vault()) {
-        return Err(invalid());
     }
     let total = read.total();
     cancelled(env, &scope)?;
@@ -963,13 +958,10 @@ pub(super) fn confirm_at(
         .is_some_and(|proof| source.admission.verify(proof).is_ok());
     if !already_accepted {
         // Never re-upload a previously sent plan after observing a newer independent barrier.
+        // Pending devices cannot read the Vault catalog. The signed plan binds the
+        // verified checkpoint epoch; the service atomically checks its current wraps.
         if remote.proof.as_ref() != Some(&source.source_proof)
             || remote.auth_epoch != source.admission.authorization_epoch
-            || remote.vaults.len() != 1
-            || remote
-                .vaults
-                .get(&source.admission.vault)
-                .is_none_or(|v| v.epoch != source.admission.checkpoint.epoch)
             || remote
                 .denied
                 .iter()

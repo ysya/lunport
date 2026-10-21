@@ -67,10 +67,9 @@ pub(super) fn begin_password(env: &SyncEnv, password: &str) -> Result<(), AppErr
     };
     let api = Api::new(&anchor.origin)?;
     let remote = controller::overview(env, &api, &session)?;
-    if remote.auth_epoch != before.control.auth_epoch
-        || remote.phase != "ready"
-        || remote.vaults.len() != 1
-    {
+    // Pending devices have no public Vault catalog. The authenticated recovery
+    // read below verifies exactly one personal Vault and its current checkpoint.
+    if remote.auth_epoch != before.control.auth_epoch || remote.phase != "ready" {
         return Err(AppError::Other(
             "The account changed. Refresh sign-in and try unlocking again.".into(),
         ));

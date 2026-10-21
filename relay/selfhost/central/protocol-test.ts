@@ -330,6 +330,10 @@ export async function checkCentralProtocol({
   assert.deepEqual((await json(await request("/v2/unlock", first.bearer))).registry,registry);
   let other = await register(peer);
   assert.equal(other.info.device_state, "pending");
+  const locked = await json(await request("/v2/account", other.bearer));
+  for (const field of ["vaults", "devices", "denied", "barrier"]) {
+    assert.equal(Object.hasOwn(locked, field), false, `Pending overview exposed ${field}`);
+  }
   const denied = await request(path + "records", other.bearer);
   assert.equal(denied.status, 403);
   await denied.arrayBuffer();
