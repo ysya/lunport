@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.9.0](https://github.com/ysya/lunport/compare/v1.8.0...v1.9.0) (2026-10-21)
+
+
+### Features
+
+* **sync:** automatic encrypted sync after Passkey sign-in and password unlock ([#63](https://github.com/ysya/lunport/issues/63)) ([fce6122](https://github.com/ysya/lunport/commit/fce6122f6c50f62cebf0f31d0818af52e6c21612))
+
+
+### Bug Fixes
+
+* inset sync page and separate macOS branding from controls ([#62](https://github.com/ysya/lunport/issues/62)) ([8e1740f](https://github.com/ysya/lunport/commit/8e1740f1c3b6d263669dc2e1e2235d9f438e5ec4))
+
+
+### Performance Improvements
+
+* reduce native test latency without reducing coverage ([#59](https://github.com/ysya/lunport/issues/59)) ([e93304c](https://github.com/ysya/lunport/commit/e93304c051087c06a3108addb77d86848d6456c9))
+
 ## [1.8.0](https://github.com/ysya/lunport/compare/v1.7.1...v1.8.0) (2026-10-20)
 
 The sync server starts blank: enter the HTTPS URL of your own deployed service. Local use remains available without an account. The client now uses central Passkey account sync; old sync-code setup and per-key sync controls have been removed.
