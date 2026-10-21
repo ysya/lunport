@@ -109,13 +109,16 @@ else {
           console.info("Fixture connection requested", String(args.hostId));
           return;
         }
-        if (command === "central_status" && scenario === "sync-layout") return {
+        if (["central_status","central_automatic_status"].includes(command) && scenario === "sync-layout") {
+          const status={
           available: true, configured: true, phase: "setup", service: "https://sync.example.com",
           account_id: "a".repeat(64), device_id: "b".repeat(32), root_fingerprint: null,
           membership_head: null, authorization_epoch: "1", has_session: true, login_pending: false,
           needs_recovery: false, replacement_pending: false, needs_reconciliation: false,
           can_sync: false, pending: 0, conflicts: 0, error: null,
         } satisfies CentralStatus;
+          return command === "central_status" ? status : {phase:"password_setup",status};
+        }
         if (command === "central_recovery_status" && scenario === "sync-layout") return {
           phase: "idle", operation: null, backup_confirmed: false, verified: 0, total: 0, root_fingerprint: null,
         } satisfies CentralRecoveryProgress;

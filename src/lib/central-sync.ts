@@ -172,3 +172,14 @@ export const centralConfirmAccountRecovery = (operation: string) =>
   tauriInvoke<CentralRecoveryProgress>("central_confirm_account_recovery", {
     operation,
   });
+
+export type AutomaticSyncProgress = {
+  phase: "signed_out" | "sign_in_required" | "password_setup" | "password_unlock" | "connecting" | "syncing" | "ready" | "needs_attention";
+  status: CentralStatus;
+};
+export const automaticSyncKey = ["central-automatic-sync"] as const;
+export const centralAutomaticStatus = () => tauriInvoke<AutomaticSyncProgress>("central_automatic_status");
+export const centralAutomaticStart = () => tauriInvoke<AutomaticSyncProgress>("central_automatic_start");
+export const centralAutomaticStep = () => tauriInvoke<AutomaticSyncProgress>("central_automatic_step");
+// Password stays in the form/call only; never put it in a Query or mutation cache.
+export const centralUnlockPassword = (password: string) => tauriInvoke<AutomaticSyncProgress>("central_unlock_password", { password });

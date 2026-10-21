@@ -39,6 +39,8 @@ import {
   type Result,
 } from "./store";
 
+import { unlockDigest, verifyUnlockUpdate, type SignedUnlock } from "./unlock";
+
 type Registration = {
   device: Device;
   credential: string;
@@ -69,6 +71,7 @@ type Account = {
   trusted: TrustedMembership | null;
   pending: Barrier | null;
   lastControl: string | null;
+  unlock?: SignedUnlock;
 };
 type Session = {
   id: string;
@@ -975,6 +978,88 @@ export class AccountStore extends DurableObject<Env> {
     const page = await result.json();
     if (!this.recoveryUnchanged(observed, actor, grant)) return { status: 409 };
     return { status: 200, body: page };
+  }
+  unlockRegistry(actor: Principal): Promise<Response> {
+    return rpcCall(async () => {
+      const state = this.load();
+      if (!this.allowed(state, actor, true) || !state.trusted) return { status: 403 };
+      return { status: 200, body: { registry: state.unlock ?? null } };
+    });
+  }
+  updateUnlock(actor: Principal, registry: SignedUnlock): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load();
+      if (!this.allowed(observed, actor) || !observed.trusted) return { status: 403 };
+      if (observed.pending || Object.values(observed.vaults).some((v) => v.rekey)) return { status: 423 };
+      // An exact authenticated retry is safe even when its original CAS response was lost.
+      try {
+        if (observed.unlock && await unlockDigest(registry) === await unlockDigest(observed.unlock))
+          return { status: 200, body: { registry: observed.unlock } };
+      } catch { return { status: 400 }; }
+      if (!await verifyUnlockUpdate(observed.trusted, observed.unlock ?? null, registry, observed.epoch, actor.device))
+        return { status: 409 };
+      return this.ctx.storage.transactionSync(() => {
+        const state = this.load();
+        if (!this.allowed(state, actor)) return { status: 403 };
+        if (state.version !== observed.version || state.pending) return { status: 409 };
+        state.unlock = registry;
+        state.version += 1;
+        this.save(state);
+        return { status: 200, body: { registry } };
+      });
+    });
+  }
+  /** A decrypted account authority adds one device; Recover remains a distinct takeover. */
+  async unlockJoin(
+    actor: Principal,
+    node: SignedMembership,
+    wraps: Record<string, WrappedKeys[]>,
+    confirmation: PairingConfirmation,
+    readProof: RecoveryReadProof,
+    now = Date.now(),
+  ): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load();
+      if (!this.allowed(observed, actor, true) || !observed.trusted || !observed.proof)
+        return { status: 403 };
+      if (node?.body?.action !== "unlock" || node.body.author !== "recovery" ||
+          node.body.enrollment?.device?.id !== actor.device) return { status: 400 };
+      if (node.signature === observed.proof.nodes.at(-1)?.signature) {
+        try {
+          if (await hash((await import("./membership")).membershipCanonical(node.body)) === observed.trusted.head)
+            return this.resumeBarrier();
+        } catch { return { status: 400 }; }
+        return { status: 400 };
+      }
+      if (observed.pending || Object.values(observed.vaults).some((v) => v.rekey)) return { status: 423 };
+      const access = await this.recoveryGrant(actor, readProof);
+      if ("status" in access) return access;
+      if (access.observed.version !== observed.version || observed.proof.nodes.length >= 1024)
+        return { status: 409 };
+      const request = observed.registrations[actor.device].request;
+      if (!request || !(await verifyEnrollment(node.body.enrollment, now)) ||
+          requestId(request) !== requestId(node.body.enrollment)) return { status: 400 };
+      const next = await applyMembership(observed.trusted, node);
+      if (!next || Math.abs(safeNumber(node.body.issued_at_ms, false) - now) > 300000 ||
+          Object.keys(next.devices).some((id) => observed.denied.includes(id)) ||
+          !validConfirmation(confirmation, request.request_id, next.head, observed.vaults, observed.epoch))
+        return { status: 400 };
+      if (!wraps || Object.keys(wraps).length !== Object.keys(observed.vaults).length)
+        return { status: 400 };
+      for (const [id, vault] of Object.entries(observed.vaults)) {
+        if (!(await completeWraps(next, id, vault.epoch, wraps[id], actor.device))) return { status: 400 };
+        const reply = await this.env.VAULT.getByName(observed.id + ":" + id).recoveryForGrant(access.grant);
+        if (reply.status !== 200) { await reply.body?.cancel(); return { status: 409 }; }
+        const checkpoint = await reply.json() as { epoch: number; phase: string; sequence: string; history_hash: string };
+        const minimum = confirmation.minimums.find((m) => m.vault === id)!;
+        if (checkpoint.phase !== "ready" || checkpoint.epoch !== vault.epoch ||
+            minimum.sequence !== checkpoint.sequence || minimum.history_hash !== checkpoint.history_hash)
+          return { status: 409 };
+      }
+      if (!this.recoveryUnchanged(observed, actor, access.grant)) return { status: 409 };
+      const result = this.publishMembership(observed, actor, node, next, wraps, false, confirmation, true);
+      return result.status === 202 ? this.resumeBarrier() : result;
+    });
   }
   async recover(
     actor: Principal,

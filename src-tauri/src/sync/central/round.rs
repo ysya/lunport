@@ -164,14 +164,16 @@ pub fn sync_once(env: &SyncEnv) -> Result<Report, AppError> {
     outcome.map(|()| report)
 }
 fn stage(env: &SyncEnv, report: &mut Report) -> Result<(), AppError> {
+    if super::automatic::background(env, report)? {
+        return Ok(());
+    }
     let state = record_runtime::snapshot(env)?.0;
     if let Some(owner) = state.local.central.as_ref().filter(|w| w.control.cutover) {
         super::initial_transaction::complete_saved(env)?;
         if super::replacement_reconciliation::required(owner) {
             // A replacement's old cache is passive. Rotate only the new selected replica;
             // historical local material remains blocked until the separate reviewed merge.
-            if state.local.central_cache_source.is_some() && owner.control.phase == Phase::Rekey
-            {
+            if state.local.central_cache_source.is_some() && owner.control.phase == Phase::Rekey {
                 report.more = super::rotation_runtime::advance(env, report)?;
                 return Ok(());
             }

@@ -522,6 +522,9 @@ impl Api {
     pub fn account(&self, session: &DeviceSession) -> Result<Reply, AppError> {
         self.authenticated(session, Method::GET, "/v2/account", None)
     }
+    pub(super) fn unlock_registry(&self, session: &DeviceSession) -> Result<Reply, AppError> {
+        self.authenticated(session, Method::GET, "/v2/unlock", None)
+    }
     pub fn control<T: Serialize>(
         &self,
         session: &DeviceSession,
@@ -762,6 +765,8 @@ pub enum Control {
     RecoveryHistory,
     RecoverySource,
     Recover,
+    UpdateUnlock,
+    UnlockJoin,
 }
 impl Control {
     fn path(&self) -> &'static str {
@@ -777,6 +782,8 @@ impl Control {
             Self::RecoveryHistory => "/v2/recovery/history",
             Self::RecoverySource => "/v2/recovery/source",
             Self::Recover => "/v2/recovery/commit",
+            Self::UpdateUnlock => "/v2/unlock",
+            Self::UnlockJoin => "/v2/unlock/join",
         }
     }
 }

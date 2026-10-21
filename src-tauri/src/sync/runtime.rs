@@ -75,6 +75,7 @@ pub struct SyncRuntime {
     pub central_login: Mutex<Option<(String, Option<crate::sync::central::browser::LoginCancellation>)>>,
     pub central_recovery_read: Mutex<Option<crate::sync::central::recovery_flow::Reading>>,
     pub central_recovery_cancel: AtomicBool,
+    pub(crate) central_unlock: Mutex<Option<Box<crate::sync::central::unlock_flow::Reading>>>,
     pub(crate) central_replacement_read: Mutex<Option<crate::sync::central::replacement_flow::Reading>>,
     pub(crate) central_replacement_generation: Mutex<Option<String>>,
     pub(crate) central_replacement_ui: Mutex<Option<crate::sync::central::replacement_flow::Invocation>>,

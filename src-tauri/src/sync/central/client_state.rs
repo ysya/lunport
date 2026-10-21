@@ -144,7 +144,7 @@ impl State {
                     confirmation.validate_minimums(&chain)?;
                     if self.personal_vault.as_deref() != Some(confirmation.personal_vault.as_str())
                         || !proof.nodes.iter().enumerate().any(|(i, node)| {
-                            node.body.action == super::membership::Action::Add
+                            matches!(node.body.action, super::membership::Action::Add | super::membership::Action::Unlock)
                                 && node.body.enrollment.as_ref().is_some_and(|r| {
                                     r.request_id == confirmation.request_id
                                         && r.device == self.device

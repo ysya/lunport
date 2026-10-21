@@ -42,7 +42,7 @@ export type Enrollment = {
   expires_at_ms: string;
   signature: string;
 };
-export type Action = "add" | "revoke" | "recover" | "recovery";
+export type Action = "add" | "unlock" | "revoke" | "recover" | "recovery";
 export type MembershipBody = {
   origin: string;
   account_id: string;
@@ -244,7 +244,7 @@ export function membershipCanonical(
       hex(v, 64),
     ) ||
     (body.author !== "recovery" && !hex(body.author, 32)) ||
-    !["add", "revoke", "recover", "recovery"].includes(body.action) ||
+    !["add", "unlock", "revoke", "recover", "recovery"].includes(body.action) ||
     !validKeys(body.recovery) ||
     body.devices === null ||
     typeof body.devices !== "object" ||
@@ -304,7 +304,7 @@ export async function applyMembership(
     )
       return null;
     const author =
-      body.action === "recover"
+      (body.action === "recover" || body.action === "unlock")
         ? body.author === "recovery"
           ? previous.recovery
           : null
@@ -315,7 +315,7 @@ export async function applyMembership(
       ([id, keys]) =>
         previous.devices[id] && sameKeys(previous.devices[id], keys),
     );
-    if (body.action === "add" || body.action === "recover") {
+    if (["add", "unlock", "recover"].includes(body.action)) {
       const request = body.enrollment;
       if (!request || !(await verifyEnrollment(request, null, allowLoopback)))
         return null;
@@ -335,7 +335,7 @@ export async function applyMembership(
         ].some((keys) => overlaps(keys, request.device.keys))
       )
         return null;
-      if (body.action === "add") {
+      if (body.action === "add" || body.action === "unlock") {
         if (
           !sameKeys(body.recovery, previous.recovery) ||
           Object.keys(body.devices).length !==

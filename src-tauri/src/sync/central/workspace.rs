@@ -26,6 +26,9 @@ pub struct BootstrapPackage {
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     pub control: State,
+    /// Untrusted scheduling hint; protected per-device consent is still required.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic_sync: bool,
     /// Only a typed replacement publication may change the protected identity selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_slot: Option<String>,
@@ -52,6 +55,7 @@ impl Workspace {
     pub fn new(control: State) -> Result<Self, AppError> {
         let state = Self {
             control,
+            automatic_sync: false,
             identity_slot: None,
             replacement: None,
             replacement_archives: vec![],

@@ -207,6 +207,8 @@ impl Enrollment {
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Add,
+    /// Add one device using the account unlock authority; never remove existing devices.
+    Unlock,
     Revoke,
     Recover,
     Recovery,
@@ -215,6 +217,7 @@ impl Action {
     fn label(self) -> &'static str {
         match self {
             Self::Add => "add",
+            Self::Unlock => "unlock",
             Self::Revoke => "revoke",
             Self::Recover => "recover",
             Self::Recovery => "recovery",
@@ -339,7 +342,7 @@ impl TrustedMembership {
         {
             return Err(invalid());
         }
-        let author = if body.action == Action::Recover {
+        let author = if matches!(body.action, Action::Recover | Action::Unlock) {
             if body.author != "recovery" {
                 return Err(invalid());
             }
@@ -353,7 +356,7 @@ impl TrustedMembership {
             .iter()
             .all(|(id, keys)| self.devices.get(id).is_some_and(|old| old == keys));
         match body.action {
-            Action::Add | Action::Recover => {
+            Action::Add | Action::Unlock | Action::Recover => {
                 let request = body.enrollment.as_ref().ok_or_else(invalid)?;
                 request.verify_signature()?;
                 let issued = number(&body.issued_at_ms, false)?;
@@ -380,7 +383,7 @@ impl TrustedMembership {
                 if body.devices.get(&request.device.id) != Some(&request.device.keys) {
                     return Err(invalid());
                 }
-                if body.action == Action::Add {
+                if matches!(body.action, Action::Add | Action::Unlock) {
                     if body.recovery != self.recovery
                         || self.devices.contains_key(&request.device.id)
                         || body.devices.len() != self.devices.len() + 1
@@ -534,6 +537,66 @@ pub fn personal_vault_id(anchor: &TrustAnchor) -> Result<String, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_unlock_adds_only_a_fresh_device_with_the_current_recovery_authority() {
+        let a = DeviceKeys::generate().unwrap();
+        let b = DeviceKeys::generate().unwrap();
+        let authority = DeviceKeys::generate().unwrap();
+        let (genesis, anchor) = Genesis::create(
+            "https://relay.example",
+            &"a".repeat(64),
+            &"a".repeat(32),
+            &a,
+            &authority,
+        )
+        .unwrap();
+        let trusted = genesis.trust(&anchor).unwrap();
+        let request = Enrollment::create(&anchor, &"b".repeat(32), &b, 1000).unwrap();
+        let mut devices = trusted.devices().clone();
+        devices.insert(request.device.id.clone(), request.device.keys.clone());
+        let body = trusted.proposal(
+            "recovery",
+            Action::Unlock,
+            Some(request),
+            devices,
+            trusted.recovery().clone(),
+            1001,
+        );
+        assert!(trusted
+            .apply(&SignedMembership::sign(body.clone(), &a).unwrap())
+            .is_err());
+        assert!(trusted
+            .apply(&SignedMembership::sign(body.clone(), &b).unwrap())
+            .is_err());
+        let node = SignedMembership::sign(body.clone(), &authority).unwrap();
+        let joined = trusted.apply(&node).unwrap();
+        assert_eq!(joined.devices().len(), 2);
+        assert_eq!(joined.devices().get(&"a".repeat(32)), Some(&a.public()));
+        assert_eq!(joined.recovery(), trusted.recovery());
+        assert!(joined.apply(&node).is_err());
+        for change in 0..5 {
+            let mut bad = body.clone();
+            match change {
+                0 => {
+                    bad.devices.remove(&"a".repeat(32));
+                }
+                1 => bad.recovery = DeviceKeys::generate().unwrap().public(),
+                2 => bad.previous_head = "f".repeat(64),
+                3 => bad.author = "a".repeat(32),
+                _ => bad.issued_at_ms = "9999999".into(),
+            }
+            assert!(trusted
+                .apply(&SignedMembership::sign(bad, &authority).unwrap())
+                .is_err());
+        }
+        let chain = super::super::trust::ControlProof {
+            genesis,
+            nodes: vec![node],
+        }
+        .verify(&anchor, None)
+        .unwrap();
+        assert_eq!(chain.security_revision(), 0);
+    }
     #[test]
     fn account_login_or_server_key_replacement_cannot_approve_a_device() {
         let a = DeviceKeys::generate().unwrap();

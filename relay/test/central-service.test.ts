@@ -44,6 +44,7 @@ import { freezeCanonical, type SignedFreeze } from "../src/v2/migration-freeze";
 import { migrationCanonical, type SignedMigration } from "../src/v2/migration";
 import { envelopeDigest } from "../src/v2/store";
 import { canonical } from "../src/v2/protocol";
+import { unlockCanonical, unlockDigest, type SignedUnlock } from "../src/v2/unlock";
 const origin = "https://relay.test";
 const random = (bytes = 32) =>
   Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (v) =>
@@ -203,6 +204,91 @@ async function setup() {
     proof: active.proof,
   };
 }
+it("account unlock joins a fresh device without replacing the first device or trusting a login alone", async () => {
+  const s = await setup(), added = device(), credential = random();
+  const pending = await s.renew(added, credential), now = Date.now();
+  const request: Enrollment = {
+    origin, account_id: s.trusted.anchor.account_id, genesis_hash: s.trusted.anchor.genesis_hash,
+    request_id: random(16), device: added, nonce: random(),
+    created_at_ms: String(now - 100), expires_at_ms: String(now + 600000), signature: "",
+  };
+  request.signature = sign(enrollmentCanonical(request), 6);
+  expect((await s.account.enrollment(pending.actor!, request)).status).toBe(204);
+  const body: MembershipBody = {
+    origin, account_id: request.account_id, genesis_hash: request.genesis_hash,
+    revision: "1", previous_head: s.trusted.head, author: "recovery", action: "unlock",
+    issued_at_ms: String(now), enrollment: request,
+    devices: { ...s.trusted.devices, [added.id]: added.keys }, recovery: s.trusted.recovery,
+  };
+  const node = { body, signature: sign(membershipCanonical(body), 4) };
+  const next = (await applyMembership(s.trusted, node))!;
+  const encrypted = { [s.vault]: await wraps(next, s.vault, 1, added.id, 6) };
+  const confirmation = {
+    request_id: request.request_id, approved_head: next.head, personal_vault: s.vault,
+    minimums: [{ vault: s.vault, creation_head: s.trusted.head, creation_authorization_epoch: "2",
+      key_epoch: "1", sequence: "0", history_hash: "0".repeat(64) }],
+    // Only the native client verifies the secret MAC. The service verifies the exact checkpoint.
+    mac: base64(new Uint8Array(32).fill(42)),
+  };
+  const readProof = {
+    request_id: request.request_id, membership_head: s.trusted.head, auth_epoch: String(pending.actor!.epoch),
+    signature: sign(canonical(["lunport-recovery-read-v2", origin, request.account_id,
+      request.genesis_hash, s.trusted.head, String(pending.actor!.epoch),
+      base64(enrollmentCanonical(request)), request.signature]), 4),
+  };
+  const before = await (await s.account.overview(s.actor)).text();
+  expect((await s.account.unlockJoin(pending.actor!,
+    { ...node, signature: sign(membershipCanonical(body), 6) }, encrypted, confirmation, readProof)).status).toBe(400);
+  expect((await s.account.unlockJoin(pending.actor!, node, encrypted, confirmation,
+    { ...readProof, signature: base64(new Uint8Array(64)) })).status).toBe(403);
+  expect((await s.account.unlockJoin(pending.actor!, node, encrypted,
+    { ...confirmation, minimums: [{ ...confirmation.minimums[0], sequence: "1" }] }, readProof)).status).toBe(409);
+  expect(await (await s.account.overview(s.actor)).text()).toBe(before);
+  expect((await s.account.unlockJoin(pending.actor!, node, encrypted, confirmation, readProof)).status).toBe(200);
+  const activeB = await s.renew(added, credential), activeA = await s.renew();
+  expect(activeA.info.device_state).toBe("active");
+  expect(activeB.info.device_state).toBe("active");
+  const observed = await (await s.account.overview(activeB.actor!)).json() as {
+    proof: { nodes: SignedMembership[] }; pairing_confirmation: unknown;
+  };
+  expect(observed.proof.nodes.at(-1)).toEqual(node);
+  expect(observed.pairing_confirmation).toEqual(confirmation);
+  expect((await s.account.unlockJoin(activeB.actor!, node, encrypted, confirmation, readProof)).status).toBe(200);
+});
+it("stores only signed unlock ciphertext with current-device authorization, durable CAS and safe retries", async () => {
+  const status = async (reply: Promise<Response>) => { const r = await reply; await r.arrayBuffer(); return r.status; };
+  const s = await setup(), pending = await s.renew(device(), random());
+  const envelope = {
+    header: { version: 1 as const, anchor: s.trusted.anchor, generation: "1",
+      binding: { kind: "password" as const }, salt: base64(new Uint8Array(32).fill(3)) },
+    nonce: base64(new Uint8Array(24).fill(4)), ciphertext: base64(new Uint8Array(64).fill(5)),
+  };
+  const first: SignedUnlock = {
+    body: { version: 1, anchor: s.trusted.anchor, revision: "1", previous_digest: "",
+      membership_head: s.trusted.head, authorization_epoch: String(s.actor.epoch), author: s.first.id,
+      recovery: s.trusted.recovery, slots: [envelope] }, signature: "",
+  };
+  first.signature = sign(unlockCanonical(first.body));
+  expect(await status(s.account.updateUnlock(pending.actor!, first))).toBe(403);
+  expect(await status(s.account.updateUnlock(s.actor, { ...first, signature: sign(unlockCanonical(first.body), 6) }))).toBe(409);
+  expect(await status(s.account.updateUnlock(s.actor, first))).toBe(200);
+  expect(await status(s.account.updateUnlock(s.actor, first))).toBe(200);
+  expect(await (await s.account.unlockRegistry(pending.actor!)).json()).toEqual({ registry: first });
+  await evictDurableObject(s.account);
+  expect(await (await s.account.unlockRegistry(s.actor)).json()).toEqual({ registry: first });
+  const revision = async (nonce: number): Promise<SignedUnlock> => {
+    const body = { ...first.body, revision: "2", previous_digest: await unlockDigest(first),
+      slots: [{ ...envelope, header: { ...envelope.header, generation: "2" }, nonce: base64(new Uint8Array(24).fill(nonce)) }] };
+    return { body, signature: sign(unlockCanonical(body)) };
+  };
+  const a = await revision(6), b = await revision(7);
+  const race = await Promise.all([status(s.account.updateUnlock(s.actor, a)), status(s.account.updateUnlock(s.actor, b))]);
+  expect(race.sort()).toEqual([200, 409]);
+  expect(await status(s.account.updateUnlock(s.actor, first))).toBe(409);
+  const observed = await (await s.account.unlockRegistry(s.actor)).text();
+  expect(observed).not.toContain("password_value");
+  expect(observed).toContain('"revision":"2"');
+});
 async function add(s: Awaited<ReturnType<typeof setup>>) {
   const added = device(),
     credential = random(),

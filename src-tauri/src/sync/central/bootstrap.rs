@@ -279,6 +279,25 @@ pub(super) fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Se
 }
 /// Persist consent before network. A lost bootstrap response is reconciled against the pinned root.
 pub fn confirm(env: &SyncEnv, expected_root: &str) -> Result<Status, AppError> {
+    confirm_inner(env, expected_root, None)
+}
+pub(super) fn confirm_password(
+    env: &SyncEnv,
+    expected_root: &str,
+    password: &str,
+) -> Result<Status, AppError> {
+    if password.chars().count() < 12 || password.len() > 1024 {
+        return Err(AppError::Other(
+            "Use at least 12 characters for your sync unlock password.".into(),
+        ));
+    }
+    confirm_inner(env, expected_root, Some(password))
+}
+fn confirm_inner(
+    env: &SyncEnv,
+    expected_root: &str,
+    password: Option<&str>,
+) -> Result<Status, AppError> {
     controller::require_enabled()?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     let session = controller::context(env)?;
@@ -377,6 +396,30 @@ pub fn confirm(env: &SyncEnv, expected_root: &str) -> Result<Status, AppError> {
     }
     let identity = session.identity.as_ref().ok_or_else(invalid)?;
     own.open(&identity.keys, &own.header, &identity.keys.public().signing)?;
+    if let Some(password) = password {
+        match load_intent(env, &session)? {
+            Some(intent) => {
+                let kit = RecoveryKit::parse(&intent.kit)?;
+                super::unlock_store::password(env, &session, &chain, &kit, password)?;
+            }
+            None => {
+                // A crash can happen after temporary authority cleanup but before local publication.
+                // Resume only after decrypting and verifying the previously committed remote envelope.
+                let saved =
+                    super::unlock_store::read(env, &session, &chain)?.ok_or_else(invalid)?;
+                let envelope = saved
+                    .signed()
+                    .body
+                    .slots
+                    .iter()
+                    .find(|e| e.header.binding == super::unlock_envelope::Binding::Password)
+                    .ok_or_else(invalid)?;
+                envelope
+                    .open_password(password, chain.current().anchor(), 1)?
+                    .current_keys(&chain)?;
+            }
+        }
+    }
     // Remove the temporary independent recovery authority before enabling any future upload.
     let profile = session.profile.profile()?;
     env.keychain.delete(&profile.slot("bootstrap"))?;

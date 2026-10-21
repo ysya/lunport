@@ -12,6 +12,42 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
+pub async fn central_automatic_status(
+    app: AppHandle,
+) -> Result<super::automatic::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::automatic::status)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_automatic_start(
+    app: AppHandle,
+) -> Result<super::automatic::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::automatic::start)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_automatic_step(
+    app: AppHandle,
+) -> Result<super::automatic::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::automatic::step)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_unlock_password(
+    app: AppHandle,
+    password: String,
+) -> Result<super::automatic::Progress, AppError> {
+    let password = zeroize::Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::automatic::password(env, &password))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
 pub async fn central_status(app: AppHandle) -> Result<Status, AppError> {
     tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, controller::status)?)
         .await

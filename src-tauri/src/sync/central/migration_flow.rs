@@ -207,7 +207,16 @@ fn loaded_progress(
 ) -> Result<Progress, AppError> {
     let approved = review::is_approved(env, loaded)?;
     let staged = loaded.progress().map_or(0, |p| p.staged() as usize);
-    let verified = loaded.verifier(keys)?.sequence() as usize;
+    // A fresh journal has no remote progress yet. Readback verification starts only after
+    // the signed migration is committed and retired, never while preparing or staging.
+    let verified = if loaded
+        .progress()
+        .is_some_and(|p| p.phase() == super::migration_progress::Phase::Retired)
+    {
+        loaded.verifier(keys)?.sequence() as usize
+    } else {
+        0
+    };
     Ok(Progress {
         phase: if !approved {
             "review"
@@ -324,6 +333,22 @@ fn run_unreserved(
     keys: &VaultKeys,
 ) -> Result<Preparation, AppError> {
     let references = BTreeMap::<String, KeyStorage>::new();
+    if let Some(progress) = capture_initial(env, scope, action, budget, state, keys, &references)? {
+        return Ok(progress);
+    }
+    prepare_initial(env, scope, action, budget, keys, &references)
+}
+// Separate large journal readers so mutually exclusive temporaries do not share a stack frame.
+#[inline(never)]
+fn capture_initial(
+    env: &SyncEnv,
+    scope: &Scope,
+    action: Action,
+    budget: &Budget,
+    state: &SyncStateV3,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<Option<Preparation>, AppError> {
     let capturing = {
         let life = env.runtime.lifecycle.lock().unwrap();
         let owner = state.local.central.as_ref().ok_or_else(invalid)?;
@@ -348,35 +373,54 @@ fn run_unreserved(
                 ..Progress::default()
             },
         )?;
-        source_capture::start_or_resume(env, &keys, &references)?;
+        source_capture::start_or_resume(env, &keys, references)?;
         scope.check(env)?;
         let step = capture_dispatch::advance(env, &keys, budget);
         match step {
             Ok(capture_dispatch::Step::More) => {
-                return Ok(Preparation {
+                return Ok(Some(Preparation {
                     progress: status(env, scope)?,
                     review: None,
-                })
+                }))
             }
             Err(e) if Budget::exhausted(&e) => {
-                return Ok(Preparation {
+                return Ok(Some(Preparation {
                     progress: status(env, scope)?,
                     review: None,
-                })
+                }))
             }
             Err(e) => return Err(e),
             Ok(capture_dispatch::Step::Ready) => {}
         }
         source_complete::ensure(env, &keys)?.ok_or_else(invalid)?;
     }
+    Ok(None)
+}
+#[inline(never)]
+fn initial_progress(
+    env: &SyncEnv,
+    scope: &Scope,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<Progress, AppError> {
     scope.check(env)?;
-    let loaded = migration_journal::ensure(env, &keys, &references)?;
-    let progress = loaded_progress(env, &loaded, &keys)?;
+    let loaded = migration_journal::ensure(env, keys, references)?;
+    loaded_progress(env, &loaded, keys)
+}
+#[inline(never)]
+fn prepare_initial(
+    env: &SyncEnv,
+    scope: &Scope,
+    action: Action,
+    budget: &Budget,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<Preparation, AppError> {
+    let progress = initial_progress(env, scope, keys, references)?;
     cached(env, scope, progress.clone())?;
-    drop(loaded);
     if !progress.approved || matches!(action, Action::Prepare) {
         let preview = if matches!(action, Action::Prepare) {
-            Some(review::preview(env, &keys, &references)?)
+            Some(review::preview(env, keys, references)?)
         } else {
             None
         };
@@ -385,10 +429,20 @@ fn run_unreserved(
             review: preview,
         });
     }
+    dispatch_initial(env, scope, budget, keys, references)
+}
+#[inline(never)]
+fn dispatch_initial(
+    env: &SyncEnv,
+    scope: &Scope,
+    budget: &Budget,
+    keys: &VaultKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<Preparation, AppError> {
     scope.check(env)?;
-    match migration_dispatch::advance(env, &keys, &references, budget)? {
+    match migration_dispatch::advance(env, &keys, references, budget)? {
         migration_dispatch::Step::More => {
-            let loaded = migration_journal::ensure(env, &keys, &references)?;
+            let loaded = migration_journal::ensure(env, &keys, references)?;
             Ok(Preparation {
                 progress: cached(env, scope, loaded_progress(env, &loaded, &keys)?)?,
                 review: None,
@@ -436,6 +490,47 @@ pub fn confirm(env: &SyncEnv, scope: &Scope, ticket: &str) -> Result<Progress, A
         env.events.wake();
     }
     result
+}
+/// The explicit sign-in-and-sync consent authorizes this normal path; all source/CAS checks remain.
+pub(super) fn automatic_background(
+    env: &SyncEnv,
+    report: &mut round::Report,
+) -> Result<(), AppError> {
+    let scope = Scope::from_state(&record_runtime::snapshot(env)?.0)?;
+    let budget = Budget::new();
+    let approved = status(env, &scope)?.approved;
+    let result = run(
+        env,
+        &scope,
+        if approved {
+            Action::Continue
+        } else {
+            Action::Prepare
+        },
+        &budget,
+    );
+    report.requests += budget.used();
+    match result {
+        Ok(result) => {
+            if !result.progress.approved {
+                if let Some(preview) = result.review {
+                    if joining(&scope.check(env)?)? {
+                        super::adoption::confirm(env, &scope, &preview.ticket)?;
+                    } else {
+                        let keys = keys(env, &scope)?;
+                        review::confirm(env, &keys, &BTreeMap::new(), &preview.ticket)?;
+                    }
+                }
+            }
+            report.more = result.progress.phase != "complete";
+            Ok(())
+        }
+        Err(e) if Budget::exhausted(&e) => {
+            report.more = true;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 /// Called inside the ordinary worker's existing syncing reservation; never starts a new capture.
 pub(super) fn background(env: &SyncEnv, report: &mut round::Report) -> Result<bool, AppError> {

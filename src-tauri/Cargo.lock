@@ -170,6 +170,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -5975,6 +5976,7 @@ dependencies = [
 name = "sshelter"
 version = "1.8.0"
 dependencies = [
+ "argon2",
  "base64 0.22.1",
  "bip39",
  "cc",

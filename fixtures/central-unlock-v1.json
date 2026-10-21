@@ -1,0 +1,44 @@
+{
+  "description": "Synthetic opaque ciphertext, seed-1 fixture signature; no real credentials or recovery material.",
+  "registry": {
+    "body": {
+      "version": 1,
+      "anchor": {
+        "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+        "origin": "https://relay.example"
+      },
+      "revision": "1",
+      "previous_digest": "",
+      "membership_head": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+      "authorization_epoch": "2",
+      "author": "ffffffffffffffffffffffffffffffff",
+      "recovery": {
+        "encryption": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+        "signing": "ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw="
+      },
+      "slots": [
+        {
+          "header": {
+            "version": 1,
+            "anchor": {
+              "account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "genesis_hash": "ed32029895d873a75d717aeca5e76bc6bc5ca2ddf262107b424bcce81093ccc0",
+              "origin": "https://relay.example"
+            },
+            "generation": "1",
+            "binding": {
+              "kind": "password"
+            },
+            "salt": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+          },
+          "nonce": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+          "ciphertext": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQ=="
+        }
+      ]
+    },
+    "signature": "YNLZ0+IKIzq8Oc4diM+6hRulLpf7FQJjqTx5wpKD+F55y4LBB+4phBRQqffp/94oDh6QIQEx7q55nkoVDBsXBA=="
+  },
+  "canonical_base64": "WyJsdW5wb3J0LWFjY291bnQtdW5sb2NrLXJlZ2lzdHJ5LXYxIiwiMSIsImh0dHBzOi8vcmVsYXkuZXhhbXBsZSIsImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJlZDMyMDI5ODk1ZDg3M2E3NWQ3MTdhZWNhNWU3NmJjNmJjNWNhMmRkZjI2MjEwN2I0MjRiY2NlODEwOTNjY2MwIiwiMSIsIiIsImVkMzIwMjk4OTVkODczYTc1ZDcxN2FlY2E1ZTc2YmM2YmM1Y2EyZGRmMjYyMTA3YjQyNGJjY2U4MTA5M2NjYzAiLCIyIiwiZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJ5cE9zRndVWWNISFdlNFBIL3c3K2dRam83RVV3VjExM0pvZVRNOXZhdm53PSIsInJBR3lJSjZHTlUrNFV5TjdYZUQwK3JFOGY4djBNNlljQVpOcFlYL3M4UXM9IiwiMSIsIld5SnNkVzV3YjNKMExXRmpZMjkxYm5RdGRXNXNiMk5yTFdWdWRtVnNiM0JsTFhZeElpd2lhSFIwY0hNNkx5OXlaV3hoZVM1bGVHRnRjR3hsSWl3aVlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlTSXNJbVZrTXpJd01qazRPVFZrT0RjellUYzFaRGN4TjJGbFkyRTFaVGMyWW1NMlltTTFZMkV5WkdSbU1qWXlNVEEzWWpReU5HSmpZMlU0TVRBNU0yTmpZekFpTENJeElpd2ljR0Z6YzNkdmNtUWlMQ0pCZDAxRVFYZE5SRUYzVFVSQmQwMUVRWGROUkVGM1RVUkJkMDFFUVhkTlJFRjNUVVJCZDAxRVFYZE5QU0lzSWtKQlVVVkNRVkZGUWtGUlJVSkJVVVZDUVZGRlFrRlJSVUpCVVVWQ1FWRkZJaXdpUWxGVlJrSlJWVVpDVVZWR1FsRlZSa0pSVlVaQ1VWVkdRbEZWUmtKUlZVWkNVVlZHUWxGVlJrSlJWVVpDVVZWR1FsRlZSa0pSVlVaQ1VWVkdRbEZWUmtKUlZVWkNVVlZHUWxGVlJrSlJWVVpDVVZWR1FsRTlQU0pkIl0=",
+  "digest": "8f270147a4e5db42a09c02217273c3120ca204222c3f3c40afc059b6f4dad522"
+}
