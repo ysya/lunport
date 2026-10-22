@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.11.0](https://github.com/ysya/lunport/compare/v1.10.4...v1.11.0) (2026-10-22)
+
+
+### Features
+
+* sync saved SSH passwords with the encrypted library ([014c1b7](https://github.com/ysya/lunport/commit/014c1b726806fa39c1df0e20d02f5244acee17c1))
+* sync saved SSH passwords with the encrypted library ([feeaaf1](https://github.com/ysya/lunport/commit/feeaaf1f504ed08ff51c43d5d213c6a9d3b4b9df))
+
+
+### Bug Fixes
+
+* show AI access timestamps in activity history ([3d5bedc](https://github.com/ysya/lunport/commit/3d5bedc980a67042581471b6c25f158f597b03f5))
+* show request and completion times in AI access history ([b3b0971](https://github.com/ysya/lunport/commit/b3b0971f0902c1f57d07ba5a6e0ccacbe1b553c3))
+
 ## [1.10.4](https://github.com/ysya/lunport/compare/v1.10.3...v1.10.4) (2026-10-21)
 
 
