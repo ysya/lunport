@@ -29,7 +29,7 @@ impl Identity {
             }
         }
         match self.kind.as_str() {
-            "host" | "group" if hex(&self.id, 16) && self.scope.is_some() => Ok(()),
+            "host" | "group" | "password" if hex(&self.id, 16) && self.scope.is_some() => Ok(()),
             "keyslot" | "key" if hex(&self.id, 32) && self.scope.is_none() => Ok(()),
             "meta" if self.id == "catalog" && self.scope.is_none() => Ok(()),
             _ => Err(invalid()),
@@ -219,6 +219,7 @@ pub enum Data {
     Group(GroupPayload),
     Keyslot(SharedKeyslot),
     Key(PrivateMaterial),
+    Password(super::passwords::Material),
     Catalog(Catalog),
 }
 pub struct Admitted {
@@ -252,6 +253,7 @@ fn check(identity: &Identity, data: &Data) -> Result<(), AppError> {
         .map_err(|_| invalid()),
         ("keyslot", Data::Keyslot(slot)) => slot.validate(&identity.id),
         ("key", Data::Key(material)) => material.validate(),
+        ("password", Data::Password(material)) => material.validate(),
         ("meta", Data::Catalog(catalog)) => catalog.validate(),
         _ => Err(invalid()),
     }
@@ -310,6 +312,7 @@ fn logical(kind: &str, deleted: bool, incoming: Incoming<'_>) -> Result<Admitted
             "group" => Data::Group(serde_json::from_str(raw).map_err(|_| invalid())?),
             "keyslot" => Data::Keyslot(serde_json::from_str(raw).map_err(|_| invalid())?),
             "key" => Data::Key(serde_json::from_str(raw).map_err(|_| invalid())?),
+            "password" => Data::Password(serde_json::from_str(raw).map_err(|_| invalid())?),
             "meta" => Data::Catalog(serde_json::from_str(raw).map_err(|_| invalid())?),
             _ => return Err(invalid()),
         }
@@ -347,6 +350,7 @@ pub fn encode(identity: &Identity, data: &Data) -> Result<Zeroizing<Vec<u8>>, Ap
         Data::Group(group) => bytes(identity, group),
         Data::Keyslot(slot) => bytes(identity, slot),
         Data::Catalog(catalog) => bytes(identity, catalog),
+        Data::Password(material) => bytes(identity, &material.outgoing()),
         Data::Key(material) => {
             #[derive(Serialize)]
             struct Private<'a> {

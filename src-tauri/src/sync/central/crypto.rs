@@ -463,7 +463,7 @@ mod tests {
         assert!(decode("AQ", 1, 1).is_err());
         assert!(super::super::wire::number("01", true).is_err());
         let mut h = header();
-        h.kind = "password".into();
+        h.kind = "unsupported-record-kind".into();
         assert!(h.canonical().is_err());
         h = header();
         h.key_epoch = "9007199254740992".into();

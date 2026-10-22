@@ -88,6 +88,7 @@ pub fn public_candidate(
         }
     }
     replica.validate(&chain)?;
+    let candidate = super::passwords::capture_removed(&candidate, keys, signer)?;
     records_v3::validate_state(&candidate).map_err(|_| invalid())?;
     Ok(candidate)
 }

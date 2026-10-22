@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { tauriInvoke } from "@/lib/ipc";
+import type { RecordHostView, RecordOverview } from "@/lib/records";
 
 // Kept only in the editor's memory, separate from the host payload and query cache.
 export type PasswordChange =
@@ -11,21 +12,25 @@ export type PasswordChange =
   | { kind: "delete" }
   | null;
 
-export async function saveHostPassword(id: string, change: PasswordChange): Promise<void> {
+export async function saveHostPassword(host: Pick<RecordHostView, "id" | "revision">, change: PasswordChange, overview: Pick<RecordOverview, "generation" | "key_scope">): Promise<void> {
   if (!change) return;
   try {
-    if (change.kind === "set") {
-      await tauriInvoke("secrets_set", { alias: id, password: change.value });
-    } else {
-      await tauriInvoke("secrets_delete", { alias: id });
-    }
+    await tauriInvoke("records_password_change", {
+      hostId: host.id,
+      expected: host.revision,
+      generation: overview.generation,
+      ...(overview.key_scope ? { invocation: overview.key_scope } : {}),
+      password: change.kind === "set" ? change.value : null,
+    });
   } catch {
     // Native failures must not echo the submitted credential into a toast or log.
-    throw new Error("Host saved. Couldn’t save the password change on this device. Retry Save changes, or discard the password change.");
+    throw new Error("Host saved. Couldn’t save the password change. Retry Save changes, or discard the password change.");
   }
 }
 
-export function HostPasswordField({ hostId, change, onChange }: {
+export function HostPasswordField({ hostId, change, onChange, syncEnabled = false, generation }: {
+  generation?: string;
+  syncEnabled?: boolean;
   hostId: string | null;
   change: PasswordChange;
   onChange: (change: PasswordChange) => void;
@@ -43,12 +48,12 @@ export function HostPasswordField({ hostId, change, onChange }: {
       setSaved(false);
       return;
     }
-    void tauriInvoke<boolean>("secrets_has", { alias: hostId }).then(
+    void tauriInvoke<boolean>("records_password_status", { hostId }).then(
       value => { if (active) setSaved(value); },
       () => { if (active) setFailed(true); },
     );
     return () => { active = false; };
-  }, [hostId, retry]);
+  }, [hostId, generation, retry]);
   useEffect(() => { setShown(false); }, [hostId, change?.kind]);
   return <section className="space-y-3 rounded-lg border bg-muted/20 p-4" aria-label="Host password">
     <div className="flex items-center gap-2 text-sm font-medium">
@@ -57,9 +62,9 @@ export function HostPasswordField({ hostId, change, onChange }: {
     <p className="text-xs text-muted-foreground">
       {change?.kind === "set" ? "This password will be saved when you save the host."
         : change?.kind === "delete" ? "The saved password will be removed when you save changes."
-        : saved ? "A password is saved on this device."
+        : saved ? "A password is saved for this host."
         : failed ? "Saved password status is unavailable."
-        : saved === null ? "Checking this device’s credential store…"
+        : saved === null ? "Checking saved password…"
         : "Enter your password in Lunport when you connect."}
     </p>
     {change?.kind === "set" ? <>
@@ -90,7 +95,7 @@ export function HostPasswordField({ hostId, change, onChange }: {
         <Button type="button" variant="outline" size="sm" onClick={() => onChange(null)}>Keep saved password</Button>
       ) : <>
         <Button type="button" variant="outline" size="sm" onClick={() => onChange({ kind: "set", value: "" })}>
-          {saved ? "Replace password" : "Save password on this device"}
+          {saved ? "Replace password" : "Save password"}
         </Button>
         {saved && (
           <Button type="button" variant="ghost" size="sm" onClick={() => onChange({ kind: "delete" })}>Remove saved password</Button>
@@ -100,6 +105,6 @@ export function HostPasswordField({ hostId, change, onChange }: {
         )}
       </>}
     </div>}
-    <p className="text-xs text-muted-foreground">Stored in the system credential store on this device. Passwords never sync.</p>
+    <p className="text-xs text-muted-foreground">{syncEnabled ? "End-to-end encrypted with your library and synced to your devices. Removing this password also syncs." : "Saved securely on this device. Included automatically when you enable encrypted library sync."}</p>
   </section>;
 }

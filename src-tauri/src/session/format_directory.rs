@@ -92,6 +92,19 @@ impl HostDirectory for FormatDirectory {
     fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
         self.with_active(|d| d.password_authorized(hop, server_key))
     }
+    fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
+        // Records' native reader owns lifecycle while checking its exact saved owner. Never
+        // hold this adapter's lifecycle across that protected read or an OS authorization.
+        let directory = {
+            let _lifecycle=self.lifecycle.lock().unwrap();
+            match (self.mode)() {
+                (RuntimeFormat::Records,_)=>self.records.clone(),
+                (RuntimeFormat::Legacy,false)=>self.legacy.clone(),
+                _=>return Err(DirectoryError::Unsupported("Choose a workspace before reading saved passwords.".into())),
+            }
+        };
+        directory.saved_password(hop,keychain)
+    }
     fn password_account(&self, id: &HostId) -> String {
         self.active()
             .map(|d| d.password_account(id))
@@ -125,6 +138,9 @@ mod tests {
         fn password_account(&self, id: &HostId) -> String {
             format!("{}:{}", self.0, id)
         }
+        fn saved_password(&self, _: &HopRef, _: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>,DirectoryError> {
+            Ok(Some(zeroize::Zeroizing::new(format!("{} native saved password",self.0))))
+        }
     }
     fn fixture() -> (FormatDirectory, Arc<Mutex<(RuntimeFormat, bool)>>) {
         let mode = Arc::new(Mutex::new((RuntimeFormat::Legacy, false)));
@@ -153,6 +169,11 @@ mod tests {
             DirectoryError::NotFound("records".into())
         );
         assert_eq!(d.password_account(&HostId::from("id")), "records:id");
+        let hop=crate::ssh::Hop::new("id","web","fixture.invalid",22,"fixture",crate::ssh::AuthMethod::Password).reference();
+        let keychain=crate::sync::testkit::MemKeychain::default();
+        assert_eq!(d.saved_password(&hop,&keychain).unwrap().as_deref().map(String::as_str),Some("records native saved password"));
+        *mode.lock().unwrap()=(RuntimeFormat::Blocked,false);
+        assert!(d.saved_password(&hop,&keychain).is_err());
     }
     #[test]
     fn blocked_and_pending_legacy_modes_cannot_resolve_or_read_pins() {

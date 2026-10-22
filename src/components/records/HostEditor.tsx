@@ -165,7 +165,7 @@ export function RecordHostEditor({
           setState(current => ({ ...current, unavailable: true }));
           throw new Error("The host was saved, but its identity is unavailable. Reopen the host to save its password.");
         }
-        await saveHostPassword(id, passwordChange);
+        await saveHostPassword(saved, passwordChange, accepted);
         setPasswordChange(null);
       }
       onSaved(id);
@@ -441,7 +441,7 @@ export function RecordHostEditor({
                 </RecordField>
               )}
             {visible.auth === "password" && (
-              <HostPasswordField hostId={state.id} change={passwordChange} onChange={change => {
+              <HostPasswordField hostId={state.id} generation={overview.generation} syncEnabled={overview.central_mode} change={passwordChange} onChange={change => {
                 setPasswordChange(change);
                 setState(current => ({ ...current, error: null }));
               }} />

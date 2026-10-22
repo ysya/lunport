@@ -251,7 +251,8 @@ fn new_epoch_head_or_rekey_notice_only_quiesces_dispatch_and_does_not_accept_row
             page.phase = "rekey_pending".into();
         }
         let report = with_transport(&d.env(), |_, _, _| Ok(page)).unwrap();
-        assert!(report.revalidate);
+        assert_eq!(report.revalidate, kind != 1);
+        assert_eq!(report.refresh, kind == 1);
         assert_eq!(report.staged, 0);
         let mut expected = before;
         expected.local.central.as_mut().unwrap().control.phase =

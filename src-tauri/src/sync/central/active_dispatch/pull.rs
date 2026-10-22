@@ -21,6 +21,7 @@ pub(in crate::sync::central) struct Report {
     pub staged: usize,
     pub more: bool,
     pub revalidate: bool,
+    pub refresh: bool,
 }
 fn check(
     env: &SyncEnv,
@@ -104,11 +105,9 @@ fn with_transport(
     {
         return Err(invalid());
     }
-    let revalidate = page.epoch != requested.epoch
-        || page.phase != "ready"
-        || owner.control.highwater.as_ref().map(|h| h.head.as_str())
-            != Some(page.membership_head.as_str());
-    if revalidate {
+    let revalidate = page.epoch != requested.epoch || page.phase != "ready";
+    let refresh = !revalidate && owner.control.highwater.as_ref().map(|h|h.head.as_str()) != Some(page.membership_head.as_str());
+    if revalidate || refresh {
         let mut candidate = before.clone();
         candidate
             .local
@@ -133,7 +132,8 @@ fn with_transport(
         return Ok(Report {
             staged: 0,
             more: false,
-            revalidate: true,
+            revalidate,
+            refresh,
         });
     }
     let advertised = Checkpoint {
@@ -181,6 +181,7 @@ fn with_transport(
         staged,
         more,
         revalidate: false,
+        refresh: false,
     })
 }
 pub(in crate::sync::central) fn once(env: &SyncEnv) -> Result<Report, AppError> {
