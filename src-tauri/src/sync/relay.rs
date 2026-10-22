@@ -16,7 +16,7 @@ pub use crate::sync::record::Envelope;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// `POST /v1/pull` 一次最多幾條 chain(spec §6.1);更多就由呼叫端分批。
+/// `POST /legacy/v1/pull` 一次最多幾條 chain(spec §6.1);更多就由呼叫端分批。
 pub const MAX_BATCH_PULL: usize = 64;
 /// 一次上傳最多幾筆(relay 的 `MAX_ITEMS_PER_PUSH`)。
 const MAX_PUSH_ITEMS: usize = 200;
@@ -27,7 +27,7 @@ const MAX_CHAIN_RESPONSE_BYTES: usize = 1024 * 1024 + 4096 * 512 + 1024;
 const MAX_BATCH_RESPONSE_BYTES: usize = 2 * 1024 * 1024 + MAX_CHAIN_RESPONSE_BYTES + MAX_BATCH_PULL * 256;
 /// cursor 與 relay 序號的上限:relay 以 JavaScript 的 safe integer 檢查 `since`(spec §6.1),序號也不會超過它。
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-/// `GET /v1/info` 回報的功能名稱(spec §6.3)。
+/// `GET /legacy/v1/info` 回報的功能名稱(spec §6.3)。
 pub const FEATURE_PULL_BATCH: &str = "pull-batch";
 pub const FEATURE_FREEZE: &str = "freeze";
 /// 輪詢間隔的下限與每條 chain 的增量(spec §6.4)。
@@ -146,7 +146,7 @@ pub enum RelayError {
     /// —— relay 對這幾種都回 413,分不出來。
     #[error("the relay refused the request: too large or over the storage quota")]
     QuotaExceeded,
-    /// relay 沒有這個端點(舊版 relay 對 `POST /v1/pull` 回 404)。
+    /// relay 沒有這個端點(舊版 relay 對 `POST /legacy/v1/pull` 回 404)。
     #[error("the relay does not support {0} yet; update the relay")]
     Unsupported(&'static str),
     /// 請求不合規格(批次超過 64 項、chain 重複、chain id 或權杖不是 64 字元小寫 hex、`since` 太大、上傳是空的、超過 200 筆
@@ -174,7 +174,7 @@ impl From<RelayError> for AppError {
     }
 }
 
-/// `GET /v1/info` 的結果(spec §6.3)。
+/// `GET /legacy/v1/info` 的結果(spec §6.3)。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelayInfo {
     /// relay 回報的版本;None = 舊版 relay(沒有這個端點,也就沒有任何新功能)。
@@ -195,7 +195,7 @@ struct WireInfo {
     features: Vec<String>,
 }
 
-/// `POST /v1/pull` 的一項(wire 欄位就是 `chain`、`token`、`since`)。`Debug` 不印出權杖。
+/// `POST /legacy/v1/pull` 的一項(wire 欄位就是 `chain`、`token`、`since`)。`Debug` 不印出權杖。
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct BatchPullItem {
     pub chain: String,
@@ -212,7 +212,7 @@ impl std::fmt::Debug for BatchPullItem {
 /// 批次查詢裡一條 chain 的結果(spec §6.1)。
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchPullResult {
-    /// 與 `GET /v1/chains/{id}/records?since=` 相同的內容。
+    /// 與 `GET /legacy/v1/chains/{id}/records?since=` 相同的內容。
     Ok(PullResponse),
     /// chain 不存在或權杖不符。
     NotFound,
@@ -271,15 +271,15 @@ struct WireStatus {
 
 /// v2 中繼抽象(spec §6):引擎只依賴它,測試以記憶體假中繼實作。語意見 `RelayClient` 的實作。
 pub trait RelayApi {
-    /// `GET /v1/info`:舊版 relay(404)→ `RelayInfo::default()`。
+    /// `GET /legacy/v1/info`:舊版 relay(404)→ `RelayInfo::default()`。
     fn info(&self) -> Result<RelayInfo, RelayError>;
-    /// `PUT /v1/chains/{id}`:建立(201)或已存在且權杖相符(200)都是 Ok。
+    /// `PUT /legacy/v1/chains/{id}`:建立(201)或已存在且權杖相符(200)都是 Ok。
     fn create_chain(&self, chain_id: &str, token: &str) -> Result<(), RelayError>;
     fn delete_chain(&self, chain_id: &str, token: &str) -> Result<(), RelayError>;
-    /// `POST /v1/chains/{id}/freeze`:冪等。舊版 relay 也回 404 —— 呼叫前先確認 `RelayInfo` 有 `freeze`。
+    /// `POST /legacy/v1/chains/{id}/freeze`:冪等。舊版 relay 也回 404 —— 呼叫前先確認 `RelayInfo` 有 `freeze`。
     fn freeze_chain(&self, chain_id: &str, token: &str) -> Result<(), RelayError>;
     fn pull(&self, chain_id: &str, token: &str, since: u64) -> Result<PullResponse, RelayError>;
-    /// `POST /v1/pull`:1–64 項(空的不發請求,回空)。結果順序與請求相同。
+    /// `POST /legacy/v1/pull`:1–64 項(空的不發請求,回空)。結果順序與請求相同。
     fn pull_batch(&self, items: &[BatchPullItem]) -> Result<Vec<BatchPullEntry>, RelayError>;
     fn push(&self, chain_id: &str, token: &str, items: &[PushItem]) -> Result<PushOutcome, RelayError>;
 }
@@ -310,7 +310,7 @@ impl RelayClient {
             }
             _ => return Err(AppError::Other("relay URL must start with https://".to_string())),
         }
-        // endpoint 是用字串接在 base 後面的:query/fragment 會把 `/v1/...` 吞掉,userinfo 沒有理由出現。
+        // endpoint 是用字串接在 base 後面的:query/fragment 會把 `/legacy/v1/...` 吞掉,userinfo 沒有理由出現。
         if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() || url.password().is_some() {
             return Err(AppError::Other("relay URL must not contain a query, fragment or credentials".to_string()));
         }
@@ -470,7 +470,7 @@ fn batch_entries(items: &[BatchPullItem], body: WireBatchResponse) -> Result<Vec
 
 impl RelayApi for RelayClient {
     fn info(&self) -> Result<RelayInfo, RelayError> {
-        let resp = self.http.get(self.url("/v1/info")).send().map_err(unreachable_error)?;
+        let resp = self.http.get(self.url("/legacy/v1/info")).send().map_err(unreachable_error)?;
         match resp.status().as_u16() {
             200 => {
                 let wire: WireInfo = read_json(resp, MAX_SMALL_RESPONSE_BYTES)?;
@@ -489,7 +489,7 @@ impl RelayApi for RelayClient {
         check_chain(chain_id, token)?;
         let resp = self
             .http
-            .put(self.url(&format!("/v1/chains/{chain_id}")))
+            .put(self.url(&format!("/legacy/v1/chains/{chain_id}")))
             .bearer_auth(token)
             .json(&serde_json::json!({}))
             .send()
@@ -504,7 +504,7 @@ impl RelayApi for RelayClient {
         check_chain(chain_id, token)?;
         let resp = self
             .http
-            .delete(self.url(&format!("/v1/chains/{chain_id}")))
+            .delete(self.url(&format!("/legacy/v1/chains/{chain_id}")))
             .bearer_auth(token)
             .send()
             .map_err(unreachable_error)?;
@@ -518,7 +518,7 @@ impl RelayApi for RelayClient {
         check_chain(chain_id, token)?;
         let resp = self
             .http
-            .post(self.url(&format!("/v1/chains/{chain_id}/freeze")))
+            .post(self.url(&format!("/legacy/v1/chains/{chain_id}/freeze")))
             .bearer_auth(token)
             .send()
             .map_err(unreachable_error)?;
@@ -533,7 +533,7 @@ impl RelayApi for RelayClient {
         check_cursor(since)?;
         let resp = self
             .http
-            .get(self.url(&format!("/v1/chains/{chain_id}/records?since={since}")))
+            .get(self.url(&format!("/legacy/v1/chains/{chain_id}/records?since={since}")))
             .bearer_auth(token)
             .send()
             .map_err(unreachable_error)?;
@@ -549,7 +549,7 @@ impl RelayApi for RelayClient {
         }
         check_batch(items)?;
         // 不帶 `Authorization`:每項的權杖在 body 裡(spec §6.1)。
-        let resp = self.http.post(self.url("/v1/pull")).json(items).send().map_err(unreachable_error)?;
+        let resp = self.http.post(self.url("/legacy/v1/pull")).json(items).send().map_err(unreachable_error)?;
         match resp.status().as_u16() {
             200 => batch_entries(items, read_json(resp, MAX_BATCH_RESPONSE_BYTES)?),
             // 舊版 relay 沒有這個端點。
@@ -563,7 +563,7 @@ impl RelayApi for RelayClient {
         check_push(items)?;
         let resp = self
             .http
-            .post(self.url(&format!("/v1/chains/{chain_id}/records")))
+            .post(self.url(&format!("/legacy/v1/chains/{chain_id}/records")))
             .bearer_auth(token)
             .json(items)
             .send()
@@ -615,11 +615,11 @@ mod tests {
     #[test]
     fn oversized_info_and_frozen_answers_are_rejected_before_json_parsing() {
         let mut server = mockito::Server::new();
-        server.mock("GET", "/v1/info").with_status(200)
+        server.mock("GET", "/legacy/v1/info").with_status(200)
             .with_body(" ".repeat(MAX_SMALL_RESPONSE_BYTES + 1)).create();
         let chain = hex('a');
         let token = hex('b');
-        server.mock("POST", format!("/v1/chains/{chain}/records").as_str()).with_status(409)
+        server.mock("POST", format!("/legacy/v1/chains/{chain}/records").as_str()).with_status(409)
             .with_body(" ".repeat(MAX_SMALL_RESPONSE_BYTES + 1)).create();
         let client = RelayClient::new(&server.url()).unwrap();
         assert!(matches!(client.info(), Err(RelayError::BadResponse(_))));
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn chunked_answers_without_a_declared_length_are_bounded() {
         let mut server = mockito::Server::new();
-        server.mock("GET", "/v1/info").with_status(200).with_chunked_body(|writer| {
+        server.mock("GET", "/legacy/v1/info").with_status(200).with_chunked_body(|writer| {
             for _ in 0..65 { writer.write_all(&[b' '; 1024])?; }
             Ok(())
         }).create();
@@ -653,7 +653,7 @@ mod tests {
         results.push(serde_json::json!({"chain":chains[3],"status":"deferred"}));
         let body = serde_json::json!({"results":results}).to_string();
         assert!(body.len() > 2 * 1024 * 1024);
-        server.mock("POST", "/v1/pull").with_status(200).with_body(body).create();
+        server.mock("POST", "/legacy/v1/pull").with_status(200).with_body(body).create();
         let requests: Vec<_> = chains.iter().map(|chain| batch_item(chain,&token,0)).collect();
         let result = RelayClient::new(&server.url()).unwrap().pull_batch(&requests).unwrap();
         assert_eq!(result.len(),4);
@@ -715,13 +715,13 @@ mod tests {
         let mut server = mockito::Server::new();
         let (a, b, ta, tb) = (hex('a'), hex('b'), hex('1'), hex('2'));
         let put = server
-            .mock("PUT", format!("/v1/chains/{a}").as_str())
+            .mock("PUT", format!("/legacy/v1/chains/{a}").as_str())
             .match_header("authorization", format!("Bearer {ta}").as_str())
             .with_status(201)
             .with_body("{}")
             .create();
         let delete = server
-            .mock("DELETE", format!("/v1/chains/{b}").as_str())
+            .mock("DELETE", format!("/legacy/v1/chains/{b}").as_str())
             .match_header("authorization", format!("Bearer {tb}").as_str())
             .with_status(204)
             .create();
@@ -737,7 +737,7 @@ mod tests {
     fn info_reports_version_and_features_and_an_old_relay_has_none() {
         let mut current = mockito::Server::new();
         current
-            .mock("GET", "/v1/info")
+            .mock("GET", "/legacy/v1/info")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"relay":"sshelter-relay","version":"0.2.0","features":["pull-batch","freeze"]}"#)
@@ -747,17 +747,17 @@ mod tests {
         assert!(info.supports(FEATURE_PULL_BATCH) && info.supports(FEATURE_FREEZE));
 
         let mut old = mockito::Server::new();
-        old.mock("GET", "/v1/info").with_status(404).create();
+        old.mock("GET", "/legacy/v1/info").with_status(404).create();
         let info = RelayClient::new(&old.url()).unwrap().info().unwrap();
         assert_eq!(info, RelayInfo::default());
         assert!(!info.supports(FEATURE_PULL_BATCH) && !info.supports(FEATURE_FREEZE));
 
         let mut foreign = mockito::Server::new();
-        foreign.mock("GET", "/v1/info").with_status(200).with_body(r#"{"relay":"other","version":"1","features":[]}"#).create();
+        foreign.mock("GET", "/legacy/v1/info").with_status(200).with_body(r#"{"relay":"other","version":"1","features":[]}"#).create();
         assert!(matches!(RelayClient::new(&foreign.url()).unwrap().info(), Err(RelayError::BadResponse(_))));
 
         let mut busy = mockito::Server::new();
-        busy.mock("GET", "/v1/info").with_status(429).create();
+        busy.mock("GET", "/legacy/v1/info").with_status(429).create();
         assert!(matches!(RelayClient::new(&busy.url()).unwrap().info(), Err(RelayError::RateLimited)));
     }
 
@@ -766,11 +766,11 @@ mod tests {
         let mut server = mockito::Server::new();
         let (a, b, ta) = (hex('a'), hex('b'), hex('1'));
         let frozen = server
-            .mock("POST", format!("/v1/chains/{a}/freeze").as_str())
+            .mock("POST", format!("/legacy/v1/chains/{a}/freeze").as_str())
             .match_header("authorization", format!("Bearer {ta}").as_str())
             .with_status(204)
             .create();
-        server.mock("POST", format!("/v1/chains/{b}/freeze").as_str()).with_status(404).create();
+        server.mock("POST", format!("/legacy/v1/chains/{b}/freeze").as_str()).with_status(404).create();
         let client = RelayClient::new(&server.url()).unwrap();
         client.freeze_chain(&a, &ta).unwrap();
         frozen.assert();
@@ -781,9 +781,9 @@ mod tests {
     fn push_reports_a_frozen_chain_distinctly() {
         let mut server = mockito::Server::new();
         let (a, b, c, t) = (hex('a'), hex('b'), hex('c'), hex('1'));
-        server.mock("POST", format!("/v1/chains/{a}/records").as_str()).with_status(409).with_body(r#"{"status":"frozen"}"#).create();
-        server.mock("POST", format!("/v1/chains/{b}/records").as_str()).with_status(409).with_body(r#"{"error":"other"}"#).create();
-        server.mock("POST", format!("/v1/chains/{c}/records").as_str()).with_status(413).create();
+        server.mock("POST", format!("/legacy/v1/chains/{a}/records").as_str()).with_status(409).with_body(r#"{"status":"frozen"}"#).create();
+        server.mock("POST", format!("/legacy/v1/chains/{b}/records").as_str()).with_status(409).with_body(r#"{"error":"other"}"#).create();
+        server.mock("POST", format!("/legacy/v1/chains/{c}/records").as_str()).with_status(413).create();
         let client = RelayClient::new(&server.url()).unwrap();
         assert_eq!(client.push(&a, &t, &[item("h1", 0)]).unwrap(), PushOutcome::Frozen);
         assert!(matches!(client.push(&b, &t, &[item("h1", 0)]), Err(RelayError::Http(409))));
@@ -798,7 +798,7 @@ mod tests {
         let mut server = mockito::Server::new();
         let (a, t) = (hex('a'), hex('1'));
         server
-            .mock("POST", format!("/v1/chains/{a}/records").as_str())
+            .mock("POST", format!("/legacy/v1/chains/{a}/records").as_str())
             .match_header("authorization", format!("Bearer {t}").as_str())
             .with_status(200)
             .with_body(r#"{"results":[{"status":"ok","seq":12}],"latestSeq":12}"#)
@@ -819,15 +819,15 @@ mod tests {
         let mut server = mockito::Server::new();
         let (a, b, c, d, e, t) = (hex('a'), hex('b'), hex('c'), hex('d'), hex('e'), hex('1'));
         server
-            .mock("GET", format!("/v1/chains/{a}/records?since=5").as_str())
+            .mock("GET", format!("/legacy/v1/chains/{a}/records?since=5").as_str())
             .match_header("authorization", format!("Bearer {t}").as_str())
             .with_status(200)
             .with_body(r#"{"records":[{"idHash":"h1","kind":"host","seq":6,"nonce":"n","ciphertext":"c","deleted":false}],"latestSeq":6}"#)
             .create();
-        server.mock("GET", format!("/v1/chains/{b}/records?since=0").as_str()).with_status(404).create();
-        server.mock("GET", format!("/v1/chains/{c}/records?since=0").as_str()).with_status(429).create();
-        server.mock("GET", format!("/v1/chains/{d}/records?since=0").as_str()).with_status(500).create();
-        server.mock("GET", format!("/v1/chains/{e}/records?since=0").as_str()).with_status(200).with_body("not json").create();
+        server.mock("GET", format!("/legacy/v1/chains/{b}/records?since=0").as_str()).with_status(404).create();
+        server.mock("GET", format!("/legacy/v1/chains/{c}/records?since=0").as_str()).with_status(429).create();
+        server.mock("GET", format!("/legacy/v1/chains/{d}/records?since=0").as_str()).with_status(500).create();
+        server.mock("GET", format!("/legacy/v1/chains/{e}/records?since=0").as_str()).with_status(200).with_body("not json").create();
         let client = RelayClient::new(&server.url()).unwrap();
         assert_eq!(client.pull(&a, &t, 5).unwrap().latest_seq, 6);
         assert!(matches!(client.pull(&b, &t, 0), Err(RelayError::NotFound)));
@@ -842,7 +842,7 @@ mod tests {
         let (a, b, c, d, t) = (hex('a'), hex('b'), hex('c'), hex('d'), hex('1'));
         let items = vec![batch_item(&a, &t, 3), batch_item(&b, &t, 0), batch_item(&c, &t, 0), batch_item(&d, &t, 7)];
         let m = server
-            .mock("POST", "/v1/pull")
+            .mock("POST", "/legacy/v1/pull")
             .match_header("authorization", Matcher::Missing)
             .match_body(Matcher::Json(serde_json::json!([
                 { "chain": a, "token": t, "since": 3 },
@@ -891,7 +891,7 @@ mod tests {
             serde_json::json!({ "results": [{ "chain": a, "status": "maybe" }, { "chain": b, "status": "not_found" }] }),
         ] {
             let mut server = mockito::Server::new();
-            server.mock("POST", "/v1/pull").with_status(200).with_body(body.to_string()).create();
+            server.mock("POST", "/legacy/v1/pull").with_status(200).with_body(body.to_string()).create();
             let result = RelayClient::new(&server.url()).unwrap().pull_batch(&items);
             assert!(matches!(result, Err(RelayError::BadResponse(_))), "{body}");
         }
@@ -906,7 +906,7 @@ mod tests {
             (400, |e| matches!(e, RelayError::Http(400))),
         ] {
             let mut server = mockito::Server::new();
-            server.mock("POST", "/v1/pull").with_status(status).create();
+            server.mock("POST", "/legacy/v1/pull").with_status(status).create();
             let err = RelayClient::new(&server.url()).unwrap().pull_batch(&items).unwrap_err();
             assert!(check(&err), "{status}: {err:?}");
         }
@@ -925,7 +925,7 @@ mod tests {
         assert!(matches!(client.pull_batch(&[batch_item(&a, &t, 0), batch_item(&a, &t, 1)]), Err(RelayError::InvalidRequest(_))));
         assert!(matches!(client.pull_batch(&[batch_item(&a, &t.to_uppercase(), 0)]), Err(RelayError::InvalidRequest(_))));
         assert!(matches!(client.pull_batch(&[batch_item(&a, &t, MAX_SAFE_INTEGER + 1)]), Err(RelayError::InvalidRequest(_))));
-        assert!(matches!(client.push("../../v1/pull", &t, &[item("h1", 0)]), Err(RelayError::InvalidRequest(_))));
+        assert!(matches!(client.push("../../legacy/v1/pull", &t, &[item("h1", 0)]), Err(RelayError::InvalidRequest(_))));
         assert!(matches!(client.freeze_chain(&a, "tok"), Err(RelayError::InvalidRequest(_))));
         // 單一 chain 的查詢:cursor 一樣不能超過 safe integer。
         assert!(matches!(client.pull(&a, &t, MAX_SAFE_INTEGER + 1), Err(RelayError::InvalidRequest(_))));
@@ -951,7 +951,7 @@ mod tests {
             (&b, serde_json::json!({ "records": [record(big)], "latestSeq": 5 })),
             (&c, serde_json::json!({ "records": [record(MAX_SAFE_INTEGER)], "latestSeq": MAX_SAFE_INTEGER })),
         ] {
-            server.mock("GET", format!("/v1/chains/{chain}/records?since=0").as_str()).with_status(200).with_body(body.to_string()).create();
+            server.mock("GET", format!("/legacy/v1/chains/{chain}/records?since=0").as_str()).with_status(200).with_body(body.to_string()).create();
         }
         let client = RelayClient::new(&server.url()).unwrap();
         assert!(matches!(client.pull(&a, &t, 0), Err(RelayError::BadResponse(_))));
@@ -964,7 +964,7 @@ mod tests {
         ] {
             let mut server = mockito::Server::new();
             let body = serde_json::json!({ "results": [entry.clone(), { "chain": b, "status": "not_found" }] });
-            server.mock("POST", "/v1/pull").with_status(200).with_body(body.to_string()).create();
+            server.mock("POST", "/legacy/v1/pull").with_status(200).with_body(body.to_string()).create();
             let result = RelayClient::new(&server.url()).unwrap().pull_batch(&[batch_item(&a, &t, 0), batch_item(&b, &t, 0)]);
             assert!(matches!(result, Err(RelayError::BadResponse(_))), "{entry}");
         }
@@ -977,7 +977,7 @@ mod tests {
         ] {
             let mut server = mockito::Server::new();
             let body = serde_json::json!({ "results": [answer.clone()], "latestSeq": 5 });
-            server.mock("POST", format!("/v1/chains/{a}/records").as_str()).with_status(200).with_body(body.to_string()).create();
+            server.mock("POST", format!("/legacy/v1/chains/{a}/records").as_str()).with_status(200).with_body(body.to_string()).create();
             let result = RelayClient::new(&server.url()).unwrap().push(&a, &t, &[item("h1", 0)]);
             assert_eq!(result.is_ok(), ok, "{answer}: {result:?}");
             if !ok {
@@ -1078,10 +1078,10 @@ mod tests {
         let never_post = elsewhere.mock("POST", Matcher::Any).expect(0).create();
         let never_get = elsewhere.mock("GET", Matcher::Any).expect(0).create();
         let (a, t) = (hex('a'), hex('1'));
-        let records = format!("/v1/chains/{a}/records");
+        let records = format!("/legacy/v1/chains/{a}/records");
         let pull = format!("{records}?since=0");
         let mut relay = mockito::Server::new();
-        relay.mock("POST", "/v1/pull").with_status(307).with_header("location", &format!("{}/v1/pull", elsewhere.url())).create();
+        relay.mock("POST", "/legacy/v1/pull").with_status(307).with_header("location", &format!("{}/legacy/v1/pull", elsewhere.url())).create();
         relay.mock("GET", pull.as_str()).with_status(308).with_header("location", &format!("{}{pull}", elsewhere.url())).create();
         relay.mock("POST", records.as_str()).with_status(307).with_header("location", &format!("{}{records}", elsewhere.url())).create();
         let client = RelayClient::new(&relay.url()).unwrap();

@@ -2,13 +2,14 @@ import { AUTHORITY_HEADER } from "./authority";
 /** Independently deployed ingress. Never retries a private RPC through a public URL. */
 import type { CentralSyncBackend } from "../index";
 import { MINIMUM_BACKEND_FLOOR, type FloorEnv } from "./floor";
+import { centralPrivateFetch, type CentralRouteEnv } from "../v2/routes";
 export { SecurityFloorStore } from "./floor";
 export { LegacyRetirementStore } from "../legacy-retirement";
 export { IpLimiter } from "../ip-limit";
 export { AccountStore } from "../v2/account";
 export { VaultStore } from "../v2/store";
 export { PasskeyStore } from "../v2/passkeys/store";
-export type GatewayEnv = FloorEnv & {
+export type GatewayEnv = FloorEnv & CentralRouteEnv & {
   CORE: Service<CentralSyncBackend>;
   IP_LIMIT: Env["IP_LIMIT"];
   SECURITY_INSTALLATION: string;
@@ -69,13 +70,13 @@ export default {
       const url = new URL(request.url);
       if (url.protocol !== "https:" || url.origin !== env.CENTRAL_ORIGIN)
         return failure(421);
-      const isV2 = url.pathname.startsWith("/v2/"),
-        isInfo = url.pathname === "/v1/info",
-        isBatch = url.pathname === "/v1/pull";
-      const match = /^\/v1\/chains\/([0-9a-f]{64})(\/records|\/freeze)?$/.exec(
+      const isCentral = url.pathname.startsWith("/v1/"),
+        isInfo = url.pathname === "/legacy/v1/info",
+        isBatch = url.pathname === "/legacy/v1/pull";
+      const match = /^\/legacy\/v1\/chains\/([0-9a-f]{64})(\/records|\/freeze)?$/.exec(
         url.pathname,
       );
-      if (!isV2 && !isInfo && !isBatch && !match) return failure(404);
+      if (!isCentral && !isInfo && !isBatch && !match) return failure(404);
       if (
         (isInfo && request.method !== "GET") ||
         (isBatch && request.method !== "POST")
@@ -102,7 +103,7 @@ export default {
       if (floor.status !== 200) return failure();
       const body = await cappedBody(
         request,
-        isBatch ? 65536 : isV2 ? 4 * 1024 * 1024 : 1048576,
+        isBatch ? 65536 : isCentral ? 4 * 1024 * 1024 : 1048576,
       );
       if (!body) return failure(413);
       if (isBatch) {
@@ -171,6 +172,10 @@ export default {
             ? undefined
             : body,
       });
+      if (isCentral) {
+        forwarded.headers.delete(AUTHORITY_HEADER);
+        return await centralPrivateFetch(forwarded, env);
+      }
       forwarded.headers.set(AUTHORITY_HEADER, floor.authority);
       return await env.CORE.forward(floor.minimum, floor.registry, forwarded);
     } catch {

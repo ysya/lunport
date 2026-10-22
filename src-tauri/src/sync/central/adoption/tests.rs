@@ -284,21 +284,21 @@ fn service(f: &Fixture) -> Service {
         .head()
         .to_string();
     let account = owner.control.account_id.clone();
-    server.mock("GET","/v2/account").with_header("content-type","application/json").with_body(json!({"account_id":account,"device_state":"active","auth_epoch":3,"phase":"ready","proof":proof,"genesis_hash":owner.control.anchor.as_ref().unwrap().genesis_hash,"pairing_confirmation":Value::Null,"vaults":{&vault:{"epoch":1,"rekey":false}},"denied":[],"devices":[],"barrier":Value::Null}).to_string()).create();
+    server.mock("GET","/v1/account").with_header("content-type","application/json").with_body(json!({"account_id":account,"device_state":"active","auth_epoch":3,"phase":"ready","proof":proof,"genesis_hash":owner.control.anchor.as_ref().unwrap().genesis_hash,"pairing_confirmation":Value::Null,"vaults":{&vault:{"epoch":1,"rekey":false}},"denied":[],"devices":[],"barrier":Value::Null}).to_string()).create();
     let data = rows.clone();
-    server.mock("GET",format!("/v2/vaults/{vault}/rekey").as_str()).with_body_from_request(move|_|{let rows=data.lock().unwrap();json!({"phase":"ready","epoch":1,"sequence":rows.len().to_string(),"history_hash":rows.last().map(|r|r.history_hash.clone()).unwrap_or_else(||"0".repeat(64)),"journal":Value::Null,"commits":[]}).to_string().into_bytes()}).create();
+    server.mock("GET",format!("/v1/vaults/{vault}/rekey").as_str()).with_body_from_request(move|_|{let rows=data.lock().unwrap();json!({"phase":"ready","epoch":1,"sequence":rows.len().to_string(),"history_hash":rows.last().map(|r|r.history_hash.clone()).unwrap_or_else(||"0".repeat(64)),"journal":Value::Null,"commits":[]}).to_string().into_bytes()}).create();
     server
-        .mock("GET", format!("/v2/vaults/{vault}/wrap").as_str())
+        .mock("GET", format!("/v1/vaults/{vault}/wrap").as_str())
         .with_body(serde_json::to_string(&f.wrap).unwrap())
         .create();
     let data = rows.clone();
     let h = head.clone();
     let v = vault.clone();
-    server.mock("GET",format!("/v2/vaults/{vault}/metadata").as_str()).with_body_from_request(move|_|{let rows=data.lock().unwrap();json!({"vault":v,"epoch":1,"membership_head":h,"authorization_epoch":"3","phase":"ready","sequence":rows.len().to_string(),"history_hash":rows.last().map(|r|r.history_hash.clone()).unwrap_or_else(||"0".repeat(64))}).to_string().into_bytes()}).create();
+    server.mock("GET",format!("/v1/vaults/{vault}/metadata").as_str()).with_body_from_request(move|_|{let rows=data.lock().unwrap();json!({"vault":v,"epoch":1,"membership_head":h,"authorization_epoch":"3","phase":"ready","sequence":rows.len().to_string(),"history_hash":rows.last().map(|r|r.history_hash.clone()).unwrap_or_else(||"0".repeat(64))}).to_string().into_bytes()}).create();
     let data = rows.clone();
     let h = head.clone();
     let cost = calls.clone();
-    server.mock("GET",format!("/v2/vaults/{vault}/records").as_str()).match_query(mockito::Matcher::Any).with_body_from_request(move|request|{
+    server.mock("GET",format!("/v1/vaults/{vault}/records").as_str()).match_query(mockito::Matcher::Any).with_body_from_request(move|request|{
         cost.fetch_add(1,std::sync::atomic::Ordering::SeqCst);let url=reqwest::Url::parse(&format!("http://127.0.0.1{}",request.path_and_query())).unwrap();let since=url.query_pairs().find(|(k,_)|k=="since").unwrap().1.parse::<usize>().unwrap();
         let rows=data.lock().unwrap();json!({"records":rows.iter().skip(since).take(32).collect::<Vec<_>>(),"sequence":rows.len().to_string(),"history_hash":rows.last().map(|r|r.history_hash.clone()).unwrap_or_else(||"0".repeat(64)),"membership_head":h,"epoch":1,"phase":"ready"}).to_string().into_bytes()
     }).create();
@@ -308,7 +308,7 @@ fn service(f: &Fixture) -> Service {
         .verify(owner.control.anchor.as_ref().unwrap(), None)
         .unwrap();
     let v = vault.clone();
-    server.mock("POST",format!("/v2/vaults/{vault}/records").as_str()).with_body_from_request(move|request|{
+    server.mock("POST",format!("/v1/vaults/{vault}/records").as_str()).with_body_from_request(move|request|{
         let body:Value=serde_json::from_slice(request.body().unwrap()).unwrap();let incoming:Vec<super::super::crypto::RecordEnvelope>=serde_json::from_value(body["records"].clone()).unwrap();let mut rows=data.lock().unwrap();let mut receipts=vec![];let mut ids=std::collections::BTreeSet::new();
         for envelope in incoming {
             assert!(ids.insert(envelope.header.record_id.clone()));chain.current().verify_write(&envelope,&v,1,&envelope.header.author).unwrap();
@@ -651,7 +651,7 @@ fn publication_rechecks_live_metadata_after_staging_even_with_a_verified_history
             .unwrap().current().head().to_string();
         let data = s.rows.clone();
         let state = changed.clone();
-        let metadata = s.server.mock("GET", format!("/v2/vaults/{vault}/metadata").as_str())
+        let metadata = s.server.mock("GET", format!("/v1/vaults/{vault}/metadata").as_str())
             .expect_at_least(2)
             .with_body_from_request(move |_| {
                 let rows = data.lock().unwrap();
@@ -1285,7 +1285,7 @@ fn retired_status(f: &Fixture) -> Value {
 fn migration_status_mock(s: &mut Service, f: &Fixture, status: Value) -> mockito::Mock {
     let vault = &f.manifest.body.vault_id;
     s.server
-        .mock("GET", format!("/v2/vaults/{vault}/migration").as_str())
+        .mock("GET", format!("/v1/vaults/{vault}/migration").as_str())
         .with_body(status.to_string())
         .create()
 }

@@ -114,14 +114,14 @@ impl Service {
         let profile = Profile::new(&origin, &config.issuer, "opaque").unwrap();
         let account = Arc::clone(&state);
         let authorization = Arc::clone(&state);
-        server.mock("POST","/v2/session").with_status_code_from_request(move |r| {let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();if authorization.lock().unwrap().denied.iter().any(|id|Some(id.as_str())==body["device"]["id"].as_str()){403}else{200}}).with_header("content-type","application/json").with_body_from_request(move|r|{
+        server.mock("POST","/v1/session").with_status_code_from_request(move |r| {let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();if authorization.lock().unwrap().denied.iter().any(|id|Some(id.as_str())==body["device"]["id"].as_str()){403}else{200}}).with_header("content-type","application/json").with_body_from_request(move|r|{
             let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let device:Device=serde_json::from_value(body["device"].clone()).unwrap();
             let mut s=account.lock().unwrap();if s.denied.contains(&device.id){return b"{}".to_vec();}s.devices.insert(device.id.clone(),device.clone());s.sessions.insert(body["session_id"].as_str().unwrap().into(),device.id.clone());
             let active=s.chain().is_some_and(|c|c.current().devices().contains_key(&device.id));
             json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":if active {"active"}else{"pending"},"auth_epoch":s.epoch,"expires_at_ms":s.session_expires_at_ms.unwrap_or(1700000300000u64)}).to_string().into_bytes()
         }).create();
         let account = Arc::clone(&state);
-        server.mock("GET","/v2/account").with_header("content-type","application/json").with_body_from_request(move|r|{
+        server.mock("GET","/v1/account").with_header("content-type","application/json").with_body_from_request(move|r|{
             let s=account.lock().unwrap();let own=s.device(r);let chain=s.chain();let active=chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&own));
             let devices:Vec<Value>=s.devices.values().map(|d|json!({"device":d,"name":"Synthetic device","state":if chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&d.id)){"active"}else{"pending"},"request":s.requests.get(&d.id)})).collect();
             // Production omits private account metadata until the device is approved.
@@ -137,7 +137,7 @@ impl Service {
         }).create();
         let account = Arc::clone(&state);
         server
-            .mock("POST", "/v2/bootstrap")
+            .mock("POST", "/v1/bootstrap")
             .with_body_from_request(move |r| {
                 let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
                 let mut s = account.lock().unwrap();
@@ -155,7 +155,7 @@ impl Service {
             .create();
         let account = Arc::clone(&state);
         server
-            .mock("POST", "/v2/enrollment")
+            .mock("POST", "/v1/enrollment")
             .with_status(204)
             .with_body_from_request(move |r| {
                 let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
@@ -172,7 +172,7 @@ impl Service {
         let account = Arc::clone(&state);
         let response = Arc::clone(&state);
         server
-            .mock("POST", "/v2/membership")
+            .mock("POST", "/v1/membership")
             .with_status_code_from_request(move |_| {
                 if std::mem::take(&mut response.lock().unwrap().lose_control_response_once) {
                     503
@@ -213,7 +213,7 @@ impl Service {
             })
             .create();
         let account = Arc::clone(&state);
-        server.mock("POST", "/v2/barrier/resume").with_body_from_request(move |_| {
+        server.mock("POST", "/v1/barrier/resume").with_body_from_request(move |_| {
             let mut s = account.lock().unwrap(); s.barrier_pending = s.hold_barrier;
             json!({"access_revoked":!s.barrier_pending,"barrier_pending":s.barrier_pending,"rekey_pending":s.rekey_pending}).to_string().into_bytes()
         }).create();
@@ -221,7 +221,7 @@ impl Service {
         server
             .mock(
                 "GET",
-                mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/wrap$".into()),
+                mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/wrap$".into()),
             )
             .with_header("content-type", "application/json")
             .with_body_from_request(move |r| {
@@ -232,12 +232,12 @@ impl Service {
             })
             .create();
         let account = Arc::clone(&state);
-        server.mock("GET",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/metadata$".into())).with_header("content-type","application/json").with_body_from_request(move |_|{
+        server.mock("GET",mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/metadata$".into())).with_header("content-type","application/json").with_body_from_request(move |_|{
             let s=account.lock().unwrap();json!({"vault":s.vault,"epoch":s.key_epoch,"membership_head":s.chain().unwrap().current().head(),"authorization_epoch":s.epoch.to_string(),"phase":if s.rekey_pending{"rekey_pending"}else{"ready"},"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or("0".repeat(64),|row|row.history_hash.clone())}).to_string().into_bytes()
         }).create();
         let account = Arc::clone(&state);
         let authorization = Arc::clone(&state);
-        server.mock("GET", mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into()))
+        server.mock("GET", mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/records$".into()))
             .match_query(mockito::Matcher::Any).with_status_code_from_request(move |_| {
                 if std::mem::take(&mut authorization.lock().unwrap().reject_pull_once) {403} else {200}
             }).with_header("content-type", "application/json")
@@ -326,7 +326,7 @@ fn fresh_sign_in_repairs_local_backoff_but_cannot_bypass_server_retry_after() {
     assert!(round::require_success(&d.env(), &limited).is_err());
     assert!(round::cooldown(&d.env()) > Duration::from_secs(199));
     assert!(round::next_delay(&d.env()) > Duration::from_secs(199));
-    let no_registration = service.server.mock("POST", "/v2/session").expect(0).create();
+    let no_registration = service.server.mock("POST", "/v1/session").expect(0).create();
     let expected = round::check_cooldown(&d.env()).unwrap_err().to_string();
     assert_eq!(sign_in().unwrap_err().to_string(), expected);
     assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0, before);
@@ -339,11 +339,11 @@ fn install_recovery_routes(
     state: &Arc<Mutex<Account>>,
     config: &OidcConfig,
 ) {
-    server.mock("GET", "/v2/info").with_header("content-type", "application/json")
+    server.mock("GET", "/v1/info").with_header("content-type", "application/json")
         .with_body(json!({"protocol":2,"features":["account-unlock-v1","ssh-password-sync-v1","central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history","recovery-source-proofs"],"oidc":config}).to_string()).create();
     let account = Arc::clone(state);
     let barrier = Arc::clone(state);
-    server.mock("POST", "/v2/recovery/wraps").with_status_code_from_request(move |_| {let s = barrier.lock().unwrap(); if s.barrier_pending && s.hold_barrier {202} else {200}}).with_header("content-type", "application/json").with_body_from_request(move |request| {
+    server.mock("POST", "/v1/recovery/wraps").with_status_code_from_request(move |_| {let s = barrier.lock().unwrap(); if s.barrier_pending && s.hold_barrier {202} else {200}}).with_header("content-type", "application/json").with_body_from_request(move |request| {
         let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
         let mut s = account.lock().unwrap();
         verify_recovery_read(&s, request, &body);
@@ -355,7 +355,7 @@ fn install_recovery_routes(
             "commits":s.commits,"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or("0".repeat(64),|row|row.history_hash.clone())}]}).to_string().into_bytes()
     }).create();
     let account = Arc::clone(state);
-    server.mock("POST", "/v2/recovery/history").with_header("content-type", "application/json").with_body_from_request(move |request| {
+    server.mock("POST", "/v1/recovery/history").with_header("content-type", "application/json").with_body_from_request(move |request| {
         let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
         let mut s = account.lock().unwrap();
         verify_recovery_read(&s, request, &body);
@@ -371,7 +371,7 @@ fn install_recovery_routes(
     }).create();
     let account = Arc::clone(state);
     server
-        .mock("POST", "/v2/recovery/source")
+        .mock("POST", "/v1/recovery/source")
         .with_header("content-type", "application/json")
         .with_body_from_request(move |request| {
             let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
@@ -397,7 +397,7 @@ fn install_recovery_routes(
     let response = Arc::clone(state);
     let account = Arc::clone(state);
     server
-        .mock("POST", "/v2/recovery/commit")
+        .mock("POST", "/v1/recovery/commit")
         .with_status_code_from_request(move |_| {
             if std::mem::take(&mut response.lock().unwrap().lose_control_response_once) {
                 503
@@ -509,7 +509,7 @@ fn migration_progress(s: &Account) -> Value {
 }
 fn install_fresh_library_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Account>>) {
     let account = Arc::clone(state);
-    server.mock("POST",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/migration/freeze$".into())).with_body_from_request(move |r|{
+    server.mock("POST",mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/migration/freeze$".into())).with_body_from_request(move |r|{
         let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();
         let intent:super::migration_freeze::SignedFreeze=serde_json::from_value(body["intent"].clone()).unwrap();
         let s=account.lock().unwrap();assert!(intent.body.chains.is_empty());
@@ -521,7 +521,7 @@ fn install_fresh_library_routes(server: &mut mockito::ServerGuard, state: &Arc<M
     server
         .mock(
             "GET",
-            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/migration$".into()),
+            mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/migration$".into()),
         )
         .with_status_code_from_request(move |_| {
             if exists.lock().unwrap().migration.is_some() {
@@ -544,7 +544,7 @@ fn install_fresh_library_routes(server: &mut mockito::ServerGuard, state: &Arc<M
         server
             .mock(
                 "POST",
-                mockito::Matcher::Regex(format!("^/v2/vaults/[0-9a-f]{{64}}/migration/{action}$")),
+                mockito::Matcher::Regex(format!("^/v1/vaults/[0-9a-f]{{64}}/migration/{action}$")),
             )
             .with_body_from_request(move |r| {
                 let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
@@ -578,7 +578,7 @@ fn install_fresh_library_routes(server: &mut mockito::ServerGuard, state: &Arc<M
             .create();
     }
     let account = Arc::clone(state);
-    server.mock("POST",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into())).with_body_from_request(move |r| {
+    server.mock("POST",mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/records$".into())).with_body_from_request(move |r| {
         let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let mut s=account.lock().unwrap();let chain=s.chain().unwrap();let mut receipts=vec![];
         let incoming:Vec<crypto::RecordEnvelope>=serde_json::from_value(body["records"].clone()).unwrap();
         for envelope in incoming { envelope.verify(&chain.current().devices()[&envelope.header.author].signing).unwrap();let row=append_automatic_row(&mut s.history,envelope);
@@ -589,7 +589,7 @@ fn install_fresh_library_routes(server: &mut mockito::ServerGuard, state: &Arc<M
 fn install_unlock_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Account>>) {
     let account = Arc::clone(state);
     server
-        .mock("GET", "/v2/unlock")
+        .mock("GET", "/v1/unlock")
         .with_header("content-type", "application/json")
         .with_body_from_request(move |_| {
             json!({"registry":account.lock().unwrap().unlock})
@@ -600,7 +600,7 @@ fn install_unlock_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Ac
     let account = Arc::clone(state);
     let reject = Arc::clone(state);
     server
-        .mock("POST", "/v2/unlock")
+        .mock("POST", "/v1/unlock")
         .with_status_code_from_request(move |_| {
             if reject.lock().unwrap().reject_unlock {
                 503
@@ -626,7 +626,7 @@ fn install_unlock_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Ac
     let account = Arc::clone(state);
     let response = Arc::clone(state);
     server
-        .mock("POST", "/v2/unlock/join")
+        .mock("POST", "/v1/unlock/join")
         .with_status_code_from_request(move |_| {
             if std::mem::take(&mut response.lock().unwrap().lose_unlock_join_reply) {
                 503
@@ -670,7 +670,7 @@ fn install_account_access_routes(
     locator: String,
 ) {
     let account = Arc::clone(state);
-    server.mock("GET","/v2/device-access").with_body_from_request(move |_| {
+    server.mock("GET","/v1/device-access").with_body_from_request(move |_| {
         let s=account.lock().unwrap();let chain=s.chain();
         let mut devices:Vec<_>=s.devices.values().map(|d|json!({"id":d.id,"name":"Synthetic device","created_at_ms":1700000000000u64,"state":if s.denied.contains(&d.id){"revoked"}else if chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&d.id)){"active"}else{"pending"}})).collect();
         if s.duplicate_access_row {if let Some(first)=devices.first().cloned(){devices.push(first);}}
@@ -678,7 +678,7 @@ fn install_account_access_routes(
     }).create();
     let account = Arc::clone(state);
     let response = Arc::clone(state);
-    server.mock("POST","/v2/device-access/revoke").with_status_code_from_request(move |_|{
+    server.mock("POST","/v1/device-access/revoke").with_status_code_from_request(move |_|{
         let mut s=response.lock().unwrap();if std::mem::take(&mut s.lose_access_response_once){503}else if s.hold_barrier{202}else{200}
     }).with_body_from_request(move |r| {
         let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let id=body["device"].as_str().unwrap();let mut s=account.lock().unwrap();
@@ -689,12 +689,12 @@ fn install_account_access_routes(
 fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Account>>) {
     use super::{rekey, rotation};
     let account = Arc::clone(state);
-    server.mock("GET", mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey$".into())).with_body_from_request(move |_| {
+    server.mock("GET", mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey$".into())).with_body_from_request(move |_| {
         let s=account.lock().unwrap();json!({"phase":if s.rekey_pending{"rekey_pending"}else{"ready"},"epoch":s.key_epoch,"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or(rotation::ZERO,|r|r.history_hash.as_str()),
             "commits":s.commits,"journal":s.rotation.as_ref().map(|(m,_,rows)|json!({"manifest":m,"staged":rows.len().to_string(),"history_hash":rows.last().map_or(rotation::ZERO,|r|r.history_hash.as_str())}))}).to_string().into_bytes()
     }).create();
     let account = Arc::clone(state);
-    server.mock("POST",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey/begin$".into())).with_body_from_request(move |r| {
+    server.mock("POST",mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey/begin$".into())).with_body_from_request(move |r| {
         let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap(); let manifest:rekey::SignedRekey=serde_json::from_value(body["manifest"].clone()).unwrap();let wraps:Vec<WrappedKeys>=serde_json::from_value(body["wraps"].clone()).unwrap();
         let mut s=account.lock().unwrap();let chain=s.chain().unwrap();
         assert!(!chain.current().devices().keys().any(|id|s.denied.contains(id)));
@@ -706,7 +706,7 @@ fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<
     }).create();
     let account = Arc::clone(state);
     let response = Arc::clone(state);
-    server.mock("POST",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey/stage$".into())).with_status_code_from_request(move |_|if std::mem::take(&mut response.lock().unwrap().lose_stage_response_once){503}else{200}).with_body_from_request(move |r| {
+    server.mock("POST",mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey/stage$".into())).with_status_code_from_request(move |_|if std::mem::take(&mut response.lock().unwrap().lose_stage_response_once){503}else{200}).with_body_from_request(move |r| {
         let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap(); let after:usize=body["after"].as_str().unwrap().parse().unwrap();let rows:Vec<rekey::Version>=serde_json::from_value(body["rows"].clone()).unwrap();
         let mut s=account.lock().unwrap();let (manifest,_,saved)=s.rotation.as_mut().unwrap(); assert_eq!(body["rotation"],manifest.body.rotation_id);assert_eq!(after,saved.len());assert!(rows.len()<=32);saved.extend(rows);
         json!({"staged":saved.len().to_string(),"history_hash":saved.last().unwrap().history_hash}).to_string().into_bytes()
@@ -716,7 +716,7 @@ fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<
     server
         .mock(
             "POST",
-            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey/commit$".into()),
+            mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey/commit$".into()),
         )
         .with_status_code_from_request(move |_| {
             if std::mem::take(&mut response.lock().unwrap().lose_commit_response_once) {
@@ -756,7 +756,7 @@ fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<
     server
         .mock(
             "POST",
-            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey/reconcile$".into()),
+            mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey/reconcile$".into()),
         )
         .with_body("{}")
         .create();
@@ -764,7 +764,7 @@ fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<
     server
         .mock(
             "GET",
-            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey/wraps$".into()),
+            mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey/wraps$".into()),
         )
         .match_query(mockito::Matcher::Any)
         .with_body_from_request(move |r| {
@@ -782,7 +782,7 @@ fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<
         })
         .create();
     let account = Arc::clone(state);
-    server.mock("GET",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/rekey/source$".into())).match_query(mockito::Matcher::Any).with_body_from_request(move |r| {
+    server.mock("GET",mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/rekey/source$".into())).match_query(mockito::Matcher::Any).with_body_from_request(move |r| {
         let query=r.path_and_query().split_once('?').unwrap().1; let params:BTreeMap<_,_>=query.split('&').map(|v|v.split_once('=').unwrap()).collect();let epoch:u64=params["epoch"].parse().unwrap();let after:usize=params["after"].parse().unwrap();
         let s=account.lock().unwrap();json!({"manifest":s.commits[epoch as usize-2],"digests":s.source_digests[&epoch].iter().skip(after).take(256).collect::<Vec<_>>()}).to_string().into_bytes()
     }).create();
@@ -1154,7 +1154,7 @@ fn stage_ciphertext_checks(
         .server
         .mock(
             "GET",
-            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into()),
+            mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/records$".into()),
         )
         .match_query(mockito::Matcher::Any)
         .with_status(429)
@@ -1808,7 +1808,7 @@ fn refused_device_grant_retains_only_account_access_and_can_be_retried_without_r
     let context = controller::context(&first.env()).unwrap();
     let refusal = service
         .server
-        .mock("POST", "/v2/session")
+        .mock("POST", "/v1/session")
         .with_status(403)
         .with_body("UNTRUSTED-REFUSAL-SENTINEL")
         .expect(1)

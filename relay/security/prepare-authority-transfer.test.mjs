@@ -79,12 +79,14 @@ test("retains the original public worker and existing central namespace IDs and 
     f.source.migrations.slice(0, 1),
   );
   assert.equal(r.security.workers_dev, false);
+  assert.equal(r.security.build.command, "node scripts/build-passkey-page.mjs");
   assert.deepEqual(r.security.routes, []);
-  assert.ok(
-    r.core.durable_objects.bindings
-      .filter((v) => ["ACCOUNT", "VAULT", "PASSKEY"].includes(v.name))
-      .every((v) => v.script_name === f.source.name),
+  assert.deepEqual(
+    r.core.durable_objects.bindings.map((v) => v.name),
+    ["CHAIN", "IP_LIMIT"],
   );
+  assert.equal(r.core.vars.CENTRAL_ENABLED, undefined);
+  assert.equal(r.security.vars.CENTRAL_ENABLED, "0");
   assert.equal(f.source.workers_dev, true);
 });
 test("creates only absent security classes for a verified legacy-only installation", () => {

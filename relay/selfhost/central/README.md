@@ -1,6 +1,8 @@
 # Central service Compose preview
 
-This separate Compose runs the same application as managed Workers. A stable workerd security image owns the private entry point, central account/Passkey/Vault databases, permanent retirement registry and security floor. A separate application image exports only the core module into a read-only runtime mount. The application updater has no security volume, proxy capability or network access. One workerd process hosts both Workers through their existing named RPC; only Caddy can reach its private HTTP socket.
+This separate Compose runs the same application as managed Workers. A stable workerd security image owns the private entry point, `/v1/*` account authentication and routes, central account/Passkey/Vault databases, permanent retirement registry and security floor. A separate application image exports only the core module into a read-only runtime mount. The application updater has no security volume, proxy capability or network access. One workerd process hosts both Workers through their existing named RPC for `/legacy/v1/*` traffic; only Caddy can reach its private HTTP socket.
+
+The core has only its local chain and limiter bindings. It cannot directly call security-owned objects, but it still controls legacy chain data and migration snapshots. Review application image updates and verify the generated workerd bindings before restarting the gateway.
 
 Central account support remains a disabled preview. The isolated deployment tests cover encrypted migration, device approval/revocation, consistent restore and older application backups while current security authority is retained. Production HTTPS/origin verification and operator restore procedures still require the actual deployment environment. The existing [legacy relay Compose](../compose.yaml) remains available. This preview creates new installation namespaces; an existing relay needs a reviewed namespace/data/security-marker import before changing its public origin. Starting empty volumes cannot establish that old sync codes or revoked devices are safe.
 
@@ -45,7 +47,7 @@ docker compose up --no-deps --force-recreate core-bundle
 docker compose restart gateway
 ```
 
-Review compatibility, storage migrations and the required backend floor before each update. Review/build the `gateway` security image separately when its code/configuration changes; application updates must retain that approved image and its persistent volumes. Pin released image digests in `.env` when distributing a deployment rather than relying on mutable local tags.
+Review compatibility, storage migrations and the required backend floor before each update. Require review and approval for every core image as well as the `gateway` image; do not auto-load an unreviewed core artifact. Application updates must retain the approved gateway image and persistent volumes. Pin released image digests in `.env` when distributing a deployment rather than relying on mutable local tags.
 
 For an approved floor increase, stop the gateway and use the inspected registry with an explicit minimum:
 

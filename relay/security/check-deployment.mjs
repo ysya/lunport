@@ -27,12 +27,13 @@ export function validateSecurityDeployment(core, security, bootstrap) {
   }
   if (
     core.main !== "src/index.ts" ||
-    core.vars?.CENTRAL_PRIVATE_CORE !== "1" ||
-    core.vars?.CENTRAL_ENABLED !== "0"
+    core.vars?.CENTRAL_PRIVATE_CORE !== "1"
   )
     problems.push(
-      "core: require private mode and generic OIDC disabled in examples",
+      "core: require private mode",
     );
+  if (core.services?.length)
+    problems.push("core: must not have cross-service bindings");
   if (
     security.main !== "src/security/gateway.ts" ||
     bootstrap.main !== security.main ||
@@ -41,6 +42,11 @@ export function validateSecurityDeployment(core, security, bootstrap) {
     problems.push(
       "security: bootstrap and final gateway must have the same owner and entrypoint",
     );
+  if (
+    security.build?.command !== "node scripts/build-passkey-page.mjs" ||
+    bootstrap.build?.command !== security.build.command
+  )
+    problems.push("security: gateway must build the Passkey page");
   const service = security.services?.find((item) => item.binding === "CORE");
   if (
     service?.service !== core.name ||
@@ -75,30 +81,18 @@ export function validateSecurityDeployment(core, security, bootstrap) {
     }
   }
   if (
-    binding(core, "LEGACY_RETIREMENT")?.script_name !== security.name ||
-    binding(core, "LEGACY_RETIREMENT")?.class_name !== "LegacyRetirementStore"
-  )
-    problems.push("core: registry binding must point to the security owner");
-  if (
     binding(security, "CHAIN")?.script_name !== core.name ||
     binding(bootstrap, "CHAIN")
   )
     problems.push(
       "security: legacy chain access must target the core; bootstrap waits for that owner",
     );
-  for (const [name, cls] of [
-    ["ACCOUNT", "AccountStore"],
-    ["VAULT", "VaultStore"],
-    ["PASSKEY", "PasskeyStore"],
-  ]) {
-    if (
-      binding(core, name)?.class_name !== cls ||
-      binding(core, name)?.script_name !== security.name
-    )
-      problems.push(
-        `core: ${name} must reference the independent security authority`,
-      );
-  }
+  const coreBindings = core.durable_objects?.bindings ?? [];
+  if (
+    coreBindings.length !== 2 ||
+    coreBindings.some((item) => !["CHAIN", "IP_LIMIT"].includes(item.name))
+  )
+    problems.push("core: only local CHAIN and IP_LIMIT bindings are allowed");
   const origin = security.vars?.CENTRAL_ORIGIN;
   try {
     if (new URL(origin).origin !== origin || !origin.startsWith("https://"))
@@ -107,7 +101,6 @@ export function validateSecurityDeployment(core, security, bootstrap) {
     problems.push("security: require a canonical HTTPS origin");
   }
   if (
-    core.vars?.CENTRAL_ORIGIN !== origin ||
     bootstrap.vars?.CENTRAL_ORIGIN !== origin ||
     !/^[0-9a-f]{32}$/.test(security.vars?.SECURITY_INSTALLATION ?? "") ||
     bootstrap.vars?.SECURITY_INSTALLATION !==
@@ -116,12 +109,35 @@ export function validateSecurityDeployment(core, security, bootstrap) {
     problems.push(
       "security: origin and stable installation must match across examples",
     );
+  for (const key of [
+    "CENTRAL_ENABLED",
+    "PASSKEY_ENABLED",
+    "OIDC_ISSUER",
+    "OIDC_JWKS_URL",
+    "OIDC_API_AUDIENCE",
+    "OIDC_NATIVE_CLIENT_ID",
+    "OIDC_SYNC_SCOPE",
+  ]) {
+    if (
+      security.vars?.[key] === undefined ||
+      bootstrap.vars?.[key] !== security.vars[key] ||
+      core.vars?.[key] !== undefined
+    )
+      problems.push(`${key}: configuration belongs only to security`);
+  }
+  if (security.vars?.CENTRAL_ENABLED !== "0")
+    problems.push("security: examples must start with central accounts disabled");
   const migrations = (config) => JSON.stringify(config.migrations);
   if (migrations(security) !== migrations(bootstrap))
     problems.push("security: bootstrap/final migration history differs");
-  for (const name of ["CHAIN", "IP_LIMIT"])
-    if (binding(core, name)?.script_name || !binding(core, name))
+  for (const [name, className] of [
+    ["CHAIN", "ChainStore"],
+    ["IP_LIMIT", "IpLimiter"],
+  ]) {
+    const item = binding(core, name);
+    if (item?.script_name || item?.class_name !== className)
       problems.push(`core: preserve local ${name} ownership`);
+  }
   for (const config of [core, security, bootstrap]) {
     const names = config.durable_objects?.bindings?.map((v) => v.name) ?? [];
     if (new Set(names).size !== names.length)
