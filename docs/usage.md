@@ -58,7 +58,7 @@ Up to eight session tabs can be open. Retained history and queued data are bound
 
 Use a key from the local vault, a saved password or an interactive authentication prompt. Passwords, key passphrases and two-factor codes appear in Lunport’s **SSH authentication** window, with the requesting host and username. Answers apply to the current connection; cancelling or closing the terminal abandons its questions. Shell input continues in your preferred terminal.
 
-In the Records host editor, choose **Authentication → Password**. Leave the password unset to enter it in Lunport when connecting, or choose **Save password on this device**, enter it and save the host. Saved passwords use the system credential store and never sync. The editor shows saved status without reading or revealing the saved password; **Replace password** and **Remove saved password** take effect when you save changes. If credential storage fails after creating the host, retry **Save changes** without creating another host.
+In the Records host editor, choose **Authentication → Password**. Leave the password unset to enter it in Lunport when connecting, or choose **Save password**, enter it and save the host. Saved SSH passwords use protected local credential storage and join end-to-end encrypted library sync when enabled. The editor shows saved status without reading or revealing the saved password; **Replace password** and **Remove saved password** take effect when you save changes. If credential storage fails after creating the host, retry **Save changes** without creating another host.
 
 The SSH engine supports `ProxyJump`; `ProxyCommand` connections are not supported. It signs with keys kept in Lunport, so an external `IdentityFile` must be imported or moved into the vault before this engine can use it. A host relying on an implicit `~/.ssh/id_*` key must select its key explicitly.
 
@@ -70,7 +70,7 @@ Open **Keys → Import private key → From a file** to choose a supported OpenS
 
 To change a key's name, select it in **Keys**, choose **Rename**, and save the new name. The key ID, fingerprint, private material and host references stay the same. Account key names sync to your other devices; a conflicting or deleted key must be resolved before renaming.
 
-Central library sync includes managed SSH private keys by default after you sign in and unlock sync. There are no per-key sync switches or private-key download steps. The Keys page offers **Set up automatic sync** until this library has completed account setup and migration. Generating or importing a key then includes it in that encrypted library. Hardware and external-agent keys keep their private material on their original device. Saved passwords and separately stored key passphrases stay on each device.
+Central library sync includes managed SSH private keys by default after you sign in and unlock sync. There are no per-key sync switches or private-key download steps. The Keys page offers **Set up automatic sync** until this library has completed account setup and migration. Generating or importing a key then includes it in that encrypted library. Hardware and external-agent keys keep their private material on their original device. Saved SSH passwords sync with their hosts; separately stored key passphrases stay on each device.
 
 Lunport's SSH agent provides vault keys to compatible local SSH clients while the app is running and asks before a program uses a key. Keep the app running, or enable launch at login when you need that integration. Exporting a private key creates an ordinary key file outside the vault; other programs can then use that copy independently.
 
@@ -88,13 +88,13 @@ Passkey account sync is available on macOS, Windows and Linux.
 
 Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**. The account-service URL starts blank: deploy your own Cloudflare or Docker service, enter its HTTPS URL and choose **Sign in and sync with Passkey**. Local use needs no account. Passkey needs no external identity provider; OIDC remains optional.
 
-On the first device, create and confirm a **sync unlock password** of at least 12 characters. Lunport prepares and syncs your encrypted library automatically. Hosts, Groups, tunnel rules and managed SSH private keys are included. The server stores encrypted library content.
+On the first device, create and confirm a **sync unlock password** of at least 12 characters. Lunport prepares and syncs your encrypted library automatically. Hosts, Groups, tunnel rules, saved SSH passwords and managed SSH private keys are included. The server stores encrypted library content.
 
 On another device, sign in to the same account on the same server, then enter the same sync unlock password once. Lunport securely connects the device, downloads your library and merges local records automatically. Imported host references and tunnel rules are remapped together. No pairing code is required. Passkey signs you into the account; the sync password unlocks encrypted data inside the app.
 
 The former sync-code controls are removed. To change an already selected service, edit its URL and choose **Change server and restart**. This opens a separate empty local library and closes terminal sessions. Reimport your SSH config explicitly; old account, Vault and backup contents are not silently uploaded to the new service. First-time sign-in from a local library keeps that library.
 
-New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys are included automatically. The relay receives ciphertext; server passwords remain local.
+New and imported records then sync with the library. You can edit cached records offline; changes queue until the next connection. Managed SSH private keys and saved SSH passwords are included automatically. The relay receives ciphertext. Changing or removing a saved SSH password also syncs. Passwords remain bound to the host identity, address, port and username; changing those connection settings requires saving the password again. Previously saved passwords without that binding must be saved again once. Each device still confirms server fingerprints before using credentials.
 
 Use the account device controls to revoke a lost device. Revocation blocks subsequent authenticated sync; it does not erase content already decrypted on that device. Save your sync unlock password in a password manager. It is not sent to the server and cannot be recovered through Passkey sign-in.
 
@@ -125,6 +125,8 @@ For example, a client can propose `create_host` with `{"alias":"web","hostname":
 `verify_host_key` accepts a host ID or exact alias; the client cannot supply a trust decision. You can also use **Edit host → Server identity → Verify server fingerprint**. Verification stops before destination login or remote commands. Jump hosts may need their own credentials. A matching saved fingerprint does not prompt again; a changed destination, route, permission or pin requires verification again.
 
 Ask reviews the exact command and can request credentials through Lunport. Auto-log execution never prompts for credentials or silently trusts a new key; complete fingerprint verification first. Authentication answers and command output are not retained in the public audit log. This permission gate covers Lunport MCP requests; other local programs still have their own operating-system access.
+
+**Recent activity** shows the latest 10 public audit entries, retained across app restarts. **Requested** and **Completed** show the date and time, including seconds and this device's local time zone. Older entries show only the timestamps that were recorded; entries without a usable timestamp show **Time unavailable**.
 
 ## Existing Legacy workspaces
 
@@ -181,4 +183,4 @@ This restores host aliases, addresses, users, ports, jumps, timeouts, tags and n
 
 Open **All hosts → More library actions → Export hosts and Groups…** to save `lunport-hosts.json`. If a server change left the old library in the original workspace, choose **Export previous workspace hosts and Groups…** instead. Export works offline without signing in and reads cached host settings; it does not contact the retired relay or open the key Vault.
 
-On the destination device choose **Import hosts**, select the exported JSON, review the hosts, then confirm. Group names, hierarchy, defaults and host membership are retained, including empty Groups. Jump-host relationships, tags and notes are also retained. Older host-only exports still import, but require a new export from the source workspace to recover Groups. SSH private keys, old key bindings, server fingerprint approvals, imported commands and account credentials are excluded. Assign SSH keys and verify server fingerprints before connecting. Source workspaces remain in place. Host exports contain server addresses and notes, so keep them private.
+On the destination device choose **Import hosts**, select the exported JSON, review the hosts, then confirm. Group names, hierarchy, defaults and host membership are retained, including empty Groups. Jump-host relationships, tags and notes are also retained. Older host-only exports still import, but require a new export from the source workspace to recover Groups. SSH private keys, old key bindings, server fingerprint approvals, imported commands and account credentials are excluded. Assign SSH keys and verify server fingerprints before connecting. Saved SSH passwords are also excluded. Source workspaces remain in place. Host exports contain server addresses and notes, so keep them private.
