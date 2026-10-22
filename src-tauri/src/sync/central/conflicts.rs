@@ -82,7 +82,7 @@ fn public(value: &Data) -> Result<Option<serde_json::Value>, AppError> {
             serde_json::json!({"name":slot.public.name,"fingerprint":slot.public.fingerprint,"type":slot.public.key_type}),
         ),
         Data::Catalog(catalog) => Some(serde_json::to_value(catalog).map_err(|_| invalid())?),
-        Data::Deleted | Data::Key(_) => None,
+        Data::Deleted | Data::Key(_) | Data::Password(_) => None,
     })
 }
 fn settled(replica: &super::replica::Replica, id: &str) -> Result<bool, AppError> {
@@ -129,6 +129,11 @@ fn views(state: &SyncStateV3, generation: u64, keys: &VaultKeys) -> Result<Vec<V
             .and_then(|v| v.as_str())
             .unwrap_or(&kind)
             .to_owned();
+        let name = if kind=="password" {
+            repo::get_host(state,&local.identity.id).ok()
+                .filter(|host|Some(&host.host.scope)==local.identity.scope.as_ref())
+                .map_or_else(||"Saved SSH password".into(),|host|host.host.payload.alias)
+        } else {name};
         let can_resolve = settled(replica, id)?;
         rows.push(View {
             id: id.clone(),
@@ -141,7 +146,7 @@ fn views(state: &SyncStateV3, generation: u64, keys: &VaultKeys) -> Result<Vec<V
             remote_deleted: matches!(other.data, Data::Deleted),
             remote_revision: remote.version.revision.clone(),
             can_resolve,
-            can_remote: can_resolve && matches!(kind.as_str(), "host" | "group"),
+            can_remote: can_resolve && matches!(kind.as_str(), "host" | "group" | "password"),
             can_copy: can_resolve && matches!(other.data, Data::Host(_)),
         });
     }
@@ -242,7 +247,9 @@ fn candidate(
     let mut next = state.clone();
     match choice {
         Choice::Remote => {
-            next = public_remote(&next, &other, now)?;
+            if other.identity.kind != "password" {
+                next = public_remote(&next, &other, now)?;
+            }
         }
         Choice::CopyRemote => {
             let Data::Host(host) = &other.data else {
@@ -446,6 +453,28 @@ mod tests {
             .unwrap()
             .clone();
         (state, keys, signer, id)
+    }
+    #[test]
+    fn ssh_password_conflicts_offer_both_versions_without_returning_either_secret() {
+        let (state,keys,_)=initial();
+        let signer=DeviceKeys::decode_secret(&B64.encode([1u8;64])).unwrap();
+        let host="000000000000e055";
+        let payload=serde_json::from_value(serde_json::json!({"schema":2,"alias":"password-host","hostname":"password.invalid","user":"fixture","auth":"password"})).unwrap();
+        let state=repo::create_host(&state,host,HostScope::Local,payload,100).unwrap();
+        let id=payload::Identity{kind:"password".into(),id:host.into(),scope:Some(HostScope::Local)};
+        let value=|password:&str|Data::Password(serde_json::from_value(serde_json::json!({"binding":{"hostname":"password.invalid","port":22,"user":"fixture"},"nonce":crypto::random_id(16).unwrap(),"value":password})).unwrap());
+        let mut state=super::super::passwords::enqueue(&state,&keys,&signer,id.clone(),value("local synthetic password")).unwrap();
+        super::super::append_library_for_test(&mut state,&keys,id.clone(),value("remote synthetic password"));
+        let opaque=id.opaque(&keys).unwrap();
+        let rows=views(&state,1,&keys).unwrap();let row=rows.iter().find(|r|r.id==opaque).unwrap();
+        assert_eq!(row.name,"password-host");assert!(row.can_remote&&row.can_resolve&&!row.can_copy);assert!(row.local.is_none()&&row.remote.is_none());
+        let view=serde_json::to_string(&rows).unwrap();assert!(!view.contains("synthetic password"));
+        for choice in [Choice::Remote,Choice::Local] {
+            let chosen=candidate(&state,&keys,&signer,&opaque,choice,None,200).unwrap();
+            let replica=chosen.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+            assert!(!replica.conflicts.contains_key(&opaque));
+            assert_eq!(replica.pending.contains_key(&opaque),matches!(choice,Choice::Local));
+        }
     }
     #[test]
     fn local_choice_rebases_once_without_resurrecting_the_conflict_or_changing_history() {

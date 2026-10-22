@@ -673,7 +673,7 @@ pub(crate) fn active_state(
         .as_ref()
         .ok_or_else(|| AppError::Other("record workspace is not initialized".into()))
 }
-fn writes_allowed(core: &crate::sync::runtime::SyncCore) -> Result<(), AppError> {
+pub(in crate::sync) fn writes_allowed(core: &crate::sync::runtime::SyncCore) -> Result<(), AppError> {
     if let Some(reason) = &core.save_blocked {
         return Err(AppError::Other(reason.clone()));
     }

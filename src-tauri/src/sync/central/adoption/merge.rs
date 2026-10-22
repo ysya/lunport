@@ -225,7 +225,7 @@ pub(super) fn history(
             _ => {}
         }
         match id.kind.as_str() {
-            "host" => id.id = host(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
+            "host" | "password" => id.id = host(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
             "group" => {
                 id.id = group(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?
             }

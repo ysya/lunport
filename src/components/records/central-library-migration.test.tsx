@@ -112,7 +112,7 @@ describe("whole-library review and continuation", () => {
     expect(text(html)).toContain("retained version");
     expect(text(html)).toContain("Hardware key reference");
     expect(text(html)).toContain(
-      "Passwords and key passphrases stay on this device",
+      "Key passphrases stay on this device",
     );
     expect(html).not.toMatch(
       /type="checkbox"|Download|Export private|This device only|local.only|inventory_digest/,

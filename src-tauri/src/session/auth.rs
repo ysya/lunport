@@ -332,10 +332,11 @@ impl AuthSource for BrokerAuth<'_> {
             locked(&self.gave).insert(hop.id.clone(), PasswordSource::Typed);
             return Some(typed.clone());
         }
-        match self.keychain.get(&self.directory.password_account(&hop.id)) {
+        match self.directory.saved_password(hop, self.keychain) {
             Ok(Some(saved)) if !saved.is_empty() => {
+                if !self.directory.password_authorized(hop, server_key.as_ref()).unwrap_or(false) {return None;}
                 locked(&self.gave).insert(hop.id.clone(), PasswordSource::Keychain);
-                return Some(Zeroizing::new(saved));
+                return Some(saved);
             }
             Ok(_) => {}
             Err(error) => eprintln!("[session] cannot read the saved password of {}: {error}", hop.alias),

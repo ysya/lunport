@@ -113,11 +113,11 @@ export function SettingsCategoryPane({
   if (category === "appearance") return <AppearancePane />;
   if (category === "connection") return <ConnectionPane recordOverview={recordOverview} />;
   if (category === "files") return <>
-    {recordOverview ? <Section title="Library & workspace tools" description="Use the library locally without an account. Signing in and unlocking enables automatic encrypted sync, including all managed SSH keys. Import copies settings and leaves the source files in place.">
+    {recordOverview ? <Section title="Library & workspace tools" description="Use the library locally without an account. Signing in and unlocking enables automatic encrypted sync, including saved SSH passwords and all managed SSH keys. Import copies settings and leaves the source files in place.">
       <SettingsGroup>
         <SettingsRow label="Import hosts and Groups" description="Review SSH configuration, host exports or saved workspaces before adding settings."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
         <SettingsRow label="Automatic sync" description="Manage your account, devices and self-hosted server in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
-        <SettingsRow label="Host and Group settings" description="Export this library or choose a retained workspace. SSH private keys and account credentials are excluded."><Button variant="outline" size="sm" onClick={onOpenDataTools}>Export / saved workspaces…</Button></SettingsRow>
+        <SettingsRow label="Host and Group settings" description="Export this library or choose a retained workspace. Passwords, SSH private keys and account credentials are excluded."><Button variant="outline" size="sm" onClick={onOpenDataTools}>Export / saved workspaces…</Button></SettingsRow>
       </SettingsGroup>
     </Section> : <FilesPane onDirtyChange={onConfigDirtyChange} onBusyChange={onConfigBusyChange} />}
     <PreferencesDataPane />
