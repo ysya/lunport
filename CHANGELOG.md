@@ -2,17 +2,18 @@
 
 ## [1.11.0](https://github.com/ysya/lunport/compare/v1.10.4...v1.11.0) (2026-10-22)
 
-
 ### Features
 
-* sync saved SSH passwords with the encrypted library ([014c1b7](https://github.com/ysya/lunport/commit/014c1b726806fa39c1df0e20d02f5244acee17c1))
-* sync saved SSH passwords with the encrypted library ([feeaaf1](https://github.com/ysya/lunport/commit/feeaaf1f504ed08ff51c43d5d213c6a9d3b4b9df))
-
+* Saved SSH passwords now join end-to-end encrypted library sync, including changes, removal and offline retries. Passwords stay bound to each host's connection identity and remain excluded from host exports and MCP responses. ([#75](https://github.com/ysya/lunport/pull/75))
 
 ### Bug Fixes
 
-* show AI access timestamps in activity history ([3d5bedc](https://github.com/ysya/lunport/commit/3d5bedc980a67042581471b6c25f158f597b03f5))
-* show request and completion times in AI access history ([b3b0971](https://github.com/ysya/lunport/commit/b3b0971f0902c1f57d07ba5a6e0ccacbe1b553c3))
+* Show request and completion times, including seconds and the local time zone, in AI access activity. ([#76](https://github.com/ysya/lunport/pull/76))
+
+### Upgrade notes
+
+* Update both the independent security service and private core before using SSH password sync, and update all participating desktop clients. Cloudflare Workers and Docker Compose are supported; retain existing bindings, namespaces and persistent volumes.
+* Previously saved SSH passwords without a host identity binding must be saved again once. Separately stored SSH key passphrases remain local. Existing account and library data are retained.
 
 ## [1.10.4](https://github.com/ysya/lunport/compare/v1.10.3...v1.10.4) (2026-10-21)
 
