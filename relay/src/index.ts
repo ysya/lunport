@@ -1,5 +1,4 @@
 import { AUTHORITY_HEADER, validAuthority } from "./security/authority";
-import { centralFetch } from "./v2/routes";
 import type { Bucket } from "./ip-limit";
 export { IpLimiter } from "./ip-limit";
 import { validScope, sameMigration, type LegacyMigrationScope, type LegacySnapshot, type LegacyGate } from "./legacy-retirement";
@@ -477,7 +476,6 @@ async function batchPull(request: Request, env: Env): Promise<Response> {
 const backend = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/v1/")) return centralFetch(request,env);
     if (url.pathname === "/legacy/v1/info") return request.method === "GET" ? info(request, env) : notFound();
     if (url.pathname === "/legacy/v1/pull") return request.method === "POST" ? batchPull(request, env) : notFound();
     const match = /^\/legacy\/v1\/chains\/([^/]+)(\/records|\/freeze)?$/.exec(url.pathname);

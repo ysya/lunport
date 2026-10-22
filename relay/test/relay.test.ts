@@ -80,6 +80,7 @@ describe("chain lifecycle", () => {
     expect((await pull(0, TOKEN, newChainId())).status).toBe(404);
     expect((await pull(0, TOKEN, "not-hex")).status).toBe(400);
     expect((await relay("/v1/nope", { headers: auth() })).status).toBe(404);
+    expect((await relay("/v1/info")).status).toBe(404);
   });
 
   it("does not allocate storage for chains that were never created", async () => {
