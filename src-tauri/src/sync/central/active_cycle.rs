@@ -64,6 +64,17 @@ pub(super) fn with_budget(
         let pulled = pulled?;
         report.staged += pulled.staged;
         report.more = pulled.more;
+        if pulled.refresh {
+            if renewed {
+                return Err(rekey_required());
+            }
+            renewed = true;
+            budget.remaining()?;
+            if !controller::resume_bounded(env, true, budget)? {
+                return Err(rekey_required());
+            }
+            continue;
+        }
         if pulled.revalidate {
             return Err(rekey_required());
         }

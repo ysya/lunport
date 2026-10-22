@@ -133,7 +133,7 @@ export function RecordsWorkspace({
     try {
       const receipt = await exportRecordHosts(previousWorkspace);
       if (receipt) toast.success(`Exported ${receipt.hosts} hosts and ${receipt.groups} Groups`, {
-        description: "SSH private keys and account credentials are excluded. Import this file on your other device, then assign SSH keys.",
+        description: "Passwords, SSH private keys and account credentials are excluded. Import this file on your other device, then assign SSH keys.",
       });
     } catch (failure) {
       toast.error("Could not export host settings", { description: revealHidden(String(failure)) });

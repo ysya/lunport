@@ -120,6 +120,10 @@ pub trait HostDirectory: Send + Sync {
     }
     /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;
+    /// Saved secrets remain native; Records can supply authenticated encrypted library material.
+    fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
+        keychain.get(&self.password_account(&hop.id)).map(|value|value.map(zeroize::Zeroizing::new)).map_err(|_|DirectoryError::Failed("The saved password is unavailable.".into()))
+    }
     /// Records independently approve the effective endpoint, user and server key locally.
     fn password_authorized(&self, _hop: &HopRef, _server_key: Option<&HostKey>) -> Result<bool, DirectoryError> { Ok(true) }
 

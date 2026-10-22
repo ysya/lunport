@@ -189,7 +189,8 @@ impl Plan {
                     private.insert(identity.id.clone(), (receipt, material));
                     continue;
                 }
-                Data::Deleted if identity.kind == "key" => continue,
+                Data::Password(_) => continue,
+                Data::Deleted if matches!(identity.kind.as_str(), "key" | "password") => continue,
                 Data::Deleted => PublicData::Deleted,
                 Data::Host(host) => PublicData::Host(host),
                 Data::Group(group) => PublicData::Group(group),

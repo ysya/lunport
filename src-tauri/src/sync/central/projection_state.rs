@@ -219,7 +219,7 @@ impl Ledger {
                     .local_hash
                     .as_ref()
                     .is_some_and(|h| !hex(h, 64) || h != &r.semantic_hash)
-                || (r.kind == "key") != basis.local_hash.is_none()
+                || matches!(r.kind.as_str(), "key" | "password") != basis.local_hash.is_none()
                 || !identities.insert((r.kind.clone(), r.id.clone(), r.scope.clone()))
             {
                 return Err(invalid());
@@ -312,7 +312,7 @@ impl Ledger {
                 Basis {
                     remote: remote.clone(),
                     wire,
-                    local_hash: (remote.kind != "key").then(|| remote.semantic_hash.clone()),
+                    local_hash: (!matches!(remote.kind.as_str(), "key" | "password")).then(|| remote.semantic_hash.clone()),
                 },
             );
             if remote.kind == "keyslot" {
@@ -735,7 +735,7 @@ impl Ledger {
         // Missing cache rows include new local rows that have no accepted remote basis yet.
         // Keep emitting their tombstone for transport rebasing after an earlier sent-A ACK.
         for (opaque, identity) in pending_identities {
-            if !seen.contains(&opaque) && identity.kind != "key" {
+            if !seen.contains(&opaque) && !matches!(identity.kind.as_str(), "key" | "password") {
                 changes.push(Change {
                     identity,
                     data: Data::Deleted,
@@ -746,7 +746,7 @@ impl Ledger {
         // Physical removal is a local deletion, never permission to resurrect a prior remote row.
         for (opaque, basis) in &self.bases {
             let r = &basis.remote;
-            if r.kind != "key"
+            if !matches!(r.kind.as_str(), "key" | "password")
                 && !seen.contains(opaque)
                 && !replica.pending.contains_key(opaque)
                 && !r.deleted

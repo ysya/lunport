@@ -265,6 +265,22 @@ export async function checkCentralProtocol({
       canonical(["lunport-history-v2", history, String(rows.length), digest]),
     );
   }
+  // Exercise a real host/password pair through migration, peer decryption and rotation.
+  const passwordHost={id:random(8),scope:{kind:"local"},payload:{schema:2,alias:"deployed-password-host",hostname:"deployed-ssh.invalid",port:22,user:"fixture",auth:"password"}};
+  for (const [kind,payload] of [
+    ["host",passwordHost.payload],
+    ["password",{binding:{hostname:passwordHost.payload.hostname,port:22,user:"fixture"},nonce:random(16),value:"synthetic deployed SSH password"}],
+  ] as const) {
+    const identity=new TextDecoder().decode(canonical(["lunport-library-identity-v1",kind,"local","",passwordHost.id]));
+    const plain=new TextEncoder().encode(JSON.stringify({schema:1,id:passwordHost.id,scope:passwordHost.scope,payload}));
+    const header={...rows[0].header,kind,deleted:false,expected_revision:"0",operation_id:random(16),record_id:createHmac("sha256",keys.slice(0,32)).update(canonical(["lunport-record-index-v2",kind,identity])).digest("hex")};
+    const nonce=randomBytes(24);
+    const cipher=xchacha20poly1305(keys.slice(32),nonce,recordCanonical(header)).encrypt(plain);
+    const row={header,nonce:base64(nonce),ciphertext:base64(cipher),signature:sign(await authorBytes("lunport-record-author-v2",recordCanonical(header),base64(nonce),cipher))};
+    rows.push(row);original.push(plain);
+    const digest=await hash(canonical(["lunport-operation-v2",new TextDecoder().decode(recordCanonical(header)),row.nonce,row.ciphertext,row.signature]));
+    history=await hash(canonical(["lunport-history-v2",history,String(rows.length),digest]));
+  }
   assert.ok(
     original.some((bytes) =>
       new TextDecoder().decode(bytes).includes("OPENSSH PRIVATE KEY"),
@@ -318,6 +334,7 @@ export async function checkCentralProtocol({
   );
   const info = await json(await fetch(`http://${address}/v2/info`));
   assert.ok(info.features.includes("account-unlock-v1"));
+  assert.ok(info.features.includes("ssh-password-sync-v1"));
   // Ciphertext is opaque to the service; native integration tests exercise password decryption.
   const registry: SignedUnlock = { body: {
     version: 1, anchor, revision: "1", previous_digest: "", membership_head: member.head,
@@ -624,7 +641,7 @@ export async function checkCentralProtocol({
   secret.fill(0);
   original.forEach((bytes) => bytes.fill(0));
   console.log(
-    "PASS: deployed central encrypted migration, permanent legacy retirement, signed password envelope readback, additive account unlock, pending-device denial, peer decryption, device revocation and epoch-2 content rotation",
+    "PASS: deployed central encrypted migration, permanent legacy retirement, signed password envelope readback, additive account unlock, pending-device denial, peer SSH password decryption, device revocation and epoch-2 content rotation",
   );
   return {
     positive: {

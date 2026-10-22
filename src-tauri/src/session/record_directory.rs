@@ -35,9 +35,11 @@ type ConfirmedPin = dyn Fn(
     ) -> Result<(), DirectoryError>
     + Send
     + Sync;
+type PasswordReader = dyn Fn(&HopRef, &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> + Send + Sync;
 pub struct RecordDirectory {
     sources: RecordSources,
     confirmed_pin: Option<Box<ConfirmedPin>>,
+    password_reader: Option<Box<PasswordReader>>,
 }
 fn repository_error(error: RepositoryError) -> DirectoryError {
     match error {
@@ -80,7 +82,12 @@ impl RecordDirectory {
         Self {
             sources,
             confirmed_pin: None,
+            password_reader: None,
         }
+    }
+    pub(crate) fn with_password_reader(mut self, read: Box<PasswordReader>) -> Self {
+        self.password_reader = Some(read);
+        self
     }
     pub(crate) fn with_confirmed_pin(mut self, pin: Box<ConfirmedPin>) -> Self {
         self.confirmed_pin = Some(pin);
@@ -296,6 +303,11 @@ impl HostDirectory for RecordDirectory {
             ));
         }
         self.write_pin(self.checked_host(hop)?, previous, key)
+    }
+    fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
+        self.checked_host(hop)?;
+        if let Some(read) = &self.password_reader {return read(hop,keychain);}
+        keychain.get(&self.password_account(&hop.id)).map(|value|value.map(zeroize::Zeroizing::new)).map_err(|_|DirectoryError::Failed("The saved password is unavailable.".into()))
     }
     fn password_account(&self, host: &HostId) -> String {
         format!("host:{}", host.as_str())
