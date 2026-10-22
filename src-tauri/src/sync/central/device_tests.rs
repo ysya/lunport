@@ -340,7 +340,7 @@ fn install_recovery_routes(
     config: &OidcConfig,
 ) {
     server.mock("GET", "/v2/info").with_header("content-type", "application/json")
-        .with_body(json!({"protocol":2,"features":["account-unlock-v1","central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history","recovery-source-proofs"],"oidc":config}).to_string()).create();
+        .with_body(json!({"protocol":2,"features":["account-unlock-v1","ssh-password-sync-v1","central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history","recovery-source-proofs"],"oidc":config}).to_string()).create();
     let account = Arc::clone(state);
     let barrier = Arc::clone(state);
     server.mock("POST", "/v2/recovery/wraps").with_status_code_from_request(move |_| {let s = barrier.lock().unwrap(); if s.barrier_pending && s.hold_barrier {202} else {200}}).with_header("content-type", "application/json").with_body_from_request(move |request| {
@@ -3803,11 +3803,16 @@ fn password_device_recovery_preserves_hosts_groups_keys_and_an_unsent_edit_throu
             crate::sync::record_commands::edit_records(&first.env(), |state, now| crate::sync::record_repository::create_host(state, "f".repeat(16).as_str(), HostScope::Local, payload.clone(), now).map_err(|_| super::wire::invalid())).unwrap();
             let key_text = crate::sync::slot_rules::test_keys::plain();
             let key = crate::sync::record_keys::import_local(&first.env(), "retained-key", Zeroizing::new(key_text.clone()), crate::vault::store::EntryOrigin::Imported).unwrap();
+            let (password_state,password_generation)=record_runtime::snapshot(&first.env()).unwrap();
+            let password_host=crate::sync::record_repository::get_host(&password_state,&"f".repeat(16)).unwrap();
+            super::passwords::change(&first.env(),&password_host.host.id,&password_host.revision,password_generation,None,Some("retained synthetic SSH password")).unwrap();
             automatic::start(&first.env()).unwrap();
             let password = "synthetic reconnect library password";
             automatic::password(&first.env(), password).unwrap();
             for _ in 0..40 { if controller::status(&first.env()).unwrap().can_sync { break; } automatic::step(&first.env()).unwrap(); }
             assert!(controller::status(&first.env()).unwrap().can_sync);
+            super::round::sync_once(&first.env()).unwrap();
+            assert_eq!(super::passwords::read(&first.env(),&"f".repeat(16)).unwrap().as_deref().map(String::as_str),Some("retained synthetic SSH password"));
             let peer = device("reconnect-adopted-library");
             if joined {
                 service.login(&peer);
@@ -3881,6 +3886,7 @@ fn password_device_recovery_preserves_hosts_groups_keys_and_an_unsent_edit_throu
             let vault = crate::vault::store::read_vault(&crate::vault::store::vault_path(&selected.env().state_path), &selected.keychain).unwrap();
             let recovered_key = final_state.local.keys.values().find(|k| k.public.fingerprint == key.public.fingerprint).unwrap();
             assert_eq!(vault.get(&recovered_key.vault_id).unwrap().unwrap().private_key, key_text);
+            assert!(crate::sync::record_repository::snapshot(&final_state).unwrap().hosts.iter().filter(|h|h.host.payload.alias=="retained-host").any(|h|super::passwords::read(&selected.env(),&h.host.id).ok().flatten().is_some_and(|value| &*value=="retained synthetic SSH password")));
             assert!(final_state.local.central.as_ref().unwrap().replacement_archives.iter().all(|a| !a.needs_reconciliation));
         });
     }
@@ -3925,3 +3931,6 @@ fn password_device_recovery_rejects_corrupt_or_rolled_back_history_without_switc
         });
     }
 }
+
+#[path = "password_device_tests.rs"]
+mod password_tests;

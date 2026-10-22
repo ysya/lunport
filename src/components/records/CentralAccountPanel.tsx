@@ -55,7 +55,7 @@ export function CentralAccountSection({
   );
 }
 const phaseText = {
-  signed_out: "Use your own server to sync hosts, Groups, tunnels and all managed SSH keys.",
+  signed_out: "Use your own server to sync hosts, Groups, tunnels, saved SSH passwords and all managed SSH keys.",
   sign_in_required: "Sign in again to resume automatic sync.",
   password_setup: "Set your sync unlock password once to protect your encrypted library.",
   password_recovery: "Reconnect this device with your sync password. Your existing local library is retained.",
@@ -175,7 +175,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
     </div>}
     {status.needs_reconciliation && !status.needs_recovery && !status.replacement_pending && <CentralLibraryMigration status={status} disabled={blocked} update={update} onBusyChange={setDeviceBusy} />}
     {status.conflicts > 0 && status.can_sync && <CentralConflicts key={`${status.root_fingerprint}:${status.membership_head}:${status.authorization_epoch}`} overview={overview} status={status} disabled={blocked} onBusyChange={setDeviceBusy} update={update} />}
-    {phase === "ready" && status.conflicts === 0 && <p className="text-sm text-muted-foreground">{status.pending > 0 ? `${status.pending} changes waiting to sync.` : "Hosts, Groups, tunnels and managed SSH keys sync across your devices."}</p>}
+    {phase === "ready" && status.conflicts === 0 && <p className="text-sm text-muted-foreground">{status.pending > 0 ? `${status.pending} changes waiting to sync.` : "Hosts, Groups, tunnels, saved SSH passwords and managed SSH keys sync across your devices."}</p>}
     {!status.configured && <p className="text-sm text-muted-foreground">Create an account in your browser using an email as its name and a Passkey. Email verification and email recovery are not used.</p>}
     {!status.service && <p className="text-sm text-muted-foreground">Deploy your own sync server with Cloudflare Workers or Docker, then enter its HTTPS URL. Local mode works without an account.</p>}
     {(setup || unlock) && !login && !changed && <form className="max-w-lg space-y-3" onSubmit={(e) => {
@@ -204,7 +204,7 @@ export function CentralAccountPanel({ status, disabled = false, onBusyChange, up
         {status.configured && <Button variant="outline" disabled={blocked} onClick={() => void run(async () => { update(await centralSignOut()); client.removeQueries({ queryKey: automaticSyncKey }); })}>Sign out</Button>}
       </>}
     </div>
-    {!status.has_session && !status.configured && !login && <p className="text-sm text-muted-foreground">Signing in enables automatic sync for this library and all managed SSH private keys.</p>}
+    {!status.has_session && !status.configured && !login && <p className="text-sm text-muted-foreground">Signing in enables automatic sync for this library, saved SSH passwords and all managed SSH private keys.</p>}
     <details className="space-y-3" onToggle={event => setAccountSettingsOpen(event.currentTarget.open)}><summary className="cursor-pointer text-sm text-muted-foreground">Account and device settings</summary>
       {status.configured && serviceField}
       {status.account_id && <p className="break-all text-xs text-muted-foreground">Account ID: {status.account_id}</p>}

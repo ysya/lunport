@@ -266,6 +266,12 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
         self.0.password_authorized(hop, server_key)
     }
+    fn saved_password(&self, hop:&crate::ssh::HopRef, keychain:&dyn crate::sync::env::Keychain)->Result<Option<crate::ssh::Secret>,crate::session::directory::DirectoryError>{
+        (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
+        let password=self.0.saved_password(hop,keychain)?;
+        (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
+        Ok(password)
+    }
     fn password_account(&self, h: &crate::ssh::HostId) -> String {
         self.0.password_account(h)
     }

@@ -89,6 +89,12 @@ impl HostDirectory for ProbeDirectory<'_> {
         self.checked()?;
         self.inner.password_authorized(hop, server_key)
     }
+    fn saved_password(&self, hop:&HopRef, keychain:&dyn crate::sync::env::Keychain)->Result<Option<Secret>,DirectoryError>{
+        self.checked()?;
+        let password=self.inner.saved_password(hop,keychain)?;
+        self.checked()?;
+        Ok(password)
+    }
     fn password_account(&self, id: &HostId) -> String {
         self.inner.password_account(id)
     }

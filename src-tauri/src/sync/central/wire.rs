@@ -77,7 +77,7 @@ impl RecordHeader {
             || !hex(&self.operation_id, 32)
             || !matches!(
                 self.kind.as_str(),
-                "host" | "group" | "keyslot" | "key" | "meta"
+                "host" | "group" | "keyslot" | "key" | "password" | "meta"
             )
         {
             return Err(invalid());

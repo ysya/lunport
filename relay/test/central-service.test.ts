@@ -623,6 +623,33 @@ describe("central device authorization and durable data", () => {
     );
     expect((await vault.push(s.actor, [reused])).status).toBe(409);
   });
+  it("persists encrypted SSH password updates and deletion with exact retries across storage reloads", async () => {
+    const s = await setup();
+    const vault = env.VAULT.getByName(s.actor.account + ":" + s.vault);
+    const id = random();
+    const password = async (expected: string, deleted = false) => {
+      const row = await record(s.trusted, s.vault, expected, id);
+      row.header.kind = "password";
+      row.header.deleted = deleted;
+      row.signature = sign(await authorBytes("lunport-record-author-v2", recordCanonical(row.header), row.nonce, Uint8Array.from(atob(row.ciphertext), c => c.charCodeAt(0))));
+      return row;
+    };
+    const first = await password("0");
+    const initial = await vault.push(s.actor, [first]);
+    expect(initial.status).toBe(200);
+    const receipt = await initial.json();
+    await evictDurableObject(vault);
+    expect(await (await vault.push(s.actor, [first])).json()).toEqual(receipt);
+    expect((await vault.push(s.actor, [await password("1")])).status).toBe(200);
+    const deleted = await password("2", true);
+    expect((await vault.push(s.actor, [deleted])).status).toBe(200);
+    expect((await vault.push(s.actor, [await password("1")])).status).toBe(409);
+    const history = await (await vault.pull(s.actor, 0)).json() as { records: Array<{ envelope: RecordEnvelope; revision: string }> };
+    expect(history.records.map(row => [row.envelope.header.kind, row.revision, row.envelope.header.deleted])).toEqual([["password", "1", false], ["password", "2", false], ["password", "3", true]]);
+    const altered = structuredClone(deleted);
+    altered.header.vault_id = random();
+    expect((await vault.push(s.actor, [altered])).status).not.toBe(200);
+  });
   it("rejects signed writes for another vault, author, epoch and stale membership", async () => {
     const s = await setup(),
       vault = env.VAULT.getByName(s.actor.account + ":" + s.vault);

@@ -53,6 +53,7 @@ pub mod authentication;
 pub mod passkey;
 pub mod pairing;
 pub mod payload;
+pub(crate) mod passwords;
 mod projection;
 mod projection_cache;
 pub mod projection_state;

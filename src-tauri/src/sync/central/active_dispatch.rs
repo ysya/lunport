@@ -237,7 +237,12 @@ impl Operation {
         budget: &super::request_budget::Budget,
     ) -> Result<Reply, AppError> {
         self.with_transport(env, |device, vault, records| {
-            Api::bounded(&self.session.profile.origin, budget)?.push(device, vault, records)
+            let api=Api::bounded(&self.session.profile.origin, budget)?;
+            if records.iter().any(|r|r.header.kind=="password")
+                && !api.info()?.features.iter().any(|f|f=="ssh-password-sync-v1") {
+                return Err(AppError::Other("Update your sync server to enable encrypted SSH password sync. Local changes are retained.".into()));
+            }
+            api.push(device, vault, records)
         })
     }
     pub fn claims(&self, env: &SyncEnv, reply: &PushReply) -> Result<(), AppError> {
@@ -288,7 +293,8 @@ pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppEr
     if context.session().is_none_or(|s| !Arc::ptr_eq(s, &session)) {
         return Err(crate::sync::runtime::superseded());
     }
-    let captured = super::capture_public(&before, context.keys(), context.signer())?;
+    let adopted = super::passwords::adopt_saved(env, &before, context.keys(), context.signer())?;
+    let captured = super::capture_public(&adopted, context.keys(), context.signer())?;
     let prepared = outbox::prepare(&captured, context.keys(), context.signer(), after)?;
     let mut candidate = captured;
     let vault = prepared
