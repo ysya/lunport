@@ -37,13 +37,13 @@ pub struct ApprovalNotice {
     pub aliases: Vec<String>,
 }
 
-/// 最近一次 `GET /v1/info`(spec §6.4、§8)。
+/// 最近一次 `GET /legacy/v1/info`(spec §6.4、§8)。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct SyncRelayView {
     pub url: String,
-    /// relay 回報的版本;None = 舊版 relay(沒有 `GET /v1/info`)。
+    /// relay 回報的版本;None = 舊版 relay(沒有 `GET /legacy/v1/info`)。
     pub version: Option<String>,
     /// 有批次查詢;false → 逐條查詢,UI 提示「relay 可以更新」。
     pub batch_pull: bool,

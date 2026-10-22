@@ -162,7 +162,7 @@ export class PasskeyStore extends DurableObject<Env> {
     return {
       status: 201,
       body: {
-        url: `${origin}/v2/auth/passkey/page?flow=${id}#key=${key}`,
+        url: `${origin}/v1/auth/passkey/page?flow=${id}#key=${key}`,
         expires_in: FLOW_MS / 1000,
       },
     };
@@ -722,7 +722,7 @@ export class PasskeyStore extends DurableObject<Env> {
     return {
       status: 200,
       body: {
-        issuer: origin + "/v2/auth/passkey",
+        issuer: origin + "/v1/auth/passkey",
         subject,
         access_token: `lpka1.${family}.${access}`,
         refresh_token: `lpkr1.${family}.${refresh}`,

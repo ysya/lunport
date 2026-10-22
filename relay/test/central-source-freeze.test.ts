@@ -88,6 +88,65 @@ function bind(s: Awaited<ReturnType<typeof setup>>, sources: any[]) {
 }
 
 describe("durable complete-source migration freeze", () => {
+  it("records the security registry fence after a private core returns its snapshot", async () => {
+    const s = await setup(0),
+      old = await source(),
+      signed = intent(s, [old.chain]),
+      tokenHash = await hash(new TextEncoder().encode(TOKEN));
+    const frozen = await runInDurableObject(
+      env.CHAIN.getByName(old.chain),
+      async (instance) => {
+        const bindings = (instance as any).env as Env;
+        const originalMode = bindings.CENTRAL_PRIVATE_CORE;
+        const originalRegistry = bindings.LEGACY_RETIREMENT;
+        bindings.CENTRAL_PRIVATE_CORE = "1";
+        delete (bindings as any).LEGACY_RETIREMENT;
+        try {
+          return await instance.freezeForMigration(
+            old.chain,
+            tokenHash,
+            migrationScope(signed.body),
+          );
+        } finally {
+          bindings.CENTRAL_PRIVATE_CORE = originalMode;
+          bindings.LEGACY_RETIREMENT = originalRegistry;
+        }
+      },
+    );
+    expect(frozen.status).toBe(200);
+    const snapshot = frozen.snapshot!;
+    expect(
+      await env.LEGACY_RETIREMENT.getByName(old.chain).check(old.chain, tokenHash, true),
+    ).toBe(200);
+    const result = await runInDurableObject(s.child, async (instance) => {
+      const bindings = (instance as any).env as Env;
+      const original = bindings.CHAIN;
+      bindings.CHAIN = {
+        getByName: (chain: string) => ({
+          freezeForMigration: async () => {
+            expect(chain).toBe(old.chain);
+            return frozen;
+          },
+        }),
+      } as any;
+      try {
+        return await instance.freezeSources(s.actor, signed, [old]);
+      } finally {
+        bindings.CHAIN = original;
+      }
+    });
+    expect(result.status).toBe(200);
+    expect(
+      await env.LEGACY_RETIREMENT.getByName(old.chain).confirmFrozen(
+        old.chain,
+        migrationScope(signed.body),
+        snapshot,
+      ),
+    ).toBe(true);
+    expect(
+      await env.LEGACY_RETIREMENT.getByName(old.chain).check(old.chain, tokenHash, true),
+    ).toBe(409);
+  });
   it("matches the native golden signature, canonical bytes and extension chain", async () => {
     const member = (await trustGenesis(genesis.genesis, genesis.anchor))!;
     const first = fixture.first.proof[0],

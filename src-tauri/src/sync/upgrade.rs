@@ -676,7 +676,7 @@ pub fn upgrade_v1(env: &SyncEnv, v1: &LegacyState) -> Result<bool, AppError> {
         core.conflict_streak = 0;
         core.failed_rounds = 0;
         core.batch_failures = 0;
-        // 新狀態是由 v1 的外殼重組的,`relay_features` 是空的:這個行程「查過 relay」的記錄也要清掉。不清的話,升級期間按過「Check relay」之後 `GET /v1/info` 不會再查
+        // 新狀態是由 v1 的外殼重組的,`relay_features` 是空的:這個行程「查過 relay」的記錄也要清掉。不清的話,升級期間按過「Check relay」之後 `GET /legacy/v1/info` 不會再查
         // (`round::relay_supports_batch`),`SyncOverview::relay` 一直是 null。
         core.relay_checked = None;
         core.state = Some(state);
@@ -1838,7 +1838,7 @@ mod tests {
 
     #[test]
     fn the_upgrade_swap_asks_the_relay_for_its_features_again() {
-        // `GET /v1/info` 每個行程、每個 relay URL 只查一次(`relay_checked`)。升級換狀態時 `relay_features` 清掉了,`relay_checked` 也要清:
+        // `GET /legacy/v1/info` 每個行程、每個 relay URL 只查一次(`relay_checked`)。升級換狀態時 `relay_features` 清掉了,`relay_checked` 也要清:
         // 否則升級期間按過「Check relay」之後,這個行程不會再查,`SyncOverview::relay` 一直是 null。
         let (relay, clock) = (FakeRelay::new(), TestClock::new());
         let (d, v1) = v1_device("a", &relay, &clock, "Host web\n");

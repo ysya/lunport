@@ -56,7 +56,7 @@ impl FakeRelay {
         Arc::new(Self { inner: Mutex::new(Inner::default()) })
     }
 
-    /// 舊版 relay:`GET /v1/info` 404(沒有任何功能)、`POST /v1/pull` 404、freeze 404。
+    /// 舊版 relay:`GET /legacy/v1/info` 404(沒有任何功能)、`POST /legacy/v1/pull` 404、freeze 404。
     pub fn set_legacy(&self, legacy: bool) {
         self.inner.lock().unwrap().legacy = legacy;
     }

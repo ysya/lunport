@@ -605,6 +605,21 @@ export class VaultStore extends DurableObject<Env> {
           !validSnapshot(response.snapshot)
         )
           return { status: response.status === 200 ? 503 : response.status };
+        if (!this.allowed(this.load(), actor)) return { status: 403 };
+        let frozen: number;
+        try {
+          frozen = await this.env.LEGACY_RETIREMENT.getByName(
+            credential.chain,
+          ).freeze(
+            credential.chain,
+            tokenHash,
+            migrationScope(intent.body),
+            response.snapshot,
+          );
+        } catch {
+          return { status: 503 };
+        }
+        if (frozen !== 200) return { status: frozen };
         const source = {
           chain_id: credential.chain,
           sequence: String(response.snapshot.latestSeq),

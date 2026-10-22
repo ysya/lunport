@@ -640,7 +640,7 @@ pub async fn sync_set_relay_url(app: AppHandle, url: String) -> Result<SyncOverv
     run_then_overview(app, true, move |env| account::set_relay_url(env, &url)).await
 }
 
-/// 重新查一次 `GET /v1/info`(使用者更新 relay 之後)。
+/// 重新查一次 `GET /legacy/v1/info`(使用者更新 relay 之後)。
 #[tauri::command]
 pub async fn sync_check_relay(app: AppHandle) -> Result<SyncOverview, AppError> {
     run_then_overview(app, false, |env| account::check_relay(env).map(|_| ())).await

@@ -47,12 +47,12 @@ beforeEach(() => {
   ip = `203.0.113.${ipSeq}`;
 });
 
-const create = (token = TOKEN, id = chain) => relay(`/v1/chains/${id}`, { method: "PUT", headers: auth(token), body: "{}" });
+const create = (token = TOKEN, id = chain) => relay(`/legacy/v1/chains/${id}`, { method: "PUT", headers: auth(token), body: "{}" });
 const push = (items: unknown, token = TOKEN, id = chain) =>
-  relay(`/v1/chains/${id}/records`, { method: "POST", headers: auth(token), body: JSON.stringify(items) });
-const pull = (since: string | number, token = TOKEN, id = chain) => relay(`/v1/chains/${id}/records?since=${since}`, { headers: auth(token) });
-const destroy = (token = TOKEN, id = chain) => relay(`/v1/chains/${id}`, { method: "DELETE", headers: auth(token) });
-const freeze = (token = TOKEN, id = chain) => relay(`/v1/chains/${id}/freeze`, { method: "POST", headers: auth(token) });
+  relay(`/legacy/v1/chains/${id}/records`, { method: "POST", headers: auth(token), body: JSON.stringify(items) });
+const pull = (since: string | number, token = TOKEN, id = chain) => relay(`/legacy/v1/chains/${id}/records?since=${since}`, { headers: auth(token) });
+const destroy = (token = TOKEN, id = chain) => relay(`/legacy/v1/chains/${id}`, { method: "DELETE", headers: auth(token) });
+const freeze = (token = TOKEN, id = chain) => relay(`/legacy/v1/chains/${id}/freeze`, { method: "POST", headers: auth(token) });
 
 type PushBody = { results: { status: string; seq?: number; current?: { seq: number; ciphertext: string; deleted: boolean } }[]; latestSeq: number };
 type PullBody = { records: { idHash: string; seq: number; ciphertext: string; deleted: boolean }[]; latestSeq: number };
@@ -75,11 +75,11 @@ describe("chain lifecycle", () => {
   });
 
   it("rejects missing or malformed auth, unknown chains and bad ids", async () => {
-    expect((await relay(`/v1/chains/${chain}/records?since=0`)).status).toBe(404);
-    expect((await relay(`/v1/chains/${chain}/records?since=0`, { headers: { authorization: "Bearer not-hex" } })).status).toBe(404);
+    expect((await relay(`/legacy/v1/chains/${chain}/records?since=0`)).status).toBe(404);
+    expect((await relay(`/legacy/v1/chains/${chain}/records?since=0`, { headers: { authorization: "Bearer not-hex" } })).status).toBe(404);
     expect((await pull(0, TOKEN, newChainId())).status).toBe(404);
     expect((await pull(0, TOKEN, "not-hex")).status).toBe(400);
-    expect((await relay("/v2/nope", { headers: auth() })).status).toBe(404);
+    expect((await relay("/v1/nope", { headers: auth() })).status).toBe(404);
   });
 
   it("does not allocate storage for chains that were never created", async () => {
@@ -171,7 +171,7 @@ describe("records", () => {
       JSON.stringify([{ ...item(hid(1)), nonce: "not base64!" }]),
     ];
     for (const body of bad) {
-      const res = await relay(`/v1/chains/${chain}/records`, { method: "POST", headers: auth(), body });
+      const res = await relay(`/legacy/v1/chains/${chain}/records`, { method: "POST", headers: auth(), body });
       expect(res.status, body).toBe(400);
       expect(await res.text()).not.toContain('idHash":');
     }
@@ -188,9 +188,9 @@ describe("records", () => {
     expect((await push([item(hid(1), 0, "z".repeat(65_540))])).status).toBe(413);
     // body 超過 1 MiB:串流讀到上限就取消,不解析。分別測有宣告長度(string body)與沒有(stream body)。
     const oversized = "[" + "x".repeat(1_048_600);
-    expect((await relay(`/v1/chains/${chain}/records`, { method: "POST", headers: auth(), body: oversized })).status).toBe(413);
+    expect((await relay(`/legacy/v1/chains/${chain}/records`, { method: "POST", headers: auth(), body: oversized })).status).toBe(413);
     const stream = new Blob([oversized]).stream();
-    expect((await relay(`/v1/chains/${chain}/records`, { method: "POST", headers: auth(), body: stream, duplex: "half" } as RequestInit)).status).toBe(413);
+    expect((await relay(`/legacy/v1/chains/${chain}/records`, { method: "POST", headers: auth(), body: stream, duplex: "half" } as RequestInit)).status).toBe(413);
     // 15 × (65536 + 8) = 983,160 可以;第 16 筆會到 1,048,704 > 1 MiB → 整批 413,原本 15 筆都在。
     const big = "y".repeat(65_536);
     const fifteen = Array.from({ length: 15 }, (_, i) => item(hid(i), 0, big));

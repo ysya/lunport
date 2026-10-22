@@ -33,7 +33,7 @@ export async function checkPasskeyBrowser({
   await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
   const redirect = `http://127.0.0.1:${listener.address().port}/passkey/callback`;
   const call = async (path, body, extraHeaders = {}) =>
-    fetch(`http://${address}/v2/auth/passkey/${path}`, {
+    fetch(`http://${address}/v1/auth/passkey/${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...extraHeaders },
       body: JSON.stringify(body),

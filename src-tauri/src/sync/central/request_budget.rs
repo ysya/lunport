@@ -87,7 +87,7 @@ mod tests {
     fn actual_transport_errors_consume_a_request_and_exhaustion_starts_no_request() {
         let mut server = mockito::Server::new();
         let route = server
-            .mock("GET", "/v2/info")
+            .mock("GET", "/v1/info")
             .with_status(503)
             .expect(1)
             .create();
@@ -103,7 +103,7 @@ mod tests {
         use super::super::api::{DeviceSession, DeviceState};
         let mut server = mockito::Server::new();
         let route = server
-            .mock("GET", "/v2/account")
+            .mock("GET", "/v1/account")
             .with_body_from_request(|_| {
                 std::thread::sleep(Duration::from_secs(3));
                 b"{}".to_vec()
