@@ -16,7 +16,6 @@ import { trustGenesis } from "../../src/v2/membership";
 import { wrapsDigest } from "../../src/v2/rekey";
 import {
   migrationCanonical,
-  migrationScope,
   type SignedMigration,
   type MigrationSource,
 } from "../../src/v2/migration";
@@ -27,14 +26,14 @@ export const random = (n = 32) =>
   ).join("");
 export const sign = (bytes: Uint8Array) =>
   base64(ed25519.sign(bytes, new Uint8Array(32).fill(1)));
-export const zero = "0".repeat(64),
-  tokenHash = "b".repeat(64);
+export const zero = "0".repeat(64);
 export async function setup(
-  sourceCount = 1,
+  sourceCount = 0,
   recordCount = 3,
   ciphertextBytes?: number,
   distinctRecords = recordCount,
 ) {
+  if (sourceCount !== 0) throw new Error("Legacy chain sources are retired.");
   const member = (await trustGenesis(fixture.genesis, fixture.anchor))!;
   const locator = random(),
     vault = random(),
@@ -150,42 +149,6 @@ export async function setup(
     wraps_digest: await wrapsDigest(wraps),
     sources: [] as MigrationSource[],
   };
-  for (let index = 0; index < sourceCount; index++) {
-    const id = random(),
-      legacy = env.CHAIN.getByName(id);
-    expect(await legacy.create(tokenHash, id)).toBe(201);
-    expect(
-      (
-        await legacy.push(
-          tokenHash,
-          [
-            {
-              idHash: random(),
-              kind: "host",
-              nonce: "bm9uY2U=",
-              ciphertext: "Y2lwaGVy",
-              deleted: false,
-              baseSeq: 0,
-            },
-          ],
-          id,
-        )
-      ).status,
-    ).toBe(200);
-    const frozen = await legacy.freezeForMigration(
-      id,
-      tokenHash,
-      migrationScope(body),
-    );
-    expect(frozen.status).toBe(200);
-    body.sources.push({
-      chain_id: id,
-      sequence: String(frozen.snapshot!.latestSeq),
-      count: String(frozen.snapshot!.count),
-      ciphertext_digest: frozen.snapshot!.digest,
-    });
-  }
-  body.sources.sort((a, b) => a.chain_id.localeCompare(b.chain_id));
   const manifest: SignedMigration = {
     body,
     signature: sign(migrationCanonical(body)),

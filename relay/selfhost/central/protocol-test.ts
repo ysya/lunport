@@ -176,14 +176,6 @@ export async function checkCentralProtocol({
   );
   first = await register(firstDevice);
   const path = `/v1/vaults/${vault}/`;
-  const chain = random(),
-    legacyToken = random();
-  const created = await fetch(`http://${address}/legacy/v1/chains/${chain}`, {
-    method: "PUT",
-    headers: { authorization: `Bearer ${legacyToken}` },
-  });
-  assert.equal(created.status, 201);
-  await created.arrayBuffer();
   const operation = random(16),
     preview = random();
   const freeze = {
@@ -198,10 +190,10 @@ export async function checkCentralProtocol({
       membership_head: member.head,
       author: firstDevice.id,
       preview_digest: preview,
-      parent_chain: chain,
+      parent_chain: "",
       revision: "1",
       previous_digest: "",
-      chains: [chain],
+      chains: [],
     },
     signature: "",
   };
@@ -209,7 +201,7 @@ export async function checkCentralProtocol({
   const frozen = await json(
     await request(path + "migration/freeze", first.bearer, {
       intent: freeze,
-      credentials: [{ chain, token: legacyToken }],
+      credentials: [],
     }),
   );
   assert.equal(frozen.phase, "frozen");
@@ -492,9 +484,6 @@ export async function checkCentralProtocol({
   const revoked = await request(path + "records", other.bearer);
   assert.ok([401, 403].includes(revoked.status));
   await revoked.arrayBuffer();
-  const retired = await request(`/legacy/v1/chains/${chain}/records`, legacyToken);
-  assert.equal(retired.status, 410);
-  await retired.arrayBuffer();
   first = await register(firstDevice);
   const removal = {
     body: {
@@ -641,7 +630,7 @@ export async function checkCentralProtocol({
   secret.fill(0);
   original.forEach((bytes) => bytes.fill(0));
   console.log(
-    "PASS: deployed central encrypted migration, permanent legacy retirement, signed password envelope readback, additive account unlock, pending-device denial, peer SSH password decryption, device revocation and epoch-2 content rotation",
+    "PASS: deployed central encrypted import, signed password envelope readback, additive account unlock, pending-device denial, peer SSH password decryption, device revocation and epoch-2 content rotation",
   );
   return {
     positive: {
@@ -655,7 +644,6 @@ export async function checkCentralProtocol({
     wrapped: { path: path + "wrap", token: first.bearer, value: survivingWrap },
     denials: [
       { path: path + "records", token: other.bearer, status: revoked.status },
-      { path: `/legacy/v1/chains/${chain}/records`, token: legacyToken, status: 410 },
     ],
   };
 }

@@ -7,7 +7,7 @@ const json = async (response: Response) => {
   return response.json() as Promise<any>;
 };
 it("migrates and reads all 16384 signed history rows across cold restarts", async () => {
-  const s = await setup(1, 16384, undefined, 4096);
+  const s = await setup(0, 16384, undefined, 4096);
   const tooMany = structuredClone(s.manifest);
   tooMany.body.target_sequence = "16385";
   expect(() => migrationCanonical(tooMany.body)).toThrow();
@@ -30,7 +30,7 @@ it("migrates and reads all 16384 signed history rows across cold restarts", asyn
   }
   expect(
     (await json(await s.child.commitMigration(s.actor, s.operation))).phase,
-  ).toBe("committed");
+  ).toBe("retired");
   await evictDurableObject(s.child);
   let after = 0;
   while (after < s.records.length) {
@@ -55,7 +55,7 @@ it("migrates and reads all 16384 signed history rows across cold restarts", asyn
 }, 180_000);
 it("rejects the ciphertext byte ceiling without publishing partial history", async () => {
   // Opaque synthetic ciphertext; this case measures server storage admission, not decryption.
-  const s = await setup(1, 1600, 16384);
+  const s = await setup(0, 1600, 16384);
   await json(await s.child.beginMigration(s.actor, s.manifest));
   let rejected = false;
   for (let after = 0; after < s.records.length; after += 32) {

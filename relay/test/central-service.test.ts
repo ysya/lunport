@@ -1866,7 +1866,7 @@ describe("security-owned authenticated initial migration transport", () => {
     });
     expect((await t.call("metadata")).status).toBe(200);
   });
-  it("never admits migration through compatibility HTTP or the private core", async () => {
+  it("never admits migration through the retired private core entrypoint", async () => {
     const t = await prepare();
     for (const suffix of [
       "migration",
@@ -1881,7 +1881,7 @@ describe("security-owned authenticated initial migration transport", () => {
       expect((await centralFetch(request, bindings())).status).toBe(404);
       expect(
         (await t.core.forward(3, registry(), t.request(suffix))).status,
-      ).toBe(503);
+      ).toBe(404);
       expect(
         (await t.core.forward(2, random(), t.request(suffix))).status,
       ).toBe(404);
@@ -1896,7 +1896,7 @@ describe("security-owned authenticated initial migration transport", () => {
     expect(
       (await publicMode.forward(2, registry(), t.request("migration/freeze")))
         .status,
-    ).toBe(503);
+    ).toBe(404);
     const info = await centralPrivateFetch(
       new Request(origin + "/v1/info", {
         headers: { [AUTHORITY_HEADER]: authorityWitness(env) },

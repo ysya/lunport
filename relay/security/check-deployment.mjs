@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { stripJsonComments } from "../.github/scripts/update-relay.mjs";
+import { stripJsonComments } from "./json-comments.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const binding = (config, name) =>
   config.durable_objects?.bindings?.find((item) => item.name === name);
@@ -47,15 +47,8 @@ export function validateSecurityDeployment(core, security, bootstrap) {
     bootstrap.build?.command !== security.build.command
   )
     problems.push("security: gateway must build the Passkey page");
-  const service = security.services?.find((item) => item.binding === "CORE");
-  if (
-    service?.service !== core.name ||
-    service?.entrypoint !== "CentralSyncBackend" ||
-    bootstrap.services?.length
-  )
-    problems.push(
-      "security: require only the checked named core RPC; bootstrap has no core service",
-    );
+  if (security.services?.length || bootstrap.services?.length)
+    problems.push("security: account gateway must not call the retired core service");
   for (const name of [
     "LEGACY_RETIREMENT",
     "SECURITY_FLOOR",
@@ -80,13 +73,8 @@ export function validateSecurityDeployment(core, security, bootstrap) {
         );
     }
   }
-  if (
-    binding(security, "CHAIN")?.script_name !== core.name ||
-    binding(bootstrap, "CHAIN")
-  )
-    problems.push(
-      "security: legacy chain access must target the core; bootstrap waits for that owner",
-    );
+  if (binding(security, "CHAIN") || binding(bootstrap, "CHAIN"))
+    problems.push("security: retired chain access must not be bound");
   const coreBindings = core.durable_objects?.bindings ?? [];
   if (
     coreBindings.length !== 2 ||
