@@ -28,7 +28,7 @@ pub const UPGRADING_MESSAGE: &str = "Lunport is upgrading sync on this device; t
 /// - `conflict_streak`:連續幾輪以推送衝突收尾;`failed_rounds`:連續幾輪被限流、relay 回 `5xx`,或 keychain 給不出同步碼(升級讀 `sync:mnemonic`、更換同步碼的各步讀
 ///   `sync:mnemonic-next`、補換碼的重試寫 `sync:mnemonic`,後者另以 `swap_failures` 逐次加長)(退避,spec §6.4);
 ///   `batch_failures`:連續幾次批次查詢回 `5xx`(第 2 次起改逐條查詢,一條壞掉的 chain 不能擋住其他的)。
-/// - `relay_checked`:這個行程查過 `GET /v1/info` 的 relay URL(spec §6.4:啟動時與 URL 改變時各查一次)。
+/// - `relay_checked`:這個行程查過 `GET /legacy/v1/info` 的 relay URL(spec §6.4:啟動時與 URL 改變時各查一次)。
 /// - `rounds`:輪數;舊版 relay 沒有批次查詢時,space 每 3 輪才查一次(spec §6.4)。
 /// - `swap_pending`:更換同步碼的最後一步(或其他電腦的重新加入)已經把狀態換成新帳戶,keychain 的同步碼卻還沒換成新碼(寫不進去):
 ///   新碼留在 `sync:mnemonic-next`,每一輪結束時再試(`rotation::retry_pending_swap`);啟動時發現同樣的情形也設起來。

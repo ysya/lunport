@@ -1,4 +1,4 @@
-//! 帳戶生命週期(spec §7.3)與這台的同步設定:建立、加入、離開(含刪除帳戶)、relay URL 與 `GET /v1/info`、裝置
+//! 帳戶生命週期(spec §7.3)與這台的同步設定:建立、加入、離開(含刪除帳戶)、relay URL 與 `GET /legacy/v1/info`、裝置
 //! 名稱、Forget、顯示同步碼。網路一律在鎖外;會改帳戶的動作由呼叫端(Tauri command)全程持有 lifecycle 鎖、在
 //! `spawn_blocking` 裡呼叫。
 
@@ -855,7 +855,7 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
     Ok(())
 }
 
-/// relay URL 只能在未加入時更改(spec §7.3:cursor 與 seq 屬於某一個 relay)。改了就要重查 `GET /v1/info`。
+/// relay URL 只能在未加入時更改(spec §7.3:cursor 與 seq 屬於某一個 relay)。改了就要重查 `GET /legacy/v1/info`。
 pub fn set_relay_url(env: &SyncEnv, url: &str) -> Result<(), AppError> {
     let normalized = RelayClient::validate_url(url)?;
     mutate(env, |s| {
@@ -874,7 +874,7 @@ pub fn set_relay_url(env: &SyncEnv, url: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// `GET /v1/info`(spec §6.4):結果與查的 URL 存進 `relay_features`。網路在鎖外。
+/// `GET /legacy/v1/info`(spec §6.4):結果與查的 URL 存進 `relay_features`。網路在鎖外。
 pub fn check_relay(env: &SyncEnv) -> Result<RelayFeatures, AppError> {
     let url = snapshot(env).map(|s| s.relay_url).unwrap_or_default();
     relay_configured(&url)?;
@@ -882,7 +882,7 @@ pub fn check_relay(env: &SyncEnv) -> Result<RelayFeatures, AppError> {
     Ok(record_relay_info(env, &url, &info))
 }
 
-/// 記下 `url` 的 `GET /v1/info` 結果(`check_relay`;同步輪次用它自己的連線查,才分得出 `429`)。查的期間 URL 被換掉(只可能
+/// 記下 `url` 的 `GET /legacy/v1/info` 結果(`check_relay`;同步輪次用它自己的連線查,才分得出 `429`)。查的期間 URL 被換掉(只可能
 /// 在未加入時):結果屬於舊 URL,不存。
 pub fn record_relay_info(env: &SyncEnv, url: &str, info: &RelayInfo) -> RelayFeatures {
     let features = RelayFeatures::from_info(url, info, env.now());

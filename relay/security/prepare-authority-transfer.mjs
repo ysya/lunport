@@ -115,6 +115,12 @@ export function prepareAuthorityTransfer(
     preview_urls: false,
     routes: [],
   };
+  const coreVars = { ...source.vars };
+  for (const key of [
+    "CENTRAL_ENABLED", "PASSKEY_ENABLED", "CENTRAL_ORIGIN",
+    "OIDC_ISSUER", "OIDC_JWKS_URL", "OIDC_API_AUDIENCE",
+    "OIDC_NATIVE_CLIENT_ID", "OIDC_SYNC_SCOPE",
+  ]) delete coreVars[key];
   const core = {
     ...closed,
     name: privateCore,
@@ -136,17 +142,15 @@ export function prepareAuthorityTransfer(
       },
     ],
     vars: {
-      ...source.vars,
-      CENTRAL_ORIGIN: live.origin,
+      ...coreVars,
       CENTRAL_PRIVATE_CORE: "1",
-      CENTRAL_ENABLED: "0",
-      PASSKEY_ENABLED: source.vars?.PASSKEY_ENABLED ?? "1",
     },
   };
   const security = {
     ...structuredClone(source),
     ...closed,
     main: "src/security/gateway.ts",
+    build: { command: "node scripts/build-passkey-page.mjs" },
     durable_objects: {
       bindings: [
         { name: "IP_LIMIT", class_name: "IpLimiter" },
@@ -169,6 +173,8 @@ export function prepareAuthorityTransfer(
       ...source.vars,
       CENTRAL_ORIGIN: live.origin,
       SECURITY_INSTALLATION: installation,
+      CENTRAL_ENABLED: "0",
+      PASSKEY_ENABLED: source.vars?.PASSKEY_ENABLED ?? "1",
     },
   };
   const missing = Object.values(central).filter((cls) => !names.has(cls));
@@ -180,20 +186,10 @@ export function prepareAuthorityTransfer(
       new_sqlite_classes: missing,
     });
   }
-  const finalCore = structuredClone(core);
-  finalCore.durable_objects.bindings.push(
-    ...Object.entries(central)
-      .filter(([name]) => name !== "SECURITY_FLOOR")
-      .map(([name, class_name]) => ({
-        name,
-        class_name,
-        script_name: source.name,
-      })),
-  );
   return {
     coreBootstrap: core,
     security,
-    core: finalCore,
+    core: structuredClone(core),
     plan: {
       version: 1,
       installation,

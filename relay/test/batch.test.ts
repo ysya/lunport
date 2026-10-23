@@ -23,17 +23,17 @@ function request(path: string, init: RequestInit = {}, ip = "203.0.113.20") {
 }
 
 const create = (id: string, token = TOKEN) =>
-  request(`/v1/chains/${id}`, { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+  request(`/legacy/v1/chains/${id}`, { method: "PUT", headers: { authorization: `Bearer ${token}` }, body: "{}" });
 const push = (id: string, items: unknown[], token = TOKEN) =>
-  request(`/v1/chains/${id}/records`, {
+  request(`/legacy/v1/chains/${id}/records`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(items),
   });
 const pull = (id: string, since = 0, token = TOKEN) =>
-  request(`/v1/chains/${id}/records?since=${since}`, { headers: { authorization: `Bearer ${token}` } });
+  request(`/legacy/v1/chains/${id}/records?since=${since}`, { headers: { authorization: `Bearer ${token}` } });
 const batch = (items: unknown, ip?: string) =>
-  request("/v1/pull", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(items) }, ip);
+  request("/legacy/v1/pull", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(items) }, ip);
 
 function record(n: number, ciphertext = "Y2lwaGVy") {
   return { idHash: hid(n), kind: "host", nonce: NONCE, ciphertext, deleted: false, baseSeq: 0 };
@@ -42,7 +42,7 @@ function record(n: number, ciphertext = "Y2lwaGVy") {
 type Entry = { chain: string; status: string; records?: Array<{ idHash: string; seq: number }>; latestSeq?: number };
 type BatchBody = { results: Entry[] };
 
-describe("POST /v1/pull", () => {
+describe("POST /legacy/v1/pull", () => {
   it("returns every chain's records in request order", async () => {
     const a = newChainId();
     const b = newChainId();
@@ -118,9 +118,9 @@ describe("POST /v1/pull", () => {
     expect((await batch([{ ...ok, since: -1 }])).status).toBe(400);
     expect((await batch([{ ...ok, since: 1.5 }])).status).toBe(400);
     expect((await batch([ok, ok])).status).toBe(400);
-    expect((await request("/v1/pull", { method: "POST", body: "not json" })).status).toBe(400);
-    expect((await request("/v1/pull", { method: "POST", body: "[" + " ".repeat(70_000) + "]" })).status).toBe(413);
-    expect((await request("/v1/pull")).status).toBe(404);
+    expect((await request("/legacy/v1/pull", { method: "POST", body: "not json" })).status).toBe(400);
+    expect((await request("/legacy/v1/pull", { method: "POST", body: "[" + " ".repeat(70_000) + "]" })).status).toBe(413);
+    expect((await request("/legacy/v1/pull")).status).toBe(404);
   });
 
   it("defers the remaining items once the response passes the 2 MiB budget", async () => {
@@ -159,12 +159,12 @@ describe("POST /v1/pull", () => {
   });
 });
 
-describe("GET /v1/info", () => {
+describe("GET /legacy/v1/info", () => {
   it("reports the relay version and its features", async () => {
-    const res = await request("/v1/info");
+    const res = await request("/legacy/v1/info");
     expect(res.status).toBe(200);
     // 版本常數不能從 Worker 主模組 export(workerd 只收 class 與 handler),所以直接比對 package.json。
     expect(await res.json()).toEqual({ relay: "sshelter-relay", version: pkg.version, features: ["pull-batch", "freeze"] });
-    expect((await request("/v1/info", { method: "POST" })).status).toBe(404);
+    expect((await request("/legacy/v1/info", { method: "POST" })).status).toBe(404);
   });
 });

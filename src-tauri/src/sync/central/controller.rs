@@ -875,7 +875,7 @@ mod tests {
         let profile = Profile::new(&server.url(), &cfg.issuer, "subject").unwrap();
         let now = env.now();
         let register = server
-            .mock("POST", "/v2/session")
+            .mock("POST", "/v1/session")
             .match_header("authorization", "Bearer SYNTHETIC-ACCESS")
             .with_header("content-type", "application/json")
             .with_body(
@@ -885,7 +885,7 @@ mod tests {
             )
             .expect(1)
             .create();
-        let view=server.mock("GET","/v2/account").with_header("content-type","application/json")
+        let view=server.mock("GET","/v1/account").with_header("content-type","application/json")
             .with_body(json!({"account_id":"a".repeat(64),"device_state":"pending","auth_epoch":1,"phase":"ready","proof":null,
                 "genesis_hash":null,"pairing_confirmation":null}).to_string()).expect(1).create();
         record_runtime::mutate_records(&env,|s|repo::create_host(s,"0000000000000001",HostScope::Local,
@@ -975,10 +975,10 @@ mod tests {
         };
         let profile = Profile::new(&server.url(), &cfg.issuer, "subject").unwrap();
         let now = env.now();
-        server.mock("POST","/v2/session").with_header("content-type","application/json").with_body(
+        server.mock("POST","/v1/session").with_header("content-type","application/json").with_body(
             serde_json::json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":"pending","auth_epoch":1,"expires_at_ms":now+300000}).to_string()).create();
         let cancelled = Arc::clone(&d);
-        server.mock("GET","/v2/account").with_header("content-type","application/json").with_body_from_request(move |_| {
+        server.mock("GET","/v1/account").with_header("content-type","application/json").with_body_from_request(move |_| {
             cancelled.runtime.central_login.lock().unwrap().take();
             serde_json::json!({"account_id":"a".repeat(64),"device_state":"pending","auth_epoch":1,"phase":"ready","proof":null,"genesis_hash":null,"pairing_confirmation":null}).to_string().into_bytes()
         }).create();

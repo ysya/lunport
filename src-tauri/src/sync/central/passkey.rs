@@ -42,7 +42,7 @@ fn request<T: Serialize, R: serde::de::DeserializeOwned>(
     let body = Zeroizing::new(serde_json::to_vec(body).map_err(|_| invalid())?);
     let request = openidconnect::http::Request::builder()
         .method("POST")
-        .uri(format!("{}/v2/auth/passkey/{path}", config.origin))
+        .uri(format!("{}/v1/auth/passkey/{path}", config.origin))
         .header("content-type", "application/json")
         .body(body.to_vec())
         .map_err(|_| invalid())?;
@@ -81,7 +81,7 @@ fn tokens(config: &Config, grant: Grant, nonce: &str) -> Result<LoginTokens, App
         let p: Vec<_> = value.split('.').collect();
         p.len() == 3 && p[0] == prefix && hex(p[1], 32) && hex(p[2], 64)
     }
-    if grant.issuer != format!("{}/v2/auth/passkey", config.origin)
+    if grant.issuer != format!("{}/v1/auth/passkey", config.origin)
         || !hex(&grant.subject, 64)
         || grant.expires_in == 0
         || grant.expires_in > 300
@@ -159,7 +159,7 @@ impl Attempt {
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
         if url.origin().ascii_serialization() != config.origin
-            || url.path() != "/v2/auth/passkey/page"
+            || url.path() != "/v1/auth/passkey/page"
             || !url.username().is_empty()
             || url.password().is_some()
             || query.len() != 1

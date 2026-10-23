@@ -346,7 +346,7 @@ impl Api {
         })
     }
     pub fn info(&self) -> Result<Info, AppError> {
-        let reply = self.request(Method::GET, "/v2/info", None, None, 65536)?;
+        let reply = self.request(Method::GET, "/v1/info", None, None, 65536)?;
         reply.success()?;
         let info: Info = reply.decode()?;
         if info.protocol != 2
@@ -425,7 +425,7 @@ impl Api {
         let started = Instant::now();
         let reply = self.request(
             Method::POST,
-            "/v2/session",
+            "/v1/session",
             Some(&tokens.access),
             Some(body),
             65536,
@@ -472,7 +472,7 @@ impl Api {
         }
         self.request(
             Method::GET,
-            "/v2/device-access",
+            "/v1/device-access",
             Some(&tokens.access),
             None,
             1048576,
@@ -499,7 +499,7 @@ impl Api {
         let body = Zeroizing::new(serde_json::to_vec(&Revoke { device }).map_err(|_| invalid())?);
         self.request(
             Method::POST,
-            "/v2/device-access/revoke",
+            "/v1/device-access/revoke",
             Some(&tokens.access),
             Some(body),
             65536,
@@ -520,10 +520,10 @@ impl Api {
         self.request(method, path, Some(&session.bearer), body, RESPONSE_CAP)
     }
     pub fn account(&self, session: &DeviceSession) -> Result<Reply, AppError> {
-        self.authenticated(session, Method::GET, "/v2/account", None)
+        self.authenticated(session, Method::GET, "/v1/account", None)
     }
     pub(super) fn unlock_registry(&self, session: &DeviceSession) -> Result<Reply, AppError> {
-        self.authenticated(session, Method::GET, "/v2/unlock", None)
+        self.authenticated(session, Method::GET, "/v1/unlock", None)
     }
     pub fn control<T: Serialize>(
         &self,
@@ -578,7 +578,7 @@ impl Api {
         self.authenticated(
             session,
             Method::GET,
-            &format!("/v2/vaults/{vault}/{suffix}"),
+            &format!("/v1/vaults/{vault}/{suffix}"),
             None,
         )
     }
@@ -599,7 +599,7 @@ impl Api {
         self.authenticated(
             session,
             Method::POST,
-            &format!("/v2/vaults/{vault}/rekey/{}", action.path()),
+            &format!("/v1/vaults/{vault}/rekey/{}", action.path()),
             Some(body),
         )
     }
@@ -621,7 +621,7 @@ impl Api {
         self.authenticated(
             session,
             Method::GET,
-            &format!("/v2/vaults/{vault}/{suffix}"),
+            &format!("/v1/vaults/{vault}/{suffix}"),
             None,
         )
     }
@@ -666,7 +666,7 @@ impl Api {
         self.authenticated(
             session,
             Method::POST,
-            &format!("/v2/vaults/{vault}/migration/freeze"),
+            &format!("/v1/vaults/{vault}/migration/freeze"),
             Some(body),
         )
     }
@@ -689,7 +689,7 @@ impl Api {
         }
         let token =
             sources.frozen_bearer(&self.origin, owner, operation, progress, minimum, chain)?;
-        Ok((format!("/v1/chains/{chain}/records?since=0"), token))
+        Ok((format!("/legacy/v1/chains/{chain}/records?since=0"), token))
     }
     /// Explicit migration read, never a fallback from failed central account authentication.
     pub(super) fn frozen_source(
@@ -724,7 +724,7 @@ impl Api {
         self.authenticated(
             session,
             Method::POST,
-            &format!("/v2/vaults/{vault}/migration/{}", action.path()),
+            &format!("/v1/vaults/{vault}/migration/{}", action.path()),
             Some(body),
         )
     }
@@ -748,7 +748,7 @@ impl Api {
         self.authenticated(
             session,
             Method::POST,
-            &format!("/v2/vaults/{vault}/records"),
+            &format!("/v1/vaults/{vault}/records"),
             Some(body),
         )
     }
@@ -771,19 +771,19 @@ pub enum Control {
 impl Control {
     fn path(&self) -> &'static str {
         match self {
-            Self::Bootstrap => "/v2/bootstrap",
-            Self::Enrollment => "/v2/enrollment",
-            Self::Membership => "/v2/membership",
-            Self::CreateVault => "/v2/vaults",
-            Self::ResumeBarrier => "/v2/barrier/resume",
-            Self::Logout => "/v2/logout",
-            Self::BatchPull => "/v2/pull",
-            Self::RecoveryRead => "/v2/recovery/wraps",
-            Self::RecoveryHistory => "/v2/recovery/history",
-            Self::RecoverySource => "/v2/recovery/source",
-            Self::Recover => "/v2/recovery/commit",
-            Self::UpdateUnlock => "/v2/unlock",
-            Self::UnlockJoin => "/v2/unlock/join",
+            Self::Bootstrap => "/v1/bootstrap",
+            Self::Enrollment => "/v1/enrollment",
+            Self::Membership => "/v1/membership",
+            Self::CreateVault => "/v1/vaults",
+            Self::ResumeBarrier => "/v1/barrier/resume",
+            Self::Logout => "/v1/logout",
+            Self::BatchPull => "/v1/pull",
+            Self::RecoveryRead => "/v1/recovery/wraps",
+            Self::RecoveryHistory => "/v1/recovery/history",
+            Self::RecoverySource => "/v1/recovery/source",
+            Self::Recover => "/v1/recovery/commit",
+            Self::UpdateUnlock => "/v1/unlock",
+            Self::UnlockJoin => "/v1/unlock/join",
         }
     }
 }
@@ -867,7 +867,7 @@ mod tests {
             refresh: None,
             expires_in: Duration::from_secs(300),
         };
-        let mock=server.mock("POST","/v2/session").match_header("authorization","Bearer synthetic-access").match_body(mockito::Matcher::PartialJson(json!({"credential":identity.credential(),"session_id":attempt.id,"session_secret":attempt.secret()}))).with_header("content-type","application/json").with_body(json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":"pending","auth_epoch":1,"expires_at_ms":301000}).to_string()).expect(2).create();
+        let mock=server.mock("POST","/v1/session").match_header("authorization","Bearer synthetic-access").match_body(mockito::Matcher::PartialJson(json!({"credential":identity.credential(),"session_id":attempt.id,"session_secret":attempt.secret()}))).with_header("content-type","application/json").with_body(json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":"pending","auth_epoch":1,"expires_at_ms":301000}).to_string()).expect(2).create();
         let api = Api::new(&server.url()).unwrap();
         let one = api
             .register(&profile, &identity, &attempt, &tokens, "Test", 1000)
@@ -886,7 +886,7 @@ mod tests {
             attempt.secret()
         );
         server
-            .mock("GET", "/v2/account")
+            .mock("GET", "/v1/account")
             .match_header("authorization", bearer.as_str())
             .with_status(403)
             .with_body("untrusted echoed secret")
@@ -931,7 +931,7 @@ mod tests {
             1,
             Duration::from_secs(300),
         );
-        let endpoint = format!("/v2/vaults/{}/migration/freeze", signed.body.vault_id);
+        let endpoint = format!("/v1/vaults/{}/migration/freeze", signed.body.vault_id);
         let no_send = server
             .mock("POST", endpoint.as_str())
             .with_status(403)
@@ -995,7 +995,7 @@ mod tests {
         );
         let vault = "b".repeat(64);
         let legacy = server
-            .mock("POST", mockito::Matcher::Regex("^/v1/".into()))
+            .mock("POST", mockito::Matcher::Regex("^/legacy/v1/".into()))
             .expect(0)
             .create();
         for action in [
@@ -1007,7 +1007,7 @@ mod tests {
             let mock = server
                 .mock(
                     "POST",
-                    format!("/v2/vaults/{vault}/migration/{}", action.path()).as_str(),
+                    format!("/v1/vaults/{vault}/migration/{}", action.path()).as_str(),
                 )
                 .match_header("authorization", "Bearer synthetic device grant")
                 .match_body("{\"synthetic\":true}")
@@ -1038,7 +1038,7 @@ mod tests {
                 "migration"
             };
             let mock = server
-                .mock("GET", format!("/v2/vaults/{vault}/{suffix}").as_str())
+                .mock("GET", format!("/v1/vaults/{vault}/{suffix}").as_str())
                 .with_status(403)
                 .expect(1)
                 .create();
@@ -1093,8 +1093,8 @@ mod tests {
     fn rejects_cross_identity_sessions_and_caps_all_response_classes_without_legacy_fallback() {
         let mut server = mockito::Server::new();
         let api = Api::new(&server.url()).unwrap();
-        let legacy = server.mock("GET", "/v1/info").expect(0).create();
-        server.mock("GET", "/v2/info").with_status(404).create();
+        let legacy = server.mock("GET", "/legacy/v1/info").expect(0).create();
+        server.mock("GET", "/v1/info").with_status(404).create();
         assert!(api.info().is_err());
         legacy.assert();
         server
@@ -1132,13 +1132,13 @@ mod tests {
             refresh: None,
             expires_in: Duration::from_secs(300),
         };
-        server.mock("POST","/v2/session").with_header("content-type","application/json").with_body(json!({"account_id":"a".repeat(64),"account_locator":"b".repeat(64),"device_state":"active","auth_epoch":1,"expires_at_ms":301000}).to_string()).create();
+        server.mock("POST","/v1/session").with_header("content-type","application/json").with_body(json!({"account_id":"a".repeat(64),"account_locator":"b".repeat(64),"device_state":"active","auth_epoch":1,"expires_at_ms":301000}).to_string()).create();
         assert!(api
             .register(&profile, &identity, &attempt, &tokens, "Test", 1000)
             .is_err());
         for status in [401u16, 403, 429] {
             let denied = server
-                .mock("POST", "/v2/session")
+                .mock("POST", "/v1/session")
                 .with_status(status as usize)
                 .with_header("retry-after", "90")
                 .with_body("untrusted echoed secret")

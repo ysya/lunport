@@ -24,6 +24,13 @@ const security :Workerd.Service = (name = "security", worker = (
     (name = "SELFHOST_PROXY_KEY", fromEnvironment = "SELFHOST_PROXY_KEY"),
     (name = "SECURITY_INSTALLATION", fromEnvironment = "SECURITY_INSTALLATION"),
     (name = "CENTRAL_ORIGIN", fromEnvironment = "CENTRAL_ORIGIN"),
+    (name = "CENTRAL_ENABLED", fromEnvironment = "CENTRAL_ENABLED"),
+    (name = "PASSKEY_ENABLED", fromEnvironment = "PASSKEY_ENABLED"),
+    (name = "OIDC_ISSUER", fromEnvironment = "OIDC_ISSUER"),
+    (name = "OIDC_JWKS_URL", fromEnvironment = "OIDC_JWKS_URL"),
+    (name = "OIDC_API_AUDIENCE", fromEnvironment = "OIDC_API_AUDIENCE"),
+    (name = "OIDC_NATIVE_CLIENT_ID", fromEnvironment = "OIDC_NATIVE_CLIENT_ID"),
+    (name = "OIDC_SYNC_SCOPE", fromEnvironment = "OIDC_SYNC_SCOPE"),
   ],
 ));
 const core :Workerd.Service = (name = "core", worker = (
@@ -37,19 +44,7 @@ const core :Workerd.Service = (name = "core", worker = (
   bindings = [
     (name = "CHAIN", durableObjectNamespace = "ChainStore"),
     (name = "IP_LIMIT", durableObjectNamespace = "IpLimiter"),
-    (name = "ACCOUNT", durableObjectNamespace = (className = "AccountStore", serviceName = "security")),
-    (name = "VAULT", durableObjectNamespace = (className = "VaultStore", serviceName = "security")),
-    (name = "PASSKEY", durableObjectNamespace = (className = "PasskeyStore", serviceName = "security")),
-    (name = "LEGACY_RETIREMENT", durableObjectNamespace = (className = "LegacyRetirementStore", serviceName = "security")),
     (name = "CENTRAL_PRIVATE_CORE", text = "1"),
-    (name = "CENTRAL_ENABLED", fromEnvironment = "CENTRAL_ENABLED"),
-    (name = "PASSKEY_ENABLED", fromEnvironment = "PASSKEY_ENABLED"),
-    (name = "CENTRAL_ORIGIN", fromEnvironment = "CENTRAL_ORIGIN"),
-    (name = "OIDC_ISSUER", fromEnvironment = "OIDC_ISSUER"),
-    (name = "OIDC_JWKS_URL", fromEnvironment = "OIDC_JWKS_URL"),
-    (name = "OIDC_API_AUDIENCE", fromEnvironment = "OIDC_API_AUDIENCE"),
-    (name = "OIDC_NATIVE_CLIENT_ID", fromEnvironment = "OIDC_NATIVE_CLIENT_ID"),
-    (name = "OIDC_SYNC_SCOPE", fromEnvironment = "OIDC_SYNC_SCOPE"),
   ],
 ));
 const securityStorage :Workerd.Service = (name = "security-storage", disk = (path = "/security-data", writable = true));

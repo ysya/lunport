@@ -42,7 +42,7 @@ beforeEach(async () => {
 });
 function request(suffix = "", method = "GET", token = TOKEN, body?: unknown) {
   return exports.default.fetch(
-    new Request(`https://relay.test/v1/chains/${chain}${suffix}`, {
+    new Request(`https://relay.test/legacy/v1/chains/${chain}${suffix}`, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
@@ -62,7 +62,7 @@ const seed = async () => {
 const freeze = () => source().freezeForMigration(chain, tokenHash, scope);
 const batch = () =>
   exports.default.fetch(
-    new Request("https://relay.test/v1/pull", {
+    new Request("https://relay.test/legacy/v1/pull", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -73,6 +73,26 @@ const batch = () =>
   );
 
 describe("independent legacy migration fence", () => {
+  it("fences the private core before the security registry acknowledges a snapshot", async () => {
+    await seed();
+    const result = await runInDurableObject(source(), async (instance) => {
+      const bindings = (instance as any).env as Env;
+      const originalMode = bindings.CENTRAL_PRIVATE_CORE;
+      const originalRegistry = bindings.LEGACY_RETIREMENT;
+      bindings.CENTRAL_PRIVATE_CORE = "1";
+      delete (bindings as any).LEGACY_RETIREMENT;
+      try {
+        return await instance.freezeForMigration(chain, tokenHash, scope);
+      } finally {
+        bindings.CENTRAL_PRIVATE_CORE = originalMode;
+        bindings.LEGACY_RETIREMENT = originalRegistry;
+      }
+    });
+    expect(result.status).toBe(200);
+    expect(result.snapshot).toBeDefined();
+    expect(await registry().check(chain, tokenHash, true)).toBe(200);
+    expect((await request("/records", "POST", TOKEN, [row(2)])).status).toBe(409);
+  });
   it("keeps a stable ciphertext snapshot through retries, alarms and eviction", async () => {
     await seed();
     const first = await freeze();
@@ -341,7 +361,7 @@ describe("independent legacy migration fence", () => {
       404,
     );
     const info = (await (
-      await exports.default.fetch(new Request("https://relay.test/v1/info"))
+      await exports.default.fetch(new Request("https://relay.test/legacy/v1/info"))
     ).json()) as any;
     expect(info.features).toEqual(["pull-batch", "freeze"]);
   });

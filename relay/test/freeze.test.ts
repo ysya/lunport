@@ -43,11 +43,11 @@ function relay(path: string, method: string, token = TOKEN, body?: unknown) {
   );
 }
 
-const create = (token = TOKEN) => relay(`/v1/chains/${chain}`, "PUT", token, {});
-const freeze = (token = TOKEN) => relay(`/v1/chains/${chain}/freeze`, "POST", token);
-const pull = () => relay(`/v1/chains/${chain}/records?since=0`, "GET");
+const create = (token = TOKEN) => relay(`/legacy/v1/chains/${chain}`, "PUT", token, {});
+const freeze = (token = TOKEN) => relay(`/legacy/v1/chains/${chain}/freeze`, "POST", token);
+const pull = () => relay(`/legacy/v1/chains/${chain}/records?since=0`, "GET");
 const push = (n: number, token = TOKEN) =>
-  relay(`/v1/chains/${chain}/records`, "POST", token, [
+  relay(`/legacy/v1/chains/${chain}/records`, "POST", token, [
     { idHash: hid(n), kind: "host", nonce: NONCE, ciphertext: "Y2lwaGVy", deleted: false, baseSeq: 0 },
   ]);
 
@@ -63,12 +63,12 @@ describe("freeze: routing, check order and rate limit", () => {
 
   it("is POST-only: other methods on /freeze are 404 and neither create, delete nor freeze", async () => {
     // 不存在的 chain:PUT /freeze 不可以建出 chain。
-    expect((await relay(`/v1/chains/${chain}/freeze`, "PUT", TOKEN, {})).status).toBe(404);
+    expect((await relay(`/legacy/v1/chains/${chain}/freeze`, "PUT", TOKEN, {})).status).toBe(404);
     expect(await env.CHAIN.getByName(chain).exists()).toBe(false);
     await create();
-    expect((await relay(`/v1/chains/${chain}/freeze`, "PUT", TOKEN, {})).status).toBe(404);
-    expect((await relay(`/v1/chains/${chain}/freeze`, "DELETE")).status).toBe(404);
-    expect((await relay(`/v1/chains/${chain}/freeze`, "GET")).status).toBe(404);
+    expect((await relay(`/legacy/v1/chains/${chain}/freeze`, "PUT", TOKEN, {})).status).toBe(404);
+    expect((await relay(`/legacy/v1/chains/${chain}/freeze`, "DELETE")).status).toBe(404);
+    expect((await relay(`/legacy/v1/chains/${chain}/freeze`, "GET")).status).toBe(404);
     // chain 還在、沒有被凍結。
     expect(await env.CHAIN.getByName(chain).exists()).toBe(true);
     expect((await push(1)).status).toBe(200);

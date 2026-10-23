@@ -92,17 +92,19 @@ Lunport tells you in *Settings → Sync* when your relay is missing something th
 
 ### Legacy API
 
-Besides the per-chain endpoints (`PUT`/`DELETE /v1/chains/{id}`, `GET`/`POST /v1/chains/{id}/records`):
+The account API uses `/v1/*`. Legacy chain requests use `/legacy/v1/*`; clients built before this path change must be updated with the server.
 
-- `POST /v1/pull` — pull up to 64 chains in one request: `[{ "chain", "token", "since" }]`. Each item is checked like
-  `GET /v1/chains/{id}/records` and answers `ok`, `not_found`, `rate_limited` or `deferred` (the response passed its
+Besides the per-chain endpoints (`PUT`/`DELETE /legacy/v1/chains/{id}`, `GET`/`POST /legacy/v1/chains/{id}/records`):
+
+- `POST /legacy/v1/pull` — pull up to 64 chains in one request: `[{ "chain", "token", "since" }]`. Each item is checked like
+  `GET /legacy/v1/chains/{id}/records` and answers `ok`, `not_found`, `rate_limited` or `deferred` (the response passed its
   2 MiB budget; ask again).
-- `POST /v1/chains/{id}/freeze` — stop all further writes to a chain (used when the sync code changes). It answers
+- `POST /legacy/v1/chains/{id}/freeze` — stop all further writes to a chain (used when the sync code changes). It answers
   `204` (also when the chain is already frozen), `404` for an unknown chain or a wrong token, and `429` over the chain's
   rate limit. From then on every push answers `409 {"status":"frozen"}` and writes nothing, while reads and batch pulls
   work as before. Deleting a frozen chain removes its records but keeps it frozen: a later `PUT` answers `200`, not
   `201`.
-- `GET /v1/info` — the relay version and features, so the app knows whether this relay needs an update.
+- `GET /legacy/v1/info` — the relay version and features, so the app knows whether this relay needs an update.
 
 ## Central migration implementation status
 
@@ -128,7 +130,7 @@ Private central migration primitives verify a signed complete-target manifest, k
 ## Limits
 
 - 64 KiB per record, 1 MiB and 4096 records per chain (tombstones count), 1 MiB per request
-- 120 requests/min per chain (any endpoint); per IP: 20 chain-creation requests/hour, 1200 requests/hour, 12000 chains pulled/hour through `POST /v1/pull`
+- 120 requests/min per chain (any endpoint); per IP: 20 chain-creation requests/hour, 1200 requests/hour, 12000 chains pulled/hour through `POST /legacy/v1/pull`
 - chains idle for 180 days are deleted automatically (reads count as activity; devices keep their local copies)
 - reading a chain that was never created returns 404 and allocates nothing
 

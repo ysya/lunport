@@ -11,6 +11,9 @@
   },
   "name": "lunport-sync-security",
   "main": "src/security/gateway.ts",
+  "build": {
+    "command": "node scripts/build-passkey-page.mjs"
+  },
   "durable_objects": {
     "bindings": [
       {
@@ -67,6 +70,13 @@
   ],
   "vars": {
     "SECURITY_INSTALLATION": "00000000000000000000000000000000",
-    "CENTRAL_ORIGIN": "https://sync.example.invalid"
+    "CENTRAL_ORIGIN": "https://sync.example.invalid",
+    "CENTRAL_ENABLED": "0",
+    "PASSKEY_ENABLED": "1",
+    "OIDC_ISSUER": "",
+    "OIDC_JWKS_URL": "",
+    "OIDC_API_AUDIENCE": "lunport-sync",
+    "OIDC_NATIVE_CLIENT_ID": "lunport-native",
+    "OIDC_SYNC_SCOPE": "lunport:sync"
   }
 }

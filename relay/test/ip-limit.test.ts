@@ -21,7 +21,7 @@ function newChainId(): string {
 
 function create(id: string) {
   return exports.default.fetch(
-    new Request(`https://relay.test/v1/chains/${id}`, {
+    new Request(`https://relay.test/legacy/v1/chains/${id}`, {
       method: "PUT",
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", "cf-connecting-ip": IP },
       body: "{}",
@@ -39,7 +39,7 @@ it("allows 20 chain-creation requests per IP per hour, then answers 429", async 
   expect((await create(newChainId())).status).toBe(429);
   // 已建立的 chain 不受建鏈限制影響(GET 只計入總請求桶)。
   const pull = await exports.default.fetch(
-    new Request(`https://relay.test/v1/chains/${first}/records?since=0`, {
+    new Request(`https://relay.test/legacy/v1/chains/${first}/records?since=0`, {
       headers: { authorization: `Bearer ${TOKEN}`, "cf-connecting-ip": IP },
     }),
   );
@@ -125,7 +125,7 @@ it("writes all three buckets, so a relay rolled back to 0.1.0 can still read the
   const ip = "198.51.100.11";
   const limiter = env.IP_LIMIT.getByName(`ip:${ip}`);
   const res = await exports.default.fetch(
-    new Request(`https://relay.test/v1/chains/${newChainId()}/records?since=0`, {
+    new Request(`https://relay.test/legacy/v1/chains/${newChainId()}/records?since=0`, {
       headers: { authorization: `Bearer ${TOKEN}`, "cf-connecting-ip": ip },
     }),
   );
@@ -145,17 +145,17 @@ it("charges a chain request with one limiter call: PUT counts request and create
   const limiter = env.IP_LIMIT.getByName(`ip:${ip}`);
   const id = newChainId();
   const headers = { authorization: `Bearer ${TOKEN}`, "cf-connecting-ip": ip };
-  const put = await exports.default.fetch(new Request(`https://relay.test/v1/chains/${id}`, { method: "PUT", headers, body: "{}" }));
+  const put = await exports.default.fetch(new Request(`https://relay.test/legacy/v1/chains/${id}`, { method: "PUT", headers, body: "{}" }));
   expect(put.status).toBe(201);
   let windows = await windowsOf(limiter);
   expect([windows.request?.count, windows.create?.count]).toEqual([1, 1]);
-  const get = await exports.default.fetch(new Request(`https://relay.test/v1/chains/${id}/records?since=0`, { headers }));
+  const get = await exports.default.fetch(new Request(`https://relay.test/legacy/v1/chains/${id}/records?since=0`, { headers }));
   expect(get.status).toBe(200);
   windows = await windowsOf(limiter);
   expect([windows.request?.count, windows.create?.count, windows.pull]).toEqual([2, 1, { start: 0, count: 0 }]);
   // 建鏈桶用完時 PUT 回 429(同一次呼叫裡 request 也照計)。
   await limiter.allow("create", 19);
-  const refused = await exports.default.fetch(new Request(`https://relay.test/v1/chains/${newChainId()}`, { method: "PUT", headers, body: "{}" }));
+  const refused = await exports.default.fetch(new Request(`https://relay.test/legacy/v1/chains/${newChainId()}`, { method: "PUT", headers, body: "{}" }));
   expect(refused.status).toBe(429);
   windows = await windowsOf(limiter);
   expect([windows.request?.count, windows.create?.count]).toEqual([3, 21]);

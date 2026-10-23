@@ -45,7 +45,7 @@ pub struct SyncStateV2 {
     /// v1 狀態檔的備份檔名(v1 升級之後,spec §7.6)。
     #[serde(default)]
     pub legacy_v1_backup: Option<String>,
-    /// 最近一次 `GET /v1/info` 的結果(spec §6.4)。
+    /// 最近一次 `GET /legacy/v1/info` 的結果(spec §6.4)。
     #[serde(default)]
     pub relay_features: Option<RelayFeatures>,
     /// 離開帳戶時 keychain 裡的同步碼刪不掉:持久化這個待辦,重啟後仍顯示重試(同 v1,spec §7.3)。
@@ -439,12 +439,12 @@ pub struct FreezeInfo {
     pub markers: Vec<RotationMarkerPayload>,
 }
 
-/// 最近一次 `GET /v1/info` 的結果(spec §6.4)。
+/// 最近一次 `GET /legacy/v1/info` 的結果(spec §6.4)。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RelayFeatures {
     /// 查的是哪個 relay URL:URL 改了就要重查。
     pub url: String,
-    /// relay 回報的版本;None = 舊版 relay(沒有 `GET /v1/info`)。
+    /// relay 回報的版本;None = 舊版 relay(沒有 `GET /legacy/v1/info`)。
     #[serde(default)]
     pub version: Option<String>,
     #[serde(default)]
