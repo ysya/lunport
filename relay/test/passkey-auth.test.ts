@@ -12,6 +12,7 @@ import {
   random,
   configuration,
 } from "../src/v2/passkeys/protocol";
+import { canonical, hash } from "../src/v2/protocol";
 const origin = "https://passkey.test";
 const bytes = (...parts: Uint8Array[]) => {
   const b = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -208,6 +209,15 @@ describe("built-in Passkey authentication on actual workerd", () => {
     const { store, virtual, flow, response, code, user, tokens } =
       await enroll();
     const identity = await store.identity(origin, tokens.access_token);
+    expect(tokens.issuer).toBe(`${origin}/v2/auth/passkey`);
+    expect(identity?.locator).toBe(
+      await hash(canonical([
+        "lunport-account-locator-v2",
+        origin,
+        `${origin}/v2/auth/passkey`,
+        tokens.subject,
+      ])),
+    );
     expect(identity?.locator).toMatch(/^[0-9a-f]{64}$/);
     expect(identity?.authenticatedAt).toBeGreaterThan(0);
     expect(

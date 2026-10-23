@@ -81,7 +81,7 @@ fn tokens(config: &Config, grant: Grant, nonce: &str) -> Result<LoginTokens, App
         let p: Vec<_> = value.split('.').collect();
         p.len() == 3 && p[0] == prefix && hex(p[1], 32) && hex(p[2], 64)
     }
-    if grant.issuer != format!("{}/v1/auth/passkey", config.origin)
+    if grant.issuer != format!("{}/v2/auth/passkey", config.origin)
         || !hex(&grant.subject, 64)
         || grant.expires_in == 0
         || grant.expires_in > 300

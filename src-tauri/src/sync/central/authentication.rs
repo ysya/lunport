@@ -42,7 +42,7 @@ impl Config {
     pub fn issuer(&self) -> String {
         match self {
             Self::Oidc(c) => c.issuer.clone(),
-            Self::Passkey(c) => format!("{}/v1/auth/passkey", c.origin),
+            Self::Passkey(c) => format!("{}/v2/auth/passkey", c.origin),
         }
     }
     pub fn client_id(&self) -> &str {

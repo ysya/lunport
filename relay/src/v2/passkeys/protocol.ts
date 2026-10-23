@@ -80,7 +80,7 @@ export async function locator(
     canonical([
       "lunport-account-locator-v2",
       origin,
-      origin + "/v1/auth/passkey",
+      origin + "/v2/auth/passkey",
       subject,
     ]),
   );
