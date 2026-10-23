@@ -232,7 +232,8 @@ export class SecurityFloorStore extends DurableObject<FloorEnv> {
         !validFloor(value) ||
         value.installation !== installation ||
         value.registry !== registry ||
-        !(await this.pinned(installation, registry, authority))
+        !(await this.pinned(installation, registry, authority)) ||
+        compiledMinimum < value.minimum
       )
         return { status: 503 };
       const minimum = Math.max(

@@ -633,6 +633,9 @@ impl Api {
         intent: &super::migration_freeze::SignedFreeze,
         next: &[String],
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        if !sources.chains().is_empty() || !intent.body.chains.is_empty() || !next.is_empty() {
+            return Err(AppError::Other("Legacy chain migration is no longer available. Original local files are retained; import them into a new Records workspace.".into()));
+        }
         if session.expired() {
             return Err(AppError::Other(
                 "Renew sign-in before synchronizing this device.".into(),
@@ -653,7 +656,7 @@ impl Api {
         }
         Ok(body)
     }
-    /// Old bearer bytes can only enter this fixed route after both provenance and destination checks.
+    /// Only empty-source central library setup can use this route.
     pub(super) fn freeze_sources(
         &self,
         session: &DeviceSession,
@@ -670,42 +673,18 @@ impl Api {
             Some(body),
         )
     }
-    pub(super) fn prepare_frozen_source(
-        &self,
-        session: &DeviceSession,
-        owner: &super::workspace::Workspace,
-        sources: &super::migration_sources::Sources,
-        operation: &str,
-        progress: &super::migration_freeze::Progress,
-        minimum: Option<&super::migration_freeze::Known>,
-        chain: &str,
-    ) -> Result<(String, Zeroizing<String>), AppError> {
-        if session.expired()
-            || session.device_state != DeviceState::Active
-            || session.account_id != owner.control.account_id
-            || session.auth_epoch != owner.control.auth_epoch
-        {
-            return Err(invalid());
-        }
-        let token =
-            sources.frozen_bearer(&self.origin, owner, operation, progress, minimum, chain)?;
-        Ok((format!("/legacy/v1/chains/{chain}/records?since=0"), token))
-    }
-    /// Explicit migration read, never a fallback from failed central account authentication.
+    /// Historical source reads are closed before any network request.
     pub(super) fn frozen_source(
         &self,
-        session: &DeviceSession,
-        owner: &super::workspace::Workspace,
-        sources: &super::migration_sources::Sources,
-        operation: &str,
-        progress: &super::migration_freeze::Progress,
-        minimum: Option<&super::migration_freeze::Known>,
-        chain: &str,
+        _session: &DeviceSession,
+        _owner: &super::workspace::Workspace,
+        _sources: &super::migration_sources::Sources,
+        _operation: &str,
+        _progress: &super::migration_freeze::Progress,
+        _minimum: Option<&super::migration_freeze::Known>,
+        _chain: &str,
     ) -> Result<Reply, AppError> {
-        self.budget.as_ref().ok_or_else(invalid)?.remaining()?;
-        let (path, token) = self
-            .prepare_frozen_source(session, owner, sources, operation, progress, minimum, chain)?;
-        self.request(Method::GET, &path, Some(&token), None, RESPONSE_CAP)
+        Err(AppError::Other("Legacy chain source retrieval is no longer available. Original local files are retained.".into()))
     }
     pub(super) fn migration(
         &self,
@@ -896,7 +875,7 @@ mod tests {
         assert!(!reply.success().unwrap_err().to_string().contains("echoed"));
     }
     #[test]
-    fn a_valid_legacy_source_body_cannot_be_dispatched_to_a_different_api_origin() {
+    fn legacy_source_credentials_cannot_be_dispatched_to_any_api_origin() {
         use crate::sync::{
             central::{crypto, migration_freeze::SignedFreeze, migration_sources::Sources},
             crypto::ChainKeys,
@@ -942,13 +921,11 @@ mod tests {
             .freeze_sources(&grant, &signed.body.vault_id, &sources, &signed, &next)
             .is_err());
         no_send.assert();
-        // Prepare a same-origin request without dispatching a real HTTPS request.
+        // A matching origin does not reopen retired source transport.
         let same = Api::new(&signed.body.origin).unwrap();
-        let body = same
+        assert!(same
             .prepare_freeze(&grant, &signed.body.vault_id, &sources, &signed, &next)
-            .unwrap();
-        let encoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(encoded["credentials"][0]["token"], "4".repeat(64));
+            .is_err());
         assert!(same
             .prepare_freeze(&grant, &"b".repeat(64), &sources, &signed, &next)
             .is_err());

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { stripJsonComments } from "../.github/scripts/update-relay.mjs";
+import { stripJsonComments } from "./json-comments.mjs";
 import {
   checkExamples,
   validateSecurityDeployment,
@@ -51,13 +51,10 @@ test("rejects accidentally public or unchecked backend paths", () => {
       c.vars.CENTRAL_PRIVATE_CORE = "0";
     },
     (c, s, b) => {
-      s.services[0].entrypoint = undefined;
+      s.services = [{ binding: "CORE", service: c.name }];
     },
     (c, s, b) => {
-      s.services[0].service = "old-core";
-    },
-    (c, s, b) => {
-      b.services = s.services;
+      s.durable_objects.bindings.push({ name: "CHAIN", class_name: "ChainStore", script_name: c.name });
     },
     (c, s, b) => {
       s.build = undefined;

@@ -573,12 +573,12 @@ mod transport_tests {
     use super::*;
     use crate::sync::central::api::{Api, DeviceSession, DeviceState};
     use std::time::Duration;
+
     #[test]
-    fn frozen_get_preparation_requires_current_pinned_target_and_only_releases_a_frozen_chain_bearer(
-    ) {
-        let (sources, owner, progress, parent, child, _, _) = super::tests::fixture();
-        let service = &owner.control.profile.origin;
-        let api = Api::new(service).unwrap();
+    fn retired_chain_source_read_fails_before_network_or_budget_use() {
+        let (sources, owner, progress, parent, _, _, _) = super::tests::fixture();
+        let budget = crate::sync::central::request_budget::Budget::limited(1, Duration::from_secs(30));
+        let api = Api::bounded(&owner.control.profile.origin, &budget).unwrap();
         let session = DeviceSession::synthetic_for_test(
             owner.control.account_id.clone(),
             DeviceState::Active,
@@ -586,114 +586,10 @@ mod transport_tests {
             Duration::from_secs(300),
         );
         let operation = &progress.proof.last().unwrap().intent.body.migration_id;
-        let (path, bearer) = api
-            .prepare_frozen_source(
-                &session, &owner, &sources, operation, &progress, None, &parent,
-            )
-            .unwrap();
-        assert_eq!(path, format!("/legacy/v1/chains/{parent}/records?since=0"));
-        assert_eq!(bearer.as_str(), sources.keys[&parent].token.as_str());
-        for denied in [&child, &"0".repeat(64), &format!("{parent}/../other")] {
-            assert!(api
-                .prepare_frozen_source(
-                    &session, &owner, &sources, operation, &progress, None, denied
-                )
-                .is_err());
-        }
-        assert!(Api::new("https://different.test")
-            .unwrap()
-            .prepare_frozen_source(&session, &owner, &sources, operation, &progress, None, &parent)
-            .is_err());
-        assert!(api
-            .prepare_frozen_source(
-                &session,
-                &owner,
-                &sources,
-                &"9".repeat(32),
-                &progress,
-                None,
-                &parent
-            )
-            .is_err());
-        let mut invalid_proof = progress.clone();
-        invalid_proof.proof[0].digest = "0".repeat(64);
-        assert!(api
-            .prepare_frozen_source(
-                &session,
-                &owner,
-                &sources,
-                operation,
-                &invalid_proof,
-                None,
-                &parent
-            )
-            .is_err());
-        let mut signed_out = owner.clone();
-        signed_out.control.phase = Phase::SignedOut;
-        assert!(api
-            .prepare_frozen_source(
-                &session,
-                &signed_out,
-                &sources,
-                operation,
-                &progress,
-                None,
-                &parent
-            )
-            .is_err());
-        for rejected in [
-            DeviceSession::synthetic_for_test(
-                owner.control.account_id.clone(),
-                DeviceState::Pending,
-                1,
-                Duration::from_secs(300),
-            ),
-            DeviceSession::synthetic_for_test(
-                "0".repeat(64),
-                DeviceState::Active,
-                1,
-                Duration::from_secs(300),
-            ),
-            DeviceSession::synthetic_for_test(
-                owner.control.account_id.clone(),
-                DeviceState::Active,
-                owner.control.auth_epoch + 1,
-                Duration::from_secs(300),
-            ),
-            DeviceSession::synthetic_for_test(
-                owner.control.account_id.clone(),
-                DeviceState::Active,
-                1,
-                Duration::ZERO,
-            ),
-        ] {
-            assert!(api
-                .prepare_frozen_source(
-                    &rejected, &owner, &sources, operation, &progress, None, &parent
-                )
-                .is_err());
-        }
-        let budget =
-            crate::sync::central::request_budget::Budget::limited(0, Duration::from_secs(30));
-        let bounded = Api::bounded(service, &budget).unwrap();
-        let exhausted = bounded
-            .frozen_source(
-                &session, &owner, &sources, operation, &progress, None, &parent,
-            )
-            .err()
-            .unwrap();
-        assert!(crate::sync::central::request_budget::Budget::exhausted(
-            &exhausted
-        ));
+        let error = api.frozen_source(
+            &session, &owner, &sources, operation, &progress, None, &parent,
+        ).err().unwrap();
+        assert!(error.to_string().contains("no longer available"));
         assert_eq!(budget.used(), 0);
-        let budget =
-            crate::sync::central::request_budget::Budget::limited(1, Duration::from_secs(30));
-        let foreign = Api::bounded("https://different.test", &budget).unwrap();
-        assert!(foreign
-            .frozen_source(&session, &owner, &sources, operation, &progress, None, &parent)
-            .is_err());
-        assert_eq!(budget.used(), 0);
-        // The live driver separately fences session identity/credential-slot selection. This
-        // transport checks the active account grant, fixed origin and authenticated source proof.
     }
 }

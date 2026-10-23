@@ -20,6 +20,7 @@ export function libraryCanConfirm(
 ) {
   return (
     progress?.phase === "review" &&
+    !progress.legacy_sources &&
     !progress.approved &&
     !!review &&
     !review.approved &&
@@ -130,6 +131,7 @@ export function CentralLibraryMigration({
   const queryFailure: unknown = query.error;
   const shown = review?.scope === scope ? review.value : null;
   const progress = query.data;
+  const retiredSources = progress?.legacy_sources === true;
   useEffect(() => {
     if (progress?.phase !== "complete" || !eligible) return;
     let cancelled = false;
@@ -246,8 +248,12 @@ export function CentralLibraryMigration({
       )}
       {progress?.mode === "publish" && !progress.approved && (
         <p>
-          Preparing a migration freezes any existing legacy sync. Original data
-          and saved progress are retained until this migration finishes.
+          Original local data and saved progress are retained until this library setup finishes.
+        </p>
+      )}
+      {retiredSources && (
+        <p role="alert">
+          This saved setup requires the retired chain service and cannot continue. Your local files are retained. Start a new Records workspace, import hosts from the old local sync-state.json, then enable encrypted library sync.
         </p>
       )}
       {progress?.mode === "join" && progress.phase === "waiting" && (
@@ -263,7 +269,7 @@ export function CentralLibraryMigration({
             : `${progress.staged} of ${progress.total} records staged · ${progress.verified} verified by readback`}
         </p>
       )}
-      {shown && !shown.approved && (
+      {shown && !shown.approved && !retiredSources && (
         <>
           <LibraryReviewDetails review={shown} />
           <label className="flex items-start gap-2">
@@ -288,7 +294,7 @@ export function CentralLibraryMigration({
           </Button>
         </>
       )}
-      {!shown && progress && !progress.approved && (
+      {!shown && progress && !progress.approved && !retiredSources && (
         <Button disabled={blocked} onClick={() => void prepare()}>
           {progress.phase === "idle"
             ? "Prepare library review"
@@ -297,7 +303,7 @@ export function CentralLibraryMigration({
               : "Continue preparing"}
         </Button>
       )}
-      {progress?.approved && progress.phase !== "complete" && (
+      {progress?.approved && progress.phase !== "complete" && !retiredSources && (
         <Button disabled={blocked} onClick={() => void advance()}>
           Continue library sync
         </Button>
