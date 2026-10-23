@@ -71,6 +71,9 @@ describe("private selfhost operator actions", () => {
     ).rejects.toThrow();
     expect(
       await floor().authorize(settings.SECURITY_INSTALLATION),
+    ).toMatchObject({ status: 503 });
+    expect(
+      await floor().authorize(settings.SECURITY_INSTALLATION, 3),
     ).toMatchObject({ status: 200, minimum: 3 });
     await runInDurableObject(floor(), (_instance, state) =>
       state.storage.put("floor", { corrupt: true }),
