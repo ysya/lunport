@@ -132,17 +132,13 @@ Ask reviews the exact command and can request credentials through Lunport. Auto-
 
 Legacy mode keeps your OpenSSH configuration as the source of truth. It preserves comments, blank lines, ordering and unknown directives, changing only the edited lines. Included files remain part of the workspace. Every write is backed up; restoring also backs up the current file first.
 
-Legacy tools include effective configuration, key hygiene, jump-chain inspection, lint, discovery from `known_hosts` or Tailscale, and host-key cleanup. Settings uses **Files & backups**, **Sync**, and **Discovery & checks** for the corresponding controls. Use the explicit migration review to copy selected hosts and keys into Records.
+Legacy tools include effective configuration, key hygiene, jump-chain inspection, lint, discovery from `known_hosts` or Tailscale, and host-key cleanup. Settings uses **Files & backups** and **Discovery & checks** for the corresponding controls. Use the explicit migration review to copy selected hosts and keys into Records.
 
-### Legacy sync
+### Historical sync files
 
-Open **Settings → Sync** to manage devices and selected spaces. Each selected space has a file in `~/.ssh/sshelter/`, included from your main SSH config so ordinary `ssh` can read it. These compatibility paths keep their names after the Lunport rename.
+The old chain sync service is retired. Existing files under `~/.ssh/sshelter/` remain local OpenSSH sources; this release does not delete them or retrieve old chain data from the server. If an alias appears in more than one source, OpenSSH combines matching blocks and takes the first value for most settings; repeatable options may accumulate. Lunport blocks ambiguous edits and identifies the sources to review.
 
-If an alias appears in more than one source, OpenSSH combines matching blocks and takes the first value for most settings; repeatable options may accumulate. Lunport blocks ambiguous edits and identifies the sources to review. Resolve duplicates before moving, renaming or removing that alias.
-
-Turning a space off removes that device's managed file. Deleting a space removes it across the synced devices. Leaving a chain moves the local space files to `~/.ssh/sshelter-local/`, where OpenSSH continues reading them as local files. The leave review explains any changes that have not uploaded yet.
-
-A key slot under `~/.ssh/sshelter/keys/` holds the public key; the private material lives in the vault, and the agent signs with it. Each device can use the shared key or choose its own local key for that slot. Existing file-based keys stay files until you move them into the vault. Hosts carrying sensitive directives from sync require local review before use; unsupported or unsafe configuration stays visible for correction.
+Use **Import** to copy host settings from an old local `sync-state.json` into Records, then enable encrypted library sync with a central account. Keep a backup of the original files until you have reviewed the imported hosts and keys. Key material, saved SSH passwords and trust approvals need separate review.
 
 ### Legacy MCP
 

@@ -530,22 +530,10 @@ export class VaultStore extends DurableObject<Env> {
           : intent.body.revision !== "1"
       )
         return { status: 409 };
-      const order = sourceOrder(intent.body),
-        witnessed = new Set(
-          prior?.sources.map((source) => source.chain_id) ?? [],
-        );
-      let last = -1;
-      for (const value of credentials) {
-        const index = order.indexOf(value.chain);
-        if (
-          index <= last ||
-          index < 0 ||
-          order.slice(0, index).some((chain) => !witnessed.has(chain))
-        )
-          return { status: 400 };
-        witnessed.add(value.chain);
-        last = index;
-      }
+      // Legacy chain transport has been retired. New central libraries use an
+      // empty source intent; historical source journals remain readable.
+      if (intent.body.chains.length || credentials.length || prior?.sources.length)
+        return { status: 410 };
       const prepared = this.ctx.storage.transactionSync(() => {
         const current = this.load(),
           latest = this.freezeJournal();
@@ -568,92 +556,6 @@ export class VaultStore extends DurableObject<Env> {
         return 200;
       });
       if (prepared !== 200) return { status: prepared };
-      for (const credential of credentials) {
-        const state = this.load(),
-          journal = this.freezeJournal();
-        if (!this.allowed(state, actor)) return { status: 403 };
-        if (
-          !journal ||
-          journal.proof.at(-1)!.digest !== digest ||
-          this.migrationJournal()
-        )
-          return { status: 409 };
-        if (
-          journal.sources.some((source) => source.chain_id === credential.chain)
-        )
-          continue;
-        const tokenHash = await hash(
-          new TextEncoder().encode(credential.token),
-        );
-        const checked = this.load();
-        if (!this.allowed(checked, actor)) return { status: 403 };
-        let response: { status: number; snapshot?: LegacySnapshot };
-        try {
-          response = await this.env.CHAIN.getByName(
-            credential.chain,
-          ).freezeForMigration(
-            credential.chain,
-            tokenHash,
-            migrationScope(intent.body),
-          );
-        } catch {
-          return { status: 503 };
-        }
-        if (
-          response.status !== 200 ||
-          !response.snapshot ||
-          !validSnapshot(response.snapshot)
-        )
-          return { status: response.status === 200 ? 503 : response.status };
-        if (!this.allowed(this.load(), actor)) return { status: 403 };
-        let frozen: number;
-        try {
-          frozen = await this.env.LEGACY_RETIREMENT.getByName(
-            credential.chain,
-          ).freeze(
-            credential.chain,
-            tokenHash,
-            migrationScope(intent.body),
-            response.snapshot,
-          );
-        } catch {
-          return { status: 503 };
-        }
-        if (frozen !== 200) return { status: frozen };
-        const source = {
-          chain_id: credential.chain,
-          sequence: String(response.snapshot.latestSeq),
-          count: String(response.snapshot.count),
-          ciphertext_digest: response.snapshot.digest,
-        };
-        const result = this.ctx.storage.transactionSync(() => {
-          const current = this.load(),
-            latest = this.freezeJournal();
-          if (!this.allowed(current, actor)) return 403;
-          if (
-            !latest ||
-            latest.proof.at(-1)!.digest !== digest ||
-            this.migrationJournal()
-          )
-            return 409;
-          const known = latest.sources.find(
-            (value) => value.chain_id === credential.chain,
-          );
-          if (known)
-            return sameSnapshot(migrationSnapshot(known), response.snapshot!)
-              ? 200
-              : 409;
-          this.saveFreeze({
-            ...latest,
-            sources: [...latest.sources, source].sort((a, b) =>
-              a.chain_id < b.chain_id ? -1 : a.chain_id > b.chain_id ? 1 : 0,
-            ),
-          });
-          this.save({ ...current, version: current.version + 1 });
-          return 200;
-        });
-        if (result !== 200) return { status: result };
-      }
       return this.freezeStatusResult(actor);
     });
   }
@@ -714,6 +616,7 @@ export class VaultStore extends DurableObject<Env> {
         observed.rekey
       )
         return { status: 409 };
+      if (manifest.body.sources.length) return { status: 410 };
       if (!(await this.migrationSources(manifest))) return { status: 503 };
       return this.ctx.storage.transactionSync(() => {
         const current = this.load();

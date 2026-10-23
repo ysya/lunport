@@ -36,7 +36,7 @@ const status: CentralStatus = {
 const progress: MigrationProgress = {
   phase: "review",
   mode: "publish",
-  legacy_sources: true,
+  legacy_sources: false,
   total: 10,
   staged: 0,
   verified: 0,
@@ -91,6 +91,7 @@ function render(partial: Partial<MigrationProgress> = {}, scope = status) {
 describe("whole-library review and continuation", () => {
   it("requires the displayed exact pending review and one explicit acknowledgement", () => {
     expect(libraryCanConfirm(progress, review, true)).toBe(true);
+    expect(libraryCanConfirm({ ...progress, legacy_sources: true }, review, true)).toBe(false);
     expect(libraryCanConfirm(progress, review, false)).toBe(false);
     expect(libraryCanConfirm(progress, null, true)).toBe(false);
     expect(
@@ -122,7 +123,7 @@ describe("whole-library review and continuation", () => {
   it("keeps pending review details out of the progress query cache", () => {
     const { client, html } = render();
     expect(text(html)).toContain("Review complete library");
-    expect(text(html)).toContain("freezes any existing legacy sync");
+    expect(text(html)).toContain("Original local data and saved progress are retained");
     const cache = JSON.stringify(
       client
         .getQueryCache()
@@ -137,6 +138,12 @@ describe("whole-library review and continuation", () => {
           .html,
       ),
     ).toContain("10 of 10 records staged · 4 verified by readback");
+  });
+  it("blocks a saved setup that still depends on the retired chain service", () => {
+    const html = render({ legacy_sources: true }).html;
+    expect(text(html)).toContain("cannot continue");
+    expect(text(html)).toContain("local files are retained");
+    expect(text(html)).not.toContain("Review complete library");
   });
   it("lets approved joiners prepare a verified merge of their local data", () => {
     const html = render({ mode: "join", phase: "waiting" }).html;

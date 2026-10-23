@@ -59,14 +59,14 @@ Existing Legacy workspaces keep their OpenSSH files. Use the offered migration r
 
 Public installers start with a blank Server URL. Deploy your own encrypted sync service with [Cloudflare Workers](relay/security/README.md) or [Docker Compose](relay/selfhost/central/README.md), then enter its HTTPS URL in Sync. See [server configuration](docs/central-server-configuration.md) for first sign-in and changing servers.
 
-The account API uses `/v1/*`. Legacy chain clients in this release use `/legacy/v1/*`; update the app and both server components together when upgrading an existing installation.
+The account API uses `/v1/*`. Update the app and both server components together when upgrading an existing installation.
 
 Before enabling central sync in production:
 
 - Use one stable HTTPS origin. Expose only the security gateway or its trusted reverse proxy; keep the private core's routes, preview URL and workerd socket inaccessible to clients. Have the proxy replace client-supplied forwarding headers.
-- Review updates to **both** the security service and private core. The deployed core must have only local chain and limiter bindings; verify that it has no account, Vault, Passkey or retirement binding. The core still controls legacy chain data and migration snapshots. Pin reviewed artifacts, restrict deployment credentials, and require approval before either component is updated. Do not automatically deploy unreviewed pushes.
+- Review updates to **both** the security service and private core. The deployed core must have only local chain and limiter bindings; verify that it has no account, Vault, Passkey or retirement binding. Pin reviewed artifacts, restrict deployment credentials, and require approval before either component is updated. Do not automatically deploy unreviewed pushes.
 - Preserve security storage, namespace identities, revocations, the backend floor and permanent retirement state in consistent backups. Verify an independently trusted current checkpoint before restoring older data; leave the service unavailable if current security state cannot be established.
-- Keep `CENTRAL_ENABLED=0` until the deployment-specific route, TLS, identity, backup and restore checks in the linked guides have passed. The combined [legacy relay](relay/README.md#legacy-relay-deployment-older-clients) does not provide the current central service.
+- Keep `CENTRAL_ENABLED=0` until the deployment-specific route, TLS, identity, backup and restore checks in the linked guides have passed.
 
 ## Learn more
 

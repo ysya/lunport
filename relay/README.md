@@ -1,140 +1,19 @@
-# Lunport sync relay
+# Lunport sync service
 
-The current desktop client uses self-hosted, email-named accounts with Passkey sign-in and end-to-end encrypted library sync. Email names are unverified and do not provide email recovery; no SMTP setup is required. The sync unlock password is processed only in the desktop app. Public installers start with a blank server URL; users deploy their own service. See [client server configuration](../docs/central-server-configuration.md).
+The desktop client uses self-hosted accounts with Passkey sign-in and end-to-end encrypted library sync. Email names are unverified and do not provide email recovery. The sync unlock password is processed only in the desktop app. Public installers start with a blank server URL; deploy your own service and enter its HTTPS origin in Sync. See [client server configuration](../docs/central-server-configuration.md).
 
 - [Cloudflare gateway and private core](security/README.md): independent account/device authority and SQLite-backed Durable Object storage.
-- [Central Docker Compose](selfhost/central/README.md): equivalent independent security storage and private application runtime.
+- [Docker Compose](selfhost/central/README.md): equivalent independent security storage and private application runtime.
 
-Follow those deployment guides for provisioning, HTTPS and backup/restore verification. The combined legacy relay below does not supply the independent central service required by current clients.
+The public account API uses `/v1/*`. The former chain API under `/legacy/v1/*` is retired and returns 404. Older clients must be updated; historical chain storage is not deleted by this code change. The desktop client no longer sends chain requests.
 
-## Legacy relay deployment (older clients)
+Deploy the security gateway and private core together from a reviewed release. Keep the core's HTTP endpoint private, preserve security namespaces and their high-water state in backups, and verify the restore procedure before enabling central sync. Follow the linked deployment guides for route, TLS, identity and storage checks.
 
-The following deployment/update instructions and sync-code API are retained for operators of older clients.
+## Development checks
 
-### Cloudflare
-
-One click, on the free Workers plan. It covers a few computers syncing a handful of spaces; Cloudflare's free daily
-limits (100,000 Durable Object requests and 100,000 rows written) are the ceiling.
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/lunport/tree/main/relay)
-
-The button copies this directory into a new repository on your GitHub or GitLab account and deploys it with
-Workers Builds; every push to that repository redeploys it. Later changes to `relay/` here do not reach your
-copy by themselves. Or deploy from a checkout:
-
-    cd relay
-    npm install
-    npx wrangler login
-    npx wrangler deploy
-
-Then point Lunport at your Worker URL: Settings → Sync → Relay URL. The app only accepts
-`https://` relays (plain `http://` is allowed for `localhost` / `127.0.0.1` during development).
-
-### Docker Compose
-
-To run the relay on your own server instead of Cloudflare, `selfhost/` runs the same Worker on
-[workerd](https://github.com/cloudflare/workerd), Cloudflare's open-source Workers runtime, behind
-[Caddy](https://caddyserver.com/) for automatic HTTPS. Every chain is a SQLite file in the `relay-data` volume.
-
-You need a domain whose DNS points at the server, with ports 80 and 443 reachable from the internet so that Caddy
-can get a certificate:
-
-    cd relay/selfhost
-    echo "RELAY_DOMAIN=relay.example.com" > .env
-    docker compose up -d --build
-
-Then enter `https://relay.example.com` in Settings → Sync → Relay URL on every computer. To update, run
-`git pull && docker compose up -d --build`. For a consistent backup of the `relay-data` volume, stop the `relay`
-service first.
-
-- **No public domain?** Lunport only accepts `https://` relays, so a bare LAN address does not work. A tunnel that gives you
-  an HTTPS address, such as Cloudflare Tunnel or `tailscale serve`, does. Treat it as a reverse proxy (next point).
-- **Your own reverse proxy instead of Caddy**:
-  - Give the `relay` service a port that only the proxy can reach, for example `127.0.0.1:8080:8080`.
-  - Start just that service: `docker compose up -d relay`.
-  - Have the proxy set `CF-Connecting-IP` to the client's address, replacing any value the client sent. The relay's
-    per-IP limits read that header (on Cloudflare, the edge sets it). Without the header, all clients share one
-    limit, which is fine for a private relay. If clients can set it themselves, they can avoid the limits, so never
-    expose port 8080 to the internet.
-- `selfhost/check-config.mjs` fails the image build if `selfhost/workerd.capnp` drifts from `wrangler.jsonc` (compatibility
-  date, Durable Object classes). `selfhost/smoke-test.mjs` checks a running relay end to end, and CI runs both.
-
-### Updating your legacy relay
-
-Lunport tells you in *Settings → Sync* when your relay is missing something the app can use.
-
-- **Deployed with the button (GitHub):** in your relay repository, open *Actions → Update relay → Run workflow*. It
-  opens a pull request that brings the relay up to the latest Lunport release (or the tag, branch or commit you enter),
-  runs its tests, and lists removed files and any Durable Object or migration change. Merge it and Cloudflare deploys it
-  with the same Worker name, so the URL and the stored chains stay the same. Set the repository variable `AUTO_UPDATE`
-  to `true` for a weekly check.
-  - Without a ref it never downgrades: if your relay is newer than the latest release, for example because you updated
-    to a beta, the run says so and changes nothing. Enter an older ref to downgrade on purpose; the pull request is then
-    titled *Downgrade relay …*. Downgrading to a release older than relay 0.2.0 (SSHelter v0.16.x and earlier, and the
-    v0.17.0-1 beta) does not work: its test setup also collects the update script's own tests, so *Test it* fails and
-    no pull request opens.
-  - Once an update pull request exists for an upstream commit, whether open, closed or merged, later runs leave that
-    commit alone. To take a closed one after all, reopen it on GitHub.
-  - If the run says Actions may not open pull requests, use the link it prints or allow it under
-    *Settings → Actions → General*.
-  - When the upstream version of the workflow file itself changes, the run warns and the pull request links it: copy it
-    to `.github/workflows/update-relay.yml` by hand, because GitHub does not let a workflow change workflow files.
-- **Deployed before this workflow existed:** copy `.github/workflows/update-relay.yml` and
-  `.github/scripts/update-relay.mjs` from this folder to the same paths in your relay repository, then run the workflow
-  as above. Deploying from a checkout of this repository also works:
-  `cd relay && npm install && npx wrangler login && npx wrangler deploy`. Set `name` in `wrangler.jsonc` to your
-  Worker's name first, otherwise wrangler creates a second Worker with empty storage, and copy the two files anyway: the
-  next push to your relay repository redeploys that repository's own, older code.
-- **Deployed with wrangler:** `git pull`, then `npx wrangler deploy` again.
-- **Docker Compose:** `git pull && docker compose up -d --build` in `relay/selfhost`.
-- **GitLab:** download the `relay/` folder of the release you want, replace your repository's files with it (keep the
-  `name` in `wrangler.jsonc`), and push.
-
-### Legacy API
-
-The account API uses `/v1/*`. Legacy chain requests use `/legacy/v1/*`; clients built before this path change must be updated with the server.
-
-Besides the per-chain endpoints (`PUT`/`DELETE /legacy/v1/chains/{id}`, `GET`/`POST /legacy/v1/chains/{id}/records`):
-
-- `POST /legacy/v1/pull` — pull up to 64 chains in one request: `[{ "chain", "token", "since" }]`. Each item is checked like
-  `GET /legacy/v1/chains/{id}/records` and answers `ok`, `not_found`, `rate_limited` or `deferred` (the response passed its
-  2 MiB budget; ask again).
-- `POST /legacy/v1/chains/{id}/freeze` — stop all further writes to a chain (used when the sync code changes). It answers
-  `204` (also when the chain is already frozen), `404` for an unknown chain or a wrong token, and `429` over the chain's
-  rate limit. From then on every push answers `409 {"status":"frozen"}` and writes nothing, while reads and batch pulls
-  work as before. Deleting a frozen chain removes its records but keeps it frozen: a later `PUT` answers `200`, not
-  `201`.
-- `GET /legacy/v1/info` — the relay version and features, so the app knows whether this relay needs an update.
-
-## Central migration implementation status
-
-The independent ingress and private-core examples are described in [security/README.md](security/README.md). They remain unrouted and require reviewed provisioning and infrastructure verification.
-
-The account service remains an opt-in preview with built-in Passkey sign-in by default and optional generic OIDC settings. It does not yet advertise a complete legacy migration capability.
-
-The native `central-sync-preview` build connects first-device source capture, whole-library review, explicit consent, bounded staging, retirement, verified readback and the protected local cutover transaction. Approved secondary devices can also verify and adopt the existing encrypted library. Nonempty supported local and retained data uses a separately reviewed additive merge: imported host, group, collection and key identities are remapped together, and managed private-key material is encrypted before upload. Existing remote identities remain intact. Consent precedes any merge upload, and activation requires authenticated readback plus the same protected vault/state transaction. Concurrent foreign collection changes are preserved through verified catalog adjustments; edits to imported entries pause the merge with its sources retained.
-
-Ordinary library edits pause after protected source capture; account safety controls remain available. Reopening resumes the saved operation, including prepared and vault-published stages. A lost successful state response only completes its receipt and preserves later active edits. A secondary device never starts a competing initial migration; an empty remote library remains waiting. Reads share a 32-request/30-second round budget and retain a small fixed set of encrypted transcript/plan archives rather than an archive per HTTP page. An interrupted in-memory read may need to reread its prefix against the protected checkpoint. Imported host trust approvals are cleared, and locally stored passwords or passphrases may need reentry for remapped hosts; none are uploaded.
-
-Joining devices with legacy cloud chains must prove the matching signed initial migration, permanent retirement of every source and all independently observed source minima before merge. Device takeovers use a separate reviewed history reconciliation that retains original encrypted archives, treats old cache receipts as passive provenance and clears synchronization blocks only after authenticated readback and protected Vault/cache publication. Captured v1/v2 state images, old host/slot schemas and completed import/account-migration journals now have native read-only admission and normalization. Original bytes and inactive history remain preserved; unsupported archives, missing original keys and unfinished recovery or rotation still stop cutover. Capture frames inherit authenticated source responses/keybooks instead of repeatedly embedding them, and first-device progress uses an atomic protected cursor after a bounded archive window. Membership/epoch supersession during a frozen operation and hardware signer adapters remain release gates. The native two-device tests use synthetic material and real localhost HTTP; browser consent/scope tests mock native commands. Workers tests exercise the application protocol in the official isolated runtime, including the 16,384-history-row limit and rejection at the ciphertext byte ceiling. The central Compose test additionally covers real HTTP encrypted migration, second-device approval/decryption, permanent legacy retirement, revocation and consistent volume restore with a Chromium virtual Passkey. Its HTTPS origin is intercepted for testing. Keep central mode disabled for general use until the actual HTTPS deployment and restore high-water state are verified.
-
-
-The central redesign keeps both deployment paths: managed Workers with Durable Objects, and Docker Compose running the same application on workerd with persistent SQLite storage. Account/device authorization and synchronization progress add server responsibilities; content encryption and decryption stay in the clients. Self hosting does not require a second application backend.
-
-The existing Compose file serves the legacy relay. A separate [central Compose preview](selfhost/central/README.md) now packages the gateway, private application module, independent security storage, explicit provisioning and health checks. Full central self hosting requires a stable HTTPS hostname and complete upgrade/backup/restore validation; OIDC is optional. Passkey login stays separate from device approval and E2EE Vault recovery. Backups must preserve account/device revocations, security floors and permanent retirement alongside ciphertext. Declaring the new Durable Object classes alone does not complete this setup. Keep central mode disabled until these checks pass on the chosen deployment.
-
-`LegacyRetirementStore` is a separate Durable Object namespace with no expiry, alarm, delete or reset RPC. Every legacy data endpoint checks it and fails closed if it is unavailable. The internal migration freeze preserves its source snapshot and prevents idle cleanup, deletion and recreation; retrying must use the same operation and target. Ordinary `/freeze` continues to support sync-code rotation.
-
-Private central migration primitives verify a signed complete-target manifest, keep bounded staged ciphertext separate from daily sync, install the target atomically, and authorize one-way retirement by reading the actual target's durable commit receipt. Migration HTTP routes are admitted only through the independently verified security ingress and private core. A trusted ingress and deployment floor are required before production migration: restoring an older public Worker can otherwise bypass these checks. Preserve security namespaces and their high-water state when backing up or restoring; an empty replacement registry is not evidence that old sync codes are safe to reuse. The legacy Docker configuration declares the same namespaces but does not establish an independent ingress or rollback protection. The separate central Compose preview supplies its own protected ingress, independent floor/retirement storage and explicit provisioning; isolated tests do not verify an operator's existing installation or reconcile an older backup automatically.
-
-## Limits
-
-- 64 KiB per record, 1 MiB and 4096 records per chain (tombstones count), 1 MiB per request
-- 120 requests/min per chain (any endpoint); per IP: 20 chain-creation requests/hour, 1200 requests/hour, 12000 chains pulled/hour through `POST /legacy/v1/pull`
-- chains idle for 180 days are deleted automatically (reads count as activity; devices keep their local copies)
-- reading a chain that was never created returns 404 and allocates nothing
-
-## Test
-
-    npm test          # runs inside workerd via @cloudflare/vitest-plugin
-    npm run typecheck
+```sh
+npm run typecheck
+npm run check:security-config
+npm run test:security-config
+npm test
+```

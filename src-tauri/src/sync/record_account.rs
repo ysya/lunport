@@ -54,7 +54,7 @@ pub fn validate_pending(op: &PendingAccountOperation) -> Result<(), AppError> {
         || op.device_name.is_empty()
         || op.device_name.len() > 128
         || !crate::sync::crypto::is_chain_id(&op.prepared_account.chain_id)
-        || crate::sync::relay::RelayClient::validate_url(&op.relay_url).is_err()
+        || crate::sync::relay::validate_url(&op.relay_url).is_err()
     {
         return Err(invalid());
     }

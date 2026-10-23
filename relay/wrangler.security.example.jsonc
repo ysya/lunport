@@ -39,11 +39,6 @@
       {
         "name": "PASSKEY",
         "class_name": "PasskeyStore"
-      },
-      {
-        "name": "CHAIN",
-        "class_name": "ChainStore",
-        "script_name": "sshelter-relay"
       }
     ]
   },
@@ -59,13 +54,6 @@
     {
       "tag": "security-v2-central-authority",
       "new_sqlite_classes": ["AccountStore", "VaultStore", "PasskeyStore"]
-    }
-  ],
-  "services": [
-    {
-      "binding": "CORE",
-      "service": "sshelter-relay",
-      "entrypoint": "CentralSyncBackend"
     }
   ],
   "vars": {
