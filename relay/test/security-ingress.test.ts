@@ -39,10 +39,12 @@ function configuration(core?: GatewayEnv["CORE"]): GatewayEnv {
     CORE: core ?? exports.CentralSyncBackend,
     SECURITY_INSTALLATION: installation,
     CENTRAL_ORIGIN: origin,
+    CENTRAL_ENABLED: "1",
+    PASSKEY_ENABLED: "1",
   };
 }
 function request(
-  path = "/v1/info",
+  path = "/legacy/v1/info",
   method = "GET",
   body?: string | ReadableStream<Uint8Array>,
 ) {
@@ -86,6 +88,39 @@ async function frozenSource() {
 }
 
 describe("independent ingress and persistent backend floor", () => {
+  it("handles v2 inside security without forwarding credentials to core", async () => {
+    await provision();
+    const calls: number[] = [];
+    const configured = configuration(accepting(calls));
+    const info = await gateway.fetch(request("/v1/info"), configured);
+    expect(info.status).toBe(200);
+    expect((await info.json() as any).protocol).toBe(2);
+    expect((await gateway.fetch(request("/v1/register", "POST", "{}"), configured)).status).toBe(401);
+    expect(calls).toEqual([]);
+    const privateCore = new CentralSyncBackend(createExecutionContext(), {
+      ...env,
+      CENTRAL_PRIVATE_CORE: "1",
+    });
+    expect((await privateCore.forward(2, identity(), request("/v1/info"))).status).toBe(404);
+  });
+  it("charges one ingress request for each v2 call", async () => {
+    await provision();
+    const charges: unknown[] = [];
+    const configured = configuration(accepting([]));
+    configured.IP_LIMIT = {
+      getByName: () => ({
+        allowMany: async (items: unknown) => {
+          charges.push(items);
+          return true;
+        },
+        allow: async () => {
+          throw new Error("v2 route must not charge request again");
+        },
+      }),
+    } as any;
+    expect((await gateway.fetch(request("/v1/info"), configured)).status).toBe(200);
+    expect(charges).toEqual([[ ["request", 1] ]]);
+  });
   it("requires explicit provisioning and never traffic-creates a floor", async () => {
     const calls: number[] = [];
     expect((await floor().authorize(installation)).status).toBe(503);
@@ -106,7 +141,7 @@ describe("independent ingress and persistent backend floor", () => {
     expect(
       (
         await gateway.fetch(
-          request("/v1/provision", "POST", "{}"),
+          request("/legacy/v1/provision", "POST", "{}"),
           configuration(accepting(calls)),
         )
       ).status,
@@ -296,14 +331,14 @@ describe("independent ingress and persistent backend floor", () => {
       expect(
         (
           await gateway.fetch(
-            request(`/v1/chains/${chain}${suffix}`, method, body),
+            request(`/legacy/v1/chains/${chain}${suffix}`, method, body),
             configured,
           )
         ).status,
       ).toBe(409);
     expect(calls).toEqual([]);
     expect(
-      (await gateway.fetch(request(`/v1/chains/${chain}/records`), configured))
+      (await gateway.fetch(request(`/legacy/v1/chains/${chain}/records`), configured))
         .status,
     ).toBe(204);
     expect(calls).toEqual([2]);
@@ -315,14 +350,14 @@ describe("independent ingress and persistent backend floor", () => {
       },
     );
     expect(
-      (await gateway.fetch(request(`/v1/chains/${chain}/records`), configured))
+      (await gateway.fetch(request(`/legacy/v1/chains/${chain}/records`), configured))
         .status,
     ).toBe(410);
     expect(
       (
         await gateway.fetch(
           request(
-            "/v1/pull",
+            "/legacy/v1/pull",
             "POST",
             JSON.stringify([{ chain, token, since: 0 }]),
           ),
@@ -352,16 +387,16 @@ describe("independent ingress and persistent backend floor", () => {
     ).toBe(503); // public compatibility mode cannot claim a private backend
   });
 
-  it("checks floor and registry in the same backend invocation before any route", async () => {
+  it("checks private mode, floor and witness formats before any v1 route", async () => {
     const core = new CentralSyncBackend(createExecutionContext(), {
       ...env,
       CENTRAL_PRIVATE_CORE: "1",
     });
     const chain = random(),
-      create = () => request(`/v1/chains/${chain}`, "PUT", "{}");
+      create = () => request(`/legacy/v1/chains/${chain}`, "PUT", "{}");
     expect((await core.forward(3, identity(), create())).status).toBe(503);
     expect((await core.forward(0, identity(), create())).status).toBe(503);
-    expect((await core.forward(2, random(), create())).status).toBe(503);
+    expect((await core.forward(2, "invalid", create())).status).toBe(503);
     expect(await env.CHAIN.getByName(chain).exists()).toBe(false);
     const wrong = create();
     wrong.headers.set(AUTHORITY_HEADER, "0".repeat(64));
@@ -394,13 +429,13 @@ describe("independent ingress and persistent backend floor", () => {
     expect(
       (
         await gateway.fetch(
-          new Request("https://other.test/v1/info"),
+          new Request("https://other.test/legacy/v1/info"),
           configured,
         )
       ).status,
     ).toBe(421);
     expect(
-      (await gateway.fetch(request("/v1/pull", "POST", "[{}]"), configured))
+      (await gateway.fetch(request("/legacy/v1/pull", "POST", "[{}]"), configured))
         .status,
     ).toBe(400);
     const chain = random(),
@@ -408,7 +443,7 @@ describe("independent ingress and persistent backend floor", () => {
     expect(
       (
         await gateway.fetch(
-          request("/v1/pull", "POST", JSON.stringify([item, item])),
+          request("/legacy/v1/pull", "POST", JSON.stringify([item, item])),
           configured,
         )
       ).status,
@@ -416,7 +451,7 @@ describe("independent ingress and persistent backend floor", () => {
     expect(
       (
         await gateway.fetch(
-          request("/v1/pull", "POST", JSON.stringify([{ ...item, since: -1 }])),
+          request("/legacy/v1/pull", "POST", JSON.stringify([{ ...item, since: -1 }])),
           configured,
         )
       ).status,
@@ -428,7 +463,7 @@ describe("independent ingress and persistent backend floor", () => {
       },
     });
     expect(
-      (await gateway.fetch(request("/v1/pull", "POST", stream), configured))
+      (await gateway.fetch(request("/legacy/v1/pull", "POST", stream), configured))
         .status,
     ).toBe(413);
     expect(calls).toEqual([]);

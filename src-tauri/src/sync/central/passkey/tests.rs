@@ -53,12 +53,12 @@ impl SyncHttpClient for Http {
         assert_eq!(request.uri().host(), Some("passkey.test"));
         let body: Value = serde_json::from_slice(request.body()).unwrap();
         let value = match request.uri().path() {
-            "/v2/auth/passkey/authorize" => {
+            "/v1/auth/passkey/authorize" => {
                 assert!(body["state"].as_str().unwrap().len() >= 32);
                 *self.begin.lock().unwrap() = Some(body);
-                json!({"url":format!("{ORIGIN}/v2/auth/passkey/page?flow={}#key={}","a".repeat(32),"b".repeat(64)),"expires_in":300})
+                json!({"url":format!("{ORIGIN}/v1/auth/passkey/page?flow={}#key={}","a".repeat(32),"b".repeat(64)),"expires_in":300})
             }
-            "/v2/auth/passkey/exchange" => {
+            "/v1/auth/passkey/exchange" => {
                 self.exchanges.fetch_add(1, Ordering::SeqCst);
                 let begin = self.begin.lock().unwrap();
                 let b = begin.as_ref().unwrap();
@@ -71,7 +71,7 @@ impl SyncHttpClient for Http {
                 );
                 self.grant()
             }
-            "/v2/auth/passkey/refresh" => {
+            "/v1/auth/passkey/refresh" => {
                 self.refreshes.fetch_add(1, Ordering::SeqCst);
                 assert!(body["refresh_token"]
                     .as_str()
@@ -79,7 +79,7 @@ impl SyncHttpClient for Http {
                     .starts_with("lpkr1."));
                 self.grant()
             }
-            "/v2/auth/passkey/logout" => {
+            "/v1/auth/passkey/logout" => {
                 assert!(body["token"].as_str().unwrap().starts_with("lpkr1."));
                 json!({"signed_out":true})
             }
@@ -97,7 +97,7 @@ impl SyncHttpClient for Http {
 }
 impl Http {
     fn grant(&self) -> Value {
-        json!({"issuer":format!("{ORIGIN}/v2/auth/passkey"),"subject":&*self.subject.lock().unwrap(),"access_token":format!("lpka1.{}.{}","d".repeat(32),"e".repeat(64)),"refresh_token":format!("lpkr1.{}.{}","d".repeat(32),"f".repeat(64)),"expires_in":300})
+        json!({"issuer":format!("{ORIGIN}/v1/auth/passkey"),"subject":&*self.subject.lock().unwrap(),"access_token":format!("lpka1.{}.{}","d".repeat(32),"e".repeat(64)),"refresh_token":format!("lpkr1.{}.{}","d".repeat(32),"f".repeat(64)),"expires_in":300})
     }
 }
 #[test]
@@ -130,7 +130,7 @@ fn fresh_capability_requires_an_explicit_expected_account_and_rejects_a_differen
     let http = Http::new();
     let profile = super::super::credentials::Profile::new(
         ORIGIN,
-        &format!("{ORIGIN}/v2/auth/passkey"),
+        &format!("{ORIGIN}/v1/auth/passkey"),
         &"c".repeat(64),
     )
     .unwrap();

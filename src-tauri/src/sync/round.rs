@@ -379,7 +379,7 @@ fn note_error(core: &mut SyncCore, env: &SyncEnv, e: &AppError) {
     let _ = save_core(core, &env.state_path);
 }
 
-/// relay 的能力(spec §6.4):每個行程、每個 relay URL 查一次 `GET /v1/info`(用這一輪的連線,結果照 `check_relay` 記下);查不到
+/// relay 的能力(spec §6.4):每個行程、每個 relay URL 查一次 `GET /legacy/v1/info`(用這一輪的連線,結果照 `check_relay` 記下);查不到
 /// (離線等)就當作未知、先試批次。被限流(`429`)回 `Err`:不能當成「支援批次」照樣送出批次查詢 —— 呼叫端這一輪不再對 relay 發
 /// 任何請求、以退避收尾。
 fn relay_supports_batch(env: &SyncEnv, s: &SyncStateV2, relay: &dyn RelayApi) -> Result<bool, RelayError> {
@@ -490,7 +490,7 @@ pub(crate) fn observe_account_format(
 /// 一輪(spec §7.1)。`generation`/`s`/`keys` 是 `sync_once` 在同一把 core 鎖內取得的快照。回傳 `RoundOutcome`:
 /// - `frozen`:上傳撞到凍結的 chain(`409 frozen`),這一輪的上傳到此為止、dirty 保留;
 /// - `markers`:拉帳戶 chain 時看到的更換標記(`meta` `rotation:*`),這一輪在套用、上傳任何東西之前就停了;
-/// - `backoff`:這一輪以被限流或 relay 出錯收尾(含拿不到帳戶、`GET /v1/info` 被限流、提早結束的那幾種),連續失敗的輪數已經加一、
+/// - `backoff`:這一輪以被限流或 relay 出錯收尾(含拿不到帳戶、`GET /legacy/v1/info` 被限流、提早結束的那幾種),連續失敗的輪數已經加一、
 ///   狀態列已經說明 —— 呼叫端不要立刻再跑,等 `next_delay`。
 ///
 /// `mark_frozen_chains` = false 時(這台自己正在更換同步碼,spec §7.5 第 2 步)凍結與更換標記都**不記進狀態**,只回報給呼叫端,
@@ -1798,7 +1798,7 @@ pub(crate) mod tests {
         delete: Option<fn() -> RelayError>,
         /// `DELETE` 被呼叫了幾次(含回錯誤的)。
         deletes: Arc<AtomicUsize>,
-        /// `GET /v1/info` 回這個錯誤。
+        /// `GET /legacy/v1/info` 回這個錯誤。
         info: Option<fn() -> RelayError>,
         /// 批次查詢一項都沒執行、全部回 `deferred`(沒有 `429`、也沒有 `5xx`)。
         defer_batches: bool,
@@ -2343,7 +2343,7 @@ pub(crate) mod tests {
     #[test]
     fn a_rate_limited_relay_info_ends_the_round_after_account_preflight() {
         let (relay, _clock, _a, b, _words, _personal) = pair();
-        b.runtime.core.lock().unwrap().relay_checked = None; // 新的行程:`GET /v1/info` 要再查一次
+        b.runtime.core.lock().unwrap().relay_checked = None; // 新的行程:`GET /legacy/v1/info` 要再查一次
         relay.clear_calls();
         let faults = Faults { info: Some(rate_limited), ..Faults::default() };
         let out = run_with_faults(&b, &relay, &faults).unwrap();

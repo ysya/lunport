@@ -1,5 +1,4 @@
-import { AUTHORITY_HEADER, authorityWitness } from "./security/authority";
-import { centralFetch, centralPrivateFetch } from "./v2/routes";
+import { AUTHORITY_HEADER, validAuthority } from "./security/authority";
 import type { Bucket } from "./ip-limit";
 export { IpLimiter } from "./ip-limit";
 import { validScope, sameMigration, type LegacyMigrationScope, type LegacySnapshot, type LegacyGate } from "./legacy-retirement";
@@ -8,7 +7,6 @@ export { AccountStore } from "./v2/account";
 export { PasskeyStore } from "./v2/passkeys/store";
 export { VaultStore } from "./v2/store";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { REGISTRY_WITNESS } from "./security/floor";
 export { SecurityFloorStore } from "./security/floor";
 
 const MAX_RECORD_BYTES = 65_536; // 單筆 ciphertext 字元數(嚴格 base64 → 字元 = byte)
@@ -21,7 +19,7 @@ const MAX_PULL_BODY_BYTES = 65_536;
 const PULL_RESPONSE_BUDGET = 2 * 1024 * 1024; // 已放入回應的 JSON 字元數(全為 ASCII,字元 = byte)
 
 /**
- * relay 版本;與 package.json 的 version 相同(測試從 `GET /v1/info` 檢查),app 也以它讀取。
+ * relay 版本;與 package.json 的 version 相同(測試從 `GET /legacy/v1/info` 檢查),app 也以它讀取。
  * 不能 export:workerd 要求主模組的每個 export 都是 class 或 handler,多一個字串 Worker 就啟動不了。
  */
 const RELAY_VERSION = "0.2.0";
@@ -128,6 +126,9 @@ export class ChainStore extends DurableObject<Env> {
   private async migrationGate(chain: string, tokenHash: string, write: boolean): Promise<LegacyGate> {
     try {
       if (!HEX64.test(chain) || !HEX64.test(tokenHash) || !this.env.CHAIN.idFromName(chain).equals(this.ctx.id)) return 503;
+      // The independent gateway checks the retirement registry before private-core v1 RPCs.
+      // This object still checks its persistent local fence before every mutation.
+      if (this.env.CENTRAL_PRIVATE_CORE === "1") return 200;
       return await this.env.LEGACY_RETIREMENT.getByName(chain).check(chain, tokenHash, write);
     } catch { return 503; }
   }
@@ -151,6 +152,9 @@ export class ChainStore extends DurableObject<Env> {
     const snapshot = { latestSeq, count: records.length, digest };
     try {
       await this.ctx.storage.deleteAlarm();
+      // The authenticated security Vault records the registry freeze after receiving
+      // this snapshot. The private core has no security namespace binding.
+      if (this.env.CENTRAL_PRIVATE_CORE === "1") return { status: 200, snapshot };
       const status = await this.env.LEGACY_RETIREMENT.getByName(chain).freeze(chain, tokenHash, scope, snapshot);
       return status === 200 ? { status, snapshot } : { status };
     } catch { return { status: 503 }; }
@@ -415,7 +419,7 @@ function limiterFor(request: Request, env: Env) {
   return env.IP_LIMIT.getByName(`ip:${ip}`);
 }
 
-/** `GET /v1/info`:版本與功能,app 據此決定要不要用批次查詢與凍結。 */
+/** `GET /legacy/v1/info`:版本與功能,app 據此決定要不要用批次查詢與凍結。 */
 async function info(request: Request, env: Env): Promise<Response> {
   if (!(await limiterFor(request, env).allow("request"))) return status(429);
   return Response.json({ relay: "sshelter-relay", version: RELAY_VERSION, features: FEATURES });
@@ -441,7 +445,7 @@ async function readPullItems(request: Request): Promise<PullItem[] | Response> {
 }
 
 /**
- * `POST /v1/pull`:一次查多條 chain。每項各自走該 chain 的 `pull()`(各自驗證權杖、計入每分鐘限制、刷新閒置期限)。
+ * `POST /legacy/v1/pull`:一次查多條 chain。每項各自走該 chain 的 `pull()`(各自驗證權杖、計入每分鐘限制、刷新閒置期限)。
  * 依序處理;累計的回應 JSON 超過預算後,剩下的項目回 deferred(不執行),第一項一律執行。
  */
 async function batchPull(request: Request, env: Env): Promise<Response> {
@@ -472,10 +476,9 @@ async function batchPull(request: Request, env: Env): Promise<Response> {
 const backend = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/v2/")) return centralFetch(request,env);
-    if (url.pathname === "/v1/info") return request.method === "GET" ? info(request, env) : notFound();
-    if (url.pathname === "/v1/pull") return request.method === "POST" ? batchPull(request, env) : notFound();
-    const match = /^\/v1\/chains\/([^/]+)(\/records|\/freeze)?$/.exec(url.pathname);
+    if (url.pathname === "/legacy/v1/info") return request.method === "GET" ? info(request, env) : notFound();
+    if (url.pathname === "/legacy/v1/pull") return request.method === "POST" ? batchPull(request, env) : notFound();
+    const match = /^\/legacy\/v1\/chains\/([^/]+)(\/records|\/freeze)?$/.exec(url.pathname);
     if (!match) return notFound();
     const [, chainId, suffix] = match;
     const recordsPath = suffix === "/records";
@@ -536,7 +539,8 @@ const backend = {
   },
 } satisfies ExportedHandler<Env>;
 
-// Every future backend revision must preserve this mandatory same-invocation check.
+// The security gateway owns namespace pinning and legacy retirement checks.
+// This private entrypoint accepts only legacy paths and validates its caller's floor inputs.
 const BACKEND_SECURITY_FLOOR = 2;
 export class CentralSyncBackend extends WorkerEntrypoint<Env> {
   async forward(
@@ -550,14 +554,12 @@ export class CentralSyncBackend extends WorkerEntrypoint<Env> {
         !Number.isSafeInteger(requiredFloor) ||
         requiredFloor < BACKEND_SECURITY_FLOOR ||
         requiredFloor > BACKEND_SECURITY_FLOOR ||
-        registry !==
-          this.env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString() ||
-        request.headers.get(AUTHORITY_HEADER) !== authorityWitness(this.env)
+        !/^[0-9a-f]{64}$/.test(registry) ||
+        !validAuthority(request.headers.get(AUTHORITY_HEADER))
       )
         return status(503);
-      return new URL(request.url).pathname.startsWith("/v2/")
-        ? await centralPrivateFetch(request, this.env)
-        : await backend.fetch(request, this.env);
+      if (!new URL(request.url).pathname.startsWith("/legacy/v1/")) return status(404);
+      return await backend.fetch(request, this.env);
     } catch {
       return status(503);
     }

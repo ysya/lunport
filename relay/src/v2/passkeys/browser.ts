@@ -20,7 +20,7 @@ let busy = true;
 let managing = false;
 let managementKey = "";
 async function call(path: string, body: object): Promise<any> {
-  const response = await fetch("/v2/auth/passkey/" + path, {
+  const response = await fetch("/v1/auth/passkey/" + path, {
     method: "POST",
     credentials: "omit",
     cache: "no-store",

@@ -72,10 +72,12 @@ jobs:
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: |
           docker compose up -d --build
+          ready=0
           for _ in $(seq 1 60); do
-            [ "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/v1/chains/not-hex/records)" = 400 ] && break
+            if [ "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/legacy/v1/chains/not-hex/records)" = 400 ]; then ready=1; break; fi
             sleep 1
           done
+          [ "$ready" -eq 1 ]
           node smoke-test.mjs https://localhost spoof
       - name: Logs
         if: failure()

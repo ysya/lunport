@@ -1,7 +1,7 @@
 import { exactObject, hex } from "../protocol";
 import { page } from "./page";
 import type { Result } from "../store";
-export const PREFIX = "/v2/auth/passkey/";
+export const PREFIX = "/v1/auth/passkey/";
 export function reply(result: Result): Response {
   const headers = {
     "cache-control": "no-store",
@@ -53,7 +53,7 @@ async function body(request: Request): Promise<Record<string, any> | null> {
 }
 export async function route(
   request: Request,
-  env: Env,
+  env: Pick<Env, "PASSKEY">,
   origin: string,
 ): Promise<Response> {
   const url = new URL(request.url),

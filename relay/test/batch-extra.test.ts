@@ -34,12 +34,12 @@ function request(path: string, init: RequestInit = {}) {
 }
 
 const auth = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
-const create = (id: string) => request(`/v1/chains/${id}`, { method: "PUT", headers: auth, body: "{}" });
-const freeze = (id: string) => request(`/v1/chains/${id}/freeze`, { method: "POST", headers: auth });
-const destroy = (id: string) => request(`/v1/chains/${id}`, { method: "DELETE", headers: auth });
+const create = (id: string) => request(`/legacy/v1/chains/${id}`, { method: "PUT", headers: auth, body: "{}" });
+const freeze = (id: string) => request(`/legacy/v1/chains/${id}/freeze`, { method: "POST", headers: auth });
+const destroy = (id: string) => request(`/legacy/v1/chains/${id}`, { method: "DELETE", headers: auth });
 /** 推 n 筆(idHash 1..n)。 */
 const push = (id: string, n: number, ciphertext = "Y2lwaGVy") =>
-  request(`/v1/chains/${id}/records`, {
+  request(`/legacy/v1/chains/${id}/records`, {
     method: "POST",
     headers: auth,
     body: JSON.stringify(
@@ -47,8 +47,8 @@ const push = (id: string, n: number, ciphertext = "Y2lwaGVy") =>
     ),
   });
 const batch = (items: unknown) =>
-  request("/v1/pull", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(items) });
-const info = () => request("/v1/info");
+  request("/legacy/v1/pull", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(items) });
+const info = () => request("/legacy/v1/info");
 
 type Windows = Partial<Record<"create" | "request" | "pull", { start: number; count: number }>>;
 const limiter = () => env.IP_LIMIT.getByName(`ip:${ip}`);
@@ -56,7 +56,7 @@ const windows = () => runInDurableObject(limiter(), async (_instance, state) => 
 
 type Body = { results: { chain: string; status: string; records?: { seq: number }[]; latestSeq?: number }[] };
 
-describe("POST /v1/pull: per-IP buckets", () => {
+describe("POST /legacy/v1/pull: per-IP buckets", () => {
   it("charges the batch to the request bucket and every item to the pull bucket in one call", async () => {
     const items = [newChainId(), newChainId(), newChainId()].map((chain) => ({ chain, token: TOKEN, since: 0 }));
     expect((await batch(items)).status).toBe(200);
@@ -66,7 +66,7 @@ describe("POST /v1/pull: per-IP buckets", () => {
 
   it("charges a malformed batch only to the request bucket", async () => {
     expect((await batch([])).status).toBe(400);
-    expect((await request("/v1/pull", { method: "POST", body: "[" + " ".repeat(70_000) + "]" })).status).toBe(413);
+    expect((await request("/legacy/v1/pull", { method: "POST", body: "[" + " ".repeat(70_000) + "]" })).status).toBe(413);
     const w = await windows();
     expect([w.request?.count, w.pull]).toEqual([2, { start: 0, count: 0 }]);
   });
@@ -89,7 +89,7 @@ describe("POST /v1/pull: per-IP buckets", () => {
   });
 });
 
-describe("POST /v1/pull: items", () => {
+describe("POST /legacy/v1/pull: items", () => {
   it("accepts exactly 64 items", async () => {
     const items = Array.from({ length: 64 }, () => ({ chain: newChainId(), token: TOKEN, since: 0 }));
     const res = await batch(items);

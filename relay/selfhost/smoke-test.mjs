@@ -30,7 +30,7 @@ async function call(method, path, token, { body, headers = {} } = {}) {
 }
 
 async function callBatch(items) {
-  const res = await fetch(new URL("/v1/pull", base), {
+  const res = await fetch(new URL("/legacy/v1/pull", base), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(items),
@@ -53,19 +53,19 @@ if (phase === "write") {
   const chain = hex(32);
   const token = hex(32);
   const record = { idHash: hex(32), kind: "host", nonce: base64(24), ciphertext: base64(48), deleted: false };
-  check("create a chain", (await call("PUT", `/v1/chains/${chain}`, token)).status, 201);
-  check("creating it again is idempotent", (await call("PUT", `/v1/chains/${chain}`, token)).status, 200);
-  check("another token cannot see it", (await call("PUT", `/v1/chains/${chain}`, hex(32))).status, 404);
-  const pushed = await call("POST", `/v1/chains/${chain}/records`, token, { body: [{ ...record, baseSeq: 0 }] });
+  check("create a chain", (await call("PUT", `/legacy/v1/chains/${chain}`, token)).status, 201);
+  check("creating it again is idempotent", (await call("PUT", `/legacy/v1/chains/${chain}`, token)).status, 200);
+  check("another token cannot see it", (await call("PUT", `/legacy/v1/chains/${chain}`, hex(32))).status, 404);
+  const pushed = await call("POST", `/legacy/v1/chains/${chain}/records`, token, { body: [{ ...record, baseSeq: 0 }] });
   check("push a record", pushed, { status: 200, json: { results: [{ status: "ok", seq: 1 }], latestSeq: 1 } });
-  const stale = await call("POST", `/v1/chains/${chain}/records`, token, {
+  const stale = await call("POST", `/legacy/v1/chains/${chain}/records`, token, {
     body: [{ ...record, ciphertext: base64(48), baseSeq: 0 }],
   });
   check("a push based on an old version conflicts", stale, {
     status: 200,
     json: { results: [{ status: "conflict", current: { ...record, seq: 1 } }], latestSeq: 1 },
   });
-  const info = await fetch(new URL("/v1/info", base)).then(async (r) => ({ status: r.status, json: await r.json() }));
+  const info = await fetch(new URL("/legacy/v1/info", base)).then(async (r) => ({ status: r.status, json: await r.json() }));
   check("the relay reports its features", [info.status, info.json.features], [200, ["pull-batch", "freeze"]]);
   const unknown = hex(32);
   check("a batch pull answers each chain on its own", await callBatch([
@@ -77,24 +77,24 @@ if (phase === "write") {
   });
   const frozenChain = hex(32);
   const frozenToken = hex(32);
-  check("create a chain to freeze", (await call("PUT", `/v1/chains/${frozenChain}`, frozenToken)).status, 201);
-  check("freeze it", (await call("POST", `/v1/chains/${frozenChain}/freeze`, frozenToken)).status, 204);
-  check("a frozen chain refuses pushes", await call("POST", `/v1/chains/${frozenChain}/records`, frozenToken, {
+  check("create a chain to freeze", (await call("PUT", `/legacy/v1/chains/${frozenChain}`, frozenToken)).status, 201);
+  check("freeze it", (await call("POST", `/legacy/v1/chains/${frozenChain}/freeze`, frozenToken)).status, 204);
+  check("a frozen chain refuses pushes", await call("POST", `/legacy/v1/chains/${frozenChain}/records`, frozenToken, {
     body: [{ ...record, baseSeq: 0 }],
   }), { status: 409, json: { status: "frozen" } });
-  check("a frozen chain still reads", (await call("GET", `/v1/chains/${frozenChain}/records?since=0`, frozenToken)).status, 200);
-  check("a frozen chain can be deleted", (await call("DELETE", `/v1/chains/${frozenChain}`, frozenToken)).status, 204);
+  check("a frozen chain still reads", (await call("GET", `/legacy/v1/chains/${frozenChain}/records?since=0`, frozenToken)).status, 200);
+  check("a frozen chain can be deleted", (await call("DELETE", `/legacy/v1/chains/${frozenChain}`, frozenToken)).status, 204);
   writeFileSync(stateFile, JSON.stringify({ chain, token, record }));
 } else if (phase === "read") {
   const { chain, token, record } = JSON.parse(readFileSync(stateFile, "utf8"));
-  const pulled = await call("GET", `/v1/chains/${chain}/records?since=0`, token);
+  const pulled = await call("GET", `/legacy/v1/chains/${chain}/records?since=0`, token);
   check("the record is still there", pulled, { status: 200, json: { records: [{ ...record, seq: 1 }], latestSeq: 1 } });
-  check("delete the chain", (await call("DELETE", `/v1/chains/${chain}`, token)).status, 204);
-  check("a deleted chain is gone", (await call("GET", `/v1/chains/${chain}/records?since=0`, token)).status, 404);
+  check("delete the chain", (await call("DELETE", `/legacy/v1/chains/${chain}`, token)).status, 204);
+  check("a deleted chain is gone", (await call("GET", `/legacy/v1/chains/${chain}/records?since=0`, token)).status, 404);
 } else {
   const statuses = [];
   for (let i = 1; i <= 21; i++) {
-    const res = await call("PUT", `/v1/chains/${hex(32)}`, hex(32), { headers: { "cf-connecting-ip": `203.0.113.${i}` } });
+    const res = await call("PUT", `/legacy/v1/chains/${hex(32)}`, hex(32), { headers: { "cf-connecting-ip": `203.0.113.${i}` } });
     statuses.push(res.status);
   }
   check("20 chains per hour from one address, whatever CF-Connecting-IP says", statuses, [...Array(20).fill(201), 429]);

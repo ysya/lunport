@@ -408,7 +408,7 @@ it("serves built-in login through the private ingress without an OIDC provider",
       }),
       settings,
     );
-  const info = await call("/v2/info");
+  const info = await call("/v1/info");
   expect(info.status).toBe(200);
   expect(await info.json()).toMatchObject({
     default_auth: "passkey",
@@ -418,7 +418,7 @@ it("serves built-in login through the private ingress without an OIDC provider",
   const verifier = "c".repeat(64),
     redirect = "http://127.0.0.1:38172/passkey/callback",
     state = random();
-  const begun = await call("/v2/auth/passkey/authorize", {
+  const begun = await call("/v1/auth/passkey/authorize", {
     code_challenge: encode(await sha(verifier)),
     redirect_uri: redirect,
     state,
@@ -436,14 +436,14 @@ it("serves built-in login through the private ingress without an OIDC provider",
   expect(
     (
       await call(
-        "/v2/auth/passkey/options",
+        "/v1/auth/passkey/options",
         { flow, kind: "register", email: "browser@homelab.test" },
         { origin: "https://evil.test", "x-lunport-flow": key },
       )
     ).status,
   ).toBe(403);
   const options = await call(
-    "/v2/auth/passkey/options",
+    "/v1/auth/passkey/options",
     { flow, kind: "register", email: "browser@homelab.test" },
     { origin, "x-lunport-flow": key },
   );
@@ -453,14 +453,14 @@ it("serves built-in login through the private ingress without an OIDC provider",
       ((await options.json()) as any).options.challenge,
     );
   const completed = await call(
-    "/v2/auth/passkey/finish",
+    "/v1/auth/passkey/finish",
     { flow, response },
     { origin, "x-lunport-flow": key },
   );
   expect(completed.status).toBe(200);
   const callback = new URL(((await completed.json()) as any).redirect);
   expect(callback.searchParams.get("state")).toBe(state);
-  const grant = await call("/v2/auth/passkey/exchange", {
+  const grant = await call("/v1/auth/passkey/exchange", {
     code: callback.searchParams.get("code"),
     verifier,
     redirect_uri: redirect,
@@ -469,7 +469,7 @@ it("serves built-in login through the private ingress without an OIDC provider",
   const tokens = (await grant.json()) as any;
   const fixture = (await import("../../fixtures/central-sync-v2.json")).default;
   const registered = await call(
-    "/v2/register",
+    "/v1/register",
     {
       device: fixture.genesis.first,
       name: "Synthetic Passkey client",
@@ -486,7 +486,7 @@ it("serves built-in login through the private ingress without an OIDC provider",
   expect(
     (
       await centralFetch(
-        new Request(origin + "/v2/auth/passkey/page?flow=" + flow),
+        new Request(origin + "/v1/auth/passkey/page?flow=" + flow),
         settings,
       )
     ).status,

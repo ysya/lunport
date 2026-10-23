@@ -491,7 +491,7 @@ mod tests {
             let committed = Arc::new(AtomicBool::new(false));
             let c = Arc::clone(&committed);
             let now = env.now();
-            server.mock("POST", "/v2/session").with_header("content-type", "application/json")
+            server.mock("POST", "/v1/session").with_header("content-type", "application/json")
                 .with_body_from_request(move |_| {
                     let active = c.load(Ordering::SeqCst);
                     json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":if active {"active"} else {"pending"},"auth_epoch":if active {2} else {1},"expires_at_ms":now+300000}).to_string().into_bytes()
@@ -499,7 +499,7 @@ mod tests {
             let published: Arc<Mutex<Option<Workspace>>> = Arc::new(Mutex::new(None));
             let state = Arc::clone(&published);
             let c = Arc::clone(&committed);
-            server.mock("GET", "/v2/account").with_header("content-type", "application/json")
+            server.mock("GET", "/v1/account").with_header("content-type", "application/json")
                 .with_body_from_request(move |_| {
                     if c.load(Ordering::SeqCst) {
                         let lock = state.lock().unwrap();let ws = lock.as_ref().unwrap();
@@ -540,7 +540,7 @@ mod tests {
             let posts = Arc::clone(&self.posts);
             let requests = Arc::clone(&self.requests);
             self.server
-                .mock("POST", "/v2/bootstrap")
+                .mock("POST", "/v1/bootstrap")
                 .with_body_from_request(move |r| {
                     posts.fetch_add(1, Ordering::SeqCst);
                     requests
@@ -555,7 +555,7 @@ mod tests {
                 .mock(
                     "GET",
                     format!(
-                        "/v2/vaults/{}/wrap",
+                        "/v1/vaults/{}/wrap",
                         ws.control.personal_vault.as_ref().unwrap()
                     )
                     .as_str(),
@@ -644,7 +644,7 @@ mod tests {
         let kit = f.prepared();
         let env = f.device.env();
         f.server
-            .mock("POST", "/v2/logout")
+            .mock("POST", "/v1/logout")
             .with_status(204)
             .create();
         let previous = controller::context(&env).unwrap();

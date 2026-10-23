@@ -591,7 +591,7 @@ mod transport_tests {
                 &session, &owner, &sources, operation, &progress, None, &parent,
             )
             .unwrap();
-        assert_eq!(path, format!("/v1/chains/{parent}/records?since=0"));
+        assert_eq!(path, format!("/legacy/v1/chains/{parent}/records?since=0"));
         assert_eq!(bearer.as_str(), sources.keys[&parent].token.as_str());
         for denied in [&child, &"0".repeat(64), &format!("{parent}/../other")] {
             assert!(api

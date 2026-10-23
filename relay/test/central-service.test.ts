@@ -37,7 +37,7 @@ import {
   type WrappedKeys,
 } from "../src/v2/protocol";
 import { rekeyCanonical, wrapsDigest, type SignedRekey } from "../src/v2/rekey";
-import { centralFetch } from "../src/v2/routes";
+import { centralFetch, centralPrivateFetch } from "../src/v2/routes";
 import { CentralSyncBackend } from "../src/index";
 import { REGISTRY_WITNESS } from "../src/security/floor";
 import { freezeCanonical, type SignedFreeze } from "../src/v2/migration-freeze";
@@ -1646,7 +1646,7 @@ describe("OIDC resource-token profile", () => {
       session_id = random(16),
       session_secret = random();
     const response = await centralFetch(
-      new Request(origin + "/v2/register", {
+      new Request(origin + "/v1/register", {
         method: "POST",
         headers: {
           authorization: "Bearer " + jwt,
@@ -1666,7 +1666,7 @@ describe("OIDC resource-token profile", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ device_state: "pending" });
     const management = await centralFetch(
-      new Request(origin + "/v2/device-access", {
+      new Request(origin + "/v1/device-access", {
         headers: { authorization: "Bearer " + jwt },
       }),
       bindings,
@@ -1681,7 +1681,7 @@ describe("OIDC resource-token profile", () => {
     expect(
       (
         await centralFetch(
-          new Request(origin + "/v2/vaults/" + random() + "/wrap", {
+          new Request(origin + "/v1/vaults/" + random() + "/wrap", {
             headers: { authorization: "Bearer " + bearer },
           }),
           bindings,
@@ -1691,7 +1691,7 @@ describe("OIDC resource-token profile", () => {
     expect(
       (
         await centralFetch(
-          new Request(origin + "/v2/account", {
+          new Request(origin + "/v1/account", {
             headers: { authorization: "Bearer " + "b".repeat(64) },
           }),
           bindings,
@@ -1700,7 +1700,7 @@ describe("OIDC resource-token profile", () => {
     ).toBe(401);
     expect(
       (
-        await centralFetch(new Request(origin + "/v2/info"), {
+        await centralFetch(new Request(origin + "/v1/info"), {
           ...bindings,
           CENTRAL_ENABLED: "0",
         })
@@ -1709,8 +1709,8 @@ describe("OIDC resource-token profile", () => {
   });
 });
 
-/** The private RPC is exercised here with the same real account grants as ordinary routes. */
-describe("private authenticated initial migration transport", () => {
+/** The security-side route uses the same real account grants as ordinary routes. */
+describe("security-owned authenticated initial migration transport", () => {
   const bindings = (): Env => ({
     ...env,
     CENTRAL_ENABLED: "1",
@@ -1734,7 +1734,7 @@ describe("private authenticated initial migration transport", () => {
       value?: unknown,
       token = active.bearer,
     ) =>
-      new Request(`${origin}/v2/vaults/${s.vault}/${suffix}`, {
+      new Request(`${origin}/v1/vaults/${s.vault}/${suffix}`, {
         method,
         headers: {
           authorization: `Bearer ${token}`,
@@ -1749,7 +1749,7 @@ describe("private authenticated initial migration transport", () => {
       method = "GET",
       value?: unknown,
       token = active.bearer,
-    ) => core.forward(2, registry(), request(suffix, method, value, token));
+    ) => centralPrivateFetch(request(suffix, method, value, token), bindings());
     const body = {
       origin,
       account_id: s.actor.account,
@@ -1866,7 +1866,7 @@ describe("private authenticated initial migration transport", () => {
     });
     expect((await t.call("metadata")).status).toBe(200);
   });
-  it("never admits migration through compatibility HTTP, spoofed headers or a failed same-invocation floor", async () => {
+  it("never admits migration through compatibility HTTP or the private core", async () => {
     const t = await prepare();
     for (const suffix of [
       "migration",
@@ -1884,7 +1884,10 @@ describe("private authenticated initial migration transport", () => {
       ).toBe(503);
       expect(
         (await t.core.forward(2, random(), t.request(suffix))).status,
-      ).toBe(503);
+      ).toBe(404);
+      expect(
+        (await t.core.forward(2, registry(), t.request(suffix))).status,
+      ).toBe(404);
     }
     const publicMode = new CentralSyncBackend(createExecutionContext(), {
       ...bindings(),
@@ -1894,12 +1897,11 @@ describe("private authenticated initial migration transport", () => {
       (await publicMode.forward(2, registry(), t.request("migration/freeze")))
         .status,
     ).toBe(503);
-    const info = await t.core.forward(
-      2,
-      registry(),
-      new Request(origin + "/v2/info", {
+    const info = await centralPrivateFetch(
+      new Request(origin + "/v1/info", {
         headers: { [AUTHORITY_HEADER]: authorityWitness(env) },
       }),
+      bindings(),
     );
     expect(
       ((await info.json()) as any).features.some((name: string) =>
@@ -1988,7 +1990,7 @@ describe("private authenticated initial migration transport", () => {
       "POST",
       "x".repeat(4 * 1024 * 1024),
     );
-    expect((await t.core.forward(2, registry(), oversized)).status).toBe(413);
+    expect((await centralPrivateFetch(oversized, bindings())).status).toBe(413);
     expect((await t.call("migration/freeze")).status).toBe(404);
   });
 });

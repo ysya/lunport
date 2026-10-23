@@ -15,7 +15,22 @@ import {
 } from "./passkeys/routes";
 import { validOrigin } from "./protocol";
 
-function configured(env: Env, checkedIngress: boolean) {
+export type CentralRouteEnv = Pick<Env,
+  | "ACCOUNT"
+  | "VAULT"
+  | "PASSKEY"
+  | "IP_LIMIT"
+  | "CENTRAL_ORIGIN"
+  | "CENTRAL_ENABLED"
+  | "PASSKEY_ENABLED"
+  | "OIDC_ISSUER"
+  | "OIDC_JWKS_URL"
+  | "OIDC_API_AUDIENCE"
+  | "OIDC_NATIVE_CLIENT_ID"
+  | "OIDC_SYNC_SCOPE"
+>;
+
+function configured(env: CentralRouteEnv, checkedIngress: boolean) {
   const origin = env.CENTRAL_ORIGIN ?? "";
   if (env.CENTRAL_ENABLED !== "1" || !validOrigin(origin)) return null;
   const identity = {
@@ -29,7 +44,6 @@ function configured(env: Env, checkedIngress: boolean) {
   const oidc = validIdentityConfig(identity) ? identity : null;
   const passkey =
     checkedIngress &&
-    env.CENTRAL_PRIVATE_CORE === "1" &&
     env.PASSKEY_ENABLED !== "0"
       ? passkeyConfiguration(origin)
       : null;
@@ -90,45 +104,45 @@ async function body(request: Request): Promise<Record<string, any> | Response> {
   }
 }
 const paths = new Set([
-  "/v2/info",
-  "/v2/register",
-  "/v2/session",
-  "/v2/account",
-  "/v2/bootstrap",
-  "/v2/enrollment",
-  "/v2/unlock/join",
-  "/v2/unlock",
-  "/v2/membership",
-  "/v2/vaults",
-  "/v2/barrier/resume",
-  "/v2/device-access/revoke",
-  "/v2/logout",
-  "/v2/pull",
-  "/v2/recovery/wraps",
-  "/v2/recovery/history",
-  "/v2/recovery/source",
-  "/v2/recovery/commit",
-  "/v2/device-access",
+  "/v1/info",
+  "/v1/register",
+  "/v1/session",
+  "/v1/account",
+  "/v1/bootstrap",
+  "/v1/enrollment",
+  "/v1/unlock/join",
+  "/v1/unlock",
+  "/v1/membership",
+  "/v1/vaults",
+  "/v1/barrier/resume",
+  "/v1/device-access/revoke",
+  "/v1/logout",
+  "/v1/pull",
+  "/v1/recovery/wraps",
+  "/v1/recovery/history",
+  "/v1/recovery/source",
+  "/v1/recovery/commit",
+  "/v1/device-access",
 ]);
-/** No v2 authentication error ever retries a v1 bearer path. */
-export function centralFetch(request: Request, env: Env): Promise<Response> {
+/** Account authentication errors never retry a legacy bearer path. */
+export function centralFetch(request: Request, env: CentralRouteEnv): Promise<Response> {
   return route(request, env, false);
 }
-/** Called only by the named RPC after its same-invocation floor/registry checks. */
+/** Called only by the security gateway after its origin, floor and rate checks. */
 export function centralPrivateFetch(
   request: Request,
-  env: Env,
+  env: CentralRouteEnv,
 ): Promise<Response> {
   return route(request, env, true);
 }
 async function route(
   request: Request,
-  env: Env,
+  env: CentralRouteEnv,
   checkedIngress: boolean,
 ): Promise<Response> {
   const url = new URL(request.url),
     match =
-      /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|rekey\/wraps|receipt|migration|migration\/freeze|migration\/begin|migration\/stage|migration\/commit|migration\/retire)$/.exec(
+      /^\/v1\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|rekey\/wraps|receipt|migration|migration\/freeze|migration\/begin|migration\/stage|migration\/commit|migration\/retire)$/.exec(
         url.pathname,
       );
   if (
@@ -138,13 +152,14 @@ async function route(
   )
     return response({ status: 404 });
   const migration = !!match && match[2].startsWith("migration");
-  if (migration && (!checkedIngress || env.CENTRAL_PRIVATE_CORE !== "1"))
+  if (migration && !checkedIngress)
     return response({ status: 404 });
 
   const limiter = env.IP_LIMIT.getByName(
     "ip:" + (request.headers.get("cf-connecting-ip") ?? "unknown"),
   );
-  if (!(await limiter.allow("request"))) return response({ status: 429 });
+  if (!checkedIngress && !(await limiter.allow("request")))
+    return response({ status: 429 });
   const config = configured(env, checkedIngress);
   if (!config) return response({ status: 503 });
   if (url.origin !== config.origin) return response({ status: 421 });
@@ -153,7 +168,7 @@ async function route(
       ? passkeyRoute(request, env, config.origin)
       : response({ status: 404 });
 
-  if (url.pathname === "/v2/info")
+  if (url.pathname === "/v1/info")
     return request.method === "GET"
       ? response({
           status: 200,
@@ -192,14 +207,14 @@ async function route(
   if (!token || token.length > 16384) return response({ status: 401 });
   if (
     [
-      "/v2/register",
-      "/v2/session",
-      "/v2/device-access/revoke",
-      "/v2/device-access",
+      "/v1/register",
+      "/v1/session",
+      "/v1/device-access/revoke",
+      "/v1/device-access",
     ].includes(url.pathname)
   ) {
     if (
-      request.method !== (url.pathname === "/v2/device-access" ? "GET" : "POST")
+      request.method !== (url.pathname === "/v1/device-access" ? "GET" : "POST")
     )
       return response({ status: 405 });
     const identity = token.startsWith("lpka1.")
@@ -211,11 +226,11 @@ async function route(
         : null;
     if (!identity) return response({ status: 401 });
     const account = env.ACCOUNT.getByName(identity.locator);
-    if (url.pathname === "/v2/device-access")
+    if (url.pathname === "/v1/device-access")
       return account.deviceAccess(identity);
     const parsed = await body(request);
     if (parsed instanceof Response) return parsed;
-    if (url.pathname === "/v2/device-access/revoke") {
+    if (url.pathname === "/v1/device-access/revoke") {
       return exactObject(parsed, ["device"]) && hex(parsed.device, 32)
         ? response(await account.revokeAccess(identity, parsed.device))
         : response({ status: 400 });
@@ -252,10 +267,10 @@ async function route(
   const proof = await sessionProof(parsedSession.id, parsedSession.secret);
   if (!proof) return response({ status: 401 });
   const account = env.ACCOUNT.getByName(parsedSession.locator);
-  const data = !!match || url.pathname === "/v2/pull";
+  const data = !!match || url.pathname === "/v1/pull";
   const actor = await account.authorize(proof, data);
   if (!actor) return response({ status: 403 });
-  if (url.pathname === "/v2/account" && request.method === "GET")
+  if (url.pathname === "/v1/account" && request.method === "GET")
     return response(await account.overview(actor));
   if (match) {
     const vault = env.VAULT.getByName(actor.account + ":" + match[1]);
@@ -412,24 +427,24 @@ async function route(
     }
     return response({ status: 405 });
   }
-  if (url.pathname === "/v2/unlock" && request.method === "GET") return account.unlockRegistry(actor);
+  if (url.pathname === "/v1/unlock" && request.method === "GET") return account.unlockRegistry(actor);
   if (request.method !== "POST") return response({ status: 405 });
   const parsed = await body(request);
   if (parsed instanceof Response) return parsed;
   switch (url.pathname) {
-    case "/v2/unlock":
+    case "/v1/unlock":
       return exactObject(parsed, ["registry"])
         ? response(await account.updateUnlock(actor, parsed.registry as any))
         : response({ status: 400 });
-    case "/v2/unlock/join":
+    case "/v1/unlock/join":
       return exactObject(parsed, ["node", "wraps", "confirmation", "read_proof"])
         ? response(await account.unlockJoin(actor, parsed.node as any, parsed.wraps as any, parsed.confirmation as any, parsed.read_proof as any))
         : response({ status: 400 });
-    case "/v2/recovery/wraps":
+    case "/v1/recovery/wraps":
       return exactObject(parsed, ["proof"])
         ? response(await account.recoveryWraps(actor, parsed.proof as any))
         : response({ status: 400 });
-    case "/v2/recovery/history": {
+    case "/v1/recovery/history": {
       if (
         !exactObject(parsed, ["proof", "vault", "since"]) ||
         !hex(parsed.vault, 64)
@@ -450,7 +465,7 @@ async function route(
         ),
       );
     }
-    case "/v2/recovery/source": {
+    case "/v1/recovery/source": {
       if (
         !exactObject(parsed, ["proof", "vault", "epoch", "after"]) ||
         !hex(parsed.vault, 64)
@@ -473,7 +488,7 @@ async function route(
         ),
       );
     }
-    case "/v2/recovery/commit":
+    case "/v1/recovery/commit":
       return exactObject(parsed, ["node", "wraps"])
         ? response(
             await account.recover(
@@ -483,7 +498,7 @@ async function route(
             ),
           )
         : response({ status: 400 });
-    case "/v2/bootstrap":
+    case "/v1/bootstrap":
       return exactObject(parsed, ["genesis", "vault", "wraps"])
         ? response(
             await account.bootstrap(
@@ -494,11 +509,11 @@ async function route(
             ),
           )
         : response({ status: 400 });
-    case "/v2/enrollment":
+    case "/v1/enrollment":
       return exactObject(parsed, ["request"])
         ? response(await account.enrollment(actor, parsed.request as any))
         : response({ status: 400 });
-    case "/v2/membership":
+    case "/v1/membership":
       return exactObject(parsed, ["node", "wraps", "confirmation"])
         ? response(
             await account.control(
@@ -509,7 +524,7 @@ async function route(
             ),
           )
         : response({ status: 400 });
-    case "/v2/vaults":
+    case "/v1/vaults":
       return exactObject(parsed, ["vault", "wraps"])
         ? response(
             await account.createVault(
@@ -519,15 +534,15 @@ async function route(
             ),
           )
         : response({ status: 400 });
-    case "/v2/barrier/resume":
+    case "/v1/barrier/resume":
       return exactObject(parsed, [])
         ? response(await account.resume(actor))
         : response({ status: 400 });
-    case "/v2/logout":
+    case "/v1/logout":
       return exactObject(parsed, [])
         ? response(await account.logout(actor))
         : response({ status: 400 });
-    case "/v2/pull": {
+    case "/v1/pull": {
       if (
         !exactObject(parsed, ["items"]) ||
         !Array.isArray(parsed.items) ||

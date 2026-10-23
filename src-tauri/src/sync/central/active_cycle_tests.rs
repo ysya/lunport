@@ -45,7 +45,7 @@ fn install_push(
     let lose = Arc::new(AtomicBool::new(false));
     let status = Arc::clone(&lose);
     let state = Arc::clone(&service.state);
-    service.server.mock("POST", mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into()))
+    service.server.mock("POST", mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/records$".into()))
         .with_status_code_from_request(move |_| if status.swap(false, Ordering::SeqCst) {503} else {200})
         .with_body_from_request(move |request| {
             let body:Value = serde_json::from_slice(request.body().unwrap()).unwrap();
@@ -358,7 +358,7 @@ fn service_cooldown_stops_the_whole_active_round_and_never_echoes_response_secre
         .server
         .mock(
             "GET",
-            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into()),
+            mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/records$".into()),
         )
         .match_query(mockito::Matcher::Any)
         .with_status(429)

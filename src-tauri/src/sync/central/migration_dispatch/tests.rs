@@ -165,14 +165,14 @@ fn the_actual_http_adapter_shares_the_request_budget_across_status_and_mutation(
     let before = loaded.cursor;
     let mut server = mockito::Server::new();
     let status = server
-        .mock("GET", format!("/v2/vaults/{vault}/migration").as_str())
+        .mock("GET", format!("/v1/vaults/{vault}/migration").as_str())
         .with_status(404)
         .expect(1)
         .create();
     let mutation = server
         .mock(
             "POST",
-            format!("/v2/vaults/{vault}/migration/begin").as_str(),
+            format!("/v1/vaults/{vault}/migration/begin").as_str(),
         )
         .with_status(500)
         .expect(0)

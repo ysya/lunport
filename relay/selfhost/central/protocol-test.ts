@@ -71,7 +71,7 @@ export async function checkCentralProtocol({
     const sessionId = random(16),
       secret = random();
     const info = await json(
-      await request("/v2/register", loginToken, {
+      await request("/v1/register", loginToken, {
         device,
         name: "Synthetic deployment device",
         credential: credentials.get(device.id),
@@ -172,13 +172,13 @@ export async function checkCentralProtocol({
   };
   const wraps = await wrap(member);
   await json(
-    await request("/v2/bootstrap", first.bearer, { genesis, vault, wraps }),
+    await request("/v1/bootstrap", first.bearer, { genesis, vault, wraps }),
   );
   first = await register(firstDevice);
-  const path = `/v2/vaults/${vault}/`;
+  const path = `/v1/vaults/${vault}/`;
   const chain = random(),
     legacyToken = random();
-  const created = await fetch(`http://${address}/v1/chains/${chain}`, {
+  const created = await fetch(`http://${address}/legacy/v1/chains/${chain}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${legacyToken}` },
   });
@@ -332,7 +332,7 @@ export async function checkCentralProtocol({
     ).phase,
     "retired",
   );
-  const info = await json(await fetch(`http://${address}/v2/info`));
+  const info = await json(await fetch(`http://${address}/v1/info`));
   assert.ok(info.features.includes("account-unlock-v1"));
   assert.ok(info.features.includes("ssh-password-sync-v1"));
   // Ciphertext is opaque to the service; native integration tests exercise password decryption.
@@ -343,11 +343,11 @@ export async function checkCentralProtocol({
       nonce:base64(randomBytes(24)),ciphertext:base64(randomBytes(64))}],
   }, signature: "" };
   registry.signature = sign(unlockCanonical(registry.body));
-  await json(await request("/v2/unlock", first.bearer, {registry}));
-  assert.deepEqual((await json(await request("/v2/unlock", first.bearer))).registry,registry);
+  await json(await request("/v1/unlock", first.bearer, {registry}));
+  assert.deepEqual((await json(await request("/v1/unlock", first.bearer))).registry,registry);
   let other = await register(peer);
   assert.equal(other.info.device_state, "pending");
-  const locked = await json(await request("/v2/account", other.bearer));
+  const locked = await json(await request("/v1/account", other.bearer));
   for (const field of ["vaults", "devices", "denied", "barrier"]) {
     assert.equal(Object.hasOwn(locked, field), false, `Pending overview exposed ${field}`);
   }
@@ -367,18 +367,18 @@ export async function checkCentralProtocol({
     signature: "",
   };
   enrollment.signature = sign(enrollmentCanonical(enrollment), 6);
-  const en = await request("/v2/enrollment", other.bearer, {
+  const en = await request("/v1/enrollment", other.bearer, {
     request: enrollment,
   });
   assert.equal(en.status, 204);
   await en.arrayBuffer();
-  assert.deepEqual((await json(await request("/v2/unlock", other.bearer))).registry,registry);
+  assert.deepEqual((await json(await request("/v1/unlock", other.bearer))).registry,registry);
   const readProof = { request_id: enrollment.request_id, membership_head: member.head,
     auth_epoch: String(other.info.auth_epoch), signature: sign(canonical([
       "lunport-recovery-read-v2", origin, anchor.account_id, anchor.genesis_hash, member.head,
       String(other.info.auth_epoch), base64(enrollmentCanonical(enrollment)), enrollment.signature,
     ]), 4) };
-  const snapshot = await json(await request("/v2/recovery/wraps", other.bearer, {proof:readProof}));
+  const snapshot = await json(await request("/v1/recovery/wraps", other.bearer, {proof:readProof}));
   assert.ok(snapshot);
   const node = {
     body: {
@@ -440,7 +440,7 @@ export async function checkCentralProtocol({
   };
   const peerWraps = await wrap(member, "1", peer.id, 6);
   await json(
-    await request("/v2/unlock/join", other.bearer, {
+    await request("/v1/unlock/join", other.bearer, {
       node,
       wraps: { [vault]: peerWraps },
       confirmation,
@@ -450,7 +450,7 @@ export async function checkCentralProtocol({
   first = await register(firstDevice);
   other = await register(peer);
   assert.equal(other.info.device_state, "active");
-  const overview = await json(await request("/v2/account", other.bearer));
+  const overview = await json(await request("/v1/account", other.bearer));
   assert.deepEqual(overview.pairing_confirmation, confirmation);
   assert.equal(
     createHmac("sha256", secret).update(confirmationBytes).digest("base64"),
@@ -487,12 +487,12 @@ export async function checkCentralProtocol({
     );
   await beforeSecurityChange?.();
   await json(
-    await request("/v2/device-access/revoke", loginToken, { device: peer.id }),
+    await request("/v1/device-access/revoke", loginToken, { device: peer.id }),
   );
   const revoked = await request(path + "records", other.bearer);
   assert.ok([401, 403].includes(revoked.status));
   await revoked.arrayBuffer();
-  const retired = await request(`/v1/chains/${chain}/records`, legacyToken);
+  const retired = await request(`/legacy/v1/chains/${chain}/records`, legacyToken);
   assert.equal(retired.status, 410);
   await retired.arrayBuffer();
   first = await register(firstDevice);
@@ -511,7 +511,7 @@ export async function checkCentralProtocol({
   };
   removal.signature = sign(membershipCanonical(removal.body));
   await json(
-    await request("/v2/membership", first.bearer, { node: removal, wraps: {}, confirmation: null }),
+    await request("/v1/membership", first.bearer, { node: removal, wraps: {}, confirmation: null }),
   );
   member = (await applyMembership(member, removal))!;
   assert.ok(member);
@@ -655,7 +655,7 @@ export async function checkCentralProtocol({
     wrapped: { path: path + "wrap", token: first.bearer, value: survivingWrap },
     denials: [
       { path: path + "records", token: other.bearer, status: revoked.status },
-      { path: `/v1/chains/${chain}/records`, token: legacyToken, status: 410 },
+      { path: `/legacy/v1/chains/${chain}/records`, token: legacyToken, status: 410 },
     ],
   };
 }

@@ -211,7 +211,7 @@ async function checkpointBeforeChange(kind) {
 function checkCurrentAuthority() {
   for (const refresh of browserProof?.revokedRefreshTokens ?? []) {
     assert.equal(
-      request("/v2/auth/passkey/refresh", {
+      request("/v1/auth/passkey/refresh", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ refresh_token: refresh }),
@@ -284,17 +284,17 @@ try {
     ),
     {},
   );
-  assert.equal(request("/v1/info").status, 200);
+  assert.equal(request("/legacy/v1/info").status, 200);
   assert.equal(
-    request("/v1/info", { headers: { "X-Lunport-Proxy-Key": "" } }).status,
+    request("/legacy/v1/info", { headers: { "X-Lunport-Proxy-Key": "" } }).status,
     403,
   );
   assert.equal(
-    request("/v1/info", { headers: { Host: "attacker.invalid" } }).status,
+    request("/legacy/v1/info", { headers: { Host: "attacker.invalid" } }).status,
     403,
   );
   assert.equal(
-    request("/v1/info", { headers: { "X-Forwarded-Proto": "http" } }).status,
+    request("/legacy/v1/info", { headers: { "X-Forwarded-Proto": "http" } }).status,
     403,
   );
   assert.equal(request("/provision").status, 404);
@@ -354,7 +354,7 @@ http://:8080 {
   let response;
   for (let n = 0; n < 30; n++) {
     try {
-      response = await fetch("http://" + address + "/v1/info", {
+      response = await fetch("http://" + address + "/legacy/v1/info", {
         headers: {
           "X-Lunport-Proxy-Key": "client-forgery",
           "X-Forwarded-Proto": "http",
@@ -367,11 +367,11 @@ http://:8080 {
   }
   assert.equal(response?.status, 200);
   assert.ok(!(await response.text()).includes(proxyKey));
-  const info = request("/v2/info");
+  const info = request("/v1/info");
   assert.equal(info.status, 200);
   assert.equal(JSON.parse(info.body).default_auth, "passkey");
   assert.equal(JSON.parse(info.body).oidc, null);
-  const authorize = request("/v2/auth/passkey/authorize", {
+  const authorize = request("/v1/auth/passkey/authorize", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -383,7 +383,7 @@ http://:8080 {
   assert.equal(authorize.status, 201);
   const authUrl = new URL(JSON.parse(authorize.body).url);
   assert.equal(request(authUrl.pathname + authUrl.search).status, 200);
-  assert.equal(request("/v2/auth/passkey/script").status, 200);
+  assert.equal(request("/v1/auth/passkey/script").status, 200);
   if (
     process.env.SELFHOST_TEST_BROWSER_MODULE &&
     process.env.SELFHOST_TEST_BROWSER_EXECUTABLE
@@ -448,7 +448,7 @@ http://:8080 {
   const chain = randomBytes(32).toString("hex"),
     token = randomBytes(32).toString("hex");
   assert.equal(
-    request("/v1/chains/" + chain, {
+    request("/legacy/v1/chains/" + chain, {
       method: "PUT",
       headers: { Authorization: "Bearer " + token },
     }).status,
@@ -457,7 +457,7 @@ http://:8080 {
   compose(["restart", "gateway"]);
   await healthy();
   assert.equal(
-    request("/v1/chains/" + chain + "/records", {
+    request("/legacy/v1/chains/" + chain + "/records", {
       headers: { Authorization: "Bearer " + token },
     }).status,
     200,
@@ -472,7 +472,7 @@ http://:8080 {
   await healthy();
   const laterChain = randomBytes(32).toString("hex");
   assert.equal(
-    request("/v1/chains/" + laterChain, {
+    request("/legacy/v1/chains/" + laterChain, {
       method: "PUT",
       headers: { Authorization: "Bearer " + token },
     }).status,
@@ -483,13 +483,13 @@ http://:8080 {
   compose(["up", "-d", "gateway"]);
   await healthy();
   assert.equal(
-    request("/v1/chains/" + chain + "/records", {
+    request("/legacy/v1/chains/" + chain + "/records", {
       headers: { Authorization: "Bearer " + token },
     }).status,
     200,
   );
   assert.equal(
-    request("/v1/chains/" + laterChain + "/records", {
+    request("/legacy/v1/chains/" + laterChain + "/records", {
       headers: { Authorization: "Bearer " + token },
     }).status,
     404,
@@ -497,7 +497,7 @@ http://:8080 {
   );
   for (const refresh of browserProof?.revokedRefreshTokens ?? []) {
     assert.equal(
-      request("/v2/auth/passkey/refresh", {
+      request("/v1/auth/passkey/refresh", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ refresh_token: refresh }),
@@ -582,7 +582,7 @@ http://:8080 {
   compose(["up", "-d", "gateway"]);
   let denied;
   for (let n = 0; n < 30; n++) {
-    denied = request("/v1/info");
+    denied = request("/legacy/v1/info");
     if (denied.code === 0) break;
     await pause(500);
   }
