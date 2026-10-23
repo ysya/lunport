@@ -224,7 +224,7 @@ export function UpdateStatusCard({
                 {phase === "available"
                   ? "Installing restarts Lunport and ends active SSH sessions."
                   : phase === "installing"
-                    ? "You can close Settings and return to see the progress."
+                    ? "Keep this window open to see the progress."
                     : phase === "restart_required"
                       ? "The update is installed. Restart Lunport to use the new version."
                       : phase === "restarting"

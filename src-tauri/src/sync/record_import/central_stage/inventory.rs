@@ -34,6 +34,26 @@ fn same(a: &VaultEntry, b: &VaultEntry) -> bool {
         && a.origin == b.origin
         && a.added_at_ms == b.added_at_ms
 }
+fn check_binding(
+    binding: &Binding,
+    entry: &VaultEntry,
+    original: Option<&VaultEntry>,
+    staged_at_ms: u64,
+) -> Result<(), AppError> {
+    if digest(entry.private_key.as_bytes()) != binding.sha256
+        || (!binding.rebind && entry.added_at_ms != staged_at_ms)
+    {
+        return Err(failure("central stage private container differs"));
+    }
+    if binding.rebind {
+        if !original.is_some_and(|prior| same(prior, entry)) {
+            return Err(failure("central stage reused private container differs"));
+        }
+    } else if original.is_some() {
+        return Err(failure("central stage replaces existing protected material"));
+    }
+    Ok(())
+}
 pub(in crate::sync::record_import) fn read_operation(
     selected: &SyncStateV3,
     operation: &str,
@@ -176,22 +196,12 @@ pub(in crate::sync::record_import) fn read_operation(
                 .ok_or_else(|| failure("missing staged central material"))?;
             check_entry(&entry)?;
             if let Some(b) = j.bindings.values().find(|b| b.protected_id == id) {
-                if digest(entry.private_key.as_bytes()) != b.sha256 || entry.added_at_ms != j.at_ms
-                {
-                    return Err(failure("central stage private container differs"));
-                }
-                if !b.rebind
-                    && old
-                        .as_ref()
-                        .map(|v| v.get_inventory(&id))
-                        .transpose()?
-                        .flatten()
-                        .is_some()
-                {
-                    return Err(failure(
-                        "central stage replaces existing protected material",
-                    ));
-                }
+                let original = old
+                    .as_ref()
+                    .map(|v| v.get_inventory(&id))
+                    .transpose()?
+                    .flatten();
+                check_binding(b, &entry, original.as_ref(), j.at_ms)?;
             } else {
                 let prior = old
                     .as_ref()
@@ -252,6 +262,43 @@ mod tests {
     use super::*;
     use crate::sync::record_import::inventory;
     use std::time::Duration;
+    #[test]
+    fn reused_private_container_keeps_its_original_timestamp_and_exact_contents() {
+        let original = VaultEntry {
+            private_key: "retained material".into(),
+            public_key: "public".into(),
+            fingerprint: "fingerprint".into(),
+            origin: EntryOrigin::Synced,
+            added_at_ms: 100,
+        };
+        let binding = Binding {
+            id: "a".repeat(32),
+            protected_id: "b".repeat(32),
+            public_digest: "c".repeat(64),
+            private_digest: "d".repeat(64),
+            sha256: digest(original.private_key.as_bytes()),
+            rebind: true,
+            old_material: None,
+        };
+        assert!(check_binding(&binding, &original, Some(&original), 200).is_ok());
+        assert!(check_binding(&binding, &original, None, 200).is_err());
+        let mut changed = original.clone();
+        changed.added_at_ms = 200;
+        assert!(check_binding(&binding, &changed, Some(&original), 200).is_err());
+        changed = original.clone();
+        changed.private_key.push('!');
+        assert!(check_binding(&binding, &changed, Some(&original), 200).is_err());
+        changed = original.clone();
+        changed.public_key.push('!');
+        assert!(check_binding(&binding, &changed, Some(&original), 200).is_err());
+
+        let new_binding = Binding { rebind: false, ..binding };
+        assert!(check_binding(&new_binding, &original, None, 200).is_err());
+        let mut created = original.clone();
+        created.added_at_ms = 200;
+        assert!(check_binding(&new_binding, &created, None, 200).is_ok());
+        assert!(check_binding(&new_binding, &created, Some(&original), 200).is_err());
+    }
     fn fixture() -> (
         crate::sync::testkit::TestDevice,
         SyncStateV3,
