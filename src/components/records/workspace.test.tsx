@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "@/lib/test-ipc";
 import { text } from "@/components/keychain/test-markup";
@@ -7,10 +8,17 @@ import { connectSavedHost } from "./operations";
 import { hostView, recordOverview, recordsStatus } from "./fixtures";
 afterEach(() => vi.unstubAllGlobals());
 describe("records workspace mode boundary", () => {
+  const withQueries = (content: React.ReactNode) => {
+    const client = new QueryClient();
+    client.setQueryData(["app", "isDevelopment"], false);
+    return renderToStaticMarkup(
+      <QueryClientProvider client={client}>{content}</QueryClientProvider>,
+    );
+  };
   const render = (status?: ReturnType<typeof recordsStatus>, error = false) => {
     const legacy = vi.fn(() => <p>Legacy mounted</p>);
     const records = vi.fn(() => <p>Records mounted</p>);
-    const html = renderToStaticMarkup(
+    const html = withQueries(
       <WorkspaceGate
         status={status}
         error={error}
@@ -60,10 +68,27 @@ describe("records workspace mode boundary", () => {
     expect(text(blocked.html)).toContain("Invalid state");
     expect(text(blocked.html)).not.toContain("Use existing SSH configuration");
   });
+  it("offers the updater when workspace state is blocked", () => {
+    const blocked = render(recordsStatus({
+      format: "blocked",
+      overview: null,
+      blocked_reason: "Invalid state",
+    }));
+    expect(blocked.html).toContain("Invalid state");
+    expect(blocked.html).toContain('aria-label="Software update"');
+    expect(blocked.html).toContain("Check for updates");
+    expect(blocked.legacy).not.toHaveBeenCalled();
+    expect(blocked.records).not.toHaveBeenCalled();
+  });
+  it("keeps a manual update check available when workspace status fails", () => {
+    const failed = render(undefined, true);
+    expect(failed.html).toContain("The workspace status is unavailable.");
+    expect(failed.html).toContain("Check for updates");
+  });
   it("renders the paused migration callback without evaluating legacy config hooks", () => {
     const legacy = vi.fn(() => <p>Legacy mounted</p>);
     const paused = vi.fn(() => <p>Migration landing</p>);
-    const html = renderToStaticMarkup(
+    const html = withQueries(
       <WorkspaceGate
         status={recordsStatus({
           format: "legacy",

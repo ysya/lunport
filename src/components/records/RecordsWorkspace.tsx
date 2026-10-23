@@ -20,7 +20,6 @@ import {
 import { toast } from "sonner";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { useUiStore } from "@/stores/ui";
-import { useSyncBackendSettings } from "@/lib/backend-settings";
 import { useGlobalHotkey } from "@/lib/global-hotkey";
 import { isTypingContext, SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 import { RecordsCommandPalette } from "./CommandPalette";
@@ -87,7 +86,6 @@ export function RecordsWorkspace({
   overview: RecordOverview;
   reload: () => void;
 }) {
-  useSyncBackendSettings();
   const central = useCentralStatus();
   const summary = syncSummary(central.data);
   const [transferOpen, setTransferOpen] = useState(false);

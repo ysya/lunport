@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { RecordsStatus } from "@/lib/records";
 import { Button } from "@/components/ui/button";
 import { BrandMark } from "@/components/app/BrandMark";
+import { UpdatesPane } from "@/components/UpdatesPane";
 import { revealHidden } from "@/lib/sync-approvals";
 export function WorkspaceGate({
   status,
@@ -39,8 +40,8 @@ export function WorkspaceGate({
             ? "Choose how to open your existing SSH configuration. Migration to the records workspace requires a reviewed import."
             : "Opening workspace…";
   return (
-    <div className="app-shell flex h-screen items-center justify-center p-8">
-      <div className="max-w-md space-y-4 text-center">
+    <div className="app-shell flex min-h-screen items-center justify-center p-8">
+      <div className="w-full max-w-md space-y-4 text-center">
         <BrandMark className="mx-auto h-12 w-14 text-primary" />
         <h1 className="app-inspector-title">
           {paused
@@ -66,6 +67,11 @@ export function WorkspaceGate({
           <Button variant="outline" onClick={retry}>
             Retry
           </Button>
+        )}
+        {(status || error) && !paused && (
+          <div className="pt-4 text-left">
+            <UpdatesPane />
+          </div>
         )}
       </div>
     </div>
