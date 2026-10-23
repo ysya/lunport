@@ -722,7 +722,7 @@ export class PasskeyStore extends DurableObject<Env> {
     return {
       status: 200,
       body: {
-        issuer: origin + "/v1/auth/passkey",
+        issuer: origin + "/v2/auth/passkey",
         subject,
         access_token: `lpka1.${family}.${access}`,
         refresh_token: `lpkr1.${family}.${refresh}`,
