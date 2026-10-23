@@ -63,7 +63,7 @@ describe("updates stay in the update page", () => {
       },
     });
     expect(html).toContain('aria-valuenow="25"');
-    expect(html).toContain("You can close Settings");
+    expect(html).toContain("Keep this window open");
     expect(html).not.toContain("Check for updates</button>");
     expect(html).not.toContain("Install and restart");
   });

@@ -25,6 +25,8 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 
 Choose an installer from [Releases](https://github.com/ysya/lunport/releases/latest). Files ending in `.sig` are updater signatures, not installers.
 
+If the workspace cannot open, use the update controls on the error screen to check for and install a signed update. If Lunport itself cannot start or its updater fails, install the latest release over the existing installation; keep the local data directory intact.
+
 | Platform | Download |
 | --- | --- |
 | macOS, Apple Silicon or Intel | Universal `.dmg` |
