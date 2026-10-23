@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.11.4](https://github.com/ysya/lunport/compare/v1.11.3...v1.11.4) (2026-10-23)
+
+### Upgrade notes
+
+* The former chain API at `/legacy/v1/*` is retired and returns 404. Older desktop clients must update. Unmigrated server chain data is no longer available through Lunport; original local files are retained for explicit import into a new central account library. ([#85](https://github.com/ysya/lunport/pull/85))
+* Deploy the security gateway and private core together. Remove the unused `CHAIN` and `CORE` bindings from the public gateway while retaining the historical `ChainStore` namespace on the private core. Keep all central account namespaces and the security floor intact. ([#85](https://github.com/ysya/lunport/pull/85))
+
+
+### Bug Fixes
+
+* **sync:** check central API health directly ([6c975d6](https://github.com/ysya/lunport/commit/6c975d6f7e0872636b7b6667d1f1cac49556330d))
+* **sync:** enforce persisted security floor ([582447e](https://github.com/ysya/lunport/commit/582447e26e642b38af0eeda76d2cefc558dbaa76))
+
 ## [1.11.3](https://github.com/ysya/lunport/compare/v1.11.2...v1.11.3) (2026-10-23)
 
 

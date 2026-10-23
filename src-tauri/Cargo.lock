@@ -5974,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "sshelter"
-version = "1.11.3"
+version = "1.11.4"
 dependencies = [
  "argon2",
  "base64 0.22.1",
