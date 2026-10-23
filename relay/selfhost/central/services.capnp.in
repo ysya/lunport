@@ -19,8 +19,6 @@ const security :Workerd.Service = (name = "security", worker = (
     (name = "ACCOUNT", durableObjectNamespace = "AccountStore"),
     (name = "VAULT", durableObjectNamespace = "VaultStore"),
     (name = "PASSKEY", durableObjectNamespace = "PasskeyStore"),
-    (name = "CHAIN", durableObjectNamespace = (className = "ChainStore", serviceName = "core")),
-    (name = "CORE", service = (name = "core", entrypoint = "CentralSyncBackend")),
     (name = "SELFHOST_PROXY_KEY", fromEnvironment = "SELFHOST_PROXY_KEY"),
     (name = "SECURITY_INSTALLATION", fromEnvironment = "SECURITY_INSTALLATION"),
     (name = "CENTRAL_ORIGIN", fromEnvironment = "CENTRAL_ORIGIN"),

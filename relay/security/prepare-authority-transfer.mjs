@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { stripJsonComments } from "../.github/scripts/update-relay.mjs";
+import { stripJsonComments } from "./json-comments.mjs";
 const central = {
   ACCOUNT: "AccountStore",
   VAULT: "VaultStore",
@@ -158,17 +158,9 @@ export function prepareAuthorityTransfer(
           name,
           class_name,
         })),
-        { name: "CHAIN", class_name: "ChainStore", script_name: privateCore },
       ],
     },
     migrations: history,
-    services: [
-      {
-        binding: "CORE",
-        service: privateCore,
-        entrypoint: "CentralSyncBackend",
-      },
-    ],
     vars: {
       ...source.vars,
       CENTRAL_ORIGIN: live.origin,

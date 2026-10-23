@@ -683,7 +683,7 @@ pub async fn records_set_relay_url(
     app: AppHandle,
     url: String,
 ) -> Result<RecordOverview, AppError> {
-    let normalized = crate::sync::relay::RelayClient::validate_url(&url)?;
+    let normalized = crate::sync::relay::validate_url(&url)?;
     edit(app, move |s, _| {
         if s.relay_url != normalized && (s.account.is_some() || s.pending_account.is_some()) {
             return Err(AppError::Other(

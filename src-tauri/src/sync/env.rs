@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::model::SshConfigDoc;
 use crate::error::AppError;
 use crate::sync::dto::{ApprovalNotice, SyncConflict};
-use crate::sync::relay::{RelayApi, RelayClient};
+use crate::sync::relay::RelayApi;
 use crate::sync::runtime::SyncRuntime;
 use crate::sync::state_v2::SyncNotice;
 
@@ -76,8 +76,8 @@ pub trait RelayConnector: Send + Sync {
 pub struct HttpRelays;
 
 impl RelayConnector for HttpRelays {
-    fn connect(&self, base_url: &str) -> Result<Box<dyn RelayApi>, AppError> {
-        Ok(Box::new(RelayClient::new(base_url)?))
+    fn connect(&self, _base_url: &str) -> Result<Box<dyn RelayApi>, AppError> {
+        Err(AppError::Other("Legacy chain sync is no longer available; use central account sync.".into()))
     }
 }
 

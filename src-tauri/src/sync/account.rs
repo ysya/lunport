@@ -15,7 +15,7 @@ use crate::sync::merge::{
     merge_account, plan_device, put_account_record, put_space_key, space_entries, space_keys, AccountMerged,
 };
 use crate::sync::record::{MetaPayload, RecordKind, SpaceKeyPayload, SpacePayload, ACCOUNT_META_ID, SCHEMA_VERSION};
-use crate::sync::relay::{RelayClient, RelayError, RelayInfo};
+use crate::sync::relay::{RelayError, RelayInfo};
 use crate::sync::rotation::{read_new_code, NewCode};
 use crate::sync::runtime::{mutate, save_core, snapshot, SyncCore};
 use crate::sync::space_files::{self, slugify, space_file_name, KeptFile};
@@ -857,7 +857,7 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
 
 /// relay URL 只能在未加入時更改(spec §7.3:cursor 與 seq 屬於某一個 relay)。改了就要重查 `GET /legacy/v1/info`。
 pub fn set_relay_url(env: &SyncEnv, url: &str) -> Result<(), AppError> {
-    let normalized = RelayClient::validate_url(url)?;
+    let normalized = crate::sync::relay::validate_url(url)?;
     mutate(env, |s| {
         if s.joined() {
             return Err(AppError::Other(

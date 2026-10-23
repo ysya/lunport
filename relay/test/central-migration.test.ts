@@ -1,5 +1,4 @@
-import { setup, random, sign, zero, tokenHash } from "./helpers/migration";
-import { env } from "cloudflare:workers";
+import { setup, random, sign, zero } from "./helpers/migration";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import fixture from "../../fixtures/central-sync-v2.json";
@@ -17,8 +16,6 @@ import { wrapsDigest } from "../src/v2/rekey";
 import {
   migrationCanonical,
   migrationDigest,
-  migrationScope,
-  migrationSnapshot,
   verifyMigration,
 } from "../src/v2/migration";
 
@@ -67,8 +64,8 @@ const stage = (
 ) => s.child.stageMigration(s.actor, s.operation, after, rows);
 const commit = (s: Awaited<ReturnType<typeof setup>>) =>
   s.child.commitMigration(s.actor, s.operation);
-async function committed(sourceCount = 1) {
-  const s = await setup(sourceCount);
+async function committed() {
+  const s = await setup();
   await json(await begin(s));
   await json(await stage(s));
   await json(await commit(s));
@@ -115,7 +112,7 @@ describe("signed central initial-library migration", () => {
       migrationDigest({ ...manifest, signature: manifest.signature + "=" }),
     ).rejects.toThrow();
   });
-  it("keeps partial staging hidden, installs atomically and retires only after a real commit", async () => {
+  it("keeps partial staging hidden and installs an empty-source library atomically", async () => {
     const s = await setup();
     expect(
       await verifyMigration(
@@ -153,16 +150,6 @@ describe("signed central initial-library migration", () => {
       expect(response.status).toBe(423);
       await response.body?.cancel();
     }
-    const source = s.manifest.body.sources[0],
-      registry = env.LEGACY_RETIREMENT.getByName(source.chain_id);
-    expect(
-      await registry.retireForMigration(
-        source.chain_id,
-        migrationScope(s.manifest.body),
-        migrationSnapshot(source),
-        s.actor,
-      ),
-    ).toBe(409);
     expect(
       (await json(await stage(s, "0", s.records.slice(0, 1)))).staged,
     ).toBe("1");
@@ -171,7 +158,7 @@ describe("signed central initial-library migration", () => {
       "3",
     );
     const receipt = await json(await commit(s));
-    expect(receipt.phase).toBe("committed");
+    expect(receipt.phase).toBe("retired");
     expect(receipt.history_hash).toBe(s.manifest.body.target_history_hash);
     const page = await json(await s.child.pull(s.actor, 0));
     expect(page.records.map((r: any) => r.envelope)).toEqual(s.records);
@@ -191,27 +178,7 @@ describe("signed central initial-library migration", () => {
     expect(
       (await json(await s.child.retireMigration(s.actor, s.operation))).phase,
     ).toBe("retired");
-    expect(await registry.check(source.chain_id, tokenHash, false)).toBe(410);
-    expect(
-      await registry.freeze(
-        source.chain_id,
-        tokenHash,
-        migrationScope(s.manifest.body),
-        migrationSnapshot(source),
-      ),
-    ).toBe(410);
-    await runInDurableObject(
-      env.CHAIN.getByName(source.chain_id),
-      async (_instance, state) => {
-        await state.storage.deleteAll();
-      },
-    );
-    expect(
-      await env.CHAIN.getByName(source.chain_id).create(
-        tokenHash,
-        source.chain_id,
-      ),
-    ).toBe(410);
+
   });
 
   it("atomically retains private history and a later inactive-slot tombstone", async () => {
@@ -411,21 +378,22 @@ describe("signed central initial-library migration", () => {
         ).status,
       ).toBe(403);
     }
+    const retiredSource = { chain_id: random(), sequence: "0", count: "0", ciphertext_digest: random() };
     for (const body of [
       { ...s.manifest.body, extra: "unknown" },
       { ...s.manifest.body, target_sequence: "0" },
       { ...s.manifest.body, target_sequence: "16385" },
       {
         ...s.manifest.body,
-        sources: Array(66).fill(s.manifest.body.sources[0]),
+        sources: Array(66).fill(retiredSource),
       },
       {
         ...s.manifest.body,
-        sources: [s.manifest.body.sources[0], s.manifest.body.sources[0]],
+        sources: [retiredSource, retiredSource],
       },
       {
         ...s.manifest.body,
-        sources: [{ ...s.manifest.body.sources[0], sequence: "01" }],
+        sources: [{ ...retiredSource, sequence: "01" }],
       },
     ])
       expect(() => migrationCanonical(body as any)).toThrow();
@@ -441,26 +409,6 @@ describe("signed central initial-library migration", () => {
       (await s.child.beginMigration({ ...s.actor, expires: 0 }, s.manifest))
         .status,
     ).toBe(403);
-  });
-
-  it("requires exact frozen source witnesses and the actual target object", async () => {
-    const s = await setup();
-    const changed = structuredClone(s.manifest);
-    changed.body.sources[0].ciphertext_digest = random();
-    changed.signature = sign(migrationCanonical(changed.body));
-    expect((await s.child.beginMigration(s.actor, changed)).status).toBe(503);
-    const wrong = env.VAULT.getByName(random());
-    expect(await wrong.install(s.install)).toBe(200);
-    expect((await wrong.beginMigration(s.actor, s.manifest)).status).toBe(403);
-    expect(
-      await wrong.migrationCommitWitness(
-        s.actor,
-        migrationScope(s.manifest.body),
-        s.manifest.body.sources[0].chain_id,
-        migrationSnapshot(s.manifest.body.sources[0]),
-      ),
-    ).toBe(403);
-    expect((await s.child.pull(s.actor, 0)).status).toBe(200);
   });
 
   it("never overwrites a nonempty normal target", async () => {
@@ -503,34 +451,6 @@ describe("signed central initial-library migration", () => {
     ).toBe(403);
   });
 
-  it("rejects a normal write that raced begin and preserves the accepted library", async () => {
-    const s = await setup();
-    const code = await runInDurableObject(s.child, async (instance) => {
-      const bindings = (instance as any).env as Env,
-        original = bindings.LEGACY_RETIREMENT;
-      bindings.LEGACY_RETIREMENT = {
-        getByName: () => ({
-          confirmFrozen: async () => {
-            expect((await instance.push(s.actor, [s.records[0]])).status).toBe(
-              200,
-            );
-            return true;
-          },
-        }),
-      } as any;
-      try {
-        return (await instance.beginMigration(s.actor, s.manifest)).status;
-      } finally {
-        bindings.LEGACY_RETIREMENT = original;
-      }
-    });
-    expect(code).toBe(409);
-    expect((await s.child.migrationStatus(s.actor)).status).toBe(404);
-    expect((await json(await s.child.pull(s.actor, 0))).records).toHaveLength(
-      1,
-    );
-  });
-
   it("does not accept another sequence/history hash as a complete target", async () => {
     const s = await setup();
     s.manifest.body.target_history_hash = random();
@@ -542,135 +462,6 @@ describe("signed central initial-library migration", () => {
     expect((await s.child.retireMigration(s.actor, s.operation)).status).toBe(
       409,
     );
-  });
-
-  it("survives a lost retirement acknowledgement and finishes in bounded continuations", async () => {
-    const s = await committed(9),
-      first = s.manifest.body.sources[0];
-    const failed = await runInDurableObject(s.child, async (instance) => {
-      const bindings = (instance as any).env as Env,
-        original = bindings.LEGACY_RETIREMENT;
-      bindings.LEGACY_RETIREMENT = {
-        idFromName: original.idFromName.bind(original),
-        getByName: (id: string) => ({
-          retireForMigration: async (...args: any[]) => {
-            const code = await (
-              original.getByName(id).retireForMigration as any
-            )(...args);
-            if (id === first.chain_id)
-              throw new Error("synthetic lost acknowledgement");
-            return code;
-          },
-        }),
-      } as any;
-      try {
-        return (await instance.retireMigration(s.actor, s.operation)).status;
-      } finally {
-        bindings.LEGACY_RETIREMENT = original;
-      }
-    });
-    expect(failed).toBe(503);
-    expect(
-      await env.LEGACY_RETIREMENT.getByName(first.chain_id).check(
-        first.chain_id,
-        tokenHash,
-        false,
-      ),
-    ).toBe(410);
-    expect((await json(await s.child.migrationStatus(s.actor))).retired).toBe(
-      "0",
-    );
-    const partial = await json(
-      await s.child.retireMigration(s.actor, s.operation),
-    );
-    expect(partial.retired).toBe("8");
-    expect(partial.phase).toBe("committed");
-    const done = await json(
-      await s.child.retireMigration(s.actor, s.operation),
-    );
-    expect(done.retired).toBe("9");
-    expect(done.phase).toBe("retired");
-    expect(
-      await json(await s.child.retireMigration(s.actor, s.operation)),
-    ).toEqual(done);
-  });
-
-  it("requires a current device principal for retirement, even after commit", async () => {
-    const s = await committed(),
-      source = s.manifest.body.sources[0],
-      registry = env.LEGACY_RETIREMENT.getByName(source.chain_id);
-    expect(
-      await registry.retireForMigration(
-        source.chain_id,
-        migrationScope(s.manifest.body),
-        migrationSnapshot(source),
-        { ...s.actor, device: random(16) },
-      ),
-    ).toBe(404);
-    expect(
-      await registry.retireForMigration(
-        source.chain_id,
-        migrationScope(s.manifest.body),
-        migrationSnapshot(source),
-        { ...s.actor, expires: 0 },
-      ),
-    ).toBe(404);
-    expect(
-      await s.child.install({
-        ...s.install,
-        epoch: 2,
-        denied: [s.actor.device],
-      }),
-    ).toBe(200);
-    expect((await s.child.retireMigration(s.actor, s.operation)).status).toBe(
-      403,
-    );
-    expect(
-      await registry.retireForMigration(
-        source.chain_id,
-        migrationScope(s.manifest.body),
-        migrationSnapshot(source),
-        { ...s.actor, epoch: 2 },
-      ),
-    ).toBe(404);
-    expect(await registry.check(source.chain_id, tokenHash, true)).toBe(409);
-  });
-
-  it("rejects authorization changes while source verification was awaiting", async () => {
-    const s = await setup();
-    await json(await begin(s));
-    await json(await stage(s));
-    const code = await runInDurableObject(s.child, async (instance, ctx) => {
-      const bindings = (instance as any).env as Env,
-        original = bindings.LEGACY_RETIREMENT;
-      bindings.LEGACY_RETIREMENT = {
-        getByName: () => ({
-          confirmFrozen: async () => {
-            const state = JSON.parse(
-              ctx.storage.sql
-                .exec<{ value: string }>("SELECT value FROM vault_state")
-                .one().value,
-            );
-            state.epoch++;
-            state.version++;
-            ctx.storage.sql.exec(
-              "UPDATE vault_state SET value=?",
-              JSON.stringify(state),
-            );
-            return true;
-          },
-        }),
-      } as any;
-      try {
-        return (await instance.commitMigration(s.actor, s.operation)).status;
-      } finally {
-        bindings.LEGACY_RETIREMENT = original;
-      }
-    });
-    expect(code).toBe(403);
-    const next = { ...s.actor, epoch: 2 };
-    expect((await s.child.commitMigration(next, s.operation)).status).toBe(409);
-    expect((await s.child.pull(next, 0)).status).toBe(423);
   });
 
   it("resumes retirement with fresh authorization after a committed receipt", async () => {
@@ -701,7 +492,7 @@ describe("signed central initial-library migration", () => {
   });
 
   it("keeps a durable commit receipt without replaying over later edits", async () => {
-    const s = await committed(0);
+    const s = await committed();
     const receipt = await json(await commit(s));
     expect(receipt.phase).toBe("retired");
     const edit = structuredClone(s.records[0]);

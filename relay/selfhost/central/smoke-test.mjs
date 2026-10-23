@@ -197,6 +197,12 @@ function volumeArchive(restore, archive, appOnly = false, oldLayout = false) {
   assert.equal(result.status, 0, String(result.stderr));
   return result.stdout;
 }
+function applicationMarker(command) {
+  return compose([
+    "--profile", "setup", "run", "--rm", "--no-deps", "-T",
+    "--entrypoint", "/bin/sh", "control", "-c", command,
+  ]).stdout.trim();
+}
 let proxy = null;
 const oldApplicationBackups = [];
 async function checkpointBeforeChange(kind) {
@@ -284,7 +290,7 @@ try {
     ),
     {},
   );
-  assert.equal(request("/legacy/v1/info").status, 200);
+  assert.equal(request("/legacy/v1/info").status, 404);
   assert.equal(
     request("/legacy/v1/info", { headers: { "X-Lunport-Proxy-Key": "" } }).status,
     403,
@@ -365,7 +371,7 @@ http://:8080 {
       await pause(500);
     }
   }
-  assert.equal(response?.status, 200);
+  assert.equal(response?.status, 404);
   assert.ok(!(await response.text()).includes(proxyKey));
   const info = request("/v1/info");
   assert.equal(info.status, 200);
@@ -445,56 +451,25 @@ http://:8080 {
     await healthy();
     checkCurrentAuthority();
   }
-  const chain = randomBytes(32).toString("hex"),
-    token = randomBytes(32).toString("hex");
-  assert.equal(
-    request("/legacy/v1/chains/" + chain, {
-      method: "PUT",
-      headers: { Authorization: "Bearer " + token },
-    }).status,
-    201,
-  );
   compose(["restart", "gateway"]);
   await healthy();
-  assert.equal(
-    request("/legacy/v1/chains/" + chain + "/records", {
-      headers: { Authorization: "Bearer " + token },
-    }).status,
-    200,
-  );
+  assert.equal(request("/v1/info").status, 200);
   console.log(
     "Checking stopped-volume backup/restore and retained login revocations",
   );
+  applicationMarker("printf before > /data/restore-probe");
   compose(["stop", "gateway"]);
   const backup = volumeArchive(false);
   assert.ok(backup.length > 1024);
   compose(["up", "-d", "gateway"]);
   await healthy();
-  const laterChain = randomBytes(32).toString("hex");
-  assert.equal(
-    request("/legacy/v1/chains/" + laterChain, {
-      method: "PUT",
-      headers: { Authorization: "Bearer " + token },
-    }).status,
-    201,
-  );
+  applicationMarker("printf after > /data/restore-probe");
   compose(["stop", "gateway"]);
   volumeArchive(true, backup);
   compose(["up", "-d", "gateway"]);
   await healthy();
-  assert.equal(
-    request("/legacy/v1/chains/" + chain + "/records", {
-      headers: { Authorization: "Bearer " + token },
-    }).status,
-    200,
-  );
-  assert.equal(
-    request("/legacy/v1/chains/" + laterChain + "/records", {
-      headers: { Authorization: "Bearer " + token },
-    }).status,
-    404,
-    "restore must actually replace application storage",
-  );
+  assert.equal(request("/v1/info").status, 200);
+  assert.equal(applicationMarker("cat /data/restore-probe"), "before");
   for (const refresh of browserProof?.revokedRefreshTokens ?? []) {
     assert.equal(
       request("/v1/auth/passkey/refresh", {
@@ -582,7 +557,7 @@ http://:8080 {
   compose(["up", "-d", "gateway"]);
   let denied;
   for (let n = 0; n < 30; n++) {
-    denied = request("/legacy/v1/info");
+    denied = request("/v1/info");
     if (denied.code === 0) break;
     await pause(500);
   }
