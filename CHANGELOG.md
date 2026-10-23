@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.2](https://github.com/ysya/lunport/compare/v1.11.1...v1.11.2) (2026-10-23)
+
+
+### Bug Fixes
+
+* preserve passkey issuer across v1 route migration ([ad961cc](https://github.com/ysya/lunport/commit/ad961cc584096e2c0f0300d664f383e9b1a44edf))
+* preserve passkey issuer across v1 route migration ([0c91055](https://github.com/ysya/lunport/commit/0c910558d325d812f95a5cd3bae527f47ef6995a))
+
 ## [1.11.1](https://github.com/ysya/lunport/compare/v1.11.0...v1.11.1) (2026-10-23)
 
 
