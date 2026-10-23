@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.3](https://github.com/ysya/lunport/compare/v1.11.2...v1.11.3) (2026-10-23)
+
+
+### Bug Fixes
+
+* accept unchanged reused key material in sync history ([21db40b](https://github.com/ysya/lunport/commit/21db40b648be4ad9976d11b027438fd193fa3544))
+* keep updates available when workspace fails ([ef56c4b](https://github.com/ysya/lunport/commit/ef56c4b833d5382bdee9c57bf64ad7a173fa6df0))
+* recover updates and unblock central sync history ([96c85fc](https://github.com/ysya/lunport/commit/96c85fc98a00b33b55fa95710cca8299653b9f54))
+
 ## [1.11.2](https://github.com/ysya/lunport/compare/v1.11.1...v1.11.2) (2026-10-23)
 
 
