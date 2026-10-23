@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.1](https://github.com/ysya/lunport/compare/v1.11.0...v1.11.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **ci:** probe relocated legacy relay path ([c8ce499](https://github.com/ysya/lunport/commit/c8ce499c551ec2b0e87ad10fd71a4f17cb7b65e0))
+* **sync:** isolate security authority and use v1 account routes ([0d4fb25](https://github.com/ysya/lunport/commit/0d4fb259d0756abdc8709f7fda2b772c27e56292))
+* **sync:** isolate security authority and use v1 account routes ([9ab4b84](https://github.com/ysya/lunport/commit/9ab4b84bc6e2949a703766cc5cf2b5648e722fc4))
+* **sync:** keep combined relay legacy only ([1cc9885](https://github.com/ysya/lunport/commit/1cc9885255501aa3301cadbc35d3c5481ccf466e))
+
 ## [1.11.0](https://github.com/ysya/lunport/compare/v1.10.4...v1.11.0) (2026-10-22)
 
 ### Features
