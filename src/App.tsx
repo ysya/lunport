@@ -67,8 +67,6 @@ import {
  * yields files + hosts). Errors are surfaced as a toast.
  */
 function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => void }) {
-  // Re-send persisted tray/close-to-tray/retention prefs (backend resets each launch).
-  useSyncBackendSettings();
   // OS-level quick-connect hotkey (⌥⌘K / Ctrl+Alt+K) — registered when enabled.
   useGlobalHotkey();
   // In-app ⌘F (focus host search) and ⌘N (new host).
@@ -317,6 +315,8 @@ function EmptySelection() {
 
 function App() {
   useApplyTheme();
+  // Keep preferences and update checks alive even when the workspace cannot open.
+  useSyncBackendSettings();
   const status = useRecordsStatus();
   const client = useQueryClient();
   const [resuming, setResuming] = useState(false);
