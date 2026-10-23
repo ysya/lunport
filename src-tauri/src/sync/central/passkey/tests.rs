@@ -13,6 +13,24 @@ fn config() -> Config {
         rp_id: "passkey.test".into(),
     }
 }
+#[test]
+fn persisted_passkey_profile_remains_valid_after_http_routes_move_to_v1() {
+    use crate::sync::central::{
+        authentication::Config as LoginConfig, client_state::ProfileData,
+        credentials::Profile,
+    };
+    let issuer = format!("{ORIGIN}/v2/auth/passkey");
+    let subject = "c".repeat(64);
+    let saved = Profile::new(ORIGIN, &issuer, &subject).unwrap();
+    let profile = ProfileData {
+        origin: ORIGIN.into(),
+        issuer,
+        subject,
+        locator: saved.locator,
+        login: LoginConfig::Passkey(config()),
+    };
+    profile.profile().unwrap();
+}
 struct Http {
     begin: Mutex<Option<Value>>,
     exchanges: AtomicUsize,
@@ -97,7 +115,7 @@ impl SyncHttpClient for Http {
 }
 impl Http {
     fn grant(&self) -> Value {
-        json!({"issuer":format!("{ORIGIN}/v1/auth/passkey"),"subject":&*self.subject.lock().unwrap(),"access_token":format!("lpka1.{}.{}","d".repeat(32),"e".repeat(64)),"refresh_token":format!("lpkr1.{}.{}","d".repeat(32),"f".repeat(64)),"expires_in":300})
+        json!({"issuer":format!("{ORIGIN}/v2/auth/passkey"),"subject":&*self.subject.lock().unwrap(),"access_token":format!("lpka1.{}.{}","d".repeat(32),"e".repeat(64)),"refresh_token":format!("lpkr1.{}.{}","d".repeat(32),"f".repeat(64)),"expires_in":300})
     }
 }
 #[test]
@@ -130,7 +148,7 @@ fn fresh_capability_requires_an_explicit_expected_account_and_rejects_a_differen
     let http = Http::new();
     let profile = super::super::credentials::Profile::new(
         ORIGIN,
-        &format!("{ORIGIN}/v1/auth/passkey"),
+        &format!("{ORIGIN}/v2/auth/passkey"),
         &"c".repeat(64),
     )
     .unwrap();
