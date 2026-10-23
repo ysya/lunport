@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.4](https://github.com/ysya/lunport/compare/v1.11.3...v1.11.4) (2026-10-23)
+
+
+### Bug Fixes
+
+* **sync:** check central API health directly ([6c975d6](https://github.com/ysya/lunport/commit/6c975d6f7e0872636b7b6667d1f1cac49556330d))
+* **sync:** enforce persisted security floor ([582447e](https://github.com/ysya/lunport/commit/582447e26e642b38af0eeda76d2cefc558dbaa76))
+
 ## [1.11.3](https://github.com/ysya/lunport/compare/v1.11.2...v1.11.3) (2026-10-23)
 
 
