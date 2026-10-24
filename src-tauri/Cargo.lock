@@ -5983,6 +5983,7 @@ dependencies = [
  "chacha20poly1305 0.10.1",
  "dirs 5.0.1",
  "ed25519-dalek 3.0.0",
+ "futures-util",
  "getrandom 0.3.4",
  "glob",
  "hkdf 0.12.4",
@@ -6024,8 +6025,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "toml_edit 0.25.12+spec-1.1.0",
  "ts-rs",
+ "url",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -6840,6 +6843,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7109,6 +7128,24 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "termcolor",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.10.3",
+ "rustls",
+ "rustls-pki-types",
+ "sha1 0.11.0",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
