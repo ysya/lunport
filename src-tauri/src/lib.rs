@@ -15,6 +15,7 @@ mod discover;
 mod diagnostics;
 mod error;
 mod fsutil;
+mod gcp;
 pub mod host_start;
 mod ipc;
 mod keys;
