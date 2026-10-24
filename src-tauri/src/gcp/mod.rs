@@ -6,4 +6,5 @@
 //!
 //! `relay.rs` and `iap.rs` are ported from gcloud (Apache License 2.0); see `NOTICE.md` in this directory.
 
+pub mod auth;
 pub mod relay;
