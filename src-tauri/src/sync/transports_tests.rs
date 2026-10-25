@@ -114,6 +114,11 @@ fn validation_rejects_bad_fields() {
     assert_eq!(edit(|_, _, _, n, _, _| *n = "eth0".into()), Some("Enter a network interface such as nic0.".to_string()));
     assert_eq!(edit(|_, _, _, n, _, _| *n = "nic7".into()), None);
     assert_eq!(edit(|_, _, _, _, a, _| *a = Some("frank".into())), Some("Enter the Google account as an email address.".to_string()));
+    // The account names a directory under gcloud's config (`legacy_credentials/<account>/adc.json`): no path characters.
+    for traversal in ["../../tmp/x@example.com", "/etc/x@example.com", "a\\b@example.com", "a:b@example.com", "a@b/c.example.com"] {
+        assert_eq!(edit(|_, _, _, _, a, _| *a = Some(traversal.into())), Some("Enter the Google account as an email address.".to_string()), "{traversal}");
+    }
+    assert!(is_email("first.last+tag@sub.example.com") && is_email("o'brien_1@example.io") && !is_email("a@b"));
     assert_eq!(edit(|_, _, _, _, a, _| *a = None), None);
     assert_eq!(edit(|_, _, _, _, _, p| *p = pam(&[], "global")), Some("Enter at least one PAM entitlement.".to_string()));
     assert_eq!(edit(|_, _, _, _, _, p| *p = pam(&["prod-operate", "prod-admin"], "global")), None);
@@ -150,16 +155,35 @@ fn a_payload_with_an_unknown_field_or_schema_is_not_decoded() {
     assert_eq!((interface.as_str(), account, os_login, pam), ("nic0", None, false, None));
 }
 
+/// A host record in `state.local.hosts`, as the leave plan writes the hosts that stay on this device.
+fn with_local_host(mut state: SyncStateV3, id: &str) -> SyncStateV3 {
+    let record = Record {
+        kind: RecordKind::Host,
+        id: id.into(),
+        version: 1,
+        updated_at_ms: 1,
+        device_id: state.device_id.clone(),
+        deleted: false,
+        payload: json!({"schema":2,"alias":format!("host-{id}"),"hostname":"fixture.invalid","auth":"password"}),
+    };
+    state.local.hosts.insert(record_key(RecordKind::Host, id), LocalRecord { record, seq: 0, dirty: false });
+    state
+}
+
+/// Transports are device-local whatever the host's scope: leaving an account keeps the transport of every host that stays on this
+/// device, under the host's new id when the leave plan gave it one (a space host), and drops the transports of hosts that go.
 #[test]
-fn leaving_an_account_carries_a_preserved_hosts_transport_to_its_new_id_and_drops_the_rest() {
-    let before = set(&set(&state(), A, None, Some(iap(A)), 1).unwrap(), B, None, Some(iap(B)), 2).unwrap();
-    let mut next = state();
+fn leaving_an_account_keeps_the_transports_of_the_hosts_that_stay_and_drops_the_rest() {
+    const LOCAL: &str = "0000000000000004";
+    let before = set(&set(&set(&state(), A, None, Some(iap(A)), 1).unwrap(), B, None, Some(iap(B)), 2).unwrap(), LOCAL, None, Some(iap(LOCAL)), 3).unwrap();
+    // A (a space host) stays as C; LOCAL (a local-scope host) stays as itself; B goes.
+    let mut next = with_local_host(with_local_host(state(), C), LOCAL);
     let host_ids: BTreeMap<String, String> = [(A.to_string(), C.to_string())].into_iter().collect();
-    preserve_on_leave(&before, &mut next, &host_ids, 3).unwrap();
-    assert_eq!(view(&next), vec![HostTransport { host_id: C.into(), ..iap(A) }]);
+    preserve_on_leave(&before, &mut next, &host_ids, 4).unwrap();
+    assert_eq!(view(&next), vec![HostTransport { host_id: C.into(), ..iap(A) }, iap(LOCAL)]);
     assert_eq!(next.version, STATE_VERSION);
     let mut nothing = state();
-    preserve_on_leave(&before, &mut nothing, &BTreeMap::new(), 3).unwrap();
-    assert!(view(&nothing).is_empty());
+    preserve_on_leave(&before, &mut nothing, &BTreeMap::new(), 4).unwrap();
+    assert!(view(&nothing).is_empty(), "no host stays, no transport stays");
     assert_eq!(nothing.version, 4, "no transport, no version bump");
 }

@@ -132,10 +132,15 @@ fn is_interface(text: &str) -> bool {
     text.strip_prefix("nic").is_some_and(|rest| rest.len() == 1 && rest.bytes().all(|byte| (b'0'..=b'7').contains(&byte)))
 }
 
-/// Plausibly an email: one `@`, something on both sides, a dot in the domain, no whitespace or control characters.
-fn is_email(text: &str) -> bool {
+/// A Google account as an email address, in the characters an address and a directory name share: the account names a directory under
+/// gcloud's config (`legacy_credentials/<account>/adc.json`), so no path separators, colons, whitespace or control characters. The
+/// frontend's `transportProblem` applies the same rule.
+pub(crate) fn is_email(text: &str) -> bool {
     let Some((local, domain)) = text.split_once('@') else { return false };
-    text.len() <= 254 && !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.contains('@') && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+    let local_ok = !local.is_empty() && local.chars().all(|c| c.is_ascii_alphanumeric() || "._%+'-".contains(c));
+    let labels: Vec<&str> = domain.split('.').collect();
+    let domain_ok = labels.len() >= 2 && labels.iter().all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    text.len() <= 254 && local_ok && domain_ok
 }
 
 /// The record payload: `{ "schema": 1, "transport": … }`.
@@ -222,15 +227,21 @@ fn write(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, n
     Ok(next)
 }
 
-/// Leaving an account keeps some hosts under new local ids (`host_ids`: old → new). Their transports follow them; every other transport
-/// of `before` is dropped from `next`, whose map starts empty.
+/// Transports are device-local whatever the host's scope: leaving an account keeps the transport of every host that stays on this device
+/// (a live record in `next.local.hosts`), under the new local id the leave plan gave a space host (`host_ids`: old → new), and drops the
+/// transports of the hosts that go. `next`'s map starts empty.
 pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
     next.local.transports.clear();
-    for (old, new) in host_ids {
-        if let Some(mut transport) = get(before, old) {
-            transport.host_id = new.clone();
-            *next = write(next, new, Some(transport), now)?;
+    for mut transport in view(before) {
+        if let Some(local_id) = host_ids.get(&transport.host_id) {
+            transport.host_id = local_id.clone();
         }
+        let stays = next.local.hosts.get(&record_key(RecordKind::Host, &transport.host_id)).is_some_and(|host| !host.record.deleted);
+        if !stays {
+            continue;
+        }
+        let host_id = transport.host_id.clone();
+        *next = write(next, &host_id, Some(transport), now)?;
     }
     Ok(())
 }
