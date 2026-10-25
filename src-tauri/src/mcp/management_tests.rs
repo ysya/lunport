@@ -83,6 +83,20 @@ fn creation_always_needs_approval_including_auto_log_and_never_grants_ai_or_pins
         assert!(r.records_active.lock().unwrap().is_empty());
     }
 }
+/// The window words each proposal by its kind (design 2026-10-26, AI edits): a creation says so.
+#[test]
+fn the_creation_proposal_says_which_kind_it_is() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let asked = AtomicUsize::new(0);
+    let result = create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|q| {
+        asked.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(q.host_proposal.as_ref().unwrap().kind, proposal_kinds::CREATE_HOST);
+        ApprovalDecision::Deny
+    });
+    assert!(result.is_err());
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}
 #[test]
 fn denied_canceled_expired_and_policy_revoked_creation_leave_no_host() {
     for decision in [
