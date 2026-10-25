@@ -81,8 +81,8 @@ fn default_duration() -> u32 {
 }
 
 /// The longest grant Lunport asks for; PAM's own maximum (the entitlement's) applies on top, in PAM's words.
-const MAX_DURATION_SECS: u32 = 480 * 60;
-const MAX_JUSTIFICATION_CHARS: usize = 512;
+pub(crate) const MAX_DURATION_SECS: u32 = 480 * 60;
+pub(crate) const MAX_JUSTIFICATION_CHARS: usize = 512;
 
 impl HostTransport {
     /// One sentence about the first field that is not acceptable, else `Ok`.

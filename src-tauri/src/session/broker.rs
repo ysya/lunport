@@ -511,11 +511,18 @@ struct SessionOwner<'a> {
     terminal: &'a dyn Owner,
     authentication: Option<Arc<dyn Owner>>,
 }
+/// What the terminal is told while a question is answered in the app's window.
+fn waiting_line(kind: QuestionKind) -> &'static str {
+    match kind {
+        QuestionKind::Grant => "Waiting for you to request a Privileged Access Manager grant in Lunport.",
+        _ => "Waiting for you to complete SSH authentication in Lunport.",
+    }
+}
 impl Owner for SessionOwner<'_> {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
         match &self.authentication {
             Some(owner) => {
-                self.terminal.host_key_notice("Waiting for you to complete SSH authentication in Lunport.");
+                self.terminal.host_key_notice(waiting_line(kind));
                 owner.ask(kind, text, echo, deadline)
             }
             None => self.terminal.ask(kind, text, echo, deadline),
@@ -524,7 +531,7 @@ impl Owner for SessionOwner<'_> {
     fn ask_at(&self, hop: &crate::ssh::HopRef, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
         match &self.authentication {
             Some(owner) => {
-                self.terminal.host_key_notice("Waiting for you to complete SSH authentication in Lunport.");
+                self.terminal.host_key_notice(waiting_line(kind));
                 owner.ask_at(hop, kind, text, echo, deadline)
             }
             None => self.terminal.ask_at(hop, kind, text, echo, deadline),
@@ -1071,6 +1078,23 @@ mod tests {
         assert_eq!(messages, [ServerMessage::Exited { code: Some(5), signal: None }]);
         crate::ssh::testing::eventually("the session to be closed and forgotten", 5, || world.broker.sessions().is_empty());
         assert_eq!(world.engine.events().last(), Some(&FakeEvent::Closed));
+    }
+
+    #[test]
+    fn a_grant_question_shows_the_waiting_line() {
+        use crate::session::protocol::GrantPrompt;
+        use crate::session::testing::FakeOwner;
+        let terminal = FakeOwner::default();
+        let window = Arc::new(FakeOwner::typing(&["30\nrestart app-api", "hunter2"]));
+        let owner = SessionOwner { terminal: &terminal, authentication: Some(window.clone() as Arc<dyn Owner>) };
+        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None };
+        let reply = owner.ask(QuestionKind::Grant, &prompt.to_text(), true, None);
+        assert!(matches!(reply, Reply::Answer(ref answer) if answer.as_str() == "30\nrestart app-api"));
+        assert_eq!(locked(&terminal.notices).as_slice(), ["Waiting for you to request a Privileged Access Manager grant in Lunport."]);
+        assert_eq!(window.questions(), [prompt.to_text()]);
+        assert!(terminal.asked().is_empty(), "the terminal is never asked itself while the window is there");
+        owner.ask(QuestionKind::Password, "deploy@web's password: ", false, None);
+        assert_eq!(locked(&terminal.notices).last().map(String::as_str), Some("Waiting for you to complete SSH authentication in Lunport."));
     }
 
     #[test]

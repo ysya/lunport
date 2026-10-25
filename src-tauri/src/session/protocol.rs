@@ -239,6 +239,9 @@ pub enum QuestionKind {
     Passphrase,
     Password,
     Interactive,
+    /// Lunport's own question (design 2026-10-25, PAM grant requests): `text` is a `GrantPrompt` as JSON, the answer a `GrantAnswer`
+    /// as encoded. It is answered in the app's window, never typed at a terminal.
+    Grant,
 }
 
 /// A question for the person at the client's terminal (spec §7.1).
@@ -252,6 +255,67 @@ pub struct Question {
     /// Milliseconds the answer is waited for, from when the question was sent; `None` for a notice. A later answer is not used: the login
     /// has been abandoned by then.
     pub deadline_ms: Option<u64>,
+}
+
+/// What a `QuestionKind::Grant` question asks about: the grant a connection needs, with the transport's stored duration and last
+/// justification to prefill the window. It travels as the question's `text` (JSON) and, with the `kind` word `grant`, in `AuthRequest`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct GrantPrompt {
+    pub project: String,
+    pub entitlement: String,
+    pub minutes: u32,
+    pub justification: Option<String>,
+}
+
+impl GrantPrompt {
+    pub fn to_text(&self) -> String {
+        serde_json::to_string(self).expect("a grant prompt is plain data")
+    }
+
+    pub fn from_text(text: &str) -> Option<GrantPrompt> {
+        serde_json::from_str(text).ok()
+    }
+
+    /// The sentence the window shows above the form.
+    pub fn sentence(&self) -> String {
+        format!("No active Privileged Access Manager grant for {} on {}.", self.entitlement, self.project)
+    }
+}
+
+/// The longest grant the window lets a person ask for, in minutes, and the longest justification: the transport record's own limits
+/// (`sync::transports`), so that what the person answers can be remembered as the transport's defaults.
+pub const MAX_GRANT_MINUTES: u32 = 480;
+pub const MAX_GRANT_JUSTIFICATION_CHARS: usize = 512;
+
+/// The answer to a `QuestionKind::Grant` question: both fields of the form, encoded as `<minutes>\n<justification>` so that they travel in
+/// the one answer string the question channel carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantAnswer {
+    pub minutes: u32,
+    pub justification: String,
+}
+
+impl GrantAnswer {
+    pub fn encode(&self) -> String {
+        format!("{}\n{}", self.minutes, self.justification)
+    }
+
+    /// `None` for anything but a whole number of minutes from 1 to `MAX_GRANT_MINUTES` and a justification with something in it, of
+    /// one line and at most `MAX_GRANT_JUSTIFICATION_CHARS`.
+    pub fn decode(text: &str) -> Option<GrantAnswer> {
+        let (minutes, justification) = text.split_once('\n')?;
+        let minutes: u32 = minutes.trim().parse().ok()?;
+        if !(1..=MAX_GRANT_MINUTES).contains(&minutes) {
+            return None;
+        }
+        let justification = justification.trim();
+        if justification.is_empty() || justification.chars().count() > MAX_GRANT_JUSTIFICATION_CHARS || justification.chars().any(char::is_control) {
+            return None;
+        }
+        Some(GrantAnswer { minutes, justification: justification.to_string() })
+    }
 }
 
 /// Something that happened, for the client to show.
@@ -315,6 +379,27 @@ mod tests {
                 return all;
             }
         }
+    }
+
+    #[test]
+    fn a_grant_answer_round_trips_and_rejects_nonsense() {
+        let answer = GrantAnswer { minutes: 30, justification: "restart app-api".into() };
+        assert_eq!(answer.encode(), "30\nrestart app-api");
+        assert_eq!(GrantAnswer::decode("30\nrestart app-api"), Some(answer.clone()));
+        assert_eq!(GrantAnswer::decode(" 30\n  restart app-api \n"), Some(answer), "both fields are trimmed");
+        assert_eq!(GrantAnswer::decode("480\nlong"), Some(GrantAnswer { minutes: 480, justification: "long".into() }));
+        let long = format!("30\n{}", "x".repeat(513));
+        for nonsense in ["0\nx", "481\nx", "30\n", "30\n   ", "thirty", "", "30", "-5\nx", "1.5\nx", "30\ntwo\nlines", "30\nbell\u{7}", long.as_str()] {
+            assert_eq!(GrantAnswer::decode(nonsense), None, "{nonsense:?}");
+        }
+        assert_eq!(GrantAnswer::decode(&format!("30\n{}", "x".repeat(512))).map(|answer| answer.justification.len()), Some(512));
+        // The window's limits are the transport record's, so that an answer can always be remembered as the transport's defaults.
+        assert_eq!(MAX_GRANT_MINUTES * 60, crate::sync::transports::MAX_DURATION_SECS);
+        assert_eq!(MAX_GRANT_JUSTIFICATION_CHARS, crate::sync::transports::MAX_JUSTIFICATION_CHARS);
+        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
+        assert_eq!(GrantPrompt::from_text(&prompt.to_text()), Some(prompt));
+        assert_eq!(GrantPrompt::from_text("No active grant."), None);
+        assert_eq!(serde_json::to_string(&QuestionKind::Grant).unwrap(), r#""grant""#);
     }
 
     #[test]
