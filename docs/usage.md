@@ -131,8 +131,13 @@ The Records adapter uses an OS-authenticated local session broker. It can start 
 | `ssh_exec` | Execute a bounded command under Ask or explicitly acknowledged Auto-log. |
 | `create_host` | Propose public connection settings for your review. Saving does not grant AI access or trust a server key. |
 | `verify_host_key` | Verify a permitted host's fingerprint, with an in-app trust decision for a new or changed key. |
+| `update_host` | Propose changes to a permitted host's public connection settings; Lunport shows each change as old → new and asks before saving. Changing the address clears the pinned server key, as the editor does. |
+| `set_transport` | Propose a permitted host's Google Cloud IAP transport, or changes to it (a field given replaces that field only; `pam` sets or removes the grant check); Lunport asks before saving. |
+| `remove_transport` | Propose removing a permitted host's transport, so it is reached at its saved address again; Lunport asks before saving. |
 
 For example, a client can propose `create_host` with `{"alias":"web","hostname":"server.example.com","user":"deploy","port":22}`. Review the settings in Lunport, then allow that host in AI access, or save it in an already allowed Group, before inspection, fingerprint verification or command execution. The native creation review shows whether existing Group permission applies. Creation fields cannot supply passwords, private keys, host-key pins or AI permission grants.
+
+To change a host the client may use, it proposes `update_host` with `{"alias":"jumpbox-prod","hostname":"10.20.0.8"}`, and to reach it through IAP, `set_transport` with `{"alias":"jumpbox-prod","project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox","pam":{"entitlements":["prod-operate"]}}`; each opens Lunport's approval window with the fields that would change, and nothing is saved without your click, in Auto-log mode too. Moving a host between Groups, its server key, passwords and private keys stay out of reach of these tools.
 
 `verify_host_key` accepts a host ID or exact alias; the client cannot supply a trust decision. You can also use **Edit host → Server identity → Verify server fingerprint**. Verification stops before destination login or remote commands. Jump hosts may need their own credentials. A matching saved fingerprint does not prompt again; a changed destination, route, permission or pin requires verification again.
 
