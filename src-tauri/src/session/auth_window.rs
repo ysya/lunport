@@ -267,6 +267,16 @@ impl AuthSurface for TauriAuthSurface {
 }
 
 /// Read the current hub after the health check; never replay an expired snapshot.
+/// The window's logical size for what is pending: a server's one-line question fits the small window; the Request-a-grant form (two
+/// fields and a hint; design 2026-10-25, PAM grant requests) gets a taller one when a grant question is anywhere in the queue.
+pub(crate) fn window_size(requests: &[AuthRequest]) -> (f64, f64) {
+    if requests.iter().any(|request| request.kind == "grant") {
+        (520.0, 500.0)
+    } else {
+        (480.0, 360.0)
+    }
+}
+
 pub(crate) fn present(app: &tauri::AppHandle) {
     use tauri::Manager;
     let requests = app.state::<crate::state::AppState>().session.auth_questions.pending();
@@ -278,14 +288,23 @@ pub(crate) fn present(app: &tauri::AppHandle) {
         }
         return;
     }
-    if app.get_webview_window(AUTH_WINDOW).is_none() {
+    let (width, height) = window_size(&requests);
+    if let Some(window) = app.get_webview_window(AUTH_WINDOW) {
+        // A window already open for a smaller question grows for a grant form; it is never shrunk under the person.
+        if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+            let current = size.to_logical::<f64>(scale);
+            if current.height < height {
+                let _ = window.set_size(tauri::LogicalSize::new(current.width.max(width), height));
+            }
+        }
+    } else {
         match WebviewWindowBuilder::new(
             app,
             AUTH_WINDOW,
             WebviewUrl::App("index.html".into()),
         )
         .title("Lunport — Authentication")
-        .inner_size(480.0, 360.0)
+        .inner_size(width, height)
         .resizable(true)
         .always_on_top(true)
         .visible(false)
@@ -331,6 +350,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    /// The window was sized for a server's one-line question; the Request-a-grant form (two fields and a hint) needs more room, so a
+    /// grant anywhere in the queue gets the taller window (design 2026-10-25, PAM grant requests).
+    #[test]
+    fn the_window_is_taller_for_a_grant_form_than_for_a_servers_question() {
+        let password = AuthRequest { id: "a".into(), request_id: "r".into(), hop: None, kind: "password".into(), text: "pw".into(), echo: false, remaining_ms: 1, grant: None };
+        let grant = AuthRequest { kind: "grant".into(), ..password.clone() };
+        assert_eq!(window_size(&[]), (480.0, 360.0));
+        assert_eq!(window_size(&[password.clone()]), (480.0, 360.0));
+        assert_eq!(window_size(&[grant.clone()]), (520.0, 500.0));
+        assert_eq!(window_size(&[password, grant]), (520.0, 500.0), "a grant anywhere in the queue gets the room");
+    }
+
     #[test]
     fn a_grant_question_carries_its_prompt_and_waits_five_minutes() {
         use crate::session::protocol::GrantAnswer;
