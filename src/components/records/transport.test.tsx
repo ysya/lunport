@@ -2,12 +2,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { osLoginOutcome, osLoginUsernameUpdate, parseEntitlements, type HostTransport } from "@/lib/transports";
+import { osLoginOutcome, osLoginUsernameUpdate, pamStatusLine, parseEntitlements, type HostTransport } from "@/lib/transports";
 import { hostPayload, hostView, recordOverview } from "./fixtures";
 import { RecordHostEditor } from "./HostEditor";
 import { HostPreview } from "./HostPreview";
 import { TransportFields } from "./TransportFields";
 import { TransportsPanel } from "./TransportsPanel";
+import { GrantRequestCardView, grantRequestDefaults, grantRequestReady } from "./GrantRequestDialog";
+import { Dialog } from "../ui/dialog";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -137,5 +139,56 @@ describe("Google Cloud IAP transports", () => {
     expect(preview).toContain("Google Cloud IAP · eng-dev-396409 / asia-east1-b / jumpbox");
     const direct = render(<HostPreview host={host} overview={recordOverview({ hosts: [host] })} connect={() => {}} edit={() => {}} close={() => {}} busy={false} />);
     expect(direct).not.toContain("Google Cloud IAP");
+  });
+});
+
+describe("PAM grants in the Google Cloud panel", () => {
+  const withPam: HostTransport = {
+    ...iap,
+    kind: { ...iap.kind, pam: { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: "restart app-api" } },
+  };
+
+  it("says what the grant is up to in one line", () => {
+    const at = new Date(2026, 9, 25, 11, 7).getTime();
+    expect(pamStatusLine({ entitlement: "prod-admin", state: "active", active_until_ms: at, message: null })).toBe("prod-admin · active until 11:07");
+    expect(pamStatusLine({ entitlement: "prod-operate", state: "activating", active_until_ms: null, message: null })).toBe("prod-operate · activating…");
+    expect(pamStatusLine({ entitlement: null, state: "none", active_until_ms: null, message: null })).toBe("no active grant");
+    expect(pamStatusLine({ entitlement: null, state: "error", active_until_ms: null, message: "Privileged Access Manager refused the request: quota exceeded." })).toBe(
+      "Privileged Access Manager refused the request: quota exceeded.",
+    );
+  });
+
+  it("offers Request grant for a transport with a PAM check, and not for one without", () => {
+    const host = hostView({ id: HOST, payload: hostPayload({ alias: "jumpbox-prod" }) });
+    const html = render(<TransportsPanel overview={recordOverview({ hosts: [host], transports: [withPam] })} accept={(overview) => overview} />);
+    expect(html).toContain("PAM: prod-operate, prod-admin");
+    expect(html).toMatch(/<button[^>]*>Request grant</);
+    const plain = render(<TransportsPanel overview={recordOverview({ hosts: [host], transports: [iap] })} accept={(overview) => overview} />);
+    expect(plain).not.toContain("Request grant");
+  });
+
+  it("asks for a justification and a duration, prefilled from the transport", () => {
+    const defaults = grantRequestDefaults(withPam);
+    expect(defaults).toEqual({ justification: "restart app-api", minutes: "30" });
+    expect(grantRequestDefaults(iap)).toEqual({ justification: "", minutes: "30" });
+    expect(grantRequestReady("restart app-api", "30")).toBe(true);
+    for (const [justification, minutes] of [["", "30"], ["   ", "30"], ["x", "0"], ["x", "481"], ["x", "abc"], ["x", "30.5"]]) {
+      expect(grantRequestReady(justification, minutes), `${justification}/${minutes}`).toBe(false);
+    }
+    const html = render(
+      <Dialog open>
+        <GrantRequestCardView transport={withPam} alias="jumpbox-prod" justification={defaults.justification} minutes={defaults.minutes} busy={false} result={null} error={null}
+          onJustification={() => {}} onMinutes={() => {}} onRequest={() => {}} onClose={() => {}} />
+      </Dialog>,
+    );
+    expect(html).toContain("Request a grant");
+    expect(html).toContain("jumpbox-prod");
+    expect(html).toContain("prod-operate");
+    expect(html).toContain("Justification");
+    expect(html).toContain("Duration (minutes)");
+    expect(html).toContain('value="restart app-api"');
+    expect(html).toContain('value="30"');
+    expect(html).toMatch(/<button[^>]*>Request</);
+    expect(html).not.toMatch(/<button[^>]*>Request grant</);
   });
 });
