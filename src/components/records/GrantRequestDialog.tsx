@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { revealHidden } from "@/lib/sync-approvals";
+import { justificationAcceptable } from "@/lib/mcp-flow";
 import { pamStatusLine, requestPamGrant, type HostTransport, type PamStatusView } from "@/lib/transports";
 
 const MAX_MINUTES = 480;
@@ -16,11 +17,10 @@ export function grantRequestDefaults(transport: HostTransport): { justification:
   return { justification: pam?.justification ?? "", minutes: String(Math.round((pam?.duration_secs ?? 1800) / 60)) };
 }
 
-/** Whether Request may go: whole minutes from 1 to 480 and a justification with something in it, as the backend checks too. */
+/** Whether Request may go: whole minutes from 1 to 480 and a justification the backend accepts (one line, no control characters). */
 export function grantRequestReady(justification: string, minutes: string): boolean {
   const whole = /^\d+$/.test(minutes.trim()) ? Number(minutes.trim()) : NaN;
-  const words = justification.trim().length;
-  return words > 0 && words <= MAX_JUSTIFICATION && whole >= 1 && whole <= MAX_MINUTES;
+  return justificationAcceptable(justification) && whole >= 1 && whole <= MAX_MINUTES;
 }
 
 export type GrantRequestCardViewProps = {

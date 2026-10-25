@@ -82,6 +82,8 @@ pub struct RestClient {
     runtime: tokio::runtime::Runtime,
     /// One library client per account (the credentials differ), built on first use.
     pam: Mutex<HashMap<String, pam_api::client::PrivilegedAccessManager>>,
+    /// How long one call may take, OS Login's and the library's alike.
+    timeout: Duration,
 }
 
 impl RestClient {
@@ -91,7 +93,12 @@ impl RestClient {
 
     /// The client against other base URLs (tests point both at a mock server).
     pub fn with_bases(tokens: Arc<dyn TokenSource>, oslogin_base: &str, pam_base: &str) -> RestClient {
-        let http = reqwest::blocking::Client::builder().timeout(HTTP_TIMEOUT).user_agent(user_agent()).build().expect("the REST client builds from fixed options");
+        RestClient::with_bases_and_timeout(tokens, oslogin_base, pam_base, HTTP_TIMEOUT)
+    }
+
+    /// `with_bases` with the per-call timeout given (tests use a short one).
+    pub fn with_bases_and_timeout(tokens: Arc<dyn TokenSource>, oslogin_base: &str, pam_base: &str, timeout: Duration) -> RestClient {
+        let http = reqwest::blocking::Client::builder().timeout(timeout).user_agent(user_agent()).build().expect("the REST client builds from fixed options");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime builds from fixed options");
         RestClient {
             tokens,
@@ -100,6 +107,7 @@ impl RestClient {
             pam_base: pam_base.trim_end_matches('/').to_string(),
             runtime,
             pam: Mutex::new(HashMap::new()),
+            timeout,
         }
     }
 
@@ -115,10 +123,15 @@ impl RestClient {
         if let Some(client) = self.pam.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&key) {
             return Ok(client.clone());
         }
+        // One call, one timeout, as for OS Login: the library's own retries (ten attempts over a minute by default) are off, since the
+        // broker's loops repeat what has to be repeated and look at `cancel` between tries; a call that hangs would otherwise hold a
+        // session thread, and the grant gate with it, for as long as the socket lives.
         let built = self.runtime.block_on(async {
             pam_api::client::PrivilegedAccessManager::builder()
                 .with_credentials(credentials(Arc::clone(&self.tokens), account.map(str::to_string)))
                 .with_endpoint(self.pam_base.clone())
+                .with_attempt_timeout(self.timeout)
+                .with_retry_policy(google_cloud_gax::retry_policy::NeverRetry)
                 .build()
                 .await
         });
@@ -262,6 +275,34 @@ mod tests {
 
     fn client(server: &mockito::Server) -> RestClient {
         RestClient::with_bases(Arc::new(StaticToken("t0k".into())), &server.url(), &server.url())
+    }
+
+    /// Design 2026-10-25: every call to Google is bounded by the 20-second timeout, the library's calls included, and the library does
+    /// not retry on its own (the broker's loops do that, watching `cancel`): a PAM server that does not answer in time is a network
+    /// failure, reported as soon as the timeout passes.
+    #[test]
+    fn a_pam_call_that_does_not_answer_in_time_fails_at_once_as_a_network_error() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // A server that answers every connection two seconds late, with an empty search result.
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                std::thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let mut request = [0u8; 4096];
+                    let _ = stream.read(&mut request);
+                    std::thread::sleep(Duration::from_secs(2));
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                });
+            }
+        });
+        let client = RestClient::with_bases_and_timeout(Arc::new(StaticToken("t0k".into())), &base, &base, Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let result = client.grants(Some("frank@retower.io"), "knowknow-prod", "global", "prod-operate");
+        assert!(matches!(result, Err(GcpError::Network(_))), "{result:?}");
+        assert!(started.elapsed() < Duration::from_millis(1500), "the library must not retry on its own: {:?}", started.elapsed());
     }
 
     #[test]

@@ -81,7 +81,7 @@ describe("grant questions", () => {
   it("lets Request go only with whole minutes from 1 to 480 and a justification with something in it", () => {
     expect(grantAnswerReady("30\nrestart app-api")).toBe(true);
     expect(grantAnswerReady("480\nx")).toBe(true);
-    for (const answer of ["0\nx", "481\nx", "30\n", "30\n   ", "abc\nx", "30.5\nx", "-1\nx", "", "30"]) {
+    for (const answer of ["0\nx", "481\nx", "30\n", "30\n   ", "abc\nx", "30.5\nx", "-1\nx", "", "30", "30\nrestart\tapp-api", "30\nbell\u0007", "30\ndel\u007f"]) {
       expect(grantAnswerReady(answer), JSON.stringify(answer)).toBe(false);
     }
   });

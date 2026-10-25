@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::config::model::SshConfigDoc;
 
@@ -25,6 +25,9 @@ pub struct AppState {
     pub agent: crate::agent::AgentRuntime,
     /// The session broker: its host key window, its sessions (own-ssh spec §4, §7).
     pub session: crate::session::SessionRuntime,
+    /// The one client for Google's APIs (design 2026-10-25): its token cache and its library clients serve the connections and the
+    /// Google Cloud panel alike, so a grant check costs one search, not a sign-in.
+    pub gcp: Arc<crate::gcp::rest::RestClient>,
 }
 
 impl Default for AppState {
@@ -40,6 +43,7 @@ impl Default for AppState {
             sync: crate::sync::runtime::SyncRuntime::default(),
             agent: crate::agent::AgentRuntime::default(),
             session: crate::session::SessionRuntime::default(),
+            gcp: Arc::new(crate::gcp::rest::RestClient::new(Arc::new(crate::gcp::auth::FileStore::from_environment()))),
         }
     }
 }

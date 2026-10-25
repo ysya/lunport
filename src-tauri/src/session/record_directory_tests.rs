@@ -683,11 +683,14 @@ mod gcp_transport {
 
     fn directory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> RecordDirectory {
         let (d, _, _) = fixture(s, true, true);
-        d.with_gcp(Box::new(Handle(Arc::clone(gcp))))
+        d.with_gcp(Arc::new(Handle(Arc::clone(gcp))))
     }
 
-    /// `directory` that also records what a grant request asked the transport to remember: `(host, justification, duration)`.
-    fn directory_with_memory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> (RecordDirectory, Arc<Mutex<Vec<(String, String, u32)>>>) {
+    /// What grant requests asked the transport to remember: `(host, justification, duration)`.
+    type Remembered = Arc<Mutex<Vec<(String, String, u32)>>>;
+
+    /// `directory` that also records what a grant request asked the transport to remember.
+    fn directory_with_memory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> (RecordDirectory, Remembered) {
         let remembered = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&remembered);
         let d = directory(s, gcp).with_grant_memory(Box::new(move |host, justification, duration| {
@@ -818,7 +821,7 @@ mod gcp_transport {
         );
         assert_eq!(calls(&gcp), vec![format!("grants {ACCOUNT} knowknow-prod global prod-operate"), format!("grants {ACCOUNT} knowknow-prod global prod-admin")]);
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("ACTIVE")];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, false);
+        assert!(!d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
     }
 
     /// Design 2026-10-25: IAP can take about 1½ minutes to see a grant, so the broker is told when the grant it found is that fresh and
@@ -832,14 +835,14 @@ mod gcp_transport {
         let target = d.resolve(&gate()).unwrap();
         let given = |ago: u64| Grant { access_grant_time: Some(rfc3339(SystemTime::now() - Duration::from_secs(ago))), ..grant("ACTIVE") };
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), given(60)];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, true);
+        assert!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
         *gcp.grants.lock().unwrap() = vec![given(600)];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, false);
+        assert!(!d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
         // A grant still activating is as fresh as one just given, and a grant time ahead of this clock (Google's clock is ahead) is fresh too.
         *gcp.grants.lock().unwrap() = vec![grant("ACTIVATING")];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, true);
+        assert!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
         *gcp.grants.lock().unwrap() = vec![Grant { access_grant_time: Some(rfc3339(SystemTime::now() + Duration::from_secs(30))), ..grant("ACTIVE") }];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, true);
+        assert!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
     }
 
     /// Design 2026-10-25 (PAM grant requests): a missing grant is reported with everything the broker needs to ask and request, and
