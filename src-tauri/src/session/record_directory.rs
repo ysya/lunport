@@ -297,8 +297,11 @@ impl HostDirectory for RecordDirectory {
                 let current = crate::gcp::pam::in_flight(&grants);
                 if !current.is_empty() {
                     in_flight = true;
-                    // IAP can take about 1½ minutes to see a grant: the broker says so if IAP refuses with 4033 right after this one.
-                    prepared.recent_grant = current.iter().any(|grant| crate::gcp::pam::granted_within(grant, SystemTime::now(), Duration::from_secs(120)));
+                    // IAP can take about 1½ minutes to see a grant: the broker says so if IAP refuses with 4033 right after this one. A
+                    // grant still activating is as fresh as one just given.
+                    prepared.recent_grant = current
+                        .iter()
+                        .any(|grant| grant.state == "ACTIVATING" || crate::gcp::pam::granted_within(grant, SystemTime::now(), Duration::from_secs(120)));
                     break;
                 }
             }
@@ -332,7 +335,7 @@ impl HostDirectory for RecordDirectory {
                 }
                 Some(name) if name != hop.user => {
                     return Err(DirectoryError::Denied(format!(
-                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; update the host (Use OS Login username).",
+                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; save that username into the host (Use OS Login username in the host's Google Cloud transport).",
                         hop.user
                     )));
                 }
