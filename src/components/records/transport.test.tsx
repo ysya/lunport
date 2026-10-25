@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { osLoginOutcome, type HostTransport } from "@/lib/transports";
+import { osLoginOutcome, osLoginUsernameUpdate, parseEntitlements, type HostTransport } from "@/lib/transports";
 import { hostPayload, hostView, recordOverview } from "./fixtures";
 import { RecordHostEditor } from "./HostEditor";
 import { HostPreview } from "./HostPreview";
@@ -54,6 +54,16 @@ describe("Google Cloud IAP transports", () => {
     expect(withPam).toContain("Enter at least one PAM entitlement.");
   });
 
+  it("lets the entitlements be typed with commas: the text is kept as typed and parsed on the side", () => {
+    // A controlled input rebuilt from the parsed list would eat the comma as it is typed; the field keeps the text and parses it.
+    expect(parseEntitlements("prod-operate,")).toEqual(["prod-operate"]);
+    expect(parseEntitlements("prod-operate, prod-admin")).toEqual(["prod-operate", "prod-admin"]);
+    expect(parseEntitlements(" , prod-admin,,")).toEqual(["prod-admin"]);
+    expect(parseEntitlements("")).toEqual([]);
+    const typed = render(<TransportFields kind={{ ...iap.kind, pam: { entitlements: ["prod-operate", "prod-admin"], location: "global" } }} onChange={() => {}} disabled={false} />);
+    expect(typed).toContain('value="prod-operate, prod-admin"');
+  });
+
   it("turns an OS Login profile into the username to save and a note about the key", () => {
     expect(osLoginOutcome({ account: "frank@retower.io", username: "frank_retower_io", key_registered: false })).toEqual({
       username: "frank_retower_io",
@@ -66,6 +76,44 @@ describe("Google Cloud IAP transports", () => {
       note: null,
       error: "OS Login has no POSIX account for frank@retower.io in this project; the project may not have OS Login enabled.",
     });
+  });
+
+  it("saves the OS Login username into the host as the connection sees it, and leaves a username inherited from a Group alone", () => {
+    const profile = { account: "frank@retower.io", username: "frank_retower_io", key_registered: true };
+    const plain = hostView({ id: HOST, payload: hostPayload({ user: "frank" }) });
+    const update = osLoginUsernameUpdate(plain, profile);
+    expect(update.payload).toEqual({ ...plain.payload, user: "frank_retower_io", host_key: null });
+    expect(update.note).toBe("Username: frank_retower_io.");
+    expect(update.error).toBeNull();
+    // Already the username the connection uses: nothing to write.
+    const same = osLoginUsernameUpdate(hostView({ id: HOST, payload: hostPayload({ user: "frank_retower_io" }) }), profile);
+    expect(same.payload).toBeNull();
+    expect(same.note).toBe("Username: frank_retower_io.");
+    // The username comes from the host's Group: writing the host's own field would change nothing the connection uses.
+    const inherited = hostView({
+      id: HOST,
+      payload: hostPayload({ user: "", inherit: ["user"], group_id: "0000000000000009" }),
+      effective_payload: hostPayload({ user: "deploy" }),
+    });
+    const refused = osLoginUsernameUpdate(inherited, profile);
+    expect(refused.payload).toBeNull();
+    expect(refused.error).toBe("This host takes its username from its Group; change it there, or stop inheriting it in the host editor.");
+    // No POSIX account: the API's own explanation, nothing written.
+    expect(osLoginUsernameUpdate(plain, { ...profile, username: null }).error).toContain("OS Login has no POSIX account");
+  });
+
+  it("shows the username the connection uses, not the host's own field, and is not held back by blocked account writes", () => {
+    const inherited = hostView({
+      id: HOST,
+      payload: hostPayload({ alias: "jumpbox-dev", user: "", inherit: ["user"], group_id: "0000000000000009" }),
+      effective_payload: hostPayload({ alias: "jumpbox-dev", user: "deploy", port: 2222 }),
+    });
+    // Transports are device-local, so blocked account writes do not hold the panel back: a host without a transport can still get one.
+    const free = hostView({ id: "0000000000000002", payload: hostPayload({ alias: "web" }) });
+    const blocked = recordOverview({ hosts: [inherited, free], transports: [iap], account: { chain_id: "chain", device_name: "fixture" }, shared_writes_blocked: true });
+    const html = render(<TransportsPanel overview={blocked} accept={(overview) => overview} />);
+    expect(html).toContain("deploy · port 2222");
+    expect(html).not.toMatch(/<button[^>]*id="new-transport-button"[^>]*disabled=""/);
   });
 
   it("keeps the host editor free of transport settings and shows the transport in the host preview", () => {

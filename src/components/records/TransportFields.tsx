@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { pamPlaceholder, transportProblem, type TransportKind } from "@/lib/transports";
+import { pamPlaceholder, parseEntitlements, transportProblem, type TransportKind } from "@/lib/transports";
 import { RecordField } from "./form";
 
 /**
@@ -51,18 +51,12 @@ export function TransportFields({ kind, onChange, disabled }: { kind: TransportK
       {kind.pam && (
         <div className="grid gap-4 sm:grid-cols-2">
           <RecordField label="Entitlements (comma-separated)">
+            {/* The text is the field's own (a value rebuilt from the parsed list would eat a comma as it is typed); the list goes up. */}
             <Input
-              value={kind.pam.entitlements.join(", ")}
+              defaultValue={kind.pam.entitlements.join(", ")}
               placeholder={pamPlaceholder}
               disabled={disabled}
-              onChange={(e) =>
-                patch({
-                  pam: {
-                    location: kind.pam?.location ?? "global",
-                    entitlements: e.target.value.split(",").map((entry) => entry.trim()).filter(Boolean),
-                  },
-                })
-              }
+              onChange={(e) => patch({ pam: { location: kind.pam?.location ?? "global", entitlements: parseEntitlements(e.target.value) } })}
             />
           </RecordField>
           <RecordField label="Location">

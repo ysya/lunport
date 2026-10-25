@@ -1,5 +1,5 @@
 import { tauriInvoke } from "./ipc";
-import type { RecordOverview } from "./records";
+import type { HostPayload, RecordHostView, RecordOverview } from "./records";
 import type { HostTransport } from "@/bindings/HostTransport";
 import type { TransportKind } from "@/bindings/TransportKind";
 import type { PamCheck } from "@/bindings/PamCheck";
@@ -35,6 +35,22 @@ export function osLoginOutcome(view: OsLoginProfileView): { username: string | n
   };
 }
 
+/**
+ * What the Use OS Login username button writes into `host` for the profile it fetched: the payload to save (`null` when the connection
+ * already uses that username, or when nothing may be written), the note to show, or why not. The comparison is with the username the
+ * connection uses (the effective payload); a host that inherits its username from its Group is left alone, since its own field is not
+ * what the connection uses.
+ */
+export function osLoginUsernameUpdate(host: RecordHostView, view: OsLoginProfileView): { payload: HostPayload | null; note: string | null; error: string | null } {
+  const outcome = osLoginOutcome(view);
+  if (!outcome.username) return { payload: null, note: null, error: outcome.error };
+  if (host.payload.inherit?.includes("user"))
+    return { payload: null, note: null, error: "This host takes its username from its Group; change it there, or stop inheriting it in the host editor." };
+  const note = [`Username: ${outcome.username}.`, outcome.note].filter(Boolean).join(" ");
+  if (host.effective_payload.user === outcome.username) return { payload: null, note, error: null };
+  return { payload: { ...host.payload, user: outcome.username, host_key: null }, note, error: null };
+}
+
 export function transportLabel(transport: HostTransport): string {
   const kind = transport.kind;
   return `Google Cloud IAP · ${kind.project} / ${kind.zone} / ${kind.instance}`;
@@ -44,8 +60,16 @@ const resourceName = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const isResourceName = (value: string) => resourceName.test(value) && !value.endsWith("-");
 const isProject = (value: string) =>
   /^[0-9]{6,20}$/.test(value) || (value.length >= 6 && value.length <= 30 && /^[a-z][a-z0-9-]*[a-z0-9]$/.test(value));
-const isEmail = (value: string) =>
-  value.length <= 254 && /^[^\s@\u0000-\u001f\u007f]+@[^\s@.\u0000-\u001f\u007f][^\s@\u0000-\u001f\u007f]*\.[^\s@\u0000-\u001f\u007f]+$/.test(value);
+/** The backend's rule: the account names a directory under gcloud's config, so only the characters an address and a directory name share. */
+const isEmail = (value: string) => {
+  const at = value.indexOf("@");
+  if (at <= 0 || value.length > 254) return false;
+  const labels = value.slice(at + 1).split(".");
+  return /^[A-Za-z0-9._%+'-]+$/.test(value.slice(0, at)) && labels.length >= 2 && labels.every((label) => /^[A-Za-z0-9-]+$/.test(label));
+};
+
+/** The entitlements field as typed, split on commas; the text itself stays in the field so a comma can be typed. */
+export const parseEntitlements = (text: string): string[] => text.split(",").map((entry) => entry.trim()).filter(Boolean);
 
 /** The same rules and sentences as the backend's `HostTransport::validate`, so the Save button and the backend agree. */
 export function transportProblem(transport: HostTransport): string | null {
