@@ -8,6 +8,9 @@
 
 pub mod auth;
 pub mod iap;
+pub mod oslogin;
+pub mod pam;
 pub mod relay;
+pub mod rest;
 #[cfg(test)]
 pub mod testing;
