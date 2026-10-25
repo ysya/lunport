@@ -71,6 +71,12 @@ reqwest = { version = "0.13", features = ["blocking", "json"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
+# Privileged Access Manager through Google's client library (src/gcp/rest.rs); the credentials stay Lunport's (src/gcp/credentials.rs
+# plugs the gcloud sign-in files in). google-cloud-gax for the paginator and the error type the library answers with.
+google-cloud-privilegedaccessmanager-v1 = "1.16"
+google-cloud-auth = "1.18"
+google-cloud-gax = "1.15"
+http = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 url = "2"
 # 金鑰保管庫(src/vault/material.rs):解析、解密 OpenSSH 私鑰並簽章。ssh-key 0.6.7 的 RSA 簽章有錯,RSA 改用 rsa 套件;
