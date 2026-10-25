@@ -288,7 +288,7 @@ fn execute(
     cancel: &CancelToken,
     current: &(dyn Fn() -> Result<(), String> + Sync),
 ) -> DeployResult {
-    use crate::mcp::records::{CheckedEngine, PublicDirectory};
+    use crate::mcp::records::{Asker, CheckedEngine, PublicDirectory};
     let check = || review.check(connector, cancel, current);
     let invalid = || {
         if cancel.is_cancelled() {
@@ -324,13 +324,15 @@ fn execute(
         inner: &observed_engine,
         check: &check_connected,
     };
-    let directory = PublicDirectory(connector.directory, &check, &check_resolved);
+    // A person drives a deployment: a needed grant is asked of them (design 2026-10-25, PAM grant requests).
+    let directory = PublicDirectory(connector.directory, &check, &check_resolved, Asker::Person);
     let guarded = Connector {
         engine: &engine,
         directory: &directory,
         keys: connector.keys,
         keychain: connector.keychain,
         confirmer: connector.confirmer,
+        grants: connector.grants,
     };
     let owner = ObservedOwner {
         inner: owner,

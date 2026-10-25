@@ -337,13 +337,14 @@ pub(super) fn verify(
     };
     let check_resolved =
         |target: &crate::ssh::Target| approved.check_resolved(target, connector.keys);
-    let directory = records::PublicDirectory(connector.directory, &check, &check_resolved);
+    let directory = records::PublicDirectory(connector.directory, &check, &check_resolved, records::Asker::Automation);
     let guarded = Connector {
         directory: &directory,
         engine: connector.engine,
         keys: connector.keys,
         keychain: connector.keychain,
         confirmer: connector.confirmer,
+        grants: connector.grants,
     };
     check()?;
     let result =

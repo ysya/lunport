@@ -249,6 +249,7 @@ pub fn verify(
         keys: connector.keys,
         keychain: connector.keychain,
         confirmer: connector.confirmer,
+        grants: connector.grants,
     };
     let result = probe.connect(query, owner, cancel);
     if cancel.is_cancelled() {

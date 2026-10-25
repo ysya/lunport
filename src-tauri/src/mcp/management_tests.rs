@@ -217,6 +217,7 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         let keys = FakeKeys::new();
         let keychain = MemKeychain::default();
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             directory: &directory,
             engine: &engine,
             confirmer: &confirmer,
@@ -328,6 +329,7 @@ fn revoked_permission_or_cancel_during_trust_never_saves_a_pin() {
         let result = verify(
             &r,
             &Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
                 directory: &directory,
                 engine: &FakeEngine::new(),
                 confirmer: &confirmer,

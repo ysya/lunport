@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 use super::auth::{KeyStore, Owner, Reply};
 use super::connect::{CancelToken, ConnectFailure, Connector, HostKeyConfirmer, CANCELLED};
+use super::grants::GrantGates;
 use super::directory::HostDirectory;
 use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
 use super::relay::{run_shell, tell, tell_all, ClientLink, ShellControl, SETTLE};
@@ -116,6 +117,8 @@ type AuthenticationOwnerFactory = Arc<dyn Fn(u64, CancelToken) -> Arc<dyn Owner>
 pub struct Broker {
     mcp: Mutex<Option<McpHandler>>,
     authentication_owner: Mutex<Option<AuthenticationOwnerFactory>>,
+    /// One grant request at a time for each grant several connections may need (design 2026-10-25, PAM grant requests).
+    grants: GrantGates,
     audit:Mutex<Option<Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>>>,
     engine: Arc<dyn SshEngine>,
     directory: Arc<dyn HostDirectory>,
@@ -165,6 +168,7 @@ impl Broker {
         Arc::new(Broker {
             mcp: Mutex::new(None),
             authentication_owner: Mutex::new(None),
+            grants: GrantGates::default(),
             audit:Mutex::new(None),
             engine,
             directory,
@@ -181,7 +185,7 @@ impl Broker {
     /// Human deployment reuses the same directory, key store and host-key policy without MCP grants.
     /// Clone the broker out of AppState before calling; the returned connector borrows only this broker.
     pub fn connector(&self) -> Connector<'_> {
-        Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref()}
+        Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref(),grants:&self.grants}
     }
 
     /// Human deployments participate in the same quit barrier, without consulting MCP policy.

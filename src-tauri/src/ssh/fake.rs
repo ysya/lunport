@@ -116,6 +116,8 @@ struct Script {
     login: FakeLogin,
     logins: HashMap<String, FakeLogin>,
     connect_error: Option<ConnectError>,
+    /// How many more connects `connect_error` fails; `None` for all of them.
+    connect_error_times: Option<usize>,
     exec: HashMap<String, ExecResult>,
     shell_output: Vec<Vec<u8>>,
     shell_exit: Exit,
@@ -162,6 +164,7 @@ impl FakeEngine {
             login: FakeLogin::Accept,
             logins: HashMap::new(),
             connect_error: None,
+            connect_error_times: None,
             exec: HashMap::new(),
             shell_output: Vec::new(),
             shell_exit: Exit::Code(0),
@@ -209,6 +212,14 @@ impl FakeEngine {
     /// (`BadJumpChain`) comes before anything else.
     pub fn failing_with(self, error: ConnectError) -> FakeEngine {
         self.script(|script| script.connect_error = Some(error))
+    }
+
+    /// `failing_with`, for the next `times` connects only; after them, connects go through.
+    pub fn failing_times(self, times: usize, error: ConnectError) -> FakeEngine {
+        self.script(|script| {
+            script.connect_error = Some(error);
+            script.connect_error_times = Some(times);
+        })
     }
 
     /// What `exec(command, …)` returns for exactly this command line (cut to the caller's `output_cap`, as the real engine does).
@@ -314,13 +325,22 @@ impl SshEngine for FakeEngine {
     fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
         check_chain(target)?;
         let (login_default, logins, key_default, keys, scripted_error, banner, prompt_wait) = {
-            let script = locked(&self.shared.script);
+            let mut script = locked(&self.shared.script);
+            // A failure scripted for so many connects is spent by this one.
+            let scripted_error = match script.connect_error_times {
+                Some(0) => None,
+                Some(left) => {
+                    script.connect_error_times = Some(left - 1);
+                    script.connect_error.clone()
+                }
+                None => script.connect_error.clone(),
+            };
             (
                 script.login.clone(),
                 script.logins.clone(),
                 script.host_key.clone(),
                 script.host_keys.clone(),
-                script.connect_error.clone(),
+                scripted_error,
                 script.banner.clone(),
                 script.prompt_wait,
             )

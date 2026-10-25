@@ -294,6 +294,7 @@ fn records_connect_through_the_real_engine_and_persist_first_contact() {
         FakeConfirmer::deciding(vec![Decision::Trust]),
     );
     let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &engine,
         directory: &directory,
         keys: &keys,
@@ -352,6 +353,7 @@ fn editing_the_endpoint_in_the_confirmation_window_refuses_the_connect() {
         Change(state.clone()),
     );
     let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &engine,
         directory: &directory,
         keys: &keys,
@@ -450,6 +452,7 @@ fn editing_the_destination_during_probe_review_cannot_trust_the_old_endpoint() {
     let (directory, state, _) = fixture(add(&state(), WEB, payload("web")), false, true);
     let confirmer = Edit(state.clone());
     let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         directory: &directory,
         engine: &crate::ssh::fake::FakeEngine::new(),
         confirmer: &confirmer,
