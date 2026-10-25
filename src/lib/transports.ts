@@ -24,6 +24,17 @@ export function transportFor(overview: RecordOverview, hostId: string | null): H
   return overview.transports?.find((transport) => transport.host_id === hostId) ?? null;
 }
 
+/** What the Use OS Login username button does with the profile it fetched: the username to save, a note about the key, or why not. */
+export function osLoginOutcome(view: OsLoginProfileView): { username: string | null; note: string | null; error: string | null } {
+  if (!view.username)
+    return { username: null, note: null, error: `OS Login has no POSIX account for ${view.account} in this project; the project may not have OS Login enabled.` };
+  return {
+    username: view.username,
+    note: view.key_registered === false ? "This key is not registered with OS Login yet; it is registered at the first connection." : null,
+    error: null,
+  };
+}
+
 export function transportLabel(transport: HostTransport): string {
   const kind = transport.kind;
   return `Google Cloud IAP · ${kind.project} / ${kind.zone} / ${kind.instance}`;

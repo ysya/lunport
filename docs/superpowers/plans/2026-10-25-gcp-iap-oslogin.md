@@ -557,3 +557,21 @@ Expected: no warnings in the new files.
 ```bash
 git push -u origin claude/project-thread-whbjuy
 ```
+
+---
+
+### Task 12: The Google Cloud panel (added after Frank's review of the design, 2026-10-25)
+
+Frank's answer to the design's question 4: the transport does not belong in the host editor. Task 9's section moves to a Library panel beside Tunnels; the spec's UI section describes the result.
+
+**Files:**
+- Create: `src/components/records/TransportsPanel.tsx` (the panel: hosts with a transport, New transport, edit and remove dialogs, Use OS Login username writing the host's `user`), `src/components/records/TransportFields.tsx` (the IAP field group, from `TransportSection.tsx`, which goes)
+- Modify: `src/components/records/LibraryNavigation.tsx` (`WorkspacePanel` gains `"transports"`; a "Google Cloud" row with the transport count), `src/components/records/RecordsWorkspace.tsx` (render the panel; ⌘N clicks `new-transport-button`), `src/lib/transports.ts` (`osLoginOutcome(view) → { username, note, error }`), `src/components/records/HostEditor.tsx` and `editor.ts` (back to their Task 8 state), `src/components/records/transport.test.tsx` (rewritten for the panel)
+
+- [ ] **Step 1: Rewrite `transport.test.tsx` for the panel and watch it fail** (`Cannot find module './TransportFields'`)
+- [ ] **Step 2: Implement the panel, the fields and `osLoginOutcome`; remove the editor section; run `pnpm test src/components/records/transport.test.tsx`, then `pnpm test` and `pnpm build`**
+- [ ] **Step 3: Commit** `feat(ui): move Google Cloud IAP transports to their own Library panel`
+
+### Final pass (whole-branch review)
+
+Two spec requirements the tasks above had dropped, each with its failing test first: the runtime raises the state version when a candidate carries transports (`persist_candidate`, `commit_migration_candidate`, as it does for tunnel rules), and the 4033 refusal after a grant active for under two minutes carries the recent-grant note (`HostDirectory::prepare` returns `Prepared { recent_grant }`, `ConnectError::Tunnel` carries the close `code`, the broker appends the sentence).
