@@ -407,3 +407,36 @@ fn a_central_history_page_cannot_overwrite_a_local_edit_saved_while_it_was_infli
     let replica=latest.local.central.unwrap().replica.unwrap();
     assert_eq!(replica.checkpoint.sequence,0);assert!(replica.pending.values().next().unwrap().sent.is_some());
 }
+
+/// Design 2026-10-25: a transport (device-local, `local.transports`) needs state version `TRANSPORT_STATE_VERSION`, which an older
+/// Lunport refuses to open. Every save goes through the runtime, so the runtime raises the version, as it does for tunnel rules.
+#[test]
+fn a_transport_promotes_the_state_version_when_persisted() {
+    use crate::sync::transports::{self, HostTransport, TransportKind};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let previous = state();
+    save_active(&path, &previous).unwrap();
+    let mut core = crate::sync::runtime::SyncCore::default();
+    activate_probe(&mut core, StartupProbe::Records { state: Box::new(previous.clone()), fresh: false }).unwrap();
+    let transport = HostTransport {
+        host_id: "0000000000000001".into(),
+        kind: TransportKind::GcpIap {
+            project: "eng-dev-396409".into(),
+            zone: "asia-east1-b".into(),
+            instance: "jumpbox".into(),
+            interface: "nic0".into(),
+            account: None,
+            os_login: true,
+            pam: None,
+        },
+    };
+    let mut candidate = transports::set(&previous, "0000000000000001", None, Some(transport), 1).unwrap();
+    // A candidate that reached the runtime by another road than `transports::set` carries the version it had.
+    candidate.version = previous.version;
+    persist_candidate(&mut core, &path, candidate).unwrap();
+    assert_eq!(core.records.as_ref().unwrap().version, crate::sync::records_v3::TRANSPORT_STATE_VERSION);
+    let StartupProbe::Records { state: reopened, .. } = probe_startup(&path, "unused") else { panic!("records") };
+    assert_eq!(reopened.version, crate::sync::records_v3::TRANSPORT_STATE_VERSION);
+    assert!(transports::has_data(&reopened));
+}

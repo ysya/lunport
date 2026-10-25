@@ -725,6 +725,7 @@ fn persist_candidate(
             .map_err(|e| AppError::Other(e.to_string()))?;
     }
     if crate::sync::tunnel_rules::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::tunnel_rules::STATE_VERSION); }
+    if crate::sync::transports::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::transports::STATE_VERSION); }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }
@@ -934,6 +935,7 @@ pub fn commit_migration_candidate(
     crate::sync::tunnel_rules::publish_local(&mut candidate, keys.as_ref(), 0)
         .map_err(|e| AppError::Other(e.to_string()))?;
     if crate::sync::tunnel_rules::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::tunnel_rules::STATE_VERSION); }
+    if crate::sync::transports::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::transports::STATE_VERSION); }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }
