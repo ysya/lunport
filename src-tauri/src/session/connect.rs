@@ -8,10 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use super::auth::{label, printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
-use super::directory::{DirectoryError, HostDirectory};
-use super::protocol::{kinds, HostQuery, QuestionKind};
+use super::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, Prepared};
+use super::grants::{Entry, GateKey, GrantGates};
+use super::protocol::{kinds, GrantAnswer, GrantPrompt, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
 use crate::sync::env::Keychain;
 
@@ -115,6 +117,50 @@ pub struct Connector<'a> {
     pub keys: &'a dyn KeyStore,
     pub keychain: &'a dyn Keychain,
     pub confirmer: &'a dyn HostKeyConfirmer,
+    /// The app's gates on grant requests (design 2026-10-25, PAM grant requests): connections that need the same grant ask once.
+    pub grants: &'a GrantGates,
+}
+
+/// How long the person has to answer the Request-a-grant question (design 2026-10-25): five minutes, the window's own limit.
+const GRANT_QUESTION_WAIT: Duration = Duration::from_secs(300);
+/// How long a connection waits for another connection's grant request to come out: the question, the request and the minute of
+/// polling for the grant to become active, with room.
+const GATE_WAIT: Duration = Duration::from_secs(7 * 60);
+/// What the terminal reads while IAP is given time to see a grant.
+const IAP_WAITING: &str = "IAP has not seen the grant yet; retrying for up to two minutes.";
+
+/// IAP's grace (design 2026-10-25): for how long after a grant became active a tunnel refused with 4033 is tried again rather than
+/// reported (IAP can take about 1½ minutes to see a grant), and how long between tries.
+#[derive(Clone, Copy, Debug)]
+struct Grace {
+    span: Duration,
+    step: Duration,
+}
+
+impl Default for Grace {
+    fn default() -> Grace {
+        Grace { span: Duration::from_secs(120), step: Duration::from_secs(10) }
+    }
+}
+
+/// `time` as a clock time of this computer's day, `HH:MM`, for the sentence that says until when a grant is active.
+pub fn local_hhmm(time: SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(time).format("%H:%M").to_string()
+}
+
+/// Waits `span`, looking at `cancel` every so often: `false` when the connection was cancelled meanwhile.
+fn pause(cancel: &CancelToken, span: Duration) -> bool {
+    let end = Instant::now() + span;
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= end {
+            return true;
+        }
+        std::thread::sleep((end - now).min(Duration::from_millis(250)));
+    }
 }
 
 /// The hop an error is about; `None` for an error about the whole chain.
@@ -160,6 +206,15 @@ fn password_abandoned(hop: &HopRef, target: &Target) -> ConnectFailure {
     failure_of(&ConnectError::AuthAbandoned { hop: hop.clone(), reason: "the password was not given".to_string() }, target)
 }
 
+/// Whether a grant given at `prepared.granted_at` is still within IAP's grace: young enough, and not tried again more often than the
+/// grace allows (a backstop for a grant time ahead of this computer's clock).
+fn within_grace(prepared: &Prepared, grace: Grace, retries: u32) -> bool {
+    let Some(granted_at) = prepared.granted_at else { return false };
+    let young = SystemTime::now().duration_since(granted_at).unwrap_or_default() < grace.span;
+    let most = (grace.span.as_millis() / grace.step.as_millis().max(1)) as u32 + 1;
+    young && retries < most
+}
+
 fn directory_failure(error: DirectoryError) -> ConnectFailure {
     match error {
         // The host is fine; the account may not connect as it is saved (no PAM grant, OS Login disagrees): a login failure.
@@ -187,7 +242,7 @@ impl Connector<'_> {
     /// came out: the failure is `cancelled` (nobody is told about it, whatever was being asked or tried when the client went away), and
     /// a session that did open meanwhile is closed here, on the caller's thread, instead of being handed to a client that is gone.
     pub fn connect(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken) -> Result<Connected, ConnectFailure> {
-        let result = self.connect_within(query, owner, cancel, round_limit);
+        let result = self.connect_within(query, owner, cancel, round_limit, Grace::default());
         if !cancel.is_cancelled() {
             return result;
         }
@@ -197,19 +252,24 @@ impl Connector<'_> {
         Err(ConnectFailure::cancelled())
     }
 
-    /// `connect` with the bound on the rounds given (`round_limit` is the one `connect` uses): the net itself is tested with a smaller one.
-    fn connect_within(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken, rounds: fn(&Target) -> usize) -> Result<Connected, ConnectFailure> {
+    /// `connect` with the bound on the rounds given (`round_limit` is the one `connect` uses) and IAP's grace given (`Grace::default()`
+    /// is the real one): the net and the grace are tested with smaller ones.
+    fn connect_within(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken, rounds: fn(&Target) -> usize, grace: Grace) -> Result<Connected, ConnectFailure> {
         if cancel.is_cancelled() {
             return Err(ConnectFailure::cancelled());
         }
         let mut target = self.directory.resolve(query).map_err(directory_failure)?;
         // What the outside world has to say before anything connects (a PAM grant, OS Login): the target is read, never changed.
-        let prepared = self.directory.prepare(&target, &|key_id| self.keys.key(key_id).map(|key| key.public_key), cancel).map_err(directory_failure)?;
+        let prepared = self.prepare_granted(&target, owner, cancel)?;
         let auth = BrokerAuth::new(self.keys, self.keychain, owner, self.directory);
         auth.unlock(&target).map_err(|text| ConnectFailure::new(kinds::AUTH, text))?;
         let policy = PinPolicy::from_target(&target);
         let mut done = Done::default();
-        for _ in 0..rounds(&target) {
+        let mut rounds_left = rounds(&target);
+        // IAP's grace: whether the terminal was told, and how many times the tunnel was tried again (a backstop on the clock).
+        let mut iap_told = false;
+        let mut iap_retries: u32 = 0;
+        while rounds_left > 0 {
             if cancel.is_cancelled() {
                 return Err(ConnectFailure::cancelled());
             }
@@ -218,6 +278,21 @@ impl Connector<'_> {
                 Ok(session) => return Ok(Connected { session, target }),
                 Err(error) => error,
             };
+            // IAP refused the tunnel (4033) right after the PAM grant check passed on a grant given moments ago: IAP can take about
+            // 1½ minutes to see a grant (design 2026-10-25), so the tunnel is tried again every few seconds while the grace lasts, and
+            // the person is told once. Those tries are not rounds: nothing was asked or learned.
+            if matches!(error, ConnectError::Tunnel { code: Some(4033), .. }) && prepared.recent_grant && within_grace(&prepared, grace, iap_retries) {
+                if !iap_told {
+                    owner.host_key_notice(IAP_WAITING);
+                    iap_told = true;
+                }
+                if !pause(cancel, grace.step) {
+                    return Err(ConnectFailure::cancelled());
+                }
+                iap_retries += 1;
+                continue;
+            }
+            rounds_left -= 1;
             match error {
                 // The person gave up the password of a hop (cancelled the question, let it run out, or their client went away). The engine
                 // asked it before it connected (a hop that starts with the password method) and went on without it, to a host key that was
@@ -272,8 +347,8 @@ impl Connector<'_> {
                         Reply::Gone => return Err(ConnectFailure::cancelled()),
                     }
                 }
-                // IAP refused the tunnel (4033) right after the PAM grant check passed on a grant given moments ago: IAP can take about
-                // 1½ minutes to see a grant (design 2026-10-25), and the person is told so instead of doubting the grant.
+                // The grace is over (or the grant has no time of its own): the refusal says why, so the person waits instead of doubting
+                // the grant.
                 ConnectError::Tunnel { code: Some(4033), .. } if prepared.recent_grant => {
                     let mut failure = failure_of(&error, &target);
                     let sentence = failure.text.trim_end_matches('.').to_string();
@@ -285,6 +360,62 @@ impl Connector<'_> {
         }
         let alias = target.hops.last().map(|hop| hop.alias.clone()).unwrap_or_default();
         Err(ConnectFailure::new(kinds::CONNECT, format!("Lunport gave up connecting to {alias} after too many attempts.")))
+    }
+
+    /// `HostDirectory::prepare`, with the grant it may need obtained first (design 2026-10-25, PAM grant requests): a connection a person
+    /// drives asks them through `owner`, requests the grant and checks again; the check then passes, or its refusal stands.
+    fn prepare_granted(&self, target: &Target, owner: &dyn Owner, cancel: &CancelToken) -> Result<Prepared, ConnectFailure> {
+        let public_key = |key_id: &str| self.keys.key(key_id).map(|key| key.public_key);
+        match self.directory.prepare(target, &public_key, cancel) {
+            Ok(prepared) => Ok(prepared),
+            Err(DirectoryError::GrantNeeded(need)) => {
+                self.obtain_grant(&need, owner, cancel)?;
+                if cancel.is_cancelled() {
+                    return Err(ConnectFailure::cancelled());
+                }
+                // The grant is active now (requested here, or by the connection this one waited on): a second refusal is the answer.
+                self.directory.prepare(target, &public_key, cancel).map_err(|error| directory_failure(error.for_automation()))
+            }
+            Err(error) => Err(directory_failure(error)),
+        }
+    }
+
+    /// Gets the grant `need` describes: through the app's gate, so that connections needing the same grant at once ask the person once.
+    /// The lead asks and requests; the others take the lead's outcome.
+    fn obtain_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<(), ConnectFailure> {
+        match self.grants.enter(GateKey::of(need), cancel, GATE_WAIT) {
+            Entry::Lead(lease) => {
+                let outcome = self.request_grant(need, owner, cancel);
+                // The others are told what went wrong, unless it was this connection going away: that is nothing to them, and the refusal
+                // (how to request a grant themselves) is.
+                let for_the_others = outcome.clone().map_err(|failure| if cancel.is_cancelled() { need.refusal_sentence() } else { failure.text });
+                lease.settle(for_the_others);
+                outcome.map(|_| ())
+            }
+            Entry::Outcome(Ok(_)) => Ok(()),
+            Entry::Outcome(Err(sentence)) => Err(ConnectFailure::new(kinds::AUTH, sentence)),
+        }
+    }
+
+    /// Asks the person for a justification and a duration (Lunport's Request-a-grant window, five minutes), requests the grant and waits
+    /// for it to become active, and tells the terminal what was got. Cancel, no answer in time, a client that went away or an answer that
+    /// is not one end with the refusal that names the gcloud command.
+    fn request_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<GrantReceipt, ConnectFailure> {
+        let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes: need.duration_secs / 60, justification: need.justification.clone() };
+        let answer = match owner.ask(QuestionKind::Grant, &prompt.to_text(), true, Some(Instant::now() + GRANT_QUESTION_WAIT)) {
+            Reply::Answer(text) => GrantAnswer::decode(&text),
+            Reply::Cancelled | Reply::TimedOut | Reply::Gone => None,
+        };
+        let Some(answer) = answer else { return Err(ConnectFailure::new(kinds::AUTH, need.refusal_sentence())) };
+        let receipt = self.directory.request_grant(need, &answer.justification, answer.minutes * 60, cancel).map_err(directory_failure)?;
+        owner.host_key_notice(&format!(
+            "Requested a {}-minute {} grant on {}; active until {}.",
+            answer.minutes,
+            need.entitlement,
+            need.project,
+            local_hhmm(receipt.active_until)
+        ));
+        Ok(receipt)
     }
 
     /// The pinned key `pinned`, which the key the server presented was compared with, as the question about a changed key shows it: its
@@ -386,7 +517,12 @@ mod tests {
 
     use super::*;
     use crate::session::auth::Reply;
-    use crate::session::directory::{PinnedKey, Prepared};
+    use crate::session::directory::{GrantNeed, GrantReceipt, PinnedKey, Prepared};
+    use crate::session::grants::GrantGates;
+    use crate::session::protocol::GrantPrompt;
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex};
+    use std::time::SystemTime;
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner, PINNED_AT_MS, TEST_PASSPHRASE};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
     use crate::ssh::russh_engine::toy_server::{ToyBehavior, ToyLogin, ToyServer};
@@ -445,6 +581,7 @@ mod tests {
         confirmer: FakeConfirmer,
         owner: FakeOwner,
         cancel: CancelToken,
+        grants: GrantGates,
     }
 
     fn world(engine: FakeEngine, directory: FakeDirectory) -> World {
@@ -456,6 +593,7 @@ mod tests {
             confirmer: FakeConfirmer::default(),
             owner: FakeOwner::default(),
             cancel: CancelToken::default(),
+            grants: GrantGates::default(),
         }
     }
 
@@ -488,8 +626,14 @@ mod tests {
 
         /// The same, with another directory than the world's.
         fn connect_through(&self, directory: &dyn HostDirectory, query: &HostQuery, owner: &dyn Owner) -> Result<Connected, ConnectFailure> {
-            let connector = Connector { engine: &self.engine, directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer };
+            let connector = Connector { engine: &self.engine, directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer, grants: &self.grants };
             connector.connect(query, owner, &self.cancel)
+        }
+
+        /// The same, with the IAP grace given instead of the real two minutes.
+        fn connect_with_grace(&self, directory: &dyn HostDirectory, query: &HostQuery, owner: &dyn Owner, grace: Grace) -> Result<Connected, ConnectFailure> {
+            let connector = Connector { engine: &self.engine, directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer, grants: &self.grants };
+            connector.connect_within(query, owner, &self.cancel, round_limit, grace)
         }
 
         fn connects(&self) -> usize {
@@ -1090,7 +1234,7 @@ mod tests {
             let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
             let world = world(FakeEngine::new(), if pinned.is_some() { directory.with_pin("web", old.clone()) } else { directory }).deciding(vec![Decision::Trust]);
             let engine = LeavingEngine { cancel: world.cancel.clone(), pinned: pinned.clone() };
-            let connector = Connector { engine: &engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
+            let connector = Connector { engine: &engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer, grants: &world.grants };
             assert_eq!(connector.connect(&web(), &world.owner, &world.cancel).err(), Some(failure(CANCELLED, "The connection was cancelled.")), "{what}");
             assert!(world.confirmer.asked().is_empty(), "{what}: the window was not asked");
             assert!(locked(&world.owner.notices).is_empty(), "{what}: nobody was told to wait for it");
@@ -1098,7 +1242,7 @@ mod tests {
 
             // The window was open when the client left, and its answer is yes.
             let world = self::world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).with_saved_password();
-            let connector = Connector { engine: &world.engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &AnsweringAfterTheClientLeft };
+            let connector = Connector { engine: &world.engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &AnsweringAfterTheClientLeft, grants: &world.grants };
             assert_eq!(connector.connect(&web(), &world.owner, &world.cancel).err(), Some(failure(CANCELLED, "The connection was cancelled.")), "{what}, late yes");
             assert!(world.directory.pins().is_empty(), "{what}: a late yes pins nothing");
         }
@@ -1328,7 +1472,7 @@ mod tests {
         let refused = |text: &str| Some(failure(kinds::HOST_KEY, text));
         let kept_changing = "The host key of web kept changing while Lunport was connecting. Connection refused.";
         let connect = |world: &World, server: &KeysInTurn, query: &str| {
-            let connector = Connector { engine: server, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
+            let connector = Connector { engine: server, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer, grants: &world.grants };
             connector.connect(&HostQuery::Alias(query.into()), &world.owner, &world.cancel).err()
         };
 
@@ -1368,8 +1512,8 @@ mod tests {
     fn a_connect_that_needs_more_rounds_than_it_is_given_ends_with_a_sentence_that_blames_nobody() {
         let new = || world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).with_saved_password().deciding(vec![Decision::Trust]);
         let within = |world: &World, rounds: fn(&Target) -> usize| {
-            let connector = Connector { engine: &world.engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
-            connector.connect_within(&web(), &world.owner, &world.cancel, rounds)
+            let connector = Connector { engine: &world.engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer, grants: &world.grants };
+            connector.connect_within(&web(), &world.owner, &world.cancel, rounds, Grace::default())
         };
         // The first round stops at the host key, which the person confirms; the second gets through.
         let short = new();
@@ -1416,12 +1560,14 @@ mod tests {
         keychain: MemKeychain,
         confirmer: FakeConfirmer,
         owner: FakeOwner,
+        grants: GrantGates,
     }
 
     fn real_world(directory: FakeDirectory, typing: &[&str]) -> RealWorld {
         RealWorld {
             engine: RusshEngine::with_options(EngineOptions { worker_threads: 2, ..EngineOptions::default() }),
             directory,
+            grants: GrantGates::default(),
             keys: FakeKeys::new(),
             keychain: MemKeychain::default(),
             confirmer: FakeConfirmer::default(),
@@ -1431,7 +1577,7 @@ mod tests {
 
     impl RealWorld {
         fn connect(&self) -> Result<Connected, ConnectFailure> {
-            let connector = Connector { engine: &self.engine, directory: &self.directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer };
+            let connector = Connector { engine: &self.engine, directory: &self.directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer, grants: &self.grants };
             connector.connect(&web(), &self.owner, &CancelToken::default())
         }
 
@@ -1502,10 +1648,31 @@ mod tests {
 
     /// A directory that answers like the fake and writes down every target it is asked to prepare (design 2026-10-25: OS Login and PAM
     /// run in `HostDirectory::prepare`, between the resolve and the connect).
+    /// With `need`, it wants that grant until one was requested of it (then `answer`); `grants` are its answers to the requests, in
+    /// order (none left: the grant is given, `receipt`), and `requested` what each request asked for.
     struct Preparing<'a> {
         inner: &'a FakeDirectory,
-        prepared: std::sync::Mutex<Vec<Target>>,
+        prepared: Mutex<Vec<Target>>,
         answer: Result<Prepared, DirectoryError>,
+        need: Option<GrantNeed>,
+        grants: Mutex<VecDeque<Result<GrantReceipt, DirectoryError>>>,
+        requested: Mutex<Vec<(String, u32)>>,
+    }
+
+    impl<'a> Preparing<'a> {
+        fn answering(inner: &'a FakeDirectory, answer: Result<Prepared, DirectoryError>) -> Preparing<'a> {
+            Preparing { inner, prepared: Default::default(), answer, need: None, grants: Default::default(), requested: Default::default() }
+        }
+
+        /// Needs `need`'s grant; once one was requested, the target is prepared as a grant given moments ago.
+        fn needing(inner: &'a FakeDirectory, need: GrantNeed, grants: Vec<Result<GrantReceipt, DirectoryError>>) -> Preparing<'a> {
+            let answer = Ok(Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) });
+            Preparing { inner, prepared: Default::default(), answer, need: Some(need), grants: Mutex::new(grants.into()), requested: Default::default() }
+        }
+
+        fn requested(&self) -> Vec<(String, u32)> {
+            locked(&self.requested).clone()
+        }
     }
 
     impl HostDirectory for Preparing<'_> {
@@ -1525,17 +1692,292 @@ mod tests {
             self.inner.password_account(host)
         }
         fn prepare(&self, target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<Prepared, DirectoryError> {
-            self.prepared.lock().unwrap().push(target.clone());
+            locked(&self.prepared).push(target.clone());
+            if let Some(need) = self.need.as_ref().filter(|_| locked(&self.requested).is_empty()) {
+                return Err(DirectoryError::GrantNeeded(need.clone()));
+            }
             self.answer.clone()
         }
+        fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, _cancel: &CancelToken) -> Result<GrantReceipt, DirectoryError> {
+            locked(&self.requested).push((justification.to_string(), duration_secs));
+            locked(&self.grants).pop_front().unwrap_or_else(|| Ok(receipt(need)))
+        }
+    }
+
+    fn need() -> GrantNeed {
+        GrantNeed {
+            host: HostId::from("id-web"),
+            account: Some("frank@retower.io".into()),
+            project: "knowknow-prod".into(),
+            location: "global".into(),
+            entitlement: "prod-operate".into(),
+            entitlements: vec!["prod-operate".into(), "prod-admin".into()],
+            duration_secs: 1800,
+            justification: Some("restart app-api".into()),
+        }
+    }
+
+    fn receipt(need: &GrantNeed) -> GrantReceipt {
+        let now = SystemTime::now();
+        GrantReceipt { entitlement: need.entitlement.clone(), granted_at: now, active_until: now + Duration::from_secs(1800) }
+    }
+
+    fn pinned_password_web() -> FakeDirectory {
+        FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())
+    }
+
+    /// IAP refusing the tunnel to web with `code`.
+    fn refused(code: u16) -> ConnectError {
+        let hop = FakeDirectory::new().with_host("web", AuthMethod::Password).resolve(&web()).unwrap().hops.remove(0).reference();
+        ConnectError::Tunnel { hop, text: "frank@retower.io is not authorized to tunnel to jumpbox through IAP.".into(), code: Some(code) }
+    }
+
+    /// The person at the terminal who answers only once the test lets them (`release`): a question waits at `ask`, so that another
+    /// connection can line up behind the one asking.
+    struct Held {
+        inner: FakeOwner,
+        released: (Mutex<bool>, Condvar),
+    }
+
+    impl Held {
+        fn answering(replies: Vec<Reply>) -> Held {
+            Held { inner: FakeOwner::answering(replies), released: (Mutex::new(false), Condvar::new()) }
+        }
+
+        fn release(&self) {
+            *locked(&self.released.0) = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    impl Owner for Held {
+        fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<std::time::Instant>) -> Reply {
+            let mut go = locked(&self.released.0);
+            while !*go {
+                go = self.released.1.wait(go).unwrap();
+            }
+            drop(go);
+            self.inner.ask(kind, text, echo, deadline)
+        }
+
+        fn host_key_notice(&self, text: &str) {
+            self.inner.host_key_notice(text);
+        }
+
+        fn banner(&self, text: &str) {
+            self.inner.banner(text);
+        }
+    }
+
+    fn wait_for(what: &str, condition: impl Fn() -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(std::time::Instant::now() < end, "waited 5 s for {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    const GRANT_NOTICE: &str = "Requested a 30-minute prod-operate grant on knowknow-prod; active until ";
+    const IAP_WAITING: &str = "IAP has not seen the grant yet; retrying for up to two minutes.";
+
+    /// Design 2026-10-25 (PAM grant requests): a connection that needs a grant asks the person once, requests what they answered, tells
+    /// the terminal what it got, checks again and connects.
+    #[test]
+    fn a_needed_grant_is_asked_once_requested_noticed_and_then_connected() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password().typing(&["45\nrestart app-api after the deploy"]);
+        let directory = Preparing::needing(&world.directory, need(), vec![]);
+        world.connect_through(&directory, &web(), &world.owner).expect("connects once the grant is active");
+        let asked = world.owner.asked();
+        assert_eq!(asked.len(), 1, "asked once");
+        assert_eq!(asked[0].kind, QuestionKind::Grant);
+        assert!(asked[0].echo);
+        let prompt = GrantPrompt::from_text(&asked[0].text).expect("the question carries the prompt");
+        assert_eq!((prompt.project.as_str(), prompt.entitlement.as_str(), prompt.minutes, prompt.justification.as_deref()), ("knowknow-prod", "prod-operate", 30, Some("restart app-api")));
+        let deadline = asked[0].deadline.expect("the question has a deadline").saturating_duration_since(std::time::Instant::now());
+        assert!(deadline > Duration::from_secs(290) && deadline <= Duration::from_secs(300), "five minutes, not two: {deadline:?}");
+        assert_eq!(directory.requested(), [("restart app-api after the deploy".to_string(), 45 * 60)], "what the person answered, in seconds");
+        let notices = locked(&world.owner.notices).clone();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].starts_with("Requested a 45-minute prod-operate grant on knowknow-prod; active until ") && notices[0].ends_with('.'), "{}", notices[0]);
+        assert_eq!(locked(&directory.prepared).len(), 2, "checked again after the grant");
+        assert_eq!(world.engine.attempts(), 1);
+    }
+
+    #[test]
+    fn a_cancelled_grant_question_fails_with_the_refusal_and_requests_nothing() {
+        for reply in [Reply::Cancelled, Reply::TimedOut, Reply::Answer(zeroize::Zeroizing::new("thirty\nnot a number".to_string()))] {
+            let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password();
+            let owner = FakeOwner::answering(vec![reply]);
+            let directory = Preparing::needing(&world.directory, need(), vec![]);
+            let error = world.connect_through(&directory, &web(), &owner).err().expect("the connect fails");
+            assert_eq!(error, failure(kinds::AUTH, &need().refusal_sentence()));
+            assert!(directory.requested().is_empty(), "nothing was requested");
+            assert_eq!(world.engine.attempts(), 0, "nothing was connected");
+            assert_eq!(owner.asked().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_refused_grant_request_fails_with_its_sentence() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password().typing(&["30\nrestart app-api"]);
+        let sentence = "The prod-operate grant did not become active (state: DENIED).";
+        let directory = Preparing::needing(&world.directory, need(), vec![Err(DirectoryError::Denied(sentence.into()))]);
+        let error = world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails");
+        assert_eq!(error, failure(kinds::AUTH, sentence));
+        assert_eq!(world.engine.attempts(), 0);
+        assert!(locked(&world.owner.notices).is_empty(), "nothing to tell: no grant was had");
+    }
+
+    #[test]
+    fn two_connections_needing_the_same_grant_ask_once_and_both_connect() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password();
+        let directory = Preparing::needing(&world.directory, need(), vec![]);
+        let owner = Held::answering(vec![Reply::Answer(zeroize::Zeroizing::new("30\nrestart app-api".to_string()))]);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| world.connect_through(&directory, &web(), &owner));
+            let second = scope.spawn(|| world.connect_through(&directory, &web(), &owner));
+            wait_for("the second connection to line up behind the question", || world.grants.waiting() == 1);
+            owner.release();
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert!(first.is_ok() && second.is_ok(), "{:?} / {:?}", first.err(), second.err());
+        assert_eq!(owner.inner.asked().len(), 1, "one question for both");
+        assert_eq!(directory.requested().len(), 1, "one request for both");
+        assert_eq!(world.engine.attempts(), 2);
+        assert_eq!(locked(&owner.inner.notices).iter().filter(|notice| notice.starts_with(GRANT_NOTICE)).count(), 1, "the one who asked is told");
+    }
+
+    #[test]
+    fn a_cancelled_question_fails_the_waiting_connection_too() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password();
+        let directory = Preparing::needing(&world.directory, need(), vec![]);
+        let owner = Held::answering(vec![Reply::Cancelled]);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| world.connect_through(&directory, &web(), &owner));
+            let second = scope.spawn(|| world.connect_through(&directory, &web(), &owner));
+            wait_for("the second connection to line up behind the question", || world.grants.waiting() == 1);
+            owner.release();
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let refusal = failure(kinds::AUTH, &need().refusal_sentence());
+        assert_eq!((first.err(), second.err()), (Some(refusal.clone()), Some(refusal)));
+        assert_eq!(owner.inner.asked().len(), 1, "the waiter asked nothing");
+        assert!(directory.requested().is_empty());
+        assert_eq!(world.engine.attempts(), 0);
+    }
+
+    /// The person at the terminal who answers the grant question once the test lets them (`release`), and whose client goes away as
+    /// they answer: the lead's connection is cancelled, and its request fails as a cancelled one does.
+    struct HeldLeaving {
+        released: (Mutex<bool>, Condvar),
+        cancel: CancelToken,
+    }
+
+    impl Owner for HeldLeaving {
+        fn ask(&self, _kind: QuestionKind, _text: &str, _echo: bool, _deadline: Option<std::time::Instant>) -> Reply {
+            let mut go = locked(&self.released.0);
+            while !*go {
+                go = self.released.1.wait(go).unwrap();
+            }
+            drop(go);
+            self.cancel.cancel();
+            Reply::Answer(zeroize::Zeroizing::new("30\nrestart app-api".to_string()))
+        }
+
+        fn host_key_notice(&self, _text: &str) {}
+
+        fn banner(&self, _text: &str) {}
+    }
+
+    /// `wait_for` that never panics while threads may still be waiting on the test: the verdict comes back for after they are joined.
+    fn lined_up(condition: impl Fn() -> bool) -> bool {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        true
+    }
+
+    /// A lead whose own connection was cancelled on the way leaves the connections waiting on it the refusal (they can request a grant
+    /// themselves), not the sentence about a cancellation that was not theirs.
+    #[test]
+    fn a_cancelled_lead_leaves_the_waiting_connection_the_refusal() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password();
+        let directory = Preparing::needing(&world.directory, need(), vec![Err(DirectoryError::Failed("The connection was cancelled.".into()))]);
+        let lead_cancel = CancelToken::default();
+        let leaving = HeldLeaving { released: (Mutex::new(false), Condvar::new()), cancel: lead_cancel.clone() };
+        let (lead, waiter, lined) = std::thread::scope(|scope| {
+            let lead = scope.spawn(|| {
+                let connector = Connector { engine: &world.engine, directory: &directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer, grants: &world.grants };
+                connector.connect(&web(), &leaving, &lead_cancel)
+            });
+            let lined = lined_up(|| world.grants.waiting() == 0 && leaving.released.0.lock().map(|go| !*go).unwrap_or(false) && locked(&directory.prepared).len() == 1);
+            let waiter = scope.spawn(|| world.connect_through(&directory, &web(), &world.owner));
+            let lined = lined && lined_up(|| world.grants.waiting() == 1);
+            *locked(&leaving.released.0) = true;
+            leaving.released.1.notify_all();
+            (lead.join().unwrap(), waiter.join().unwrap(), lined)
+        });
+        assert!(lined, "the lead asked first, then the waiter lined up behind it");
+        assert_eq!(lead.err(), Some(failure(CANCELLED, "The connection was cancelled.")));
+        assert_eq!(waiter.err(), Some(failure(kinds::AUTH, &need().refusal_sentence())));
+        assert!(world.owner.asked().is_empty(), "the waiter asked nothing");
+    }
+
+    /// IAP can take about 1½ minutes to see a grant given moments ago (design 2026-10-25): a 4033 then is tried again every few seconds,
+    /// after one word to the terminal, until the tunnel opens.
+    #[test]
+    fn a_4033_within_the_grace_is_retried_until_the_tunnel_opens() {
+        let world = world(FakeEngine::new().failing_times(2, refused(4033)), pinned_password_web()).with_saved_password();
+        let directory = Preparing::answering(&world.directory, Ok(Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) }));
+        let grace = Grace { span: Duration::from_secs(10), step: Duration::from_millis(5) };
+        world.connect_with_grace(&directory, &web(), &world.owner, grace).expect("connects once IAP sees the grant");
+        assert_eq!(world.engine.attempts(), 3, "two refusals, then the tunnel");
+        assert_eq!(locked(&world.owner.notices).as_slice(), [IAP_WAITING], "said once");
+    }
+
+    #[test]
+    fn the_grace_runs_out_with_the_note() {
+        let note = "frank@retower.io is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.";
+        // No grace at all: the first refusal is the end, and nothing is said about retrying.
+        let world = world(FakeEngine::new().failing_times(5, refused(4033)), pinned_password_web()).with_saved_password();
+        let directory = Preparing::answering(&world.directory, Ok(Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) }));
+        let error = world.connect_with_grace(&directory, &web(), &world.owner, Grace { span: Duration::ZERO, step: Duration::from_millis(1) }).err().expect("fails");
+        assert_eq!(error, failure(kinds::CONNECT, note));
+        assert_eq!(world.engine.attempts(), 1);
+        assert!(locked(&world.owner.notices).is_empty());
+        // A short grace: tried again while it lasts, then the same note.
+        let world = self::world(FakeEngine::new().failing_times(1000, refused(4033)), pinned_password_web()).with_saved_password();
+        let directory = Preparing::answering(&world.directory, Ok(Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) }));
+        let error = world.connect_with_grace(&directory, &web(), &world.owner, Grace { span: Duration::from_millis(60), step: Duration::from_millis(5) }).err().expect("fails");
+        assert_eq!(error, failure(kinds::CONNECT, note));
+        assert!(world.engine.attempts() > 1 && world.engine.attempts() <= 1 + 60 / 5 + 1, "{}", world.engine.attempts());
+        assert_eq!(locked(&world.owner.notices).as_slice(), [IAP_WAITING]);
+        // A grant with no time of its own (an ACTIVE grant PAM did not date) gets the note at once, as before.
+        let world = self::world(FakeEngine::new().failing_times(5, refused(4033)), pinned_password_web()).with_saved_password();
+        let directory = Preparing::answering(&world.directory, Ok(Prepared { recent_grant: true, granted_at: None }));
+        assert_eq!(world.connect_with_grace(&directory, &web(), &world.owner, Grace::default()).err(), Some(failure(kinds::CONNECT, note)));
+        assert_eq!(world.engine.attempts(), 1);
+    }
+
+    #[test]
+    fn a_time_of_day_is_two_digits_each() {
+        let text = local_hhmm(SystemTime::now());
+        assert_eq!(text.len(), 5, "{text}");
+        assert_eq!(text.as_bytes()[2], b':');
+        let (hours, minutes) = text.split_once(':').unwrap();
+        assert!(hours.parse::<u8>().is_ok_and(|h| h < 24) && minutes.parse::<u8>().is_ok_and(|m| m < 60), "{text}");
     }
 
     #[test]
     fn the_connector_prepares_the_target_before_unlocking_it() {
         let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
-        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Ok(Prepared::default()) };
+        let directory = Preparing::answering(&world.directory, Ok(Prepared::default()));
         let connected = world.connect_through(&directory, &web(), &world.owner).expect("connects");
-        let prepared = directory.prepared.lock().unwrap();
+        let prepared = locked(&directory.prepared);
         assert_eq!(prepared.len(), 1, "prepared once, before the connect");
         assert_eq!(prepared[0], connected.target);
     }
@@ -1544,7 +1986,7 @@ mod tests {
     fn a_denied_preparation_is_an_auth_failure_and_nothing_connects() {
         let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
         let sentence = "No active Privileged Access Manager grant for prod-operate on knowknow-prod. Request one and connect again.";
-        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Err(DirectoryError::Denied(sentence.into())) };
+        let directory = Preparing::answering(&world.directory, Err(DirectoryError::Denied(sentence.into())));
         let error = world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails");
         assert_eq!(error, failure(kinds::AUTH, sentence));
         assert_eq!(world.engine.attempts(), 0, "nothing was connected");
@@ -1556,13 +1998,9 @@ mod tests {
     /// after an older grant, stand as the engine said them.
     #[test]
     fn a_tunnel_refused_right_after_a_grant_says_iap_may_not_see_it_yet() {
-        let refused = |code: u16| {
-            let hop = FakeDirectory::new().with_host("web", AuthMethod::Password).resolve(&web()).unwrap().hops.remove(0).reference();
-            ConnectError::Tunnel { hop, text: "frank@retower.io is not authorized to tunnel to jumpbox through IAP.".into(), code: Some(code) }
-        };
         let fails_with = |error: ConnectError, prepared: Prepared| {
             let world = world(FakeEngine::new().failing_with(error), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
-            let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Ok(prepared) };
+            let directory = Preparing::answering(&world.directory, Ok(prepared));
             world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails")
         };
         let bare = "frank@retower.io is not authorized to tunnel to jumpbox through IAP.";

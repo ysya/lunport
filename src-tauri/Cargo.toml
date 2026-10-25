@@ -78,6 +78,7 @@ google-cloud-auth = "1.18"
 google-cloud-gax = "1.15"
 google-cloud-wkt = "1"
 http = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 url = "2"
 # 金鑰保管庫(src/vault/material.rs):解析、解密 OpenSSH 私鑰並簽章。ssh-key 0.6.7 的 RSA 簽章有錯,RSA 改用 rsa 套件;
