@@ -16,7 +16,7 @@ const request: McpPendingRequest = {
 const question: AuthRequest = {
   id: "q1", request_id: "exec1",
   hop: { host_id: "jump-id", alias: "jump", hostname: "hop.invalid", user: "hopuser", port: 2222 },
-  kind: "interactive", text: "<script>server challenge</script>", echo: false, remaining_ms: 1000,
+  kind: "interactive", text: "<script>server challenge</script>", echo: false, remaining_ms: 1000, grant: null,
 };
 const renderAuth = (over: Partial<Parameters<typeof AuthenticationCardView>[0]> = {}) =>
   renderToStaticMarkup(

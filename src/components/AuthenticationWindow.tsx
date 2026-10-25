@@ -1,11 +1,15 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { Eye, EyeOff, KeyRound } from "lucide-react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { Eye, EyeOff, KeyRound, ShieldCheck } from "lucide-react";
 import { DecisionLayout } from "@/components/app/DecisionLayout";
 
 import type { AuthRequest } from "@/bindings/AuthRequest";
 import { armAfterDelay } from "@/lib/hostkey";
 import {
   authRemaining,
+  encodeGrantAnswer,
+  grantAnswerReady,
+  grantFields,
+  MAX_GRANT_MINUTES,
   receiveAuthQuestion,
   sampleClock,
   takeAuthAnswer,
@@ -38,33 +42,91 @@ export function AuthenticationCardView({
   request, busy, armed, remainingMs, answer, abandoned = false, error, onChange, onAnswer,
 }: AuthenticationCardViewProps) {
   const cancel = useRef<HTMLButtonElement>(null);
+  const justification = useRef<HTMLInputElement>(null);
   const answerId = useId();
+  const minutesId = useId();
   const [shown, setShown] = useState(false);
+  // A grant question (design 2026-10-25, PAM grant requests) is Lunport's own, not a server's prompt: it gets the Request-a-grant form.
+  const grant = request.kind === "grant" ? request.grant : null;
+  const isGrant = grant !== null;
   useEffect(() => { setShown(false); }, [request.id]);
-  useEffect(() => { cancel.current?.focus(); }, [request.id]);
+  useEffect(() => { (isGrant ? justification.current : cancel.current)?.focus(); }, [request.id, isGrant]);
   const expired = remainingMs <= 0;
   const inactive = expired || abandoned;
-  const cannotSubmit = busy || !armed || inactive;
+  const cannotSubmit = busy || !armed || inactive || (isGrant && !grantAnswerReady(answer));
+  const fields = grantFields(answer);
   const answerLabel = request.kind === "password" ? "Password" : request.kind === "passphrase" ? "Key passphrase" : "Authentication answer";
+  const seconds = Math.ceil(Math.max(0, remainingMs) / 1000);
+  const meta = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
+  const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (!event.nativeEvent.isComposing && !cannotSubmit) onAnswer(answer);
+  };
+  const over = (
+    <p role="alert" className={busy ? "text-muted-foreground" : "text-destructive"}>
+      {expired ? "This question expired. Previous input was cleared. Start a fresh connection request to retry."
+        : busy ? (isGrant ? "Request sent. Lunport is requesting the grant…" : "Answer cleared. Waiting for the server…")
+        : "This answer was abandoned. Previous input was cleared. Start a fresh connection request to retry."}
+    </p>
+  );
 
   return (
     <DecisionLayout
-      title="SSH authentication"
-      icon={<KeyRound className="size-5" />}
-      meta={`${Math.ceil(Math.max(0, remainingMs) / 1000)}s`}
+      title={isGrant ? "Request a grant" : "SSH authentication"}
+      icon={isGrant ? <ShieldCheck className="size-5" /> : <KeyRound className="size-5" />}
+      meta={meta}
       actions={<>
-        <Button autoFocus ref={cancel} variant="outline" disabled={busy} onClick={() => onAnswer(null)}>Cancel</Button>
-        <Button disabled={cannotSubmit} onClick={() => onAnswer(answer)}>{busy ? "Sending…" : "Submit"}</Button>
+        <Button autoFocus={!isGrant} ref={cancel} variant="outline" disabled={busy} onClick={() => onAnswer(null)}>Cancel</Button>
+        <Button disabled={cannotSubmit} onClick={() => onAnswer(answer)}>
+          {busy ? (isGrant ? "Requesting…" : "Sending…") : isGrant ? "Request" : "Submit"}
+        </Button>
       </>}
-      response={
+      response={isGrant ? (
+      <section aria-label="Grant request" className="space-y-2 text-xs">
+        {inactive ? over : (
+          <>
+          <div className="space-y-1">
+            <Label htmlFor={answerId}>Justification</Label>
+            <Input
+              id={answerId}
+              ref={justification}
+              aria-label="Justification"
+              type="text"
+              value={fields.justification}
+              autoFocus
+              autoComplete="off"
+              maxLength={512}
+              disabled={busy}
+              onChange={event => onChange(encodeGrantAnswer(fields.minutes, event.target.value))}
+              onKeyDown={submitOnEnter}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor={minutesId}>Duration (minutes)</Label>
+            <Input
+              id={minutesId}
+              aria-label="Duration (minutes)"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={MAX_GRANT_MINUTES}
+              step={1}
+              className="w-28"
+              value={fields.minutes}
+              disabled={busy}
+              onChange={event => onChange(encodeGrantAnswer(event.target.value, fields.justification))}
+              onKeyDown={submitOnEnter}
+            />
+          </div>
+          <p className="text-muted-foreground">Requested as you through Privileged Access Manager, for at most what the entitlement allows. The justification is kept for next time.</p>
+          </>
+        )}
+        {error && <p role="alert" className="text-destructive">{error}</p>}
+      </section>
+      ) : (
       <section aria-label="Authentication response" className="space-y-2 text-xs">
-        {inactive ? (
-          <p role="alert" className={busy ? "text-muted-foreground" : "text-destructive"}>
-            {expired ? "This question expired. Previous input was cleared. Start a fresh connection request to retry."
-              : busy ? "Answer cleared. Waiting for the server…"
-              : "This answer was abandoned. Previous input was cleared. Start a fresh connection request to retry."}
-          </p>
-        ) : (
+        {inactive ? over : (
           <>
           <Label htmlFor={answerId}>{answerLabel}</Label>
           <div className="flex gap-2">
@@ -79,11 +141,7 @@ export function AuthenticationCardView({
             spellCheck={false}
             disabled={busy}
             onChange={event => onChange(event.target.value)}
-            onKeyDown={event => {
-              if (event.key !== "Enter") return;
-              event.preventDefault();
-              if (!event.nativeEvent.isComposing && !cannotSubmit) onAnswer(answer);
-            }}
+            onKeyDown={submitOnEnter}
           />
           {!request.echo && <Button variant="outline" size="icon" aria-label={shown ? "Hide answer" : "Show answer"} aria-pressed={shown} disabled={busy} onClick={() => setShown(value => !value)}>{shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>}
           </div>
@@ -92,20 +150,29 @@ export function AuthenticationCardView({
         )}
         {error && <p role="alert" className="text-destructive">{error}</p>}
       </section>
-      }
+      )}
     >
-        <section aria-label="Connection context" className="space-y-1 text-sm">
-          {request.hop ? (
-            <>
-              <p className="font-medium">{revealHidden(request.hop.alias)}</p>
-              <p className="break-all font-mono text-xs text-muted-foreground">{revealHidden(request.hop.user)}@{revealHidden(request.hop.hostname)}:{request.hop.port}</p>
-            </>
-          ) : <p>Server context: Unknown</p>}
-        </section>
-        <div>
-          <p className="mb-1 text-muted-foreground">Server prompt · {revealHidden(request.kind)}</p>
-          <pre className="whitespace-pre-wrap break-all font-sans">{revealHidden(request.text)}</pre>
-        </div>
+        {isGrant ? (
+          <section aria-label="Grant context" className="space-y-1 text-sm">
+            <p>{revealHidden(request.text)}</p>
+            {request.hop && <p className="break-all font-mono text-xs text-muted-foreground">{revealHidden(request.hop.alias)} · {revealHidden(request.hop.user)}@{revealHidden(request.hop.hostname)}:{request.hop.port}</p>}
+          </section>
+        ) : (
+          <>
+          <section aria-label="Connection context" className="space-y-1 text-sm">
+            {request.hop ? (
+              <>
+                <p className="font-medium">{revealHidden(request.hop.alias)}</p>
+                <p className="break-all font-mono text-xs text-muted-foreground">{revealHidden(request.hop.user)}@{revealHidden(request.hop.hostname)}:{request.hop.port}</p>
+              </>
+            ) : <p>Server context: Unknown</p>}
+          </section>
+          <div>
+            <p className="mb-1 text-muted-foreground">Server prompt · {revealHidden(request.kind)}</p>
+            <pre className="whitespace-pre-wrap break-all font-sans">{revealHidden(request.text)}</pre>
+          </div>
+          </>
+        )}
         <details className="text-xs text-muted-foreground">
           <summary className="cursor-pointer">Connection details</summary>
           <div className="mt-2 space-y-1 break-all font-mono">
