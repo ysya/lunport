@@ -276,7 +276,8 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         self.0.password_account(h)
     }
     fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<crate::session::directory::Prepared, crate::session::directory::DirectoryError> {
-        self.0.prepare(target, public_key, cancel)
+        // An AI request asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
+        self.0.prepare(target, public_key, cancel).map_err(crate::session::directory::DirectoryError::for_automation)
     }
 }
 fn credential_reason(error: &str) -> &'static str {

@@ -1,5 +1,5 @@
 //! A broker survives a confirmed cutover; every request uses the current single runtime owner.
-use super::directory::{DirectoryError, HostDirectory, PinnedKey, Prepared};
+use super::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, PinnedKey, Prepared};
 use super::protocol::HostQuery;
 use crate::ssh::{HopRef, HostId, HostKey, Target};
 use crate::sync::record_runtime::RuntimeFormat;
@@ -103,6 +103,18 @@ impl HostDirectory for FormatDirectory {
             }
         };
         directory.prepare(target, public_key, cancel)
+    }
+    fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
+        // The request waits on Google for up to a minute: choose the directory under lifecycle, call it outside, as `prepare` does.
+        let directory = {
+            let _lifecycle = self.lifecycle.lock().unwrap();
+            match (self.mode)() {
+                (RuntimeFormat::Records, _) => self.records.clone(),
+                (RuntimeFormat::Legacy, false) => self.legacy.clone(),
+                _ => return Err(DirectoryError::Unsupported("Choose a workspace or resolve the blocked state before connecting.".into())),
+            }
+        };
+        directory.request_grant(need, justification, duration_secs, cancel)
     }
     fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
         // Records' native reader owns lifecycle while checking its exact saved owner. Never

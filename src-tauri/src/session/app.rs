@@ -136,6 +136,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
     };
     let for_password = app.clone();
+    let for_grant = app.clone();
     let app = app.clone();
     super::record_directory::RecordDirectory::new(sources).with_password_reader(Box::new(move |hop,keychain| {
         crate::sync::engine::with_env(&for_password, |env| {
@@ -156,6 +157,13 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
     ))
     // Google Cloud IAP transports: OS Login and PAM over gcloud's credential files (design 2026-10-25).
     .with_gcp(Box::new(crate::gcp::rest::RestClient::new(Arc::new(crate::gcp::auth::FileStore::from_environment()))))
+    // A grant the person requested from a connection: its justification and duration are the transport's defaults next time.
+    .with_grant_memory(Box::new(move |host, justification, duration_secs| crate::sync::engine::with_env(&for_grant, |env| {
+        let now = env.now();
+        crate::sync::record_runtime::mutate_records(env, |s| crate::sync::transports::remember_grant_request(s, host.as_str(), justification, duration_secs, now).map_err(|e| AppError::Other(e.to_string())))?;
+        env.events.wake();
+        Ok::<_, AppError>(())
+    }).map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))))
 }
 
 /// The temporary directory over the app's ssh_config, sync state and keychain (`ssh_config_directory.rs`).

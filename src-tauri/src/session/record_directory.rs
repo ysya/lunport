@@ -1,5 +1,5 @@
 //! Records adapter for the broker. SyncCore remains the only mutable/persistent owner.
-use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey, Prepared};
+use crate::session::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, PinnedKey, Prepared};
 use crate::session::protocol::HostQuery;
 use crate::gcp::rest::GcpClient;
 use crate::ssh::{AuthMethod, Hop, HopRef, HostId, HostKey, IapTarget, Target, Transport};
@@ -44,7 +44,19 @@ pub struct RecordDirectory {
     password_reader: Option<Box<PasswordReader>>,
     /// Google, for `prepare` (OS Login, PAM); `None` in builds and tests without it.
     gcp: Option<Box<dyn GcpClient>>,
+    /// Where a grant request's justification and duration are kept for next time; `None` forgets them.
+    grant_memory: Option<Box<GrantMemory>>,
 }
+/// When a grant was given, as the broker counts it: its grant time, never ahead of `now` (Google's clock may run ahead); `now` for a
+/// grant still activating; nothing for a grant with no time that is not activating (design 2026-10-25, PAM grant requests).
+fn granted_at(grant: &crate::gcp::pam::Grant, now: SystemTime) -> Option<SystemTime> {
+    match grant.access_grant_time.as_deref().and_then(crate::gcp::pam::parse_rfc3339) {
+        Some(time) => Some(time.min(now)),
+        None if grant.state == "ACTIVATING" => Some(now),
+        None => None,
+    }
+}
+
 fn repository_error(error: RepositoryError) -> DirectoryError {
     match error {
         RepositoryError::Validation(RecordValidationError::HostNotFound(id)) => {
@@ -81,6 +93,9 @@ pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryErro
         pinned_at_ms: pin.pinned_at_ms,
     })
 }
+/// Writes what a grant request taught a host's transport: `(host, justification, duration_secs)` (design 2026-10-25, PAM grant requests).
+pub type GrantMemory = dyn Fn(&HostId, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
+
 impl RecordDirectory {
     pub fn new(sources: RecordSources) -> Self {
         Self {
@@ -88,6 +103,64 @@ impl RecordDirectory {
             confirmed_pin: None,
             password_reader: None,
             gcp: None,
+            grant_memory: None,
+        }
+    }
+    pub(crate) fn with_grant_memory(mut self, remember: Box<GrantMemory>) -> Self {
+        self.grant_memory = Some(remember);
+        self
+    }
+
+    /// `HostDirectory::request_grant` with the pacing given (the trait method uses the design's 2 s and 60 s; tests hurry). A grant that
+    /// appeared since `prepare` looked (another connection, the panel) is used instead of requested: PAM refuses a second request with
+    /// the same scope. What the person gave is remembered on the transport for next time, whether or not the memory can be written.
+    pub(crate) fn request_grant_with(
+        &self,
+        need: &GrantNeed,
+        justification: &str,
+        duration_secs: u32,
+        cancel: &super::connect::CancelToken,
+        poll_every: Duration,
+        wait: Duration,
+    ) -> Result<GrantReceipt, DirectoryError> {
+        let cancelled = || DirectoryError::Failed("The connection was cancelled.".into());
+        let denied = |error: crate::gcp::rest::GcpError| DirectoryError::Denied(error.to_string());
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
+        let account = need.account.as_deref();
+        let found = gcp.grants(account, &need.project, &need.location, &need.entitlement).map_err(denied)?;
+        let mut grant = match crate::gcp::pam::in_flight(&found).into_iter().max_by_key(|grant| granted_at(grant, SystemTime::now()).unwrap_or(SystemTime::UNIX_EPOCH)) {
+            Some(existing) => existing.clone(),
+            None => {
+                let created = gcp.create_grant(account, &need.project, &need.location, &need.entitlement, duration_secs, justification).map_err(denied)?;
+                if let Some(remember) = &self.grant_memory {
+                    let _ = remember(&need.host, justification, duration_secs);
+                }
+                created
+            }
+        };
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+            if grant.state == "ACTIVE" {
+                let now = SystemTime::now();
+                let granted_at = granted_at(&grant, now).unwrap_or(now);
+                let length = grant.until().and_then(|until| until.duration_since(granted_at).ok()).unwrap_or(Duration::from_secs(u64::from(duration_secs)));
+                return Ok(GrantReceipt { entitlement: need.entitlement.clone(), granted_at, active_until: granted_at + length });
+            }
+            if grant.is_final() {
+                let why = if grant.state == "APPROVAL_AWAITED" { "; Lunport does not wait for an approver" } else { "" };
+                return Err(DirectoryError::Denied(format!("The {} grant did not become active (state: {}){why}.", need.entitlement, grant.state)));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(DirectoryError::Denied(format!("The {} grant did not become active within a minute (state: {}); try connecting again.", need.entitlement, grant.state)));
+            }
+            std::thread::sleep(poll_every);
+            grant = gcp.get_grant(account, &grant.name).map_err(denied)?;
         }
     }
     pub(crate) fn with_password_reader(mut self, read: Box<PasswordReader>) -> Self {
@@ -297,21 +370,26 @@ impl HostDirectory for RecordDirectory {
                 let current = crate::gcp::pam::in_flight(&grants);
                 if !current.is_empty() {
                     in_flight = true;
-                    // IAP can take about 1½ minutes to see a grant: the broker says so if IAP refuses with 4033 right after this one. A
-                    // grant still activating is as fresh as one just given.
-                    prepared.recent_grant = current
-                        .iter()
-                        .any(|grant| grant.state == "ACTIVATING" || crate::gcp::pam::granted_within(grant, SystemTime::now(), Duration::from_secs(120)));
+                    // IAP can take about 1½ minutes to see a grant: the broker waits on IAP, and says so, after a grant this young. The
+                    // freshest in-flight grant dates it; one still activating, or timed by a clock ahead of this one, is as fresh as now.
+                    let now = SystemTime::now();
+                    let dated = current.iter().filter_map(|grant| granted_at(grant, now)).max();
+                    prepared.recent_grant = dated.is_some_and(|granted| now.duration_since(granted).map_or(true, |age| age <= Duration::from_secs(120)));
+                    prepared.granted_at = dated;
                     break;
                 }
             }
             if !in_flight {
-                return Err(DirectoryError::Denied(format!(
-                    "No active Privileged Access Manager grant for {} on {project}. Request one (for example gcloud pam grants create --entitlement={} --requested-duration=30m --justification=\"…\" --location={} --project={project}) and connect again.",
-                    pam.entitlements.join(" or "),
-                    pam.entitlements[0],
-                    pam.location
-                )));
+                return Err(DirectoryError::GrantNeeded(GrantNeed {
+                    host: hop.id.clone(),
+                    account: account.clone(),
+                    project: project.clone(),
+                    location: pam.location.clone(),
+                    entitlement: pam.entitlements[0].clone(),
+                    entitlements: pam.entitlements.clone(),
+                    duration_secs: pam.duration_secs,
+                    justification: pam.justification.clone(),
+                }));
             }
             if cancel.is_cancelled() {
                 return Err(cancelled());
@@ -343,6 +421,9 @@ impl HostDirectory for RecordDirectory {
             }
         }
         Ok(prepared)
+    }
+    fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
+        self.request_grant_with(need, justification, duration_secs, cancel, Duration::from_secs(2), Duration::from_secs(60))
     }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?

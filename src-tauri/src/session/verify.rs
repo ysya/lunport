@@ -99,7 +99,8 @@ impl HostDirectory for ProbeDirectory<'_> {
         self.inner.password_account(id)
     }
     fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<super::directory::Prepared, DirectoryError> {
-        self.inner.prepare(target, public_key, cancel)
+        // A fingerprint check asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
+        self.inner.prepare(target, public_key, cancel).map_err(DirectoryError::for_automation)
     }
 }
 
