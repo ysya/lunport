@@ -981,14 +981,65 @@ pub(super) fn metadata(
         p.user.clone()
     };
     let safe = |s: &str| crate::session::auth::printable(s).replace(['\n', '\t'], "?");
+    // The host's Google Cloud IAP transport, when it has one (design 2026-10-26, AI edits): what the client would change.
+    let transport = crate::sync::transports::get(state, &view.host.id).map(|transport| transport_view(&transport));
     Ok(
-        json!({"id":view.host.id,"alias":safe(&p.alias),"hostname":safe(&p.hostname),"user":safe(&user),"port":p.port,"auth":p.auth,"key_id":p.key_id,"jump_ids":p.jump,"tags":p.tags.iter().map(|t|safe(t)).collect::<Vec<_>>(),"scope":view.host.scope,"group_path":path.iter().rev().map(|g|json!({"id":g.id,"name":safe(&g.payload.name)})).collect::<Vec<_>>(),"inherited_from":view.inherited_from}),
+        json!({"id":view.host.id,"alias":safe(&p.alias),"hostname":safe(&p.hostname),"user":safe(&user),"port":p.port,"auth":p.auth,"key_id":p.key_id,"jump_ids":p.jump,"tags":p.tags.iter().map(|t|safe(t)).collect::<Vec<_>>(),"scope":view.host.scope,"group_path":path.iter().rev().map(|g|json!({"id":g.id,"name":safe(&g.payload.name)})).collect::<Vec<_>>(),"inherited_from":view.inherited_from,"transport":transport}),
     )
+}
+
+/// A transport as the client reads it: its connection settings and the PAM check's shape, never the justification the person last
+/// sent (that is theirs; the client sends its own when it requests).
+pub(super) fn transport_view(transport: &crate::sync::transports::HostTransport) -> Value {
+    let crate::sync::transports::TransportKind::GcpIap { project, zone, instance, interface, account, os_login, pam } = &transport.kind;
+    json!({
+        "project": project,
+        "zone": zone,
+        "instance": instance,
+        "interface": interface,
+        "account": account,
+        "os_login": os_login,
+        "pam": pam.as_ref().map(|pam| json!({"entitlements": pam.entitlements, "location": pam.location, "duration_minutes": pam.duration_secs / 60})),
+    })
 }
 
 #[cfg(test)]
 mod behavior_tests {
     use super::*;
+
+    /// Design 2026-10-26 (AI edits): the host view the AI reads carries the host's transport, so the client can see what it would
+    /// change; the justification the person last sent stays theirs.
+    #[test]
+    fn the_host_view_carries_the_transport_without_its_justification() {
+        use crate::sync::record_repository as repo;
+        use crate::sync::records_v3::{HostScope, SyncStateV3};
+        use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
+        let state: SyncStateV3 = serde_json::from_value(json!({"version":4,"device_id":"d".repeat(32),"device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap();
+        let payload = serde_json::from_value(json!({"schema":2,"alias":"jumpbox-prod","hostname":"10.20.0.8","user":"frank","auth":"password"})).unwrap();
+        let state = repo::create_host(&state, "0000000000000001", HostScope::Local, payload, 2).unwrap();
+        let without = metadata(&state, &repo::get_host(&state, "0000000000000001").unwrap()).unwrap();
+        assert!(without.as_object().unwrap().contains_key("transport"), "{without}");
+        assert_eq!(without["transport"], Value::Null);
+        let transport = HostTransport {
+            host_id: "0000000000000001".into(),
+            kind: TransportKind::GcpIap {
+                project: "knowknow-prod".into(),
+                zone: "asia-east1-b".into(),
+                instance: "jumpbox".into(),
+                interface: "nic0".into(),
+                account: Some("frank@retower.io".into()),
+                os_login: false,
+                pam: Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into(), duration_secs: 1800, justification: Some("restart app-api".into()) }),
+            },
+        };
+        let state = transports::set(&state, "0000000000000001", None, Some(transport), 3).unwrap();
+        let with = metadata(&state, &repo::get_host(&state, "0000000000000001").unwrap()).unwrap();
+        assert_eq!(
+            with["transport"],
+            json!({"project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox","interface":"nic0","account":"frank@retower.io","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"],"location":"global","duration_minutes":30}})
+        );
+        assert!(!with.to_string().contains("restart app-api"), "the justification is the person's, not the client's");
+    }
     use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
     use crate::ssh::{
         fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods},
