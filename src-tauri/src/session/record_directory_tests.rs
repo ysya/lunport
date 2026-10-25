@@ -550,3 +550,252 @@ fn a_later_pin_approval_cannot_authorize_a_password_for_an_in_flight_old_server_
     assert!(!directory.password_authorized(&hop, Some(&original)).unwrap());
     assert!(directory.password_authorized(&hop, Some(&replacement)).unwrap());
 }
+
+/// Google Cloud IAP transports (design 2026-10-25): the first hop's transport, and what `prepare` does with OS Login and PAM.
+mod gcp_transport {
+    use super::*;
+    use crate::gcp::oslogin::{LoginProfile, PosixAccount};
+    use crate::gcp::pam::Grant;
+    use crate::gcp::rest::{GcpClient, GcpError};
+    use crate::session::connect::CancelToken;
+    use crate::ssh::{IapTarget, Transport};
+    use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
+
+    const ACCOUNT: &str = "frank@retower.io";
+    const LINE: &str = test_keys::PLAIN_PUBLIC;
+
+    /// A scripted Google: one login profile, optionally another one after an import, the grants of every entitlement, and the calls made.
+    #[derive(Default)]
+    struct FakeGcp {
+        profile: Mutex<LoginProfile>,
+        after_import: Mutex<Option<LoginProfile>>,
+        grants: Mutex<Vec<Grant>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    struct Handle(Arc<FakeGcp>);
+
+    impl GcpClient for Handle {
+        fn login_profile(&self, account: Option<&str>, project: &str) -> Result<LoginProfile, GcpError> {
+            self.0.calls.lock().unwrap().push(format!("profile {} {project}", account.unwrap_or("-")));
+            Ok(self.0.profile.lock().unwrap().clone())
+        }
+        fn import_ssh_public_key(&self, account: Option<&str>, project: &str, key_line: &str) -> Result<LoginProfile, GcpError> {
+            self.0.calls.lock().unwrap().push(format!("import {} {project} {key_line}", account.unwrap_or("-")));
+            let after = self.0.after_import.lock().unwrap().clone();
+            Ok(after.unwrap_or_else(|| self.0.profile.lock().unwrap().clone()))
+        }
+        fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
+            self.0.calls.lock().unwrap().push(format!("grants {} {project} {location} {entitlement}", account.unwrap_or("-")));
+            Ok(self.0.grants.lock().unwrap().clone())
+        }
+    }
+
+    fn linux(username: &str, keys: &[&str]) -> LoginProfile {
+        LoginProfile {
+            posix_accounts: vec![PosixAccount { username: username.into(), primary: true, operating_system_type: Some("LINUX".into()) }],
+            ssh_public_keys: keys.iter().map(|key| key.to_string()).collect(),
+        }
+    }
+
+    fn grant(state: &str) -> Grant {
+        Grant { name: format!("grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: None }
+    }
+
+    fn transport(project: &str, host: &str, os_login: bool, pam: Option<PamCheck>) -> HostTransport {
+        HostTransport {
+            host_id: host.into(),
+            kind: TransportKind::GcpIap {
+                project: project.into(),
+                zone: "asia-east1-b".into(),
+                instance: "jumpbox".into(),
+                interface: "nic0".into(),
+                account: Some(ACCOUNT.into()),
+                os_login,
+                pam,
+            },
+        }
+    }
+
+    fn prod_pam() -> Option<PamCheck> {
+        Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into() })
+    }
+
+    /// GATE as a key host (its key available on this device) logging in as `user`, with `transport` when given.
+    fn gate_state(user: &str, transport: Option<HostTransport>) -> SyncStateV3 {
+        let mut gate = payload("gate");
+        gate.auth = AuthKind::Key;
+        gate.key_id = Some(KEY.into());
+        gate.user = user.into();
+        let mut s = add(&state(), GATE, gate);
+        let pubkey = ssh_key::PublicKey::from_openssh(LINE).unwrap();
+        s.local.keys.insert(
+            KEY.into(),
+            LocalKeyMetadata {
+                vault_id: KEY.into(),
+                public: KeySlotPayload {
+                    schema: 2,
+                    name: "key".into(),
+                    public_key: LINE.into(),
+                    fingerprint: pubkey.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+                    key_type: pubkey.algorithm().to_string(),
+                    has_passphrase: false,
+                    created_at_ms: 1,
+                    origin_device_id: "a".repeat(32),
+                },
+            },
+        );
+        match transport {
+            Some(transport) => transports::set(&s, GATE, None, Some(transport), 1).unwrap(),
+            None => s,
+        }
+    }
+
+    fn directory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> RecordDirectory {
+        let (d, _, _) = fixture(s, true, true);
+        d.with_gcp(Box::new(Handle(Arc::clone(gcp))))
+    }
+
+    fn public_key(key_id: &str) -> Option<String> {
+        (key_id == KEY).then(|| LINE.to_string())
+    }
+
+    fn gate() -> HostQuery {
+        HostQuery::Id(GATE.into())
+    }
+
+    fn calls(gcp: &FakeGcp) -> Vec<String> {
+        gcp.calls.lock().unwrap().clone()
+    }
+
+    fn denied(error: DirectoryError) -> String {
+        match error {
+            DirectoryError::Denied(text) => text,
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_transport_on_the_first_hop_becomes_an_iap_target() {
+        let gcp = Arc::new(FakeGcp::default());
+        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let t = d.resolve(&gate()).unwrap();
+        assert_eq!(
+            t.hops[0].transport,
+            Transport::GcpIap(IapTarget {
+                project: "eng-dev-396409".into(),
+                zone: "asia-east1-b".into(),
+                instance: "jumpbox".into(),
+                interface: "nic0".into(),
+                account: Some(ACCOUNT.into()),
+                url_root: None,
+            })
+        );
+        assert_eq!(t.hops[0].user, "frank_retower_io", "resolving leaves the saved user alone");
+        assert!(calls(&gcp).is_empty(), "resolving talks to nobody");
+        let d = directory(gate_state("deploy", None), &gcp);
+        assert_eq!(d.resolve(&gate()).unwrap().hops[0].transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn a_transport_on_a_jump_target_is_refused() {
+        let mut s = gate_state("deploy", None);
+        let mut web = payload("web");
+        web.jump = vec![GATE.into()];
+        s = add(&s, WEB, web);
+        s = transports::set(&s, WEB, None, Some(transport("eng-dev-396409", WEB, false, None)), 2).unwrap();
+        let d = directory(s, &Arc::new(FakeGcp::default()));
+        assert_eq!(
+            d.resolve(&HostQuery::Id(WEB.into())).unwrap_err(),
+            DirectoryError::Unsupported("web connects through Google Cloud IAP and cannot be reached through a jump host.".into())
+        );
+    }
+
+    #[test]
+    fn prepare_imports_a_missing_key_and_accepts_a_matching_username() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.profile.lock().unwrap() = linux("frank_retower_io", &[]);
+        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} eng-dev-396409"), format!("import {ACCOUNT} eng-dev-396409 {LINE}")]);
+    }
+
+    #[test]
+    fn prepare_skips_the_import_when_the_key_is_registered() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.profile.lock().unwrap() = linux("frank_retower_io", &[&format!("{LINE} frank@retower.pub")]);
+        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} eng-dev-396409")]);
+    }
+
+    #[test]
+    fn prepare_imports_the_key_when_the_profile_has_no_posix_account_and_uses_the_returned_profile() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.after_import.lock().unwrap() = Some(linux("frank_retower_io", &[LINE]));
+        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} eng-dev-396409"), format!("import {ACCOUNT} eng-dev-396409 {LINE}")]);
+        let gcp = Arc::new(FakeGcp::default());
+        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        assert_eq!(
+            denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err()),
+            "OS Login has no POSIX account for frank@retower.io in eng-dev-396409; the project may not have OS Login enabled."
+        );
+    }
+
+    #[test]
+    fn prepare_refuses_a_username_that_differs_from_os_login() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.profile.lock().unwrap() = linux("frank_retower_io", &[LINE]);
+        let d = directory(gate_state("frank", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        assert_eq!(
+            denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err()),
+            "OS Login names frank@retower.io frank_retower_io on eng-dev-396409, but the host is saved with user frank; update the host (Use OS Login username)."
+        );
+    }
+
+    #[test]
+    fn prepare_refuses_without_an_in_flight_pam_grant_and_passes_with_one() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("DENIED")];
+        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let text = denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err());
+        assert!(text.starts_with("No active Privileged Access Manager grant for prod-operate or prod-admin on knowknow-prod."), "{text}");
+        assert!(
+            text.contains("gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=knowknow-prod"),
+            "{text}"
+        );
+        assert_eq!(calls(&gcp), vec![format!("grants {ACCOUNT} knowknow-prod global prod-operate"), format!("grants {ACCOUNT} knowknow-prod global prod-admin")]);
+        *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("ACTIVE")];
+        d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+    }
+
+    #[test]
+    fn prepare_does_nothing_for_a_direct_host_and_without_a_client() {
+        let gcp = Arc::new(FakeGcp::default());
+        let d = directory(gate_state("deploy", None), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+        assert!(calls(&gcp).is_empty());
+
+        let (d, _, _) = fixture(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), true, true);
+        let target = d.resolve(&gate()).unwrap();
+        assert_eq!(
+            d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err(),
+            DirectoryError::Failed("Google Cloud access is not configured in this build.".into())
+        );
+
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        assert_eq!(d.prepare(&target, &public_key, &cancel).unwrap_err(), DirectoryError::Failed("The connection was cancelled.".into()));
+        assert!(calls(&gcp).is_empty(), "a cancelled connect talks to nobody");
+    }
+}

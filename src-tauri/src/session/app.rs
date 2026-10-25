@@ -154,6 +154,8 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
             .map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))
         },
     ))
+    // Google Cloud IAP transports: OS Login and PAM over gcloud's credential files (design 2026-10-25).
+    .with_gcp(Box::new(crate::gcp::rest::RestClient::new(Arc::new(crate::gcp::auth::FileStore::from_environment()))))
 }
 
 /// The temporary directory over the app's ssh_config, sync state and keychain (`ssh_config_directory.rs`).

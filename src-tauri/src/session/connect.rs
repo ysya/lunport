@@ -161,7 +161,11 @@ fn password_abandoned(hop: &HopRef, target: &Target) -> ConnectFailure {
 }
 
 fn directory_failure(error: DirectoryError) -> ConnectFailure {
-    ConnectFailure::new(kinds::HOST, error.to_string())
+    match error {
+        // The host is fine; the account may not connect as it is saved (no PAM grant, OS Login disagrees): a login failure.
+        DirectoryError::Denied(text) => ConnectFailure::new(kinds::AUTH, text),
+        other => ConnectFailure::new(kinds::HOST, other.to_string()),
+    }
 }
 
 /// What a connect has done for each host so far, for the things it does only so often. A pass of the loop that is not the last is one
@@ -199,6 +203,8 @@ impl Connector<'_> {
             return Err(ConnectFailure::cancelled());
         }
         let mut target = self.directory.resolve(query).map_err(directory_failure)?;
+        // What the outside world has to say before anything connects (a PAM grant, OS Login): the target is read, never changed.
+        self.directory.prepare(&target, &|key_id| self.keys.key(key_id).map(|key| key.public_key), cancel).map_err(directory_failure)?;
         let auth = BrokerAuth::new(self.keys, self.keychain, owner, self.directory);
         auth.unlock(&target).map_err(|text| ConnectFailure::new(kinds::AUTH, text))?;
         let policy = PinPolicy::from_target(&target);
@@ -1484,5 +1490,59 @@ mod tests {
         let connected = world.connects();
         assert_eq!(world.owner.questions(), ["(deploy@web) Password: ", "deploy@web's password: "]);
         assert_eq!(connected.target.hops[0].auth, AuthMethod::Password);
+    }
+
+    /// A directory that answers like the fake and writes down every target it is asked to prepare (design 2026-10-25: OS Login and PAM
+    /// run in `HostDirectory::prepare`, between the resolve and the connect).
+    struct Preparing<'a> {
+        inner: &'a FakeDirectory,
+        prepared: std::sync::Mutex<Vec<Target>>,
+        answer: Option<DirectoryError>,
+    }
+
+    impl HostDirectory for Preparing<'_> {
+        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+            self.inner.resolve(query)
+        }
+        fn pinned(&self, host: &HostId) -> Result<Option<crate::session::directory::PinnedKey>, DirectoryError> {
+            self.inner.pinned(host)
+        }
+        fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
+            self.inner.pin(host, key)
+        }
+        fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+            self.inner.replace_pin(host, previous, key)
+        }
+        fn password_account(&self, host: &HostId) -> String {
+            self.inner.password_account(host)
+        }
+        fn prepare(&self, target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<(), DirectoryError> {
+            self.prepared.lock().unwrap().push(target.clone());
+            match &self.answer {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn the_connector_prepares_the_target_before_unlocking_it() {
+        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
+        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: None };
+        let connected = world.connect_through(&directory, &web(), &world.owner).expect("connects");
+        let prepared = directory.prepared.lock().unwrap();
+        assert_eq!(prepared.len(), 1, "prepared once, before the connect");
+        assert_eq!(prepared[0], connected.target);
+    }
+
+    #[test]
+    fn a_denied_preparation_is_an_auth_failure_and_nothing_connects() {
+        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
+        let sentence = "No active Privileged Access Manager grant for prod-operate on knowknow-prod. Request one and connect again.";
+        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Some(DirectoryError::Denied(sentence.into())) };
+        let error = world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails");
+        assert_eq!(error, failure(kinds::AUTH, sentence));
+        assert_eq!(world.engine.attempts(), 0, "nothing was connected");
+        assert!(world.owner.asked().is_empty(), "nobody was asked for anything");
     }
 }

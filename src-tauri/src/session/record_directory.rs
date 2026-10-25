@@ -1,7 +1,9 @@
 //! Records adapter for the broker. SyncCore remains the only mutable/persistent owner.
 use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey};
 use crate::session::protocol::HostQuery;
-use crate::ssh::{AuthMethod, Hop, HopRef, HostId, HostKey, Target};
+use crate::gcp::rest::GcpClient;
+use crate::ssh::{AuthMethod, Hop, HopRef, HostId, HostKey, IapTarget, Target, Transport};
+use crate::sync::transports::{self, HostTransport, TransportKind};
 use crate::sync::record_repository::{
     self as repo, HostEndpoint, HostReadiness, HostView, KeyView, RepositoryError,
 };
@@ -40,6 +42,8 @@ pub struct RecordDirectory {
     sources: RecordSources,
     confirmed_pin: Option<Box<ConfirmedPin>>,
     password_reader: Option<Box<PasswordReader>>,
+    /// Google, for `prepare` (OS Login, PAM); `None` in builds and tests without it.
+    gcp: Option<Box<dyn GcpClient>>,
 }
 fn repository_error(error: RepositoryError) -> DirectoryError {
     match error {
@@ -83,6 +87,7 @@ impl RecordDirectory {
             sources,
             confirmed_pin: None,
             password_reader: None,
+            gcp: None,
         }
     }
     pub(crate) fn with_password_reader(mut self, read: Box<PasswordReader>) -> Self {
@@ -91,6 +96,10 @@ impl RecordDirectory {
     }
     pub(crate) fn with_confirmed_pin(mut self, pin: Box<ConfirmedPin>) -> Self {
         self.confirmed_pin = Some(pin);
+        self
+    }
+    pub(crate) fn with_gcp(mut self, gcp: Box<dyn GcpClient>) -> Self {
+        self.gcp = Some(gcp);
         self
     }
     fn host(&self, id: &HostId) -> Result<HostView, DirectoryError> {
@@ -232,6 +241,17 @@ impl RecordDirectory {
             }
             hops.push(hop);
         }
+        // A device-local transport (design 2026-10-25) replaces the first hop's TCP connection. It cannot carry a later hop, which is
+        // reached through the hop before it.
+        for (index, hop) in hops.iter_mut().enumerate() {
+            let Some(HostTransport { kind: TransportKind::GcpIap { project, zone, instance, interface, account, .. }, .. }) = transports::get(&state, hop.id.as_str()) else {
+                continue;
+            };
+            if index > 0 {
+                return Err(DirectoryError::Unsupported(format!("{} connects through Google Cloud IAP and cannot be reached through a jump host.", hop.alias)));
+            }
+            hop.transport = Transport::GcpIap(IapTarget { project, zone, instance, interface, account, url_root: None });
+        }
         Ok(Target { hops })
     }
 }
@@ -244,6 +264,77 @@ impl HostDirectory for RecordDirectory {
     }
     fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
         self.resolve_material(query, false, true)
+    }
+    /// For a first hop through Google Cloud IAP (design 2026-10-25): the PAM grant check, then OS Login. The key is registered when the
+    /// profile lacks it or has no POSIX account yet (`gcloud compute ssh` does the same; the import creates the account), and the
+    /// profile's username must be the one the host is saved with: nothing here changes the target, so the identity checks that compare
+    /// the hop's user keep their meaning.
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<(), DirectoryError> {
+        let Some(hop) = target.hops.first() else { return Ok(()) };
+        if !matches!(hop.transport, Transport::GcpIap(_)) {
+            return Ok(());
+        }
+        let state = (self.sources.snapshot)()?;
+        let Some(HostTransport { kind: TransportKind::GcpIap { project, account, os_login, pam, .. }, .. }) = transports::get(&state, hop.id.as_str()) else {
+            return Ok(());
+        };
+        if !os_login && pam.is_none() {
+            return Ok(());
+        }
+        let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
+        let cancelled = || DirectoryError::Failed("The connection was cancelled.".into());
+        let denied = |error: crate::gcp::rest::GcpError| DirectoryError::Denied(error.to_string());
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        let who = account.as_deref().unwrap_or("the active gcloud account");
+        if let Some(pam) = &pam {
+            let mut in_flight = false;
+            for entitlement in &pam.entitlements {
+                let grants = gcp.grants(account.as_deref(), &project, &pam.location, entitlement).map_err(denied)?;
+                if !crate::gcp::pam::in_flight(&grants).is_empty() {
+                    in_flight = true;
+                    break;
+                }
+            }
+            if !in_flight {
+                return Err(DirectoryError::Denied(format!(
+                    "No active Privileged Access Manager grant for {} on {project}. Request one (for example gcloud pam grants create --entitlement={} --requested-duration=30m --justification=\"…\" --location={} --project={project}) and connect again.",
+                    pam.entitlements.join(" or "),
+                    pam.entitlements[0],
+                    pam.location
+                )));
+            }
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+        }
+        if os_login {
+            let mut profile = gcp.login_profile(account.as_deref(), &project).map_err(denied)?;
+            if let AuthMethod::Key { key_id } = &hop.auth {
+                if let Some(line) = public_key(key_id) {
+                    if profile.username().is_none() || !profile.has_key(&line) {
+                        if cancel.is_cancelled() {
+                            return Err(cancelled());
+                        }
+                        profile = gcp.import_ssh_public_key(account.as_deref(), &project, &line).map_err(denied)?;
+                    }
+                }
+            }
+            match profile.username() {
+                None => {
+                    return Err(DirectoryError::Denied(format!("OS Login has no POSIX account for {who} in {project}; the project may not have OS Login enabled.")));
+                }
+                Some(name) if name != hop.user => {
+                    return Err(DirectoryError::Denied(format!(
+                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; update the host (Use OS Login username).",
+                        hop.user
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
     }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?
