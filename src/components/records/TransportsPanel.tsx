@@ -1,3 +1,4 @@
+import "./transports.css";
 import { useRef, useState } from "react";
 import { Cloud, LoaderCircle, PencilLine, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -92,7 +93,7 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
   const problem = draft ? transportProblem(draft) : null;
 
   return (
-    <div className="space-y-5">
+    <div className="transports-panel space-y-5">
       <PageHeader
         title="Google Cloud"
         count={transports.length}
@@ -126,8 +127,8 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
               <tr>
                 <th className="px-4 py-3 font-medium">Host</th>
                 <th className="px-4 py-3 font-medium">Tunnel</th>
-                <th className="px-4 py-3 font-medium">Account</th>
-                <th className="px-4 py-3 font-medium">Checks</th>
+                <th className="transport-wide px-4 py-3 font-medium">Account</th>
+                <th className="transport-wide px-4 py-3 font-medium">Checks</th>
                 <th className="px-4 py-3">
                   <span className="sr-only">Actions</span>
                 </th>
@@ -153,9 +154,13 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
                         {transportLabel(transport)}
                       </span>
                       <span className="mt-1 block text-xs text-muted-foreground">interface {transport.kind.interface}</span>
+                      {/* On a narrow panel the Account and Checks columns fold into this line. */}
+                      <span className="transport-compact mt-1 text-xs text-muted-foreground">
+                        {transport.kind.account ?? "gcloud's active account"} · {checks.length ? checks.join(" · ") : "no checks"}
+                      </span>
                     </td>
-                    <td className="px-4 py-3 text-xs">{transport.kind.account ?? "gcloud's active account"}</td>
-                    <td className="px-4 py-3 text-xs">{checks.length ? checks.join(" · ") : "None"}</td>
+                    <td className="transport-wide px-4 py-3 text-xs">{transport.kind.account ?? "gcloud's active account"}</td>
+                    <td className="transport-wide px-4 py-3 text-xs">{checks.length ? checks.join(" · ") : "None"}</td>
                     <td className="px-3 py-3">
                       <div className="flex items-center justify-end gap-1">
                         <Button size="icon-sm" variant="ghost" aria-label={`Edit the transport of ${host?.payload.alias ?? transport.host_id}`} disabled={busy} onClick={() => edit(transport)}>
