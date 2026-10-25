@@ -8,6 +8,13 @@ use std::fmt;
 use super::protocol::HostQuery;
 use crate::ssh::{HostId, HostKey, HopRef, Target};
 
+/// What `HostDirectory::prepare` learned that the broker needs to explain a refusal (design 2026-10-25): `recent_grant` is a Privileged
+/// Access Manager grant that became active within the last two minutes, which IAP can take about 1½ minutes to see.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Prepared {
+    pub recent_grant: bool,
+}
+
 /// A pinned host key and when it was pinned (milliseconds since the Unix epoch).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedKey {
@@ -71,8 +78,8 @@ pub trait HostDirectory: Send + Sync {
     /// check). Reads `target`, changes nothing, may wait on the network for a while; called on the broker's thread between the resolve and
     /// the connect, never while a lock is held. `public_key` is the vault's OpenSSH public line for a key id. The default does nothing: a
     /// directory without transports has nothing to settle.
-    fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &super::connect::CancelToken) -> Result<(), DirectoryError> {
-        Ok(())
+    fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
+        Ok(Prepared::default())
     }
 
     /// Handshake-only identity verification must not require destination login credentials.

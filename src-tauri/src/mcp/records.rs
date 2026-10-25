@@ -275,7 +275,7 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn password_account(&self, h: &crate::ssh::HostId) -> String {
         self.0.password_account(h)
     }
-    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<(), crate::session::directory::DirectoryError> {
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<crate::session::directory::Prepared, crate::session::directory::DirectoryError> {
         self.0.prepare(target, public_key, cancel)
     }
 }

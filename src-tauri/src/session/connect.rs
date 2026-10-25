@@ -204,7 +204,7 @@ impl Connector<'_> {
         }
         let mut target = self.directory.resolve(query).map_err(directory_failure)?;
         // What the outside world has to say before anything connects (a PAM grant, OS Login): the target is read, never changed.
-        self.directory.prepare(&target, &|key_id| self.keys.key(key_id).map(|key| key.public_key), cancel).map_err(directory_failure)?;
+        let prepared = self.directory.prepare(&target, &|key_id| self.keys.key(key_id).map(|key| key.public_key), cancel).map_err(directory_failure)?;
         let auth = BrokerAuth::new(self.keys, self.keychain, owner, self.directory);
         auth.unlock(&target).map_err(|text| ConnectFailure::new(kinds::AUTH, text))?;
         let policy = PinPolicy::from_target(&target);
@@ -271,6 +271,13 @@ impl Connector<'_> {
                         Reply::Cancelled | Reply::TimedOut => return Err(password_abandoned(hop, &target)),
                         Reply::Gone => return Err(ConnectFailure::cancelled()),
                     }
+                }
+                // IAP refused the tunnel (4033) right after the PAM grant check passed on a grant given moments ago: IAP can take about
+                // 1½ minutes to see a grant (design 2026-10-25), and the person is told so instead of doubting the grant.
+                ConnectError::Tunnel { code: Some(4033), .. } if prepared.recent_grant => {
+                    let mut failure = failure_of(&error, &target);
+                    failure.text.push_str(" The grant became active moments ago; IAP can take about 1½ minutes to see it.");
+                    return Err(failure);
                 }
                 other => return Err(failure_of(&other, &target)),
             }
@@ -378,7 +385,7 @@ mod tests {
 
     use super::*;
     use crate::session::auth::Reply;
-    use crate::session::directory::PinnedKey;
+    use crate::session::directory::{PinnedKey, Prepared};
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner, PINNED_AT_MS, TEST_PASSPHRASE};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
     use crate::ssh::russh_engine::toy_server::{ToyBehavior, ToyLogin, ToyServer};
@@ -1497,7 +1504,7 @@ mod tests {
     struct Preparing<'a> {
         inner: &'a FakeDirectory,
         prepared: std::sync::Mutex<Vec<Target>>,
-        answer: Option<DirectoryError>,
+        answer: Result<Prepared, DirectoryError>,
     }
 
     impl HostDirectory for Preparing<'_> {
@@ -1516,19 +1523,16 @@ mod tests {
         fn password_account(&self, host: &HostId) -> String {
             self.inner.password_account(host)
         }
-        fn prepare(&self, target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<(), DirectoryError> {
+        fn prepare(&self, target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<Prepared, DirectoryError> {
             self.prepared.lock().unwrap().push(target.clone());
-            match &self.answer {
-                Some(error) => Err(error.clone()),
-                None => Ok(()),
-            }
+            self.answer.clone()
         }
     }
 
     #[test]
     fn the_connector_prepares_the_target_before_unlocking_it() {
         let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
-        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: None };
+        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Ok(Prepared::default()) };
         let connected = world.connect_through(&directory, &web(), &world.owner).expect("connects");
         let prepared = directory.prepared.lock().unwrap();
         assert_eq!(prepared.len(), 1, "prepared once, before the connect");
@@ -1539,10 +1543,33 @@ mod tests {
     fn a_denied_preparation_is_an_auth_failure_and_nothing_connects() {
         let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
         let sentence = "No active Privileged Access Manager grant for prod-operate on knowknow-prod. Request one and connect again.";
-        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Some(DirectoryError::Denied(sentence.into())) };
+        let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Err(DirectoryError::Denied(sentence.into())) };
         let error = world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails");
         assert_eq!(error, failure(kinds::AUTH, sentence));
         assert_eq!(world.engine.attempts(), 0, "nothing was connected");
         assert!(world.owner.asked().is_empty(), "nobody was asked for anything");
+    }
+
+    /// Design 2026-10-25: a PAM grant given moments ago passes the check, but IAP can take about 1½ minutes to see it and refuses with
+    /// 4033 meanwhile. The refusal then says why, so the person waits instead of doubting their grant. Any other refusal, and a 4033
+    /// after an older grant, stand as the engine said them.
+    #[test]
+    fn a_tunnel_refused_right_after_a_grant_says_iap_may_not_see_it_yet() {
+        let refused = |code: u16| {
+            let hop = FakeDirectory::new().with_host("web", AuthMethod::Password).resolve(&web()).unwrap().hops.remove(0).reference();
+            ConnectError::Tunnel { hop, text: "frank@retower.io is not authorized to tunnel to jumpbox through IAP.".into(), code: Some(code) }
+        };
+        let fails_with = |error: ConnectError, prepared: Prepared| {
+            let world = world(FakeEngine::new().failing_with(error), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
+            let directory = Preparing { inner: &world.directory, prepared: Default::default(), answer: Ok(prepared) };
+            world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails")
+        };
+        let bare = "frank@retower.io is not authorized to tunnel to jumpbox through IAP.";
+        assert_eq!(
+            fails_with(refused(4033), Prepared { recent_grant: true }),
+            failure(kinds::CONNECT, &format!("{bare} The grant became active moments ago; IAP can take about 1½ minutes to see it."))
+        );
+        assert_eq!(fails_with(refused(4033), Prepared { recent_grant: false }), failure(kinds::CONNECT, bare));
+        assert_eq!(fails_with(refused(4003), Prepared { recent_grant: true }), failure(kinds::CONNECT, bare));
     }
 }

@@ -133,8 +133,10 @@ fn close_codes_and_a_refused_handshake_have_their_sentences() {
     assert_eq!(text, "IAP could not reach port 22 on jumpbox: nothing is listening, or the firewall does not allow 35.235.240.0/20.");
 
     relay.set(Behaviour::CloseAtOpen(4033, "not authorized"));
-    let text = tunnel_text(&engine().connect(&target, &*policy, &vault).err().expect("refused"));
-    assert_eq!(text, "frank@retower.io is not authorized to tunnel to jumpbox through IAP.");
+    let error = engine().connect(&target, &*policy, &vault).err().expect("refused");
+    assert_eq!(tunnel_text(&error), "frank@retower.io is not authorized to tunnel to jumpbox through IAP.");
+    // The close code travels with the sentence: the broker adds a note to a 4033 that follows a fresh PAM grant.
+    assert!(matches!(error, ConnectError::Tunnel { code: Some(4033), .. }), "{error:?}");
 
     relay.set(Behaviour::CloseAtOpen(4010, "destination read failed"));
     let text = tunnel_text(&engine().connect(&target, &*policy, &vault).err().expect("refused"));

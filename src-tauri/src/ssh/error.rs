@@ -15,8 +15,9 @@ pub enum ConnectError {
     /// DNS or TCP failed, or the jump host could not open a connection to `hop`.
     Unreachable { hop: HopRef, reason: String },
     /// The Google Cloud IAP tunnel that carries `hop` could not be opened. `text` is the whole sentence (design 2026-10-25, "Error
-    /// texts"): it names the instance and the account, which `Unreachable`'s "Could not reach host:port" would not.
-    Tunnel { hop: HopRef, text: String },
+    /// texts"): it names the instance and the account, which `Unreachable`'s "Could not reach host:port" would not. `code` is the relay's
+    /// close code when IAP closed the tunnel (4033: not authorized), for the broker's note about a grant IAP does not see yet.
+    Tunnel { hop: HopRef, text: String, code: Option<u16> },
     /// `hop` did not answer in time: its `connect_timeout` ran out during `phase`, or the server stopped answering the login. The wait for
     /// the handshake and for each login request can end sooner than `connect_timeout` when the keepalive interval is short (see `Hop`).
     Timeout { hop: HopRef, phase: Phase },
@@ -168,7 +169,7 @@ mod tests {
             (ConnectError::Protocol { hop: hop(), text: "Key exchange failed".into() }, "SSH error: Key exchange failed"),
             (ConnectError::BadJumpChain { why: "web appears twice".into() }, "The jump chain cannot be used: web appears twice"),
             // An IAP tunnel sentence is shown as it is: it names the instance, not the hostname and port the relay never uses.
-            (ConnectError::Tunnel { hop: hop(), text: "IAP could not reach port 22 on jumpbox: nothing is listening.".into() }, "IAP could not reach port 22 on jumpbox: nothing is listening."),
+            (ConnectError::Tunnel { hop: hop(), text: "IAP could not reach port 22 on jumpbox: nothing is listening.".into(), code: Some(4003) }, "IAP could not reach port 22 on jumpbox: nothing is listening."),
         ];
         for (error, text) in cases {
             assert_eq!(error.to_string(), text);

@@ -553,7 +553,7 @@ async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostK
             // and ends russh's detached task on end-of-file.
             (None, Transport::GcpIap(target)) => {
                 let Some(tokens) = options.gcp_tokens.clone() else {
-                    return Err(ConnectError::Tunnel { hop: reference.clone(), text: "Google Cloud credentials are not configured.".to_string() });
+                    return Err(ConnectError::Tunnel { hop: reference.clone(), text: "Google Cloud credentials are not configured.".to_string(), code: None });
                 };
                 let iap::Tunnel { stream, guard } = iap::open(target.endpoint(hop.port), tokens, target.account.clone(), user_agent())
                     .await
@@ -618,6 +618,10 @@ where
 fn iap_failure(hop: &HopRef, target: &IapTarget, port: u16, error: IapError) -> ConnectError {
     let instance = target.instance.as_str();
     let account = target.account.as_deref().unwrap_or("the active gcloud account");
+    let code = match &error {
+        IapError::Closed { code, .. } => Some(*code),
+        _ => None,
+    };
     let text = match error {
         IapError::Refused { status } => format!(
             "Google Cloud IAP refused the tunnel to {instance} (HTTP {status}): check that {account} has roles/iap.tunnelResourceAccessor on the instance, and for production that a PAM grant is active."
@@ -631,7 +635,7 @@ fn iap_failure(hop: &HopRef, target: &IapTarget, port: u16, error: IapError) -> 
         IapError::Protocol(text) | IapError::Io(text) => format!("The IAP tunnel to {instance} could not be opened: {text}."),
         IapError::ReconnectExhausted => format!("The IAP tunnel to {instance} could not be reconnected within 15 minutes."),
     };
-    ConnectError::Tunnel { hop: hop.clone(), text }
+    ConnectError::Tunnel { hop: hop.clone(), text, code }
 }
 
 /// Why the jump host `via` could not give us a connection to `hop`: it refused to open the tunnel, or it is gone.

@@ -774,7 +774,25 @@ mod gcp_transport {
         );
         assert_eq!(calls(&gcp), vec![format!("grants {ACCOUNT} knowknow-prod global prod-operate"), format!("grants {ACCOUNT} knowknow-prod global prod-admin")]);
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("ACTIVE")];
-        d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
+    }
+
+    /// Design 2026-10-25: IAP can take about 1½ minutes to see a grant, so the broker is told when the grant it found is that fresh and
+    /// adds the note to a 4033 refusal. A grant given earlier than two minutes ago, or one without a time, is not fresh.
+    #[test]
+    fn prepare_reports_a_grant_that_became_active_moments_ago() {
+        use crate::gcp::pam::rfc3339;
+        use std::time::{Duration, SystemTime};
+        let gcp = Arc::new(FakeGcp::default());
+        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let given = |ago: u64| Grant { access_grant_time: Some(rfc3339(SystemTime::now() - Duration::from_secs(ago))), ..grant("ACTIVE") };
+        *gcp.grants.lock().unwrap() = vec![grant("ENDED"), given(60)];
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
+        *gcp.grants.lock().unwrap() = vec![given(600)];
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
+        *gcp.grants.lock().unwrap() = vec![grant("ACTIVATING")];
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
     }
 
     #[test]

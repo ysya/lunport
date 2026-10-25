@@ -1,5 +1,5 @@
 //! Records adapter for the broker. SyncCore remains the only mutable/persistent owner.
-use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey};
+use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey, Prepared};
 use crate::session::protocol::HostQuery;
 use crate::gcp::rest::GcpClient;
 use crate::ssh::{AuthMethod, Hop, HopRef, HostId, HostKey, IapTarget, Target, Transport};
@@ -9,7 +9,7 @@ use crate::sync::record_repository::{
 };
 use crate::sync::records_v3::{AuthKind, RecordValidationError, StoredHostKey, SyncStateV3};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub struct RecordSources {
     pub snapshot: Box<dyn Fn() -> Result<SyncStateV3, DirectoryError> + Send + Sync>,
@@ -269,17 +269,18 @@ impl HostDirectory for RecordDirectory {
     /// profile lacks it or has no POSIX account yet (`gcloud compute ssh` does the same; the import creates the account), and the
     /// profile's username must be the one the host is saved with: nothing here changes the target, so the identity checks that compare
     /// the hop's user keep their meaning.
-    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<(), DirectoryError> {
-        let Some(hop) = target.hops.first() else { return Ok(()) };
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
+        let nothing = Prepared::default();
+        let Some(hop) = target.hops.first() else { return Ok(nothing) };
         if !matches!(hop.transport, Transport::GcpIap(_)) {
-            return Ok(());
+            return Ok(nothing);
         }
         let state = (self.sources.snapshot)()?;
         let Some(HostTransport { kind: TransportKind::GcpIap { project, account, os_login, pam, .. }, .. }) = transports::get(&state, hop.id.as_str()) else {
-            return Ok(());
+            return Ok(nothing);
         };
         if !os_login && pam.is_none() {
-            return Ok(());
+            return Ok(nothing);
         }
         let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
         let cancelled = || DirectoryError::Failed("The connection was cancelled.".into());
@@ -288,12 +289,16 @@ impl HostDirectory for RecordDirectory {
             return Err(cancelled());
         }
         let who = account.as_deref().unwrap_or("the active gcloud account");
+        let mut prepared = nothing;
         if let Some(pam) = &pam {
             let mut in_flight = false;
             for entitlement in &pam.entitlements {
                 let grants = gcp.grants(account.as_deref(), &project, &pam.location, entitlement).map_err(denied)?;
-                if !crate::gcp::pam::in_flight(&grants).is_empty() {
+                let current = crate::gcp::pam::in_flight(&grants);
+                if !current.is_empty() {
                     in_flight = true;
+                    // IAP can take about 1½ minutes to see a grant: the broker says so if IAP refuses with 4033 right after this one.
+                    prepared.recent_grant = current.iter().any(|grant| crate::gcp::pam::granted_within(grant, SystemTime::now(), Duration::from_secs(120)));
                     break;
                 }
             }
@@ -334,7 +339,7 @@ impl HostDirectory for RecordDirectory {
                 Some(_) => {}
             }
         }
-        Ok(())
+        Ok(prepared)
     }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?
