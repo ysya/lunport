@@ -54,10 +54,13 @@ describe("Google Cloud IAP transports", () => {
     expect(html).toContain('value="frank@retower.io"');
     expect(html).toContain("OS Login");
     expect(html).not.toContain("Entitlements");
-    const withPam = render(<TransportFields kind={{ ...iap.kind, pam: { entitlements: [], location: "global" } }} onChange={() => {}} disabled={false} />);
+    const withPam = render(<TransportFields kind={{ ...iap.kind, pam: { entitlements: [], location: "global", duration_secs: 1800, justification: null } }} onChange={() => {}} disabled={false} />);
     expect(withPam).toContain("Entitlements");
     expect(withPam).toContain("prod-operate, prod-admin");
     expect(withPam).toContain("Enter at least one PAM entitlement.");
+    // The duration a grant requested from Lunport asks for, in minutes (design 2026-10-25, PAM grant requests).
+    expect(withPam).toContain("Default duration (minutes)");
+    expect(withPam).toContain('value="30"');
   });
 
   it("lets the entitlements be typed with commas: the text is kept as typed and parsed on the side", () => {
@@ -66,7 +69,7 @@ describe("Google Cloud IAP transports", () => {
     expect(parseEntitlements("prod-operate, prod-admin")).toEqual(["prod-operate", "prod-admin"]);
     expect(parseEntitlements(" , prod-admin,,")).toEqual(["prod-admin"]);
     expect(parseEntitlements("")).toEqual([]);
-    const typed = render(<TransportFields kind={{ ...iap.kind, pam: { entitlements: ["prod-operate", "prod-admin"], location: "global" } }} onChange={() => {}} disabled={false} />);
+    const typed = render(<TransportFields kind={{ ...iap.kind, pam: { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null } }} onChange={() => {}} disabled={false} />);
     expect(typed).toContain('value="prod-operate, prod-admin"');
   });
 

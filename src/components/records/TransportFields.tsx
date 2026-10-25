@@ -1,13 +1,15 @@
 import { Input } from "@/components/ui/input";
-import { pamPlaceholder, parseEntitlements, transportProblem, type TransportKind } from "@/lib/transports";
+import { newPamCheck, pamPlaceholder, parseEntitlements, transportProblem, type PamCheck, type TransportKind } from "@/lib/transports";
 import { RecordField } from "./form";
 
 /**
- * The fields of a Google Cloud IAP transport (design 2026-10-25): the instance, the Google account, OS Login and the PAM grant check.
- * `kind` is the value as displayed; every change goes up through `onChange`. The Google Cloud panel wraps this in its editor dialog.
+ * The fields of a Google Cloud IAP transport (design 2026-10-25): the instance, the Google account, OS Login and the PAM grant check
+ * (its entitlements, location and the duration a grant requested from Lunport asks for). `kind` is the value as displayed; every change
+ * goes up through `onChange`. The Google Cloud panel wraps this in its editor dialog.
  */
 export function TransportFields({ kind, onChange, disabled }: { kind: TransportKind; onChange: (next: TransportKind) => void; disabled: boolean }) {
   const patch = (changes: Partial<TransportKind>) => onChange({ ...kind, ...changes });
+  const patchPam = (changes: Partial<PamCheck>) => patch({ pam: { ...(kind.pam ?? newPamCheck()), ...changes } });
   const problem = transportProblem({ host_id: "0000000000000000", ...{ kind } }) ?? null;
   return (
     <div className="space-y-4">
@@ -44,27 +46,34 @@ export function TransportFields({ kind, onChange, disabled }: { kind: TransportK
           type="checkbox"
           checked={kind.pam !== null}
           disabled={disabled}
-          onChange={(e) => patch({ pam: e.target.checked ? { entitlements: [], location: "global" } : null })}
+          onChange={(e) => patch({ pam: e.target.checked ? newPamCheck() : null })}
         />
         Require an active Privileged Access Manager grant
       </label>
       {kind.pam && (
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-3">
           <RecordField label="Entitlements (comma-separated)">
             {/* The text is the field's own (a value rebuilt from the parsed list would eat a comma as it is typed); the list goes up. */}
             <Input
               defaultValue={kind.pam.entitlements.join(", ")}
               placeholder={pamPlaceholder}
               disabled={disabled}
-              onChange={(e) => patch({ pam: { location: kind.pam?.location ?? "global", entitlements: parseEntitlements(e.target.value) } })}
+              onChange={(e) => patchPam({ entitlements: parseEntitlements(e.target.value) })}
             />
           </RecordField>
           <RecordField label="Location">
+            <Input value={kind.pam.location} placeholder="global" disabled={disabled} onChange={(e) => patchPam({ location: e.target.value.trim() })} />
+          </RecordField>
+          <RecordField label="Default duration (minutes)">
+            {/* What a grant requested from Lunport asks for; the request dialog offers it, and remembers what was last used. */}
             <Input
-              value={kind.pam.location}
-              placeholder="global"
+              type="number"
+              min={1}
+              max={480}
+              step={1}
+              value={Math.round(kind.pam.duration_secs / 60)}
               disabled={disabled}
-              onChange={(e) => patch({ pam: { entitlements: kind.pam?.entitlements ?? [], location: e.target.value.trim() } })}
+              onChange={(e) => patchPam({ duration_secs: Math.round(Number(e.target.value)) * 60 })}
             />
           </RecordField>
         </div>

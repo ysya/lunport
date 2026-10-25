@@ -100,7 +100,7 @@ fn validation_rejects_bad_fields() {
         transport.validate().err()
     }
     fn pam(entitlements: &[&str], location: &str) -> Option<PamCheck> {
-        Some(PamCheck { entitlements: entitlements.iter().map(|e| e.to_string()).collect(), location: location.into() })
+        Some(PamCheck { entitlements: entitlements.iter().map(|e| e.to_string()).collect(), location: location.into(), duration_secs: 1800, justification: None })
     }
     assert_eq!(iap(A).validate(), Ok(()));
     let mut other_host = iap(A);
@@ -125,6 +125,60 @@ fn validation_rejects_bad_fields() {
     assert_eq!(edit(|_, _, _, _, _, p| *p = pam(&["Prod"], "global")), Some("Enter PAM entitlement ids such as prod-operate.".to_string()));
     assert_eq!(edit(|_, _, _, _, _, p| *p = pam(&["prod-operate"], "Global")), Some("Enter the PAM location, such as global.".to_string()));
     assert_eq!(edit(|_, _, _, _, _, p| *p = pam(&["a", "b", "c", "d", "e", "f", "g", "h", "i"], "global")), Some("Enter at most 8 PAM entitlements.".to_string()));
+}
+
+/// A transport with the PAM check of the design's example, for the grant-request tests.
+fn with_pam(host: &str) -> HostTransport {
+    let mut transport = iap(host);
+    let TransportKind::GcpIap { pam, .. } = &mut transport.kind;
+    *pam = Some(PamCheck { entitlements: vec!["prod-operate".into()], location: "global".into(), duration_secs: 1800, justification: None });
+    transport
+}
+
+/// Design 2026-10-25 (PAM grant requests): the transport remembers the duration and the last justification, with defaults an older
+/// record (without the fields) decodes to, and rules a request cannot break.
+#[test]
+fn pam_defaults_decode_for_an_older_record_and_validate() {
+    let one = set(&state(), A, None, Some(with_pam(A)), 1).unwrap();
+    let mut older = one.local.transports.values().next().unwrap().record.clone();
+    let pam = older.payload["transport"]["kind"]["pam"].as_object_mut().unwrap();
+    pam.remove("duration_secs");
+    pam.remove("justification");
+    let TransportKind::GcpIap { pam: Some(decoded), .. } = decode(&older).expect("an older record has defaults").kind else { panic!("a PAM check") };
+    assert_eq!((decoded.duration_secs, decoded.justification), (1800, None));
+    let problem = |duration_secs: u32, justification: Option<&str>| {
+        let mut transport = with_pam(A);
+        let TransportKind::GcpIap { pam: Some(pam), .. } = &mut transport.kind else { unreachable!() };
+        pam.duration_secs = duration_secs;
+        pam.justification = justification.map(str::to_string);
+        transport.validate().err()
+    };
+    let minutes = Some("Enter a grant duration between 1 and 480 minutes.".to_string());
+    assert_eq!(problem(30, None), minutes);
+    assert_eq!(problem(28_860, None), minutes);
+    assert_eq!(problem(90, None), minutes, "whole minutes only");
+    assert_eq!(problem(60, None), None);
+    assert_eq!(problem(28_800, None), None);
+    let line = Some("Keep the justification under 512 characters on one line.".to_string());
+    assert_eq!(problem(1800, Some(&"x".repeat(513))), line);
+    assert_eq!(problem(1800, Some("restart\napp-api")), line);
+    assert_eq!(problem(1800, Some("restart app-api")), None);
+}
+
+#[test]
+fn remember_grant_request_keeps_everything_else_and_needs_a_pam_check() {
+    let saved = set(&state(), A, None, Some(with_pam(A)), 1).unwrap();
+    let next = remember_grant_request(&saved, A, "restart app-api", 3600, 2).unwrap();
+    let rows = view(&next);
+    assert_eq!(rows.len(), 1);
+    let TransportKind::GcpIap { pam: Some(pam), project, .. } = &rows[0].kind else { panic!("a PAM check") };
+    assert_eq!((pam.justification.as_deref(), pam.duration_secs, pam.entitlements.as_slice()), (Some("restart app-api"), 3600, &["prod-operate".to_string()][..]));
+    assert_eq!(project, "eng-dev-396409");
+    assert_eq!(next.version, STATE_VERSION);
+    assert_eq!(get(&next, A).as_ref(), rows.first(), "the remembered record is what compare-and-set sees");
+    assert!(remember_grant_request(&next, A, "x", 30, 3).is_err(), "the rules apply to what is remembered too");
+    assert!(remember_grant_request(&set(&state(), A, None, Some(iap(A)), 1).unwrap(), A, "x", 1800, 2).is_err(), "no PAM check to remember for");
+    assert!(remember_grant_request(&state(), A, "x", 1800, 2).is_err(), "no transport");
 }
 
 #[test]
