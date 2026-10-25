@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.1](https://github.com/ysya/lunport/compare/v1.12.0...v1.12.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **mcp:** route every tool the records server lists through the MCP adapter ([e4ac060](https://github.com/ysya/lunport/commit/e4ac060d900e866c76fcfea4e36ff8584552f125))
+* **mcp:** route update_host, set_transport and remove_transport through the MCP adapter ([e47771c](https://github.com/ysya/lunport/commit/e47771c8209c2c79293467d5eeca3012c7088597))
+
 ## [1.12.0](https://github.com/ysya/lunport/compare/v1.11.4...v1.12.0) (2026-10-25)
 
 
