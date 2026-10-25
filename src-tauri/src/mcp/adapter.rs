@@ -96,15 +96,19 @@ pub(super) fn ipc_on(
     result
 }
 
+/// Whether `name` is one of `tools`' names.
+fn listed_in(tools: &[Value], name: &str) -> bool {
+    tools.iter().any(|tool| tool["name"] == name)
+}
+
 pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) -> Value {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !matches!(
-        name,
-        "list_hosts" | "get_host" | "get_effective_config" | "ssh_exec" | "run" | "create_host" | "verify_host_key"
-    ) {
+    // Every tool the records server lists is routed, so a new tool cannot be listed and then refused; the legacy names stay known.
+    let records_tools = tools_for_mode("records");
+    if !(matches!(name, "get_effective_config" | "run") || listed_in(records_tools.as_array().map(Vec::as_slice).unwrap_or_default(), name)) {
         return tool_error(format!("Unknown tool: {name}"));
     }
     let mut arguments = params
@@ -117,7 +121,8 @@ pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) 
         .err()
         .is_some_and(|e| e == "legacy_transport_required")
     {
-        if matches!(name, "create_host" | "verify_host_key") {
+        // The tools only the records server has (creating, verifying and editing hosts) have no legacy counterpart.
+        if listed_in(&management::tool_definitions(), name) {
             return tool_error("This tool requires a Records workspace in the current Lunport version.".into());
         }
         call.legacy.store(true, Ordering::SeqCst);
@@ -165,6 +170,23 @@ pub(super) fn insert(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A tool the records server lists must reach the broker: 1.12.0 listed update_host, set_transport and remove_transport, and the
+    /// adapter refused them as unknown. A cancelled call stops before the broker, so nothing is launched here.
+    #[test]
+    fn every_tool_the_records_server_lists_is_routed_to_the_broker() {
+        let call = Call::default();
+        call.cancel.cancel();
+        let listed = tools_for_mode("records");
+        let names: Vec<&str> = listed.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"update_host") && names.contains(&"set_transport") && names.contains(&"remove_transport"), "{names:?}");
+        for name in names {
+            let answer = tool(&json!({"name": name, "arguments": {}}), "1", &McpClientInfo::default(), &call).to_string();
+            assert!(!answer.contains("Unknown tool"), "{name} is listed but refused: {answer}");
+            assert!(answer.contains("canceled"), "{name} went to the broker: {answer}");
+        }
+        let unknown = tool(&json!({"name": "drop_tables", "arguments": {}}), "1", &McpClientInfo::default(), &call).to_string();
+        assert!(unknown.contains("Unknown tool: drop_tables"), "{unknown}");
+    }
     #[test]
     fn duplicate_rpc_ids_preserve_original_handle_and_cancel_before_ipc_registration() {
         let calls = Mutex::new(HashMap::new());
