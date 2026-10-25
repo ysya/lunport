@@ -9,6 +9,7 @@ use crate::sync::record_repository::{
 };
 use crate::sync::records_v3::{AuthKind, RecordValidationError, StoredHostKey, SyncStateV3};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub struct RecordSources {
@@ -43,7 +44,7 @@ pub struct RecordDirectory {
     confirmed_pin: Option<Box<ConfirmedPin>>,
     password_reader: Option<Box<PasswordReader>>,
     /// Google, for `prepare` (OS Login, PAM); `None` in builds and tests without it.
-    gcp: Option<Box<dyn GcpClient>>,
+    gcp: Option<Arc<dyn GcpClient>>,
     /// Where a grant request's justification and duration are kept for next time; `None` forgets them.
     grant_memory: Option<Box<GrantMemory>>,
 }
@@ -138,7 +139,7 @@ impl RecordDirectory {
         self.confirmed_pin = Some(pin);
         self
     }
-    pub(crate) fn with_gcp(mut self, gcp: Box<dyn GcpClient>) -> Self {
+    pub(crate) fn with_gcp(mut self, gcp: Arc<dyn GcpClient>) -> Self {
         self.gcp = Some(gcp);
         self
     }

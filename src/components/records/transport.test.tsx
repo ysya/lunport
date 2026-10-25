@@ -172,7 +172,7 @@ describe("PAM grants in the Google Cloud panel", () => {
     expect(defaults).toEqual({ justification: "restart app-api", minutes: "30" });
     expect(grantRequestDefaults(iap)).toEqual({ justification: "", minutes: "30" });
     expect(grantRequestReady("restart app-api", "30")).toBe(true);
-    for (const [justification, minutes] of [["", "30"], ["   ", "30"], ["x", "0"], ["x", "481"], ["x", "abc"], ["x", "30.5"]]) {
+    for (const [justification, minutes] of [["", "30"], ["   ", "30"], ["x", "0"], ["x", "481"], ["x", "abc"], ["x", "30.5"], ["restart\tapp-api", "30"], ["two\nlines", "30"]]) {
       expect(grantRequestReady(justification, minutes), `${justification}/${minutes}`).toBe(false);
     }
     const html = render(

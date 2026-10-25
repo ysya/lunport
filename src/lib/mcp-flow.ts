@@ -42,12 +42,17 @@ export function grantFields(answer: string): { minutes: string; justification: s
   return at < 0 ? { minutes: answer, justification: "" } : { minutes: answer.slice(0, at), justification: answer.slice(at + 1) };
 }
 
-/** Whether Request may go: whole minutes from 1 to the limit, and a justification with something in it. */
+/** A justification the broker accepts: something in it, one line, no control characters, at most 512 characters (the same rule as `GrantAnswer::decode`). */
+export function justificationAcceptable(justification: string): boolean {
+  const words = justification.trim().length;
+  return words > 0 && words <= MAX_GRANT_JUSTIFICATION_CHARS && !/[\u0000-\u001f\u007f]/.test(justification.trim());
+}
+
+/** Whether Request may go: whole minutes from 1 to the limit, and a justification the broker accepts. */
 export function grantAnswerReady(answer: string): boolean {
   const { minutes, justification } = grantFields(answer);
   const whole = /^\d+$/.test(minutes.trim()) ? Number(minutes.trim()) : NaN;
-  const words = justification.trim().length;
-  return whole >= 1 && whole <= MAX_GRANT_MINUTES && words > 0 && words <= MAX_GRANT_JUSTIFICATION_CHARS;
+  return whole >= 1 && whole <= MAX_GRANT_MINUTES && justificationAcceptable(justification);
 }
 
 /** A grant form starts from the transport's stored duration and last justification; every other question starts empty. */

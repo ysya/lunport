@@ -53,12 +53,16 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
   useEffect(() => {
     if (!pamHosts) return;
     let live = true;
+    // One read in flight per host: a read that outlives the minute (Google not answering) is not stacked on.
+    const reading = new Set<string>();
     const refresh = () => {
       for (const hostId of pamHosts.split(",")) {
+        if (reading.has(hostId)) continue;
+        reading.add(hostId);
         fetchPamStatus(hostId).then(
           (view) => { if (live) setGrants((known) => ({ ...known, [hostId]: view })); },
           (failure) => { if (live) setGrants((known) => ({ ...known, [hostId]: { entitlement: null, state: "error", active_until_ms: null, message: describe(failure) } })); },
-        );
+        ).finally(() => reading.delete(hostId));
       }
     };
     refresh();

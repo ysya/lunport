@@ -2,15 +2,14 @@
 //! username the editor fills in, and show or request the Privileged Access Manager grant a transport needs (design 2026-10-25, PAM
 //! grant requests). Definitions are device-local; connections read them through `RecordDirectory`.
 
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::Manager;
 
-use crate::gcp::auth::{self, FileStore};
+use crate::gcp::auth;
 use crate::gcp::pam;
-use crate::gcp::rest::{GcpClient, RestClient};
+use crate::gcp::rest::GcpClient;
 use crate::state::AppState;
 use crate::sync::record_commands::RecordOverview;
 use crate::sync::transports::{self, HostTransport, TransportKind};
@@ -225,8 +224,8 @@ pub async fn transports_oslogin_profile(
     tauri::async_runtime::spawn_blocking(move || {
         let public_key = key_id.as_deref().and_then(|id| vault_public_line(&app, id));
         let label = account.clone().unwrap_or_else(active_account_label);
-        let gcp = RestClient::new(Arc::new(FileStore::from_environment()));
-        os_login_profile(&gcp, &label, account.as_deref(), &project, public_key.as_deref())
+        let gcp = app.state::<AppState>().gcp.clone();
+        os_login_profile(&*gcp, &label, account.as_deref(), &project, public_key.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -240,8 +239,8 @@ pub async fn transports_pam_status(app: tauri::AppHandle, window: tauri::Webview
     }
     tauri::async_runtime::spawn_blocking(move || {
         let transport = transport_of(&app, &host_id)?;
-        let gcp = RestClient::new(Arc::new(FileStore::from_environment()));
-        Ok(pam_status(&gcp, &transport))
+        let gcp = app.state::<AppState>().gcp.clone();
+        Ok(pam_status(&*gcp, &transport))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -256,7 +255,7 @@ pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::Webvie
     let justification = checked_request(&justification, duration_secs)?;
     tauri::async_runtime::spawn_blocking(move || {
         let transport = transport_of(&app, &host_id)?;
-        let gcp = RestClient::new(Arc::new(FileStore::from_environment()));
+        let gcp = app.state::<AppState>().gcp.clone();
         let remember = |justification: &str, duration_secs: u32| -> Result<(), String> {
             crate::sync::engine::with_env(&app, |env| {
                 crate::sync::record_commands::edit_records(env, |state, now| {
@@ -267,7 +266,7 @@ pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::Webvie
             .map(|_| ())
             .map_err(|error| error.to_string())
         };
-        pam_request(&gcp, &remember, &transport, &justification, duration_secs)
+        pam_request(&*gcp, &remember, &transport, &justification, duration_secs)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -461,6 +460,26 @@ mod tests {
         let error = pam_request_with(&gcp, &remember, &iap(), "x", 1800, &|| false, Duration::from_millis(1), Duration::from_secs(5)).err();
         assert_eq!(error, Some("This transport requires no grant.".to_string()));
         assert_eq!(remembered.lock().unwrap().len(), 2, "nothing more was remembered");
+    }
+
+    /// A grant that is already in flight (requested by hand, or by a connection a moment ago) is used, not requested again, and the
+    /// request is not remembered as the transport's defaults: nothing was asked of PAM.
+    #[test]
+    fn pam_request_takes_a_grant_already_in_flight_and_requests_nothing() {
+        let now = SystemTime::now();
+        let gcp = Pam::default();
+        gcp.answering("prod-operate", Ok(vec![grant("g-op", "ACTIVE", Some(now - Duration::from_secs(60)), 1800)]));
+        let remembered = Mutex::new(Vec::<(String, u32)>::new());
+        let remember = |justification: &str, duration_secs: u32| {
+            remembered.lock().unwrap().push((justification.to_string(), duration_secs));
+            Ok(())
+        };
+        let view = pam_request_with(&gcp, &remember, &with_pam(&["prod-operate", "prod-admin"]), "restart app-api", 2700, &|| false, Duration::from_millis(1), Duration::from_secs(5)).unwrap();
+        assert_eq!((view.state.as_str(), view.entitlement.as_deref()), ("active", Some("prod-operate")));
+        assert_eq!(view.active_until_ms, Some(ends(now - Duration::from_secs(60), 1800)), "the grant's own end, not the duration asked for");
+        assert!(gcp.created.lock().unwrap().is_empty(), "nothing was requested");
+        assert!(gcp.read.lock().unwrap().is_empty(), "nothing was read back");
+        assert!(remembered.lock().unwrap().is_empty(), "nothing to remember");
     }
 
     #[test]
