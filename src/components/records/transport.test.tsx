@@ -33,6 +33,12 @@ describe("Google Cloud IAP transports", () => {
     expect(html).not.toContain("web</");
   });
 
+  it("sits in the workspace's page frame like the Tunnels panel, so its content is inset and never clipped", () => {
+    // The workspace main pads nothing; each tool panel brings its own inset (`.tunnels-panel`, `.transports-panel`).
+    const html = render(<TransportsPanel overview={recordOverview({ transports: [iap] })} accept={(overview) => overview} />);
+    expect(html).toMatch(/^<div class="transports-panel /);
+  });
+
   it("explains itself when no host uses a tunnel, and asks for a host first", () => {
     const html = render(<TransportsPanel overview={recordOverview({ transports: [] })} accept={(overview) => overview} />);
     expect(html).toContain("No host uses a Google Cloud IAP tunnel yet");
