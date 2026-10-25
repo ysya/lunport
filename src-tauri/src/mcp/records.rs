@@ -815,6 +815,7 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "ssh_exec"
             | "create_host"
             | "verify_host_key"
+            | "update_host"
     ) {
         Ok(())
     } else {
@@ -868,6 +869,17 @@ pub(crate) fn dispatch(
     match method {
         "create_host" => crate::sync::engine::with_env(app, |env| {
             super::management::create(env, &state.mcp, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "update_host" => crate::sync::engine::with_env(app, |env| {
+            super::management::update(env, &state.mcp, params, context, cancel, &|request| {
                 state
                     .mcp
                     .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {

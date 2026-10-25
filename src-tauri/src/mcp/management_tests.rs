@@ -288,7 +288,8 @@ fn records_tool_inventory_is_explicit_and_legacy_tools_remain_compatible() {
             "get_host",
             "ssh_exec",
             "create_host",
-            "verify_host_key"
+            "verify_host_key",
+            "update_host"
         ]
     );
     let legacy_value = tools_for_mode("legacy");
@@ -392,4 +393,180 @@ fn native_creation_review_discloses_existing_group_access_and_rejects_stale_gran
             assert!(r.policy.lock().unwrap().allowed_hosts.is_empty());
         }
     }
+}
+
+
+// ---- update_host (design 2026-10-26, AI edits) ----
+
+/// A host the client may use: `fixture-web`, created through `create` with consent and then allowed individually.
+fn created(d: &TestDevice, r: &McpRuntime) -> String {
+    let value = create(&d.env(), r, &input(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    let id = value["host"]["id"].as_str().unwrap().to_string();
+    r.policy.lock().unwrap().allowed_hosts.insert(id.clone());
+    id
+}
+
+fn host_of(d: &TestDevice, id: &str) -> repo::HostView {
+    repo::get_host(&snapshot(d), id).unwrap()
+}
+
+fn rows(q: &McpPendingRequest) -> Vec<(String, String)> {
+    q.host_proposal.as_ref().unwrap().settings.clone()
+}
+
+fn last_outcome(r: &McpRuntime) -> String {
+    r.recent.lock().unwrap().front().unwrap().outcome.clone()
+}
+
+#[test]
+fn an_update_asks_shows_old_and_new_and_saves_only_on_consent() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::AutoLog] {
+        let d = device();
+        let r = runtime(mode);
+        let id = created(&d, &r);
+        let asked = AtomicUsize::new(0);
+        let value = update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"10.20.0.8","port":22}), RequestContext::default(), &CancelToken::default(), &|q| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(q.host_proposal.as_ref().unwrap().kind, proposal_kinds::UPDATE_HOST);
+            assert_eq!(q.host_id.as_deref(), Some(id.as_str()));
+            let rows = rows(q);
+            assert!(rows.contains(&("Hostname".into(), "fixture.invalid → 10.20.0.8".into())), "{rows:?}");
+            assert!(rows.contains(&("Port".into(), "2222 → 22".into())), "{rows:?}");
+            assert!(!rows.iter().any(|(label, _)| label == "Username"), "an unchanged field is not a row: {rows:?}");
+            assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid", "nothing saved before consent");
+            ApprovalDecision::Allow
+        })
+        .unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(value["host"]["hostname"], "10.20.0.8");
+        assert_eq!(value["message"], "Host saved.");
+        let host = host_of(&d, &id);
+        assert_eq!((host.effective_payload.hostname.as_str(), host.effective_payload.port), ("10.20.0.8", 22));
+        assert_eq!(last_outcome(&r), "host_updated");
+        assert!(r.records_active.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn an_update_of_a_pinned_address_says_the_key_will_be_verified_again() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+        let host = repo::get_host(state, &id).map_err(|e| AppError::Other(e.to_string()))?;
+        let endpoint = repo::HostEndpoint { hostname: host.effective_payload.hostname.clone(), port: host.effective_payload.port };
+        // A key whose fingerprint matches its blob, as the repository checks (the test key of the slot rules).
+        let public = ssh_key::PublicKey::from_openssh(crate::sync::slot_rules::test_keys::PLAIN_PUBLIC).unwrap();
+        let key = crate::sync::records_v3::StoredHostKey {
+            algorithm: public.algorithm().as_str().into(),
+            public_key: crate::sync::slot_rules::test_keys::PLAIN_PUBLIC.split_whitespace().nth(1).unwrap().into(),
+            fingerprint: public.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+            pinned_at_ms: now,
+            pinned_by_device_id: state.device_id.clone(),
+        };
+        repo::pin_host_key(state, &id, &endpoint, None, key, now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    assert!(host_of(&d, &id).host.payload.host_key.is_some(), "pinned");
+    let value = update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"10.20.0.8"}), RequestContext::default(), &CancelToken::default(), &|q| {
+        assert!(rows(q).contains(&("Server key".into(), "pinned → verified again at the next connection".into())), "{:?}", rows(q));
+        ApprovalDecision::Allow
+    })
+    .unwrap();
+    assert!(host_of(&d, &id).host.payload.host_key.is_none(), "the pin is gone with the address");
+    assert!(value["message"].as_str().unwrap().contains("verify_host_key"), "{}", value["message"]);
+}
+
+#[test]
+fn an_update_with_nothing_to_change_or_only_the_identifier_is_refused_without_a_window() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let _id = created(&d, &r);
+    let never = |_: &McpPendingRequest| -> ApprovalDecision { panic!("no window") };
+    assert_eq!(update(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), "Provide at least one setting to change.");
+    assert_eq!(update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"fixture.invalid","tags":["fixture"]}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), "Nothing would change.");
+}
+
+#[test]
+fn an_update_needs_the_hosts_ai_permission_and_answers_as_get_host_does() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    r.policy.lock().unwrap().allowed_hosts.clear();
+    let never = |_: &McpPendingRequest| -> ApprovalDecision { panic!("no window") };
+    assert_eq!(update(&d.env(), &r, &json!({"alias":"fixture-web","port":22}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), format!("host '{id}' is not allowed for AI access"));
+    let unknown = repo::find_by_alias(&snapshot(&d), "nope").unwrap_err().to_string();
+    assert_eq!(update(&d.env(), &r, &json!({"alias":"nope","port":22}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), unknown);
+    assert_eq!(host_of(&d, &id).effective_payload.port, 2222);
+}
+
+#[test]
+fn an_inherited_field_becomes_the_hosts_own_when_the_client_changes_it() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let group_id = "0000000000000031";
+    let id = "0000000000000041";
+    crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+        let state = crate::sync::record_groups::create_group(state, group_id, HostScope::Local, serde_json::from_value(json!({"schema":1,"name":"Operations","defaults":{"port":2222}})).unwrap(), true, now).map_err(|e| AppError::Other(e.to_string()))?;
+        let payload = serde_json::from_value(json!({"schema":3,"alias":"grouped","hostname":"g.invalid","user":"ops","auth":"password","group_id":group_id,"inherit":["port"]})).unwrap();
+        repo::create_host(&state, id, HostScope::Local, payload, now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    r.policy.lock().unwrap().allowed_hosts.insert(id.into());
+    assert_eq!(host_of(&d, id).effective_payload.port, 2222, "inherited from the Group");
+    update(&d.env(), &r, &json!({"alias":"grouped","port":2200}), RequestContext::default(), &CancelToken::default(), &|q| {
+        assert!(rows(q).contains(&("Port".into(), "2222 (from Group Operations) → 2200".into())), "{:?}", rows(q));
+        ApprovalDecision::Allow
+    })
+    .unwrap();
+    let host = host_of(&d, id);
+    assert_eq!(host.effective_payload.port, 2200);
+    assert!(host.host.payload.inherit.is_empty(), "the port is the host's own now: {:?}", host.host.payload.inherit);
+}
+
+#[test]
+fn a_denied_timed_out_or_cancelled_update_changes_nothing_and_is_audited() {
+    for (decision, sentence) in [(ApprovalDecision::Deny, "Host update was denied."), (ApprovalDecision::TimedOut, "Host update approval timed out."), (ApprovalDecision::Cancel, "Host update was canceled.")] {
+        let d = device();
+        let r = runtime(ApprovalMode::Ask);
+        let id = created(&d, &r);
+        assert_eq!(update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"10.20.0.8"}), RequestContext::default(), &CancelToken::default(), &|_| decision).unwrap_err(), sentence);
+        assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid");
+        assert_eq!(last_outcome(&r), "host_update_not_completed");
+        assert!(r.records_active.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn an_update_over_a_host_changed_meanwhile_is_refused() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    let error = update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"10.20.0.8"}), RequestContext::default(), &CancelToken::default(), &|_| {
+        crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+            let host = repo::get_host(state, &id).map_err(|e| AppError::Other(e.to_string()))?;
+            let mut payload = host.host.payload.clone();
+            payload.hostname = "other.invalid".into();
+            repo::update_host(state, &id, &host.revision, payload, now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    assert_eq!(error, "The host changed while the request was open; read it again and retry.");
+    assert_eq!(host_of(&d, &id).effective_payload.hostname, "other.invalid", "the other change stands");
+}
+
+#[test]
+fn an_update_rejects_private_data_group_moves_and_a_loop_through_itself() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    let never = |_: &McpPendingRequest| -> ApprovalDecision { panic!("no window") };
+    for input in [json!({"alias":"fixture-web","password":"x"}), json!({"alias":"fixture-web","group_id":"0000000000000031"}), json!({"alias":"fixture-web","host_key":{}})] {
+        let error = update(&d.env(), &r, &input, RequestContext::default(), &CancelToken::default(), &never).unwrap_err();
+        assert!(error.starts_with("Provide public connection settings only."), "{input}: {error}");
+    }
+    assert!(update(&d.env(), &r, &json!({"alias":"fixture-web","jump":[id]}), RequestContext::default(), &CancelToken::default(), &never).is_err());
+    assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid");
 }
