@@ -62,6 +62,16 @@ In the Records host editor, choose **Authentication → Password**. Leave the pa
 
 The SSH engine supports `ProxyJump`; `ProxyCommand` connections are not supported. It signs with keys kept in Lunport, so an external `IdentityFile` must be imported or moved into the vault before this engine can use it. A host relying on an implicit `~/.ssh/id_*` key must select its key explicitly.
 
+### Google Cloud IAP and OS Login
+
+A host on a Compute Engine instance can be reached through Identity-Aware Proxy TCP forwarding instead of a public address, without `gcloud` running. In the host editor, choose **Connect through → Google Cloud IAP tunnel** and enter the project, zone, instance and network interface (`nic0` for the first). The tunnel goes to the host's port on the instance, so the instance's firewall must allow Google's IAP range `35.235.240.0/20` on that port, and the Google account needs `roles/iap.tunnelResourceAccessor` on the instance. Jump hosts still work: an IAP host can be the first hop of a chain, but not a later one.
+
+Credentials come from `gcloud auth login` on this device: Lunport reads the files gcloud keeps under `~/.config/gcloud` (`%APPDATA%\gcloud` on Windows, or `CLOUDSDK_CONFIG`) and refreshes access tokens itself. **Google account** chooses which signed-in account; leave it empty for gcloud's active account. When a sign-in has expired, the connection says so and `gcloud auth login <account>` fixes it.
+
+**OS Login** registers the host's vault key with OS Login when it is not there yet and checks that the host is saved with OS Login's username for the account. Choose **Use OS Login username** beside the Username field to fill that username in; the project must have OS Login enabled. **Require an active Privileged Access Manager grant** lists the entitlements (for example `prod-operate, prod-admin`) one of which must hold an in-flight grant before Lunport opens the tunnel; without one the connection explains how to request a grant instead of failing inside IAP. A fresh grant can take a minute or two before IAP honours it.
+
+A dropped network connection is reconnected inside the tunnel for up to 15 minutes while the SSH session stays open. Transports are saved on this device only and are not synced; adopting central sync clears them, so enter them again afterwards. Older Lunport versions on the same device cannot open a library that contains a transport.
+
 The command-line entry point remains `sshelter connect <host>` through the rename. Windows terminals use `sshelter-cli.exe`, installed beside `sshelter.exe`. Saved MCP commands keep working with these executable names.
 
 ## Import and manage keys
