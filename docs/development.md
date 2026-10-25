@@ -55,7 +55,7 @@ Validation: `cargo test --locked --lib ssh::engine_tests::forward` uses disposab
 
 A transport is a device-local `Meta` record `transport:<host-id>` in `local.transports` (`sync/transports.rs`), gated by state version 9; it is cleared by the initial central projection and re-keyed on leaving an account, and is not published yet. The record keeps the envelope tunnel rules use, so syncing it later is additive. Design and plan: `docs/superpowers/specs/2026-10-25-gcp-iap-oslogin-design.md`.
 
-Validation without Google: `gcp::testing::FakeRelay` speaks the relay subprotocol in front of a TCP target and can refuse, close with a code, cut the socket or stall; `cargo test --locked --lib -- gcp:: ssh::engine_tests::iap` runs the codec, credential, tunnel and engine tests (the engine ones use the scratch sshd), `session::record_directory_tests::gcp_transport` the OS Login and PAM decisions with a scripted client, and `pnpm test src/components/records/transport.test.tsx` the editor. The live check against a real jump box is manual.
+Validation without Google: `gcp::testing::FakeRelay` speaks the relay subprotocol in front of a TCP target and can refuse, close with a code, cut the socket or stall; `cargo test --locked --lib -- gcp:: ssh::engine_tests::iap` runs the codec, credential, tunnel and engine tests (the engine ones use the scratch sshd), `session::record_directory::tests::gcp_transport` the OS Login and PAM decisions with a scripted client, and `pnpm test src/components/records/transport.test.tsx` the Google Cloud panel (`TransportsPanel.tsx`, `TransportFields.tsx`). The live check against a real jump box is manual.
 
 ## Embedded SSH terminal
 
