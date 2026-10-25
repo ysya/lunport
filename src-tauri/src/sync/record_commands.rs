@@ -124,6 +124,8 @@ pub struct RecordOverview {
     library_scope: Option<HostScope>,
     pending_changes: usize,
     conflicts: Vec<crate::sync::record_conflicts::ConflictView>,
+    /// Device-local host transports (Google Cloud IAP), one per host at most.
+    transports: Vec<crate::sync::transports::HostTransport>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupOrderView {
@@ -274,6 +276,7 @@ pub fn overview_from(
         group_deletion_token,
         relay_url: state.relay_url.clone(),
         hosts,
+        transports: crate::sync::transports::view(state),
         groups: snapshot
             .groups
             .into_iter()

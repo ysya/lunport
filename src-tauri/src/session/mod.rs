@@ -39,6 +39,7 @@ pub struct SessionRuntime {
 }
 
 pub mod app;
+pub mod transports;
 pub mod tunnels;
 pub mod embedded;
 pub mod auth;
