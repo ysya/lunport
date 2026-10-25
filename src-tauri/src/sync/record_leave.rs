@@ -791,6 +791,8 @@ pub(crate) fn resume_locked(env: &SyncEnv) -> Result<(), AppError> {
             }).collect();
             crate::sync::tunnel_rules::preserve_on_leave(latest, &mut n, &host_ids, env.now())
                 .map_err(|e| error(&e.to_string()))?;
+            crate::sync::transports::preserve_on_leave(latest, &mut n, &host_ids, env.now())
+                .map_err(|e| error(&e.to_string()))?;
             n.spaces.clear();
             n.rotation = None;
             n.migration_gate = None;
