@@ -3,4 +3,13 @@
 /**
  * Which PAM entitlements may carry the grant, and where they live.
  */
-export type PamCheck = { entitlements: Array<string>, location: string, };
+export type PamCheck = { entitlements: Array<string>, location: string,
+/**
+ * How long a grant requested from Lunport asks for: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design 2026-10-25,
+ * PAM grant requests).
+ */
+duration_secs: number,
+/**
+ * The justification last sent with a request, offered again next time.
+ */
+justification: string | null, };

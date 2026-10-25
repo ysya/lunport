@@ -59,6 +59,13 @@ pub struct PamCheck {
     pub entitlements: Vec<String>,
     #[serde(default = "default_location")]
     pub location: String,
+    /// How long a grant requested from Lunport asks for: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design 2026-10-25,
+    /// PAM grant requests).
+    #[serde(default = "default_duration")]
+    pub duration_secs: u32,
+    /// The justification last sent with a request, offered again next time.
+    #[serde(default)]
+    pub justification: Option<String>,
 }
 
 fn default_interface() -> String {
@@ -68,6 +75,14 @@ fn default_interface() -> String {
 fn default_location() -> String {
     "global".to_string()
 }
+
+fn default_duration() -> u32 {
+    30 * 60
+}
+
+/// The longest grant Lunport asks for; PAM's own maximum (the entitlement's) applies on top, in PAM's words.
+const MAX_DURATION_SECS: u32 = 480 * 60;
+const MAX_JUSTIFICATION_CHARS: usize = 512;
 
 impl HostTransport {
     /// One sentence about the first field that is not acceptable, else `Ok`.
@@ -103,6 +118,12 @@ impl HostTransport {
             }
             if !is_resource_name(&pam.location) {
                 return Err("Enter the PAM location, such as global.".into());
+            }
+            if pam.duration_secs < 60 || pam.duration_secs > MAX_DURATION_SECS || pam.duration_secs % 60 != 0 {
+                return Err("Enter a grant duration between 1 and 480 minutes.".into());
+            }
+            if pam.justification.as_deref().is_some_and(|text| text.chars().count() > MAX_JUSTIFICATION_CHARS || text.chars().any(char::is_control)) {
+                return Err("Keep the justification under 512 characters on one line.".into());
             }
         }
         Ok(())
@@ -208,6 +229,19 @@ pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>,
         }
     }
     write(state, host_id, transport, now)
+}
+
+/// What a grant request taught the transport (design 2026-10-25, PAM grant requests): the duration asked for and the justification
+/// given, offered again next time. Written without a compare-and-set (the panel may be showing the transport meanwhile); `validate`'s
+/// rules apply to what is remembered.
+pub fn remember_grant_request(state: &SyncStateV3, host_id: &str, justification: &str, duration_secs: u32, now: u64) -> Result<SyncStateV3, RepositoryError> {
+    let Some(mut transport) = get(state, host_id) else { return Err(repo::invalid("transport", host_id, "This host has no transport.")) };
+    let TransportKind::GcpIap { pam, .. } = &mut transport.kind;
+    let Some(pam) = pam.as_mut() else { return Err(repo::invalid("transport", host_id, "This transport requires no grant.")) };
+    pam.justification = Some(justification.to_string());
+    pam.duration_secs = duration_secs;
+    transport.validate().map_err(|reason| repo::invalid("transport", host_id, &reason))?;
+    write(state, host_id, Some(transport), now)
 }
 
 fn write(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {

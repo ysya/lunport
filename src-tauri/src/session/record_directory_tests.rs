@@ -626,7 +626,7 @@ mod gcp_transport {
     }
 
     fn prod_pam() -> Option<PamCheck> {
-        Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into() })
+        Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into(), duration_secs: 1800, justification: None })
     }
 
     /// GATE as a key host (its key available on this device) logging in as `user`, with `transport` when given.

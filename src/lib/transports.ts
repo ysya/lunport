@@ -84,6 +84,13 @@ export function transportProblem(transport: HostTransport): string | null {
     if (kind.pam.entitlements.length > 8) return "Enter at most 8 PAM entitlements.";
     if (!kind.pam.entitlements.every(isResourceName)) return "Enter PAM entitlement ids such as prod-operate.";
     if (!isResourceName(kind.pam.location)) return "Enter the PAM location, such as global.";
+    const { duration_secs: duration, justification } = kind.pam;
+    if (duration < 60 || duration > 480 * 60 || duration % 60 !== 0) return "Enter a grant duration between 1 and 480 minutes.";
+    if (justification !== null && ([...justification].length > 512 || /[\u0000-\u001f\u007f]/.test(justification)))
+      return "Keep the justification under 512 characters on one line.";
   }
   return null;
 }
+
+/** A PAM check as the checkbox starts it: no entitlement yet, the global location, a 30-minute grant, nothing to say yet. */
+export const newPamCheck = (): PamCheck => ({ entitlements: [], location: "global", duration_secs: 30 * 60, justification: null });
