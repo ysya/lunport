@@ -2,7 +2,9 @@
 //! them are in flight. The REST call lives in `gcp::rest`; the broker checks for a grant before it opens a tunnel to a production host,
 //! so the person reads "no grant" instead of IAP's bare 4033.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use super::rest::{GcpClient, GcpError};
 
 /// One grant, as much of it as the broker reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +90,105 @@ pub fn granted_within(grant: &Grant, now: SystemTime, window: Duration) -> bool 
         .as_deref()
         .and_then(parse_rfc3339)
         .is_some_and(|granted| now.duration_since(granted).map_or(true, |age| age <= window))
+}
+
+/// When the grant's access was given, as far as this computer can tell: the grant time (never ahead of `now`), or `now` for a grant
+/// still activating (its time comes with activation); `None` for a grant PAM did not date.
+pub fn granted_at(grant: &Grant, now: SystemTime) -> Option<SystemTime> {
+    match grant.access_grant_time.as_deref().and_then(parse_rfc3339) {
+        Some(time) => Some(time.min(now)),
+        None if grant.state == "ACTIVATING" => Some(now),
+        None => None,
+    }
+}
+
+/// When an active grant's access began and ends: from its own times, else from `now` and the duration that was asked for.
+pub fn active_span(grant: &Grant, now: SystemTime, duration_secs: u32) -> (SystemTime, SystemTime) {
+    let began = granted_at(grant, now).unwrap_or(now);
+    let length = grant.until().and_then(|until| until.duration_since(began).ok()).unwrap_or(Duration::from_secs(u64::from(duration_secs)));
+    (began, began + length)
+}
+
+/// Where a grant lives: the caller's account (or gcloud's active one) and the entitlement's full address.
+pub struct Entitlement<'a> {
+    pub account: Option<&'a str>,
+    pub project: &'a str,
+    pub location: &'a str,
+    pub entitlement: &'a str,
+}
+
+/// How a grant request ended short of an active grant.
+#[derive(Debug)]
+pub enum RequestError {
+    /// `cancelled` said so between steps.
+    Cancelled,
+    /// The API refused a call.
+    Api(GcpError),
+    /// The grant reached a state nothing more will come of without a person (`APPROVAL_AWAITED` included).
+    NotActive { state: String },
+    /// The grant was still on its way when the wait ran out.
+    TimedOut { state: String },
+}
+
+impl RequestError {
+    /// The sentence for the person, naming the entitlement (design 2026-10-25, PAM grant requests).
+    pub fn sentence(&self, entitlement: &str) -> String {
+        match self {
+            RequestError::Cancelled => "The connection was cancelled.".to_string(),
+            RequestError::Api(error) => error.to_string(),
+            RequestError::NotActive { state } => {
+                let why = if state == "APPROVAL_AWAITED" { "; Lunport does not wait for an approver" } else { "" };
+                format!("The {entitlement} grant did not become active (state: {state}){why}.")
+            }
+            RequestError::TimedOut { state } => format!("The {entitlement} grant did not become active within a minute (state: {state}); try connecting again."),
+        }
+    }
+}
+
+/// Requests a grant on `place` for `duration_secs` with `justification` (or takes the one already in flight there, the most recent),
+/// tells `remember` once a request was made, and reads the grant back every `poll_every` until it is `ACTIVE`, for at most `wait`.
+/// `cancelled` is looked at between steps. The connect and the Google Cloud panel both request through here (design 2026-10-25).
+#[allow(clippy::too_many_arguments)]
+pub fn request_and_wait(
+    gcp: &dyn GcpClient,
+    place: &Entitlement<'_>,
+    justification: &str,
+    duration_secs: u32,
+    remember: &dyn Fn(),
+    poll_every: Duration,
+    wait: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Grant, RequestError> {
+    if cancelled() {
+        return Err(RequestError::Cancelled);
+    }
+    let found = gcp.grants(place.account, place.project, place.location, place.entitlement).map_err(RequestError::Api)?;
+    let now = SystemTime::now();
+    let mut grant = match in_flight(&found).into_iter().max_by_key(|grant| granted_at(grant, now).unwrap_or(UNIX_EPOCH)) {
+        Some(existing) => existing.clone(),
+        None => {
+            let created = gcp.create_grant(place.account, place.project, place.location, place.entitlement, duration_secs, justification).map_err(RequestError::Api)?;
+            remember();
+            created
+        }
+    };
+    let deadline = Instant::now() + wait;
+    loop {
+        if cancelled() {
+            return Err(RequestError::Cancelled);
+        }
+        if grant.state == "ACTIVE" {
+            return Ok(grant);
+        }
+        if grant.is_final() {
+            return Err(RequestError::NotActive { state: grant.state });
+        }
+        if Instant::now() >= deadline {
+            return Err(RequestError::TimedOut { state: grant.state });
+        }
+        std::thread::sleep(poll_every);
+        grant = gcp.get_grant(place.account, &grant.name).map_err(RequestError::Api)?;
+    }
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, the only shape Google's APIs write. Anything else is `None`.

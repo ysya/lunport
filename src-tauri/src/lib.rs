@@ -423,6 +423,8 @@ fn run_app(host: bool, start_hidden: bool) {
             session::transports::transports_save,
             session::transports::transports_delete,
             session::transports::transports_oslogin_profile,
+            session::transports::transports_pam_status,
+            session::transports::transports_pam_request,
             session::embedded::terminal_write,
             session::embedded::terminal_resize,
             session::embedded::terminal_ack,

@@ -4,7 +4,8 @@ import type { HostTransport } from "@/bindings/HostTransport";
 import type { TransportKind } from "@/bindings/TransportKind";
 import type { PamCheck } from "@/bindings/PamCheck";
 import type { OsLoginProfileView } from "@/bindings/OsLoginProfileView";
-export type { HostTransport, TransportKind, PamCheck, OsLoginProfileView };
+import type { PamStatusView } from "@/bindings/PamStatusView";
+export type { HostTransport, TransportKind, PamCheck, OsLoginProfileView, PamStatusView };
 
 /** A placeholder for the PAM entitlements field, never a default: Lunport is a public product. */
 export const pamPlaceholder = "prod-operate, prod-admin";
@@ -14,6 +15,28 @@ export const saveTransport = (transport: HostTransport, expected: HostTransport 
 export const deleteTransport = (expected: HostTransport) => tauriInvoke<RecordOverview>("transports_delete", { expected });
 export const fetchOsLoginProfile = (account: string | null, project: string, keyId: string | null) =>
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
+export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
+export const requestPamGrant = (hostId: string, justification: string, durationSecs: number) =>
+  tauriInvoke<PamStatusView>("transports_pam_request", { hostId, justification, durationSecs });
+
+const hhmm = (ms: number) => {
+  const at = new Date(ms);
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+};
+
+/** One line about a transport's PAM grant (design 2026-10-25): which entitlement holds it and until when, on this computer's clock, or why there is none. */
+export function pamStatusLine(view: PamStatusView): string {
+  switch (view.state) {
+    case "active":
+      return `${view.entitlement ?? "grant"} · active${view.active_until_ms === null ? "" : ` until ${hhmm(view.active_until_ms)}`}`;
+    case "activating":
+      return `${view.entitlement ?? "grant"} · activating…`;
+    case "error":
+      return view.message ?? "The grant could not be checked.";
+    default:
+      return "no active grant";
+  }
+}
 
 export function newIapTransport(hostId: string): HostTransport {
   return { host_id: hostId, kind: { type: "gcp_iap", project: "", zone: "", instance: "", interface: "nic0", account: null, os_login: true, pam: null } };

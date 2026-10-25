@@ -1,10 +1,11 @@
 import "./transports.css";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Cloud, LoaderCircle, PencilLine, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/app/PageHeader";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { TaskDialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
+import { GrantRequestDialog } from "./GrantRequestDialog";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { RecordField, selectClass } from "./form";
 import { TransportFields } from "./TransportFields";
@@ -19,6 +20,9 @@ import {
   transportLabel,
   transportProblem,
   type HostTransport,
+  fetchPamStatus,
+  pamStatusLine,
+  type PamStatusView,
 } from "@/lib/transports";
 
 /** The sentence of a failure, without a thrown Error's "Error: " prefix. */
@@ -42,6 +46,30 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<HostTransport | null>(null);
+  // The PAM grant of each transport that needs one (design 2026-10-25, PAM grant requests): read when the panel opens and every minute.
+  const [grants, setGrants] = useState<Record<string, PamStatusView>>({});
+  const [requesting, setRequesting] = useState<HostTransport | null>(null);
+  const pamHosts = transports.filter((transport) => transport.kind.pam).map((transport) => transport.host_id).join(",");
+  useEffect(() => {
+    if (!pamHosts) return;
+    let live = true;
+    const refresh = () => {
+      for (const hostId of pamHosts.split(",")) {
+        fetchPamStatus(hostId).then(
+          (view) => { if (live) setGrants((known) => ({ ...known, [hostId]: view })); },
+          (failure) => { if (live) setGrants((known) => ({ ...known, [hostId]: { entitlement: null, state: "error", active_until_ms: null, message: describe(failure) } })); },
+        );
+      }
+    };
+    refresh();
+    const timer = setInterval(refresh, 60_000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [pamHosts]);
+  const grantLine = (transport: HostTransport) => (transport.kind.pam ? (grants[transport.host_id] ? pamStatusLine(grants[transport.host_id]) : "checking the grant…") : null);
+  const grantHeld = (transport: HostTransport) => ["active", "activating"].includes(grants[transport.host_id]?.state ?? "");
 
   const edit = (transport: HostTransport | null) => {
     setOriginal(transport);
@@ -138,6 +166,7 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
               {transports.map((transport) => {
                 const host = hostOf(transport.host_id);
                 const checks = [transport.kind.os_login ? "OS Login" : null, transport.kind.pam ? `PAM: ${transport.kind.pam.entitlements.join(", ")}` : null].filter(Boolean);
+                const grant = grantLine(transport);
                 return (
                   <tr key={transport.host_id} className="border-b last:border-0 hover:bg-muted/20">
                     <td className="max-w-60 px-4 py-3">
@@ -157,12 +186,21 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
                       {/* On a narrow panel the Account and Checks columns fold into this line. */}
                       <span className="transport-compact mt-1 text-xs text-muted-foreground">
                         {transport.kind.account ?? "gcloud's active account"} · {checks.length ? checks.join(" · ") : "no checks"}
+                        {grant ? ` · ${grant}` : ""}
                       </span>
                     </td>
                     <td className="transport-wide px-4 py-3 text-xs">{transport.kind.account ?? "gcloud's active account"}</td>
-                    <td className="transport-wide px-4 py-3 text-xs">{checks.length ? checks.join(" · ") : "None"}</td>
+                    <td className="transport-wide px-4 py-3 text-xs">
+                      {checks.length ? checks.join(" · ") : "None"}
+                      {grant && <span className="mt-1 block text-muted-foreground">{grant}</span>}
+                    </td>
                     <td className="px-3 py-3">
                       <div className="flex items-center justify-end gap-1">
+                        {transport.kind.pam && (
+                          <Button size="sm" variant="outline" className="mr-1" disabled={busy || grantHeld(transport)} onClick={() => setRequesting(transport)}>
+                            Request grant
+                          </Button>
+                        )}
                         <Button size="icon-sm" variant="ghost" aria-label={`Edit the transport of ${host?.payload.alias ?? transport.host_id}`} disabled={busy} onClick={() => edit(transport)}>
                           <PencilLine className="size-3.5" />
                         </Button>
@@ -233,6 +271,15 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
           </DialogFooter>
         </TaskDialogContent>
       </Dialog>
+      {requesting && (
+        <GrantRequestDialog
+          key={requesting.host_id}
+          transport={requesting}
+          alias={hostOf(requesting.host_id)?.payload.alias ?? requesting.host_id}
+          onClose={() => setRequesting(null)}
+          onRequested={(view) => setGrants((known) => ({ ...known, [requesting.host_id]: view }))}
+        />
+      )}
       <AlertDialog
         open={!!deleting}
         onOpenChange={(open) => {
