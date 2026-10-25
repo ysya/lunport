@@ -2247,6 +2247,13 @@ fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
             .map_err(|e| AppError::Other(e.to_string()))
     })
     .unwrap();
+    // A device-local transport on the same source host: the projection re-keys hosts and forces the state version, so it is cleared.
+    let transport: crate::sync::transports::HostTransport = serde_json::from_value(json!({"host_id":"a".repeat(16),"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
+        crate::sync::transports::set(s, &transport.host_id, None, Some(transport.clone()), now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    assert_eq!(crate::sync::transports::view(&record_runtime::snapshot(&f.peer.env()).unwrap().0).len(), 1);
     let service = service(&f);
     api::with_test_transport(&f.origin, &service.server.url(), || {
         let (scope, ticket) = prepared(&f);
@@ -2266,5 +2273,7 @@ fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
                 && !r.record.deleted
                 && r.record.payload["alias"] == "peer-local-host"));
         assert!(state.local.tunnel_rules.is_empty());
+        assert!(state.local.transports.is_empty(), "device-local transports are cleared by the projection");
+        assert!(crate::sync::records_v3::validate_state(&state).is_ok());
     });
 }

@@ -251,7 +251,7 @@ fn invalid_state_save_preserves_existing_bytes_and_creates_no_other_files() {
     let path = temp.path().join("sync-state.json");
     fs::write(&path, b"source").unwrap();
     let mut invalid = state();
-    invalid.version = crate::sync::records_v3::CENTRAL_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::TRANSPORT_STATE_VERSION + 1;
     assert!(save_active(&path, &invalid).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"source");
     assert_eq!(names(temp.path()), vec!["sync-state.json"]);
