@@ -269,6 +269,7 @@ fn public_preview_then_explicit_confirmation_executes_independent_of_mcp_grants(
         )
         .with_pin("web", default_server_key());
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -301,6 +302,7 @@ fn cancellation_denial_missing_metadata_and_expired_preview_never_execute() {
         .with_host("web", AuthMethod::Password)
         .with_pin("web", default_server_key());
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -357,6 +359,7 @@ fn same_id_public_identity_change_and_current_workspace_change_reject_before_con
         )
         .with_pin("web", default_server_key());
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &keys,
@@ -427,6 +430,7 @@ fn completed_exec_with_failed_audit_keeps_outcome_warns_and_never_retries() {
         )
         .with_pin("web", default_server_key());
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -473,6 +477,7 @@ fn authentication_abandonment_timeout_and_host_key_refusal_are_distinct() {
             .with_host("web", AuthMethod::Password)
             .with_pin("web", default_server_key());
         let c = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &e,
             directory: &d,
             keys: &FakeKeys::new(),
@@ -507,6 +512,7 @@ fn authentication_abandonment_timeout_and_host_key_refusal_are_distinct() {
     );
     let confirmer = FakeConfirmer::deciding(vec![Decision::Refuse]);
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -594,6 +600,7 @@ fn inherited_group_endpoint_changes_invalidate_preview_without_host_revision_cha
     });
     let e = FakeEngine::new();
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -796,6 +803,7 @@ fn public_resolution_and_private_authentication_leave_lifecycle_available() {
         result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
     );
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &directory,
         keys: &keys,
@@ -855,6 +863,7 @@ fn selected_key_change_during_host_key_question_prevents_pin_and_exec() {
         },
     );
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &keys,
@@ -911,6 +920,7 @@ fn change_during_connect_closes_session_before_exec() {
         )
         .with_pin("web", default_server_key());
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -1007,6 +1017,7 @@ fn connection_timeout_has_a_distinct_timeout_outcome_without_exec() {
         phase: crate::ssh::Phase::Handshake,
     });
     let c = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
         engine: &e,
         directory: &d,
         keys: &FakeKeys::new(),
@@ -1036,6 +1047,7 @@ fn deployment_aba_resolve_cannot_connect_or_execute_on_unreviewed_target() {
             result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
         ));
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &FakeKeys::new(),
@@ -1097,6 +1109,7 @@ fn deployment_legitimate_new_pin_and_interactive_password_fallback_still_execute
         });
         let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &FakeKeys::new(),

@@ -234,7 +234,7 @@ else {
       busy={false} onAnswer={() => {}}
     />;
     if (scenario === "authentication" || scenario === "authentication-expired") return <AuthenticationCardView
-      request={{ id: "fixture-question", request_id: "fixture-connection", hop: { alias: "Production web", host_id: "0000000000000001", hostname: "web.example.com", user: "deploy", port: 22 }, kind: "password", text: "Password for deploy@web.example.com:", echo: false, remaining_ms: 90000 }}
+      request={{ id: "fixture-question", request_id: "fixture-connection", hop: { alias: "Production web", host_id: "0000000000000001", hostname: "web.example.com", user: "deploy", port: 22 }, kind: "password", text: "Password for deploy@web.example.com:", echo: false, remaining_ms: 90000, grant: null }}
       busy={false} armed remainingMs={scenario === "authentication-expired" ? 0 : 90000} answer={answer} onChange={setAnswer} onAnswer={() => setAnswer("")}
     />;
     return <>

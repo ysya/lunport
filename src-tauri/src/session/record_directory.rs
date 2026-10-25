@@ -1,13 +1,16 @@
 //! Records adapter for the broker. SyncCore remains the only mutable/persistent owner.
-use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey};
+use crate::session::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, PinnedKey, Prepared};
 use crate::session::protocol::HostQuery;
-use crate::ssh::{AuthMethod, Hop, HopRef, HostId, HostKey, Target};
+use crate::gcp::rest::GcpClient;
+use crate::ssh::{AuthMethod, Hop, HopRef, HostId, HostKey, IapTarget, Target, Transport};
+use crate::sync::transports::{self, HostTransport, TransportKind};
 use crate::sync::record_repository::{
     self as repo, HostEndpoint, HostReadiness, HostView, KeyView, RepositoryError,
 };
 use crate::sync::records_v3::{AuthKind, RecordValidationError, StoredHostKey, SyncStateV3};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 pub struct RecordSources {
     pub snapshot: Box<dyn Fn() -> Result<SyncStateV3, DirectoryError> + Send + Sync>,
@@ -40,7 +43,13 @@ pub struct RecordDirectory {
     sources: RecordSources,
     confirmed_pin: Option<Box<ConfirmedPin>>,
     password_reader: Option<Box<PasswordReader>>,
+    /// Google, for `prepare` (OS Login, PAM); `None` in builds and tests without it.
+    gcp: Option<Arc<dyn GcpClient>>,
+    /// Where a grant request's justification and duration are kept for next time; `None` forgets them.
+    grant_memory: Option<Box<GrantMemory>>,
 }
+/// When a grant was given, as the broker counts it: its grant time, never ahead of `now` (Google's clock may run ahead); `now` for a
+/// grant still activating; nothing for a grant with no time that is not activating (design 2026-10-25, PAM grant requests).
 fn repository_error(error: RepositoryError) -> DirectoryError {
     match error {
         RepositoryError::Validation(RecordValidationError::HostNotFound(id)) => {
@@ -77,13 +86,50 @@ pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryErro
         pinned_at_ms: pin.pinned_at_ms,
     })
 }
+/// Writes what a grant request taught a host's transport: `(host, justification, duration_secs)` (design 2026-10-25, PAM grant requests).
+pub type GrantMemory = dyn Fn(&HostId, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
+
 impl RecordDirectory {
     pub fn new(sources: RecordSources) -> Self {
         Self {
             sources,
             confirmed_pin: None,
             password_reader: None,
+            gcp: None,
+            grant_memory: None,
         }
+    }
+    pub(crate) fn with_grant_memory(mut self, remember: Box<GrantMemory>) -> Self {
+        self.grant_memory = Some(remember);
+        self
+    }
+
+    /// `HostDirectory::request_grant` with the pacing given (the trait method uses the design's 2 s and 60 s; tests hurry). A grant that
+    /// appeared since `prepare` looked (another connection, the panel) is used instead of requested: PAM refuses a second request with
+    /// the same scope. What the person gave is remembered on the transport for next time, whether or not the memory can be written.
+    pub(crate) fn request_grant_with(
+        &self,
+        need: &GrantNeed,
+        justification: &str,
+        duration_secs: u32,
+        cancel: &super::connect::CancelToken,
+        poll_every: Duration,
+        wait: Duration,
+    ) -> Result<GrantReceipt, DirectoryError> {
+        let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
+        let place = crate::gcp::pam::Entitlement { account: need.account.as_deref(), project: &need.project, location: &need.location, entitlement: &need.entitlement };
+        // A failed memory write does not fail the request: the grant exists either way.
+        let remember = || {
+            if let Some(remember) = &self.grant_memory {
+                let _ = remember(&need.host, justification, duration_secs);
+            }
+        };
+        let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled()).map_err(|error| match error {
+            crate::gcp::pam::RequestError::Cancelled => DirectoryError::Failed(error.sentence(&need.entitlement)),
+            other => DirectoryError::Denied(other.sentence(&need.entitlement)),
+        })?;
+        let (granted_at, active_until) = crate::gcp::pam::active_span(&grant, SystemTime::now(), duration_secs);
+        Ok(GrantReceipt { entitlement: need.entitlement.clone(), granted_at, active_until })
     }
     pub(crate) fn with_password_reader(mut self, read: Box<PasswordReader>) -> Self {
         self.password_reader = Some(read);
@@ -91,6 +137,10 @@ impl RecordDirectory {
     }
     pub(crate) fn with_confirmed_pin(mut self, pin: Box<ConfirmedPin>) -> Self {
         self.confirmed_pin = Some(pin);
+        self
+    }
+    pub(crate) fn with_gcp(mut self, gcp: Arc<dyn GcpClient>) -> Self {
+        self.gcp = Some(gcp);
         self
     }
     fn host(&self, id: &HostId) -> Result<HostView, DirectoryError> {
@@ -232,6 +282,17 @@ impl RecordDirectory {
             }
             hops.push(hop);
         }
+        // A device-local transport (design 2026-10-25) replaces the first hop's TCP connection. It cannot carry a later hop, which is
+        // reached through the hop before it.
+        for (index, hop) in hops.iter_mut().enumerate() {
+            let Some(HostTransport { kind: TransportKind::GcpIap { project, zone, instance, interface, account, .. }, .. }) = transports::get(&state, hop.id.as_str()) else {
+                continue;
+            };
+            if index > 0 {
+                return Err(DirectoryError::Unsupported(format!("{} connects through Google Cloud IAP and cannot be reached through a jump host.", hop.alias)));
+            }
+            hop.transport = Transport::GcpIap(IapTarget { project, zone, instance, interface, account, url_root: None });
+        }
         Ok(Target { hops })
     }
 }
@@ -244,6 +305,93 @@ impl HostDirectory for RecordDirectory {
     }
     fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
         self.resolve_material(query, false, true)
+    }
+    /// For a first hop through Google Cloud IAP (design 2026-10-25): the PAM grant check, then OS Login. The key is registered when the
+    /// profile lacks it or has no POSIX account yet (`gcloud compute ssh` does the same; the import creates the account), and the
+    /// profile's username must be the one the host is saved with: nothing here changes the target, so the identity checks that compare
+    /// the hop's user keep their meaning.
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
+        let nothing = Prepared::default();
+        let Some(hop) = target.hops.first() else { return Ok(nothing) };
+        if !matches!(hop.transport, Transport::GcpIap(_)) {
+            return Ok(nothing);
+        }
+        let state = (self.sources.snapshot)()?;
+        let Some(HostTransport { kind: TransportKind::GcpIap { project, account, os_login, pam, .. }, .. }) = transports::get(&state, hop.id.as_str()) else {
+            return Ok(nothing);
+        };
+        if !os_login && pam.is_none() {
+            return Ok(nothing);
+        }
+        let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
+        let cancelled = || DirectoryError::Failed("The connection was cancelled.".into());
+        let denied = |error: crate::gcp::rest::GcpError| DirectoryError::Denied(error.to_string());
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        let who = account.as_deref().unwrap_or("the active gcloud account");
+        let mut prepared = nothing;
+        if let Some(pam) = &pam {
+            let mut in_flight = false;
+            for entitlement in &pam.entitlements {
+                let grants = gcp.grants(account.as_deref(), &project, &pam.location, entitlement).map_err(denied)?;
+                let current = crate::gcp::pam::in_flight(&grants);
+                if !current.is_empty() {
+                    in_flight = true;
+                    // IAP can take about 1½ minutes to see a grant: the broker waits on IAP, and says so, after a grant this young. The
+                    // freshest in-flight grant dates it; one still activating, or timed by a clock ahead of this one, is as fresh as now.
+                    let now = SystemTime::now();
+                    let dated = current.iter().filter_map(|grant| crate::gcp::pam::granted_at(grant, now)).max();
+                    prepared.recent_grant = dated.is_some_and(|granted| now.duration_since(granted).map_or(true, |age| age <= Duration::from_secs(120)));
+                    prepared.granted_at = dated;
+                    break;
+                }
+            }
+            if !in_flight {
+                return Err(DirectoryError::GrantNeeded(Box::new(GrantNeed {
+                    host: hop.id.clone(),
+                    account: account.clone(),
+                    project: project.clone(),
+                    location: pam.location.clone(),
+                    entitlement: pam.entitlements[0].clone(),
+                    entitlements: pam.entitlements.clone(),
+                    duration_secs: pam.duration_secs,
+                    justification: pam.justification.clone(),
+                })));
+            }
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+        }
+        if os_login {
+            let mut profile = gcp.login_profile(account.as_deref(), &project).map_err(denied)?;
+            if let AuthMethod::Key { key_id } = &hop.auth {
+                if let Some(line) = public_key(key_id) {
+                    if profile.username().is_none() || !profile.has_key(&line) {
+                        if cancel.is_cancelled() {
+                            return Err(cancelled());
+                        }
+                        profile = gcp.import_ssh_public_key(account.as_deref(), &project, &line).map_err(denied)?;
+                    }
+                }
+            }
+            match profile.username() {
+                None => {
+                    return Err(DirectoryError::Denied(format!("OS Login has no POSIX account for {who} in {project}; the project may not have OS Login enabled.")));
+                }
+                Some(name) if name != hop.user => {
+                    return Err(DirectoryError::Denied(format!(
+                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; save that username into the host (Use OS Login username in the host's Google Cloud transport).",
+                        hop.user
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(prepared)
+    }
+    fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
+        self.request_grant_with(need, justification, duration_secs, cancel, Duration::from_secs(2), Duration::from_secs(60))
     }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?

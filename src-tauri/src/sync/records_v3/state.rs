@@ -60,6 +60,9 @@ pub struct LocalState {
     pub central_cache_source: Option<Box<crate::sync::central::replacement_archive::Receipt>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tunnel_rules: BTreeMap<String, LocalRecord>,
+    /// Device-local host transports (`transport:<host-id>` Meta records); never published. Needs `TRANSPORT_STATE_VERSION`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub transports: BTreeMap<String, LocalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -146,7 +149,8 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
+        | TRANSPORT_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -294,6 +298,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             | LOCAL_CREDENTIAL_STATE_VERSION
             | LOCAL_CONFLICT_STATE_VERSION
             | CENTRAL_STATE_VERSION
+            | TRANSPORT_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -363,6 +368,15 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
     for (key, row) in &state.local.tunnel_rules {
         validate_cache_key(key, row)?;
         if !crate::sync::tunnel_rules::valid(&row.record) { return Err(state_invalid("tunnel", &row.record.id, "invalid tunnel metadata")); }
+    }
+    if !state.local.transports.is_empty() && state.version < crate::sync::transports::STATE_VERSION {
+        return Err(state_invalid("transport", "local", "invalid transport state version"));
+    }
+    for (key, row) in &state.local.transports {
+        validate_cache_key(key, row)?;
+        if !crate::sync::transports::valid(&row.record) {
+            return Err(state_invalid("transport", &row.record.id, "invalid transport metadata"));
+        }
     }
     read_hosts(&state.local.hosts, HostScope::Local)?;
     for (key, row) in &state.local.groups {

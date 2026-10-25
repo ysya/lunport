@@ -18,9 +18,20 @@ import {
 /** localStorage key for ALL persisted preferences (zustand persist envelope). */
 export const SETTINGS_STORAGE_KEY = "sshelter-settings";
 
-/** Pre-settings-store keys, read ONCE as migration seeds (never written again). */
+/** The pre-settings-store theme key, read ONCE as a migration seed (never written again). */
 const LEGACY_THEME_KEY = "sshelter-theme";
-const LEGACY_TERMINAL_KEY = "sshelter-terminal";
+
+/**
+ * The persisted envelope's version. 1 (2026-10-25): Lunport's own terminal becomes everyone's preferred terminal once, whatever an
+ * older build had saved; a terminal chosen after that is kept, as before.
+ */
+export const SETTINGS_VERSION = 1;
+
+/** Brings preferences saved by an older build up to `SETTINGS_VERSION`. */
+export function migrateSettings(persisted: unknown, version: number): Partial<SettingsState> {
+  const state = (persisted ?? {}) as Partial<SettingsState>;
+  return version < 1 ? { ...state, terminalId: IN_APP_TERMINAL } : state;
+}
 
 /**
  * One-time migration seed: if the old standalone theme key holds an explicit
@@ -39,17 +50,6 @@ function legacyTheme(): ThemePref {
   return "system";
 }
 
-/** One-time migration seed for the preferred-terminal id (see {@link legacyTheme}). */
-function legacyTerminalId(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const stored = window.localStorage.getItem(LEGACY_TERMINAL_KEY);
-    return stored && stored.length > 0 ? stored : null;
-  } catch {
-    return null;
-  }
-}
-
 interface SettingsState {
   /** Theme preference; "system" follows the OS (resolved in `useApplyTheme`). */
   theme: ThemePref;
@@ -60,7 +60,9 @@ interface SettingsState {
   toggleTheme: () => void;
   /**
    * "lunport" opens an in-app session; null uses the system default / first
-   * detected external terminal. Existing persisted choices survive upgrades.
+   * detected external terminal. Lunport's own terminal is the default for
+   * everyone (settings version 1 reset older choices once); a choice made
+   * since then survives upgrades.
    */
   terminalId: string | null;
   setTerminalId: (id: string | null) => void;
@@ -157,7 +159,7 @@ export const useSettingsStore = create<SettingsState>()(
         set((s) => ({
           theme: resolveTheme(s.theme, systemPrefersDark()) === "dark" ? "light" : "dark",
         })),
-      terminalId: legacyTerminalId() ?? IN_APP_TERMINAL,
+      terminalId: IN_APP_TERMINAL,
       setTerminalId: (terminalId) => set({ terminalId }),
       terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
       setTerminalFontSize: (size) => set({ terminalFontSize: clampTerminalFontSize(size) }),
@@ -230,6 +232,6 @@ export const useSettingsStore = create<SettingsState>()(
           return { fileAliases: { ...s.fileAliases, [path]: trimmed } };
         }),
     }),
-    { name: SETTINGS_STORAGE_KEY },
+    { name: SETTINGS_STORAGE_KEY, version: SETTINGS_VERSION, migrate: migrateSettings },
   ),
 );

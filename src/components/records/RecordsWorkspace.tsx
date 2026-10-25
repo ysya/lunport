@@ -78,6 +78,7 @@ import { connectSavedHost } from "./operations";
 import { TerminalWorkspace } from "./TerminalWorkspace";
 import { useTerminalStore } from "@/stores/terminals";
 import { TunnelsPanel } from "./TunnelsPanel";
+import { TransportsPanel } from "./TransportsPanel";
 
 export function RecordsWorkspace({
   overview,
@@ -242,6 +243,7 @@ export function RecordsWorkspace({
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
         if (panel === "tunnels") document.getElementById("new-tunnel-button")?.click();
+        else if (panel === "transports") document.getElementById("new-transport-button")?.click();
         else if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
         else createHost();
       } else if (event.key.toLowerCase() === "f") {
@@ -509,6 +511,7 @@ export function RecordsWorkspace({
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
+              {panel === "transports" && <TransportsPanel overview={overview} accept={accept} />}
               {panel === "account" && (
                 <RecordsAccountPanel
                   onOpenImport={() => setPanel("import")}

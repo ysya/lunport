@@ -12,6 +12,8 @@ pub const STATE_VERSION: u32 = 3;
 pub const LOCAL_CREDENTIAL_STATE_VERSION: u32 = 6;
 pub const LOCAL_CONFLICT_STATE_VERSION: u32 = 7;
 pub const CENTRAL_STATE_VERSION: u32 = 8;
+/// `local.transports` exists (design 2026-10-25): an older Lunport refuses the state instead of misreading it.
+pub const TRANSPORT_STATE_VERSION: u32 = 9;
 pub const MAX_JUMPS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

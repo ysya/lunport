@@ -8,6 +8,7 @@ import {
 import { Button } from "@/components/ui/button";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
+import { transportFor, transportLabel } from "@/lib/transports";
 import { groupPath } from "./group-tree";
 import { readinessLabel } from "./HostList";
 import { DetailPane } from "./DetailPane";
@@ -31,6 +32,7 @@ export function HostPreview({
 }) {
   const payload = host.effective_payload;
   const ready = host.readiness.kind === "ready" && !host.group_error;
+  const transport = transportFor(overview, host.id);
   const field = (name: string, value: string, mono = false) => (
     <div>
       <dt>{name}</dt>
@@ -74,6 +76,7 @@ export function HostPreview({
           <h3>Connection</h3>
           <dl>
             {field("Address", payload.hostname, true)}
+            {transport && field("Connect through", transportLabel(transport))}
             {field("Username", payload.user || "Terminal default", true)}
             {field("Port", String(payload.port), true)}
             {field(

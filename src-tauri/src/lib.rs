@@ -15,6 +15,7 @@ mod discover;
 mod diagnostics;
 mod error;
 mod fsutil;
+mod gcp;
 pub mod host_start;
 mod ipc;
 mod keys;
@@ -419,6 +420,11 @@ fn run_app(host: bool, start_hidden: bool) {
             session::tunnels::tunnels_delete,
             session::tunnels::tunnels_start,
             session::tunnels::tunnels_stop,
+            session::transports::transports_save,
+            session::transports::transports_delete,
+            session::transports::transports_oslogin_profile,
+            session::transports::transports_pam_status,
+            session::transports::transports_pam_request,
             session::embedded::terminal_write,
             session::embedded::terminal_resize,
             session::embedded::terminal_ack,

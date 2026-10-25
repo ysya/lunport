@@ -137,6 +137,8 @@ impl Candidate {
         shadow.local.groups = cache.groups;
         shadow.local.group_order = cache.group_order;
         shadow.local.tunnel_rules.clear();
+        // Device-local transports are keyed by host ids this projection replaces, and the version above is below theirs: entered again.
+        shadow.local.transports.clear();
         // All source pointers and files remain in source. A native stage supplies new verified mappings.
         shadow.local.keys.clear();
         shadow.local.credential_approvals.clear();
