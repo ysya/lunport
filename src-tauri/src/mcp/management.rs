@@ -137,6 +137,7 @@ fn candidate(
     Ok((
         next,
         McpHostProposal {
+            kind: proposal_kinds::CREATE_HOST.into(),
             settings: vec![
                 (
                     "Storage".into(),
