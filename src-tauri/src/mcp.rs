@@ -146,10 +146,26 @@ struct PendingApproval {
     decision: mpsc::SyncSender<ApprovalDecision>,
 }
 
+/// What kind of change a proposal asks the person to approve (design 2026-10-26, AI edits): the window words each kind.
+pub mod proposal_kinds {
+    pub const CREATE_HOST: &str = "create_host";
+    pub const UPDATE_HOST: &str = "update_host";
+    pub const SET_TRANSPORT: &str = "set_transport";
+    pub const REMOVE_TRANSPORT: &str = "remove_transport";
+}
+
+fn create_host_kind() -> String {
+    proposal_kinds::CREATE_HOST.to_string()
+}
+
+/// A change the client proposes, as the window shows it: its kind and its rows (a label and a value; a changed field's value reads
+/// `old → new`). No secret is ever a row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpHostProposal {
+    #[serde(default = "create_host_kind")]
+    pub kind: String,
     pub settings: Vec<(String, String)>,
 }
 

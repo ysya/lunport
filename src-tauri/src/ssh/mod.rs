@@ -22,8 +22,8 @@ mod types;
 pub(crate) use error::{AuthError, ConnectError, SessionError};
 pub(crate) use traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
 pub(crate) use types::{
-    AuthMethod, DisconnectKind, DisconnectReason, Exit, Hop, HopRef, HostId, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Secret, Signature, Target,
-    DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_EVERY,
+    AuthMethod, DisconnectKind, DisconnectReason, Exit, Hop, HopRef, HostId, HostKey, HostKeyVerdict, IapTarget, Prompt, Pty, RsaHash, Secret, Signature, Target,
+    Transport, DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_EVERY,
 };
 // Execution types shared by Records MCP and the human deployment integration.
 pub(crate) use types::{Ended, ExecResult};

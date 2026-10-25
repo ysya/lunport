@@ -49,6 +49,7 @@ export const recordOverview = (
   group_deletion_token: "fixture-reviewed-snapshot",
   hosts: [hostView()],
   groups: [],
+  transports: [],
   format_upgrade_required: false,
   shared_format_upgrade_required: false,
   keys: [],

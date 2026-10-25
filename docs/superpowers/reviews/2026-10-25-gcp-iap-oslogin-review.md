@@ -1,0 +1,40 @@
+# Google Cloud IAP tunnels and OS Login: review record
+
+The branch `claude/project-thread-whbjuy` (design `docs/superpowers/specs/2026-10-25-gcp-iap-oslogin-design.md`, plan `docs/superpowers/plans/2026-10-25-gcp-iap-oslogin.md`) was reviewed twice by fresh readers before it was handed over: the whole branch up to the documentation commit, and the four commits that followed (the Google Cloud panel, the state-version fix, the recent-grant note). This file records what they found, what was fixed, the calls made on the rest, and what is left for later. Each fix was made test-first; the test named is the one that failed before the fix and passes after it.
+
+Later on the same branch, the plan `docs/superpowers/plans/2026-10-25-pam-grant-request.md` (design `docs/superpowers/specs/2026-10-25-pam-grant-request-design.md`) added requesting a PAM grant from Lunport: the Request-a-grant question and window, the gate for connections needing the same grant, the IAP grace retry and the panel's grant state. Its review is recorded in `docs/superpowers/reviews/2026-10-25-pam-grant-request-review.md`.
+
+## Fixed
+
+| Finding | Fix | Test |
+|---|---|---|
+| A real `wss://` dial panicked inside rustls: the build has both of rustls's crypto providers (aws-lc-rs through reqwest, ring through the updater) and nothing installed a process default; the tests used `ws://` and never saw it. | `gcp/iap.rs` builds its own TLS configuration (aws-lc-rs named, the system's roots) and dials with an explicit connector, Nagle off, a 2 MiB message cap. | `a_tls_dial_builds_its_own_rustls_configuration` |
+| The pump wrote to the engine inside the same `select!` that read from it; russh writes a whole batch before it reads again, so bulk traffic both ways stopped both sides for good. | The pipe's halves are pumped independently with one pending frame; the engine's bytes are always read. | `a_large_write_completes_while_nothing_reads_the_echo` |
+| A reconnect attempt had no bound (a stalled TCP or TLS handshake stopped the 15-minute budget), and reconnects went on after the engine had dropped the stream. | Each attempt is bounded by 60 s and the remaining budget; while waiting, the pump takes the engine's writes and ends on its end-of-file. | `a_reconnect_attempt_that_never_answers_is_bounded_by_the_budget`, `dropping_the_stream_stops_a_reconnect_in_progress` |
+| Why the tunnel ended was dropped: the engine reported russh's end-of-file, never "the IAP tunnel could not be reconnected within 15 minutes" or the relay's close. | The pump records the reason; the engine's disconnect reason repeats it. | `the_tunnel_records_why_it_ended`, `a_relay_that_ends_the_session_is_why_the_connection_ended` |
+| Leaving an account dropped the transports of local-scope hosts. | `preserve_on_leave` keeps every host that stays on the device, as tunnel rules do. | `leaving_an_account_keeps_the_transports_of_the_hosts_that_stay_and_drops_the_rest` |
+| The PAM grant search read one page; the one active grant of someone who requests one daily sits on a later page. | Every page is read, up to ten. | `grants_are_read_across_pages` |
+| The runtime did not raise the state version for a candidate carrying transports (tunnel rules had the guard). | `persist_candidate` and `commit_migration_candidate` raise it. | `a_transport_promotes_the_state_version_when_persisted` |
+| The spec's recent-grant note (a 4033 right after a grant was given) was not implemented. | `prepare` reports `recent_grant`; the broker joins the note to the 4033 sentence, one sentence in all. | `prepare_reports_a_grant_that_became_active_moments_ago`, `a_tunnel_refused_right_after_a_grant_says_iap_may_not_see_it_yet` |
+| The account field accepted path characters and named a file under gcloud's config. | Only the characters an address and a directory name share, in Rust and TypeScript and in `transports_oslogin_profile`. | `validation_rejects_bad_fields`, `transportProblem` cases |
+| **Use OS Login username** compared with and wrote the host's own `user`, not the one the connection uses; a username inherited from a Group could never be made to agree. | `osLoginUsernameUpdate` works on the effective payload and refuses an inherited username with a sentence; the row shows the effective user and port. | `saves the OS Login username into the host as the connection sees it…`, `shows the username the connection uses…` |
+| The entitlements field could not take a typed comma (the controlled value was rebuilt from the parsed list). | The field keeps its text; `parseEntitlements` derives the list. | `lets the entitlements be typed with commas…` (the parser; the repo has no DOM test environment) |
+| A failed Remove showed nothing (the panel's alert sat behind the modal). | The error renders inside the Remove dialog, as the Tunnels panel does. | none (mirrors the sibling) |
+| Smaller: "Error: " prefixes on shown failures; the OS Login mismatch sentence pointed at a button that moved; a grant timed ahead of this clock or still activating did not count as fresh; the panel refused edits while account writes were blocked, although transports are device-local; Save with a vanished host; the docs said the SSH session survives 15 minutes (the keepalive bounds it at about 1½ minutes by default). | Fixed in the same pass. | existing tests updated |
+
+## Calls made
+
+- A reconnect handshake refused with 401/403/404 is retried within the budget, as gcloud's retryer retries every exception, rather than ending the tunnel at once. Cost if wrong: up to 15 minutes of retries after a grant expiry, ending with the exhausted sentence.
+- The PAM check still stops at the first entitlement with an in-flight grant, and judges `recent_grant` on that entitlement's grants. Cost: a missed note when an earlier entitlement holds only an old scheduled grant and a later one the fresh active grant.
+- The project ids and account in tests, fixtures and docs are Frank's own; the product text carries only the spec's placeholder.
+- `os_login` defaults to on, as the spec says; a VM with metadata keys needs it off, and the first refused connect says so.
+- The clippy warnings left in the new files are two: `transports::preserve_on_leave` "never used" in the library target (the leave path sits behind a Tauri command; `tunnel_rules::preserve_on_leave` reports the same) and the pre-existing closure types of `RecordSources`.
+
+## Left for later
+
+- The relay protocol: an unknown frame tag before the session announcement fails the open instead of being skipped; gcloud's timing details are not mirrored (no sleep before the first reconnect attempt, jitter, an idle ACK every 2 s, 408/429 retryable); the HTTP-refusal sentence suggests the IAP role for every status, 429 and 5xx included.
+- The broker: the verification probe runs the OS Login check too; `prepare` re-reads the transport record and checks cancellation once per PAM loop; the blocking HTTP client is built eagerly in every engine and directory, and two token stores do not share a cache.
+- Secrets: tungstenite's trace logging would include the Authorization header if a log backend were ever installed; the bearer header and the token form body are plain `String`s.
+- Records: a deleted host leaves its transport orphaned; an active-config account whose legacy credentials file is missing falls back to application default credentials silently.
+- The panel: Escape and Cancel discard the draft silently and Enter does not save; the OS Login note stays after changing host, account or project; `TransportFields` passes a placeholder host id to `transportProblem`; the Save sending the displayed value as `expected` has no test; the Remove title and aria-labels do not go through `revealHidden`; nothing warns that a host with jump hosts cannot use a transport; the Address field of an IAP host is unused without a hint.
+- The live check against a real jump box, with and without a PAM grant, and a 20-second network drop, is still to be done by hand (the fake relay speaks plain `ws://`; the TLS path is covered only by the dial test).

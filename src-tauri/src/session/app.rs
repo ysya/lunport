@@ -136,7 +136,10 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
     };
     let for_password = app.clone();
+    let for_grant = app.clone();
     let app = app.clone();
+    // Google Cloud IAP transports: OS Login and PAM through the app's one client (design 2026-10-25).
+    let gcp: Arc<dyn crate::gcp::rest::GcpClient> = app.state::<AppState>().gcp.clone();
     super::record_directory::RecordDirectory::new(sources).with_password_reader(Box::new(move |hop,keychain| {
         crate::sync::engine::with_env(&for_password, |env| {
             let safe=crate::sync::env::SyncEnv{doc:env.doc,backed_up:env.backed_up,retention:env.retention,runtime:env.runtime,ssh_dir:env.ssh_dir.clone(),state_path:env.state_path.clone(),home:env.home.clone(),keychain,relays:env.relays,events:env.events,clock:env.clock,platform:env.platform};
@@ -154,6 +157,14 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
             .map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))
         },
     ))
+    .with_gcp(gcp)
+    // A grant the person requested from a connection: its justification and duration are the transport's defaults next time.
+    .with_grant_memory(Box::new(move |host, justification, duration_secs| crate::sync::engine::with_env(&for_grant, |env| {
+        let now = env.now();
+        crate::sync::record_runtime::mutate_records(env, |s| crate::sync::transports::remember_grant_request(s, host.as_str(), justification, duration_secs, now).map_err(|e| AppError::Other(e.to_string())))?;
+        env.events.wake();
+        Ok::<_, AppError>(())
+    }).map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))))
 }
 
 /// The temporary directory over the app's ssh_config, sync state and keychain (`ssh_config_directory.rs`).

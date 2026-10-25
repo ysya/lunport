@@ -181,11 +181,20 @@ impl SshEngine for CheckedEngine<'_> {
     }
 }
 
+/// Who drives the connection a `PublicDirectory` serves (design 2026-10-25, PAM grant requests): a person may be asked for a
+/// Privileged Access Manager grant; automation (an AI's request) gets the refusal that names the gcloud command instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asker {
+    Person,
+    Automation,
+}
+
 /// Uses public resolution; private material is verified by KeyStore immediately before authentication.
 pub(crate) struct PublicDirectory<'a>(
     pub(crate) &'a dyn crate::session::directory::HostDirectory,
     pub(crate) &'a (dyn Fn() -> Result<(), String> + Sync),
     pub(crate) &'a (dyn Fn(&Target) -> Result<(), String> + Sync),
+    pub(crate) Asker,
 );
 impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn resolve_host_key(
@@ -274,6 +283,18 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     }
     fn password_account(&self, h: &crate::ssh::HostId) -> String {
         self.0.password_account(h)
+    }
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<crate::session::directory::Prepared, crate::session::directory::DirectoryError> {
+        let prepared = self.0.prepare(target, public_key, cancel);
+        match self.3 {
+            // An AI request asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
+            Asker::Automation => prepared.map_err(crate::session::directory::DirectoryError::for_automation),
+            Asker::Person => prepared,
+        }
+    }
+    fn request_grant(&self, need: &crate::session::directory::GrantNeed, justification: &str, duration_secs: u32, cancel: &CancelToken) -> Result<crate::session::directory::GrantReceipt, crate::session::directory::DirectoryError> {
+        (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
+        self.0.request_grant(need, justification, duration_secs, cancel)
     }
 }
 fn credential_reason(error: &str) -> &'static str {
@@ -520,13 +541,14 @@ pub(super) fn execute_context(
             } else {
                 connector.keychain
             };
-            let directory = PublicDirectory(connector.directory, &check, &check_resolved);
+            let directory = PublicDirectory(connector.directory, &check, &check_resolved, Asker::Automation);
             let guarded = Connector {
                 engine: &engine,
                 confirmer: &confirmer,
                 keys: &keys,
                 keychain,
                 directory: &directory,
+                grants: connector.grants,
             };
             let interaction_reason = || {
                 (*keys.reason.lock().unwrap()).or(*noninteractive.reason.lock().unwrap())
@@ -632,12 +654,90 @@ pub(super) fn execute_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::directory::{DirectoryError, GrantNeed, HostDirectory, Prepared};
+    use crate::session::grants::GrantGates;
     use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
     use crate::ssh::{
         fake::{default_server_key, FakeEngine, FakeEvent},
-        AuthMethod, Ended, ExecResult,
+        AuthMethod, Ended, ExecResult, HostId, HostKey,
     };
     use crate::sync::testkit::MemKeychain;
+
+    /// A directory whose every target needs a Privileged Access Manager grant (design 2026-10-25, PAM grant requests).
+    struct NeedsGrant<'a>(&'a FakeDirectory);
+
+    fn need() -> GrantNeed {
+        GrantNeed {
+            host: HostId::from("id-web"),
+            account: None,
+            project: "knowknow-prod".into(),
+            location: "global".into(),
+            entitlement: "prod-operate".into(),
+            entitlements: vec!["prod-operate".into()],
+            duration_secs: 1800,
+            justification: None,
+        }
+    }
+
+    impl HostDirectory for NeedsGrant<'_> {
+        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+            self.0.resolve(query)
+        }
+        fn pinned(&self, host: &HostId) -> Result<Option<crate::session::directory::PinnedKey>, DirectoryError> {
+            self.0.pinned(host)
+        }
+        fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
+            self.0.pin(host, key)
+        }
+        fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+            self.0.replace_pin(host, previous, key)
+        }
+        fn password_account(&self, host: &HostId) -> String {
+            self.0.password_account(host)
+        }
+        fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<Prepared, DirectoryError> {
+            Err(DirectoryError::GrantNeeded(Box::new(need())))
+        }
+    }
+
+    /// An AI's request asks nobody for a grant (design 2026-10-25): it gets the refusal that names the gcloud command, and nothing connects.
+    #[test]
+    fn an_ai_request_never_asks_for_a_grant_and_gets_the_refusal() {
+        let runtime = McpRuntime::default();
+        runtime.policy.lock().unwrap().enabled = true;
+        runtime.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+        let engine = FakeEngine::new();
+        let inner = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let directory = NeedsGrant(&inner);
+        let owner = FakeOwner::default();
+        let connector = Connector {
+            engine: &engine,
+            directory: &directory,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &FakeConfirmer::default(),
+            grants: GrantGates::for_tests(),
+        };
+        let error = execute(&runtime, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow).unwrap_err();
+        assert_eq!(error, need().refusal_sentence());
+        assert!(owner.asked().is_empty(), "nobody was asked");
+        assert!(!engine.events().iter().any(|event| matches!(event, FakeEvent::Connect { .. })), "nothing connected");
+    }
+
+    /// The public directory a person's deployment connects through passes a needed grant on, so that the person is asked; the one an AI
+    /// request connects through turns it into the refusal.
+    #[test]
+    fn a_persons_public_directory_passes_a_needed_grant_on_and_automations_refuses() {
+        let inner = FakeDirectory::new().with_host("web", AuthMethod::Password);
+        let needing = NeedsGrant(&inner);
+        let fine = || Ok(());
+        let fine_target = |_: &Target| Ok(());
+        let target = inner.resolve(&HostQuery::Alias("web".into())).unwrap();
+        let person = PublicDirectory(&needing, &fine, &fine_target, Asker::Person);
+        assert!(matches!(person.prepare(&target, &|_| None, &CancelToken::default()), Err(DirectoryError::GrantNeeded(_))));
+        let automation = PublicDirectory(&needing, &fine, &fine_target, Asker::Automation);
+        assert!(matches!(automation.prepare(&target, &|_| None, &CancelToken::default()), Err(DirectoryError::Denied(text)) if text == need().refusal_sentence()));
+    }
 
     #[test]
     fn allowed_id_executes_without_pty_and_preserves_disconnected_null_status() {
@@ -672,6 +772,7 @@ mod tests {
         let keychain = MemKeychain::default();
         let confirmer = FakeConfirmer::default();
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &keys,
@@ -714,6 +815,9 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "ssh_exec"
             | "create_host"
             | "verify_host_key"
+            | "update_host"
+            | "set_transport"
+            | "remove_transport"
     ) {
         Ok(())
     } else {
@@ -767,6 +871,29 @@ pub(crate) fn dispatch(
     match method {
         "create_host" => crate::sync::engine::with_env(app, |env| {
             super::management::create(env, &state.mcp, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "update_host" => crate::sync::engine::with_env(app, |env| {
+            super::management::update(env, &state.mcp, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "set_transport" | "remove_transport" => crate::sync::engine::with_env(app, |env| {
+            let tool = if method == "set_transport" { super::management::set_transport } else { super::management::remove_transport };
+            tool(env, &state.mcp, params, context, cancel, &|request| {
                 state
                     .mcp
                     .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
@@ -880,14 +1007,65 @@ pub(super) fn metadata(
         p.user.clone()
     };
     let safe = |s: &str| crate::session::auth::printable(s).replace(['\n', '\t'], "?");
+    // The host's Google Cloud IAP transport, when it has one (design 2026-10-26, AI edits): what the client would change.
+    let transport = crate::sync::transports::get(state, &view.host.id).map(|transport| transport_view(&transport));
     Ok(
-        json!({"id":view.host.id,"alias":safe(&p.alias),"hostname":safe(&p.hostname),"user":safe(&user),"port":p.port,"auth":p.auth,"key_id":p.key_id,"jump_ids":p.jump,"tags":p.tags.iter().map(|t|safe(t)).collect::<Vec<_>>(),"scope":view.host.scope,"group_path":path.iter().rev().map(|g|json!({"id":g.id,"name":safe(&g.payload.name)})).collect::<Vec<_>>(),"inherited_from":view.inherited_from}),
+        json!({"id":view.host.id,"alias":safe(&p.alias),"hostname":safe(&p.hostname),"user":safe(&user),"port":p.port,"auth":p.auth,"key_id":p.key_id,"jump_ids":p.jump,"tags":p.tags.iter().map(|t|safe(t)).collect::<Vec<_>>(),"scope":view.host.scope,"group_path":path.iter().rev().map(|g|json!({"id":g.id,"name":safe(&g.payload.name)})).collect::<Vec<_>>(),"inherited_from":view.inherited_from,"transport":transport}),
     )
+}
+
+/// A transport as the client reads it: its connection settings and the PAM check's shape, never the justification the person last
+/// sent (that is theirs; the client sends its own when it requests).
+pub(super) fn transport_view(transport: &crate::sync::transports::HostTransport) -> Value {
+    let crate::sync::transports::TransportKind::GcpIap { project, zone, instance, interface, account, os_login, pam } = &transport.kind;
+    json!({
+        "project": project,
+        "zone": zone,
+        "instance": instance,
+        "interface": interface,
+        "account": account,
+        "os_login": os_login,
+        "pam": pam.as_ref().map(|pam| json!({"entitlements": pam.entitlements, "location": pam.location, "duration_minutes": pam.duration_secs / 60})),
+    })
 }
 
 #[cfg(test)]
 mod behavior_tests {
     use super::*;
+
+    /// Design 2026-10-26 (AI edits): the host view the AI reads carries the host's transport, so the client can see what it would
+    /// change; the justification the person last sent stays theirs.
+    #[test]
+    fn the_host_view_carries_the_transport_without_its_justification() {
+        use crate::sync::record_repository as repo;
+        use crate::sync::records_v3::{HostScope, SyncStateV3};
+        use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
+        let state: SyncStateV3 = serde_json::from_value(json!({"version":4,"device_id":"d".repeat(32),"device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap();
+        let payload = serde_json::from_value(json!({"schema":2,"alias":"jumpbox-prod","hostname":"10.20.0.8","user":"frank","auth":"password"})).unwrap();
+        let state = repo::create_host(&state, "0000000000000001", HostScope::Local, payload, 2).unwrap();
+        let without = metadata(&state, &repo::get_host(&state, "0000000000000001").unwrap()).unwrap();
+        assert!(without.as_object().unwrap().contains_key("transport"), "{without}");
+        assert_eq!(without["transport"], Value::Null);
+        let transport = HostTransport {
+            host_id: "0000000000000001".into(),
+            kind: TransportKind::GcpIap {
+                project: "knowknow-prod".into(),
+                zone: "asia-east1-b".into(),
+                instance: "jumpbox".into(),
+                interface: "nic0".into(),
+                account: Some("frank@retower.io".into()),
+                os_login: false,
+                pam: Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into(), duration_secs: 1800, justification: Some("restart app-api".into()) }),
+            },
+        };
+        let state = transports::set(&state, "0000000000000001", None, Some(transport), 3).unwrap();
+        let with = metadata(&state, &repo::get_host(&state, "0000000000000001").unwrap()).unwrap();
+        assert_eq!(
+            with["transport"],
+            json!({"project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox","interface":"nic0","account":"frank@retower.io","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"],"location":"global","duration_minutes":30}})
+        );
+        assert!(!with.to_string().contains("restart app-api"), "the justification is the person's, not the client's");
+    }
     use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
     use crate::ssh::{
         fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods},
@@ -922,6 +1100,7 @@ mod behavior_tests {
         execute(
             r,
             &Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
                 engine: e,
                 directory: d,
                 keys: &FakeKeys::new(),
@@ -1027,6 +1206,7 @@ mod behavior_tests {
         let e = FakeEngine::new();
         let r = runtime(ApprovalMode::Ask);
         let c = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &e,
             directory: &d,
             keys: &FakeKeys::new(),
@@ -1149,6 +1329,7 @@ mod behavior_tests {
         let d = directory(AuthMethod::Password, true);
         let owner = FakeOwner::default();
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &d,
             keys: &FakeKeys::new(),
@@ -1302,6 +1483,7 @@ mod identity_tests {
         }
         let engine = FakeEngine::new();
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &FakeKeys::new(),
@@ -1371,6 +1553,7 @@ mod identity_tests {
             p.allowed_hosts.insert("id-web".into());
         }
         let c = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &keys,
@@ -1440,6 +1623,7 @@ mod identity_tests {
                 .with_host("web", auth)
                 .with_pin("web", default_server_key());
             let c = Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
                 engine: &engine,
                 directory: &d,
                 keys: &keys,
@@ -1537,6 +1721,7 @@ mod cancellation_tests {
                 )
                 .with_pin("web", default_server_key());
             let connector = Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
                 engine: &engine,
                 directory: &directory,
                 keys: &FakeKeys::new(),
@@ -1606,6 +1791,7 @@ mod approval_deadline_tests {
             .with_host("web", AuthMethod::Password)
             .with_pin("web", default_server_key());
         let c = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &e,
             directory: &d,
             keys: &FakeKeys::new(),
@@ -1676,6 +1862,7 @@ mod approval_deadline_tests {
             .with_host("web", AuthMethod::Password)
             .with_pin("web", default_server_key());
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &FakeKeys::new(),
@@ -1819,6 +2006,7 @@ mod confirmed_pin_tests {
             let keys = FakeKeys::new();
             let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
             let connector = Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
                 engine: &engine,
                 directory: &directory,
                 keys: &keys,

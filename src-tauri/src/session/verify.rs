@@ -98,6 +98,10 @@ impl HostDirectory for ProbeDirectory<'_> {
     fn password_account(&self, id: &HostId) -> String {
         self.inner.password_account(id)
     }
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<super::directory::Prepared, DirectoryError> {
+        // A fingerprint check asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
+        self.inner.prepare(target, public_key, cancel).map_err(DirectoryError::for_automation)
+    }
 }
 
 struct StopBeforeLogin<'a> {
@@ -245,6 +249,7 @@ pub fn verify(
         keys: connector.keys,
         keychain: connector.keychain,
         confirmer: connector.confirmer,
+        grants: connector.grants,
     };
     let result = probe.connect(query, owner, cancel);
     if cancel.is_cancelled() {

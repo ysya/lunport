@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { chooseMcpMode, receiveAuthQuestion, authRemaining, takeAuthAnswer } from "./mcp-flow";
+import { chooseMcpMode, receiveAuthQuestion, authRemaining, takeAuthAnswer, grantFields, encodeGrantAnswer, grantAnswerReady } from "./mcp-flow";
 import type { AuthRequest } from "@/bindings/AuthRequest";
 
 const question: AuthRequest = {
   id: "q1", request_id: "exec1", hop: null, kind: "password",
-  text: "Password:", echo: false, remaining_ms: 1000,
+  text: "Password:", echo: false, remaining_ms: 1000, grant: null,
 };
 
 describe("MCP mode changes", () => {
@@ -52,5 +52,37 @@ describe("native authentication answers", () => {
     expect(takeAuthAnswer(state, { wall: 1, monotonic: 1 })).toBe("answer");
     expect(state.answer).toBe("");
     expect(takeAuthAnswer(state, { wall: 2, monotonic: 2 })).toBeNull();
+  });
+});
+
+describe("grant questions", () => {
+  const now = { wall: 0, monotonic: 0 };
+  const grant: AuthRequest = {
+    ...question, id: "g1", kind: "grant", echo: true, remaining_ms: 400000,
+    text: "No active Privileged Access Manager grant for prod-operate on knowknow-prod.",
+    grant: { project: "knowknow-prod", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
+  };
+
+  it("waits up to five minutes for a grant request, two for a server's question", () => {
+    expect(authRemaining(receiveAuthQuestion(grant, now), now)).toBe(300000);
+    expect(authRemaining(receiveAuthQuestion({ ...question, remaining_ms: 400000 }, now), now)).toBe(120000);
+    expect(authRemaining(receiveAuthQuestion({ ...grant, remaining_ms: 1000 }, now), now)).toBe(1000);
+  });
+
+  it("starts the form from the stored justification and duration, and keeps both fields in the one answer", () => {
+    expect(receiveAuthQuestion(grant, now).answer).toBe("30\nrestart app-api");
+    expect(receiveAuthQuestion({ ...grant, grant: { ...grant.grant!, justification: null } }, now).answer).toBe("30\n");
+    expect(receiveAuthQuestion(question, now).answer).toBe("");
+    expect(grantFields("30\nrestart app-api")).toEqual({ minutes: "30", justification: "restart app-api" });
+    expect(grantFields("")).toEqual({ minutes: "", justification: "" });
+    expect(encodeGrantAnswer("45", "restart app-api")).toBe("45\nrestart app-api");
+  });
+
+  it("lets Request go only with whole minutes from 1 to 480 and a justification with something in it", () => {
+    expect(grantAnswerReady("30\nrestart app-api")).toBe(true);
+    expect(grantAnswerReady("480\nx")).toBe(true);
+    for (const answer of ["0\nx", "481\nx", "30\n", "30\n   ", "abc\nx", "30.5\nx", "-1\nx", "", "30", "30\nrestart\tapp-api", "30\nbell\u0007", "30\ndel\u007f"]) {
+      expect(grantAnswerReady(answer), JSON.stringify(answer)).toBe(false);
+    }
   });
 });

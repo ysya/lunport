@@ -4,9 +4,58 @@
 //! (`ssh_config_directory.rs`; plan 1c replaces it with host records). The broker sees only this trait.
 
 use std::fmt;
+use std::time::SystemTime;
 
 use super::protocol::HostQuery;
 use crate::ssh::{HostId, HostKey, HopRef, Target};
+
+/// What `HostDirectory::prepare` learned that the broker needs to explain a refusal (design 2026-10-25): `recent_grant` is a Privileged
+/// Access Manager grant that became active within the last two minutes, which IAP can take about 1½ minutes to see; `granted_at` is when
+/// the grant in flight was given (never ahead of this clock; now, for a grant still activating), for the broker's wait on IAP.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Prepared {
+    pub recent_grant: bool,
+    pub granted_at: Option<SystemTime>,
+}
+
+/// A Privileged Access Manager grant the connection needs and nobody holds (design 2026-10-25, PAM grant requests): everything the
+/// broker needs to ask the person and to request one. `entitlement` is the first the transport lists (the one requested); `entitlements`
+/// are all of them, for the refusal sentence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantNeed {
+    pub host: HostId,
+    pub account: Option<String>,
+    pub project: String,
+    pub location: String,
+    pub entitlement: String,
+    pub entitlements: Vec<String>,
+    /// The transport's stored duration, in seconds.
+    pub duration_secs: u32,
+    /// The transport's last justification, offered again.
+    pub justification: Option<String>,
+}
+
+impl GrantNeed {
+    /// The refusal the person reads when nothing is requested: how to request a grant by hand.
+    pub fn refusal_sentence(&self) -> String {
+        format!(
+            "No active Privileged Access Manager grant for {} on {}. Request one (for example gcloud pam grants create --entitlement={} --requested-duration=30m --justification=\"…\" --location={} --project={}) and connect again.",
+            self.entitlements.join(" or "),
+            self.project,
+            self.entitlement,
+            self.location,
+            self.project
+        )
+    }
+}
+
+/// A grant that was requested (or found) and is active: when it was given and when it ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantReceipt {
+    pub entitlement: String,
+    pub granted_at: SystemTime,
+    pub active_until: SystemTime,
+}
 
 /// A pinned host key and when it was pinned (milliseconds since the Unix epoch).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,14 +77,32 @@ pub enum DirectoryError {
     Unsupported(String),
     /// Reading the saved hosts or the pins, or writing a pin, failed.
     Failed(String),
+    /// The account may not connect as the host is saved (design 2026-10-25): OS Login names another user, Google refused the call, or a
+    /// grant could not be had. The broker reports it as a login failure.
+    Denied(String),
+    /// No Privileged Access Manager grant is in flight for the host's transport (design 2026-10-25, PAM grant requests): a connection a
+    /// person drives asks them and requests one; automation gets `for_automation`'s refusal.
+    GrantNeeded(Box<GrantNeed>),
+}
+
+impl DirectoryError {
+    /// The error as a connection nobody is watching sees it: a needed grant is the refusal that names the gcloud command, since no one
+    /// is there to answer a question. Everything else is unchanged.
+    pub fn for_automation(self) -> DirectoryError {
+        match self {
+            DirectoryError::GrantNeeded(need) => DirectoryError::Denied(need.refusal_sentence()),
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for DirectoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DirectoryError::NotFound(text) | DirectoryError::Ambiguous(text) | DirectoryError::Unsupported(text) | DirectoryError::Failed(text) => {
+            DirectoryError::NotFound(text) | DirectoryError::Ambiguous(text) | DirectoryError::Unsupported(text) | DirectoryError::Failed(text) | DirectoryError::Denied(text) => {
                 f.write_str(text)
             }
+            DirectoryError::GrantNeeded(need) => f.write_str(&need.refusal_sentence()),
         }
     }
 }
@@ -62,6 +129,21 @@ pub trait HostDirectory: Send + Sync {
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
     /// Public resolution for approval and noninteractive connections. Implementations must not read private material here.
     fn resolve_public(&self, query:&HostQuery)->Result<Target,DirectoryError>{self.resolve(query)}
+
+    /// Everything a resolved target needs settled with the outside world before the engine connects (design 2026-10-25): for a first hop
+    /// that goes through Google Cloud IAP, the Privileged Access Manager grant check and OS Login (the key registration, the username
+    /// check). Reads `target`, changes nothing, may wait on the network for a while; called on the broker's thread between the resolve and
+    /// the connect, never while a lock is held. `public_key` is the vault's OpenSSH public line for a key id. The default does nothing: a
+    /// directory without transports has nothing to settle.
+    fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
+        Ok(Prepared::default())
+    }
+
+    /// Requests the grant `prepare` said was needed, with the person's `justification` and `duration_secs`, and waits for it to be
+    /// active (design 2026-10-25, PAM grant requests). A directory without Google has nothing to request from.
+    fn request_grant(&self, _need: &GrantNeed, _justification: &str, _duration_secs: u32, _cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
+        Err(DirectoryError::Unsupported("Requesting a grant is not available here.".into()))
+    }
 
     /// Handshake-only identity verification must not require destination login credentials.
     /// Jump hosts still require their normal credentials to reach the destination.

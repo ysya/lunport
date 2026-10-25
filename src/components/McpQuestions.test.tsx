@@ -16,7 +16,7 @@ const request: McpPendingRequest = {
 const question: AuthRequest = {
   id: "q1", request_id: "exec1",
   hop: { host_id: "jump-id", alias: "jump", hostname: "hop.invalid", user: "hopuser", port: 2222 },
-  kind: "interactive", text: "<script>server challenge</script>", echo: false, remaining_ms: 1000,
+  kind: "interactive", text: "<script>server challenge</script>", echo: false, remaining_ms: 1000, grant: null,
 };
 const renderAuth = (over: Partial<Parameters<typeof AuthenticationCardView>[0]> = {}) =>
   renderToStaticMarkup(
@@ -55,7 +55,7 @@ describe("MCP command review", () => {
   });
 
   it("reviews host creation with complete settings, no implicit access, and delayed consent", () => {
-    const proposed = { ...request, command: "", host_proposal: { settings: [
+    const proposed = { ...request, command: "", host_proposal: { kind: "create_host", settings: [
       ["Alias", "new-web"], ["Hostname", "127.0.0.1"], ["Port", "2222"],
       ["Storage", "This device's library"], ["Tags", "<untrusted>"],
     ] as [string, string][] } };
@@ -110,5 +110,33 @@ describe("native authentication rendering", () => {
     expect(renderAuth({ abandoned: true, answer: "must not render" })).not.toContain("must not render");
     expect(renderAuth({ abandoned: true })).not.toContain("<input");
     expect(disabled(renderAuth({ armed: false }), "Submit")).toBe(true);
+  });
+});
+
+describe("AI edit proposals", () => {
+  const proposal = (kind: string, settings: [string, string][]) => ({ ...request, command: "", host_proposal: { kind, settings } });
+
+  it("titles, describes and labels each kind of proposal", () => {
+    const edit = renderReview({ request: proposal("update_host", [["Hostname", "jumpbox → 10.20.0.8"], ["Server key", "pinned → verified again at the next connection"], ["Tags", "<b>x</b>"]]) });
+    expect(edit).toContain("Change this SSH host?");
+    expect(edit).toContain("Review what would change before saving");
+    expect(edit).toContain("jumpbox → 10.20.0.8");
+    expect(edit).toContain("verified again at the next connection");
+    expect(edit).toContain("ID: stable-host");
+    expect(edit).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(edit).not.toContain("New record");
+    expect(edit).not.toContain("Add host");
+    expect(disabled(edit, "Save changes")).toBe(false);
+    expect(disabled(renderReview({ request: proposal("update_host", [["Port", "22 → 2222"]]), armed: false }), "Save changes")).toBe(true);
+    const set = renderReview({ request: proposal("set_transport", [["Project", "knowknow-prod"]]) });
+    // Static markup writes the apostrophe as an entity.
+    expect(set).toMatch(/Change this host(&#x27;|')s transport\?/);
+    expect(disabled(set, "Save transport")).toBe(false);
+    const remove = renderReview({ request: proposal("remove_transport", [["Instance", "jumpbox"]]) });
+    expect(remove).toMatch(/Remove this host(&#x27;|')s transport\?/);
+    expect(disabled(remove, "Remove transport")).toBe(false);
+    const create = renderReview({ request: proposal("create_host", [["Alias", "new-web"]]) });
+    expect(create).toContain("Add this SSH host?");
+    expect(create).toContain("New record");
   });
 });

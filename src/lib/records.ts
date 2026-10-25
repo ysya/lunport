@@ -133,6 +133,8 @@ export type RecordOverview = {
   central_mode?: boolean;
   key_scope?: RecordKeyInvocation;
   conflicts?: RecordConflict[];
+  /** Device-local host transports (Google Cloud IAP); absent in older backend fixtures. */
+  transports?: import("@/bindings/HostTransport").HostTransport[];
   /** Transient transport activity; absent in older backend fixtures. */
   syncing?: boolean;
   library_enabled: boolean;

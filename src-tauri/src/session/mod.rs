@@ -39,6 +39,7 @@ pub struct SessionRuntime {
 }
 
 pub mod app;
+pub mod transports;
 pub mod tunnels;
 pub mod embedded;
 pub mod auth;
@@ -46,6 +47,7 @@ pub(crate) mod credential_approval;
 pub mod auth_window;
 pub mod broker;
 pub mod connect;
+pub mod grants;
 pub mod verify;
 pub mod directory;
 pub mod deploy;

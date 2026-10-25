@@ -3,7 +3,7 @@ use super::{
     auth::{printable, Owner, Reply},
     connect::CancelToken,
     deadline::InteractionDeadline,
-    protocol::QuestionKind,
+    protocol::{GrantPrompt, QuestionKind},
 };
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,9 @@ pub struct AuthRequest {
     pub echo: bool,
     #[cfg_attr(test, ts(type = "number"))]
     pub remaining_ms: u64,
+    /// The form of a `grant` question (design 2026-10-25, PAM grant requests); `None` for every other kind.
+    #[serde(default)]
+    pub grant: Option<GrantPrompt>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -127,29 +130,39 @@ impl NativeOwner {
         if self.cancel.is_cancelled() {
             return Reply::Gone;
         }
-        let deadline = deadline
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(120))
-            .min(Instant::now() + Duration::from_secs(120));
+        // A server's question waits two minutes; a grant request is Lunport's own and the person may be away from the window.
+        let cap = Duration::from_secs(if kind == QuestionKind::Grant { 300 } else { 120 });
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + cap).min(Instant::now() + cap);
         let deadline = InteractionDeadline::from_instant(deadline);
         if deadline.expired() {
             return Reply::TimedOut;
         }
         let id = format!("auth-{}", self.hub.next.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = mpsc::sync_channel(1);
+        let (word, text, grant) = match kind {
+            QuestionKind::Passphrase => ("passphrase", text.to_string(), None),
+            QuestionKind::Password => ("password", text.to_string(), None),
+            QuestionKind::Interactive => ("interactive", text.to_string(), None),
+            QuestionKind::Grant => {
+                // The window shows the sentence and the form; the prompt itself is Lunport's own data.
+                let prompt = GrantPrompt::from_text(text);
+                (
+                    "grant",
+                    prompt.as_ref().map(GrantPrompt::sentence).unwrap_or_else(|| text.to_string()),
+                    prompt,
+                )
+            }
+            QuestionKind::HostKeyNotice => return Reply::Gone,
+        };
         let request = AuthRequest {
             id: id.clone(),
             request_id: self.request_id.clone(),
             hop,
-            kind: match kind {
-                QuestionKind::Passphrase => "passphrase",
-                QuestionKind::Password => "password",
-                QuestionKind::Interactive => "interactive",
-                QuestionKind::HostKeyNotice => return Reply::Gone,
-            }
-            .into(),
-            text: printable(text).chars().take(4096).collect(),
+            kind: word.into(),
+            text: printable(&text).chars().take(4096).collect(),
             echo,
             remaining_ms: deadline.remaining().as_millis() as u64,
+            grant,
         };
         {
             let mut p = self.hub.pending.lock().unwrap();
@@ -254,6 +267,16 @@ impl AuthSurface for TauriAuthSurface {
 }
 
 /// Read the current hub after the health check; never replay an expired snapshot.
+/// The window's logical size for what is pending: a server's one-line question fits the small window; the Request-a-grant form (two
+/// fields and a hint; design 2026-10-25, PAM grant requests) gets a taller one when a grant question is anywhere in the queue.
+pub(crate) fn window_size(requests: &[AuthRequest]) -> (f64, f64) {
+    if requests.iter().any(|request| request.kind == "grant") {
+        (520.0, 500.0)
+    } else {
+        (480.0, 360.0)
+    }
+}
+
 pub(crate) fn present(app: &tauri::AppHandle) {
     use tauri::Manager;
     let requests = app.state::<crate::state::AppState>().session.auth_questions.pending();
@@ -265,14 +288,23 @@ pub(crate) fn present(app: &tauri::AppHandle) {
         }
         return;
     }
-    if app.get_webview_window(AUTH_WINDOW).is_none() {
+    let (width, height) = window_size(&requests);
+    if let Some(window) = app.get_webview_window(AUTH_WINDOW) {
+        // A window already open for a smaller question grows for a grant form; it is never shrunk under the person.
+        if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+            let current = size.to_logical::<f64>(scale);
+            if current.height < height {
+                let _ = window.set_size(tauri::LogicalSize::new(current.width.max(width), height));
+            }
+        }
+    } else {
         match WebviewWindowBuilder::new(
             app,
             AUTH_WINDOW,
             WebviewUrl::App("index.html".into()),
         )
         .title("Lunport — Authentication")
-        .inner_size(480.0, 360.0)
+        .inner_size(width, height)
         .resizable(true)
         .always_on_top(true)
         .visible(false)
@@ -316,6 +348,39 @@ mod tests {
         while h.pending().is_empty() {
             assert!(Instant::now() < end);
             std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    /// The window was sized for a server's one-line question; the Request-a-grant form (two fields and a hint) needs more room, so a
+    /// grant anywhere in the queue gets the taller window (design 2026-10-25, PAM grant requests).
+    #[test]
+    fn the_window_is_taller_for_a_grant_form_than_for_a_servers_question() {
+        let password = AuthRequest { id: "a".into(), request_id: "r".into(), hop: None, kind: "password".into(), text: "pw".into(), echo: false, remaining_ms: 1, grant: None };
+        let grant = AuthRequest { kind: "grant".into(), ..password.clone() };
+        assert_eq!(window_size(&[]), (480.0, 360.0));
+        assert_eq!(window_size(&[password.clone()]), (480.0, 360.0));
+        assert_eq!(window_size(&[grant.clone()]), (520.0, 500.0));
+        assert_eq!(window_size(&[password, grant]), (520.0, 500.0), "a grant anywhere in the queue gets the room");
+    }
+
+    #[test]
+    fn a_grant_question_carries_its_prompt_and_waits_five_minutes() {
+        use crate::session::protocol::GrantAnswer;
+        let hub = Arc::new(AuthHub::default());
+        let owner = NativeOwner { hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "terminal-7".into(), cancel: CancelToken::default() };
+        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
+        let text = prompt.to_text();
+        let worker = std::thread::spawn(move || owner.ask(QuestionKind::Grant, &text, true, Some(Instant::now() + Duration::from_secs(3600))));
+        wait(&hub);
+        let q = hub.pending().remove(0);
+        assert_eq!(q.kind, "grant");
+        assert_eq!(q.grant, Some(prompt));
+        assert_eq!(q.text, "No active Privileged Access Manager grant for prod-operate on knowknow-prod.");
+        assert!(q.remaining_ms > 120_000 && q.remaining_ms <= 300_000, "a grant question waits five minutes, not two: {}ms", q.remaining_ms);
+        let answer = GrantAnswer { minutes: 45, justification: "restart app-api after the deploy".into() };
+        hub.resolve(&q.id, Some(Zeroizing::new(answer.encode()))).unwrap();
+        match worker.join().unwrap() {
+            Reply::Answer(secret) => assert_eq!(GrantAnswer::decode(&secret), Some(answer)),
+            other => panic!("expected the answer, got {other:?}"),
         }
     }
     #[test]
@@ -460,6 +525,7 @@ mod expiry_tests {
                 text: "Password".into(),
                 echo: false,
                 remaining_ms: 0,
+                grant: None,
             },
             deadline: InteractionDeadline::from_instant(Instant::now() - Duration::from_secs(1)),
             answer: tx,
@@ -485,6 +551,7 @@ mod expiry_tests {
                 text: "Password".into(),
                 echo: false,
                 remaining_ms: 120000,
+                grant: None,
             },
             deadline: InteractionDeadline {
                 monotonic: Instant::now() + Duration::from_secs(120),

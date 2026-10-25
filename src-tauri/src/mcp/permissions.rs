@@ -176,6 +176,7 @@ mod tests {
         records::execute_context(
             runtime,
             &Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
                 directory: &directory(),
                 engine,
                 keys: &FakeKeys::new(),

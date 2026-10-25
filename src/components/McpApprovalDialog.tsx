@@ -22,26 +22,41 @@ export type McpApprovalCardViewProps = {
   onAnswer: (allow: boolean) => void;
 };
 
+/** The window's words for each kind of proposal (design 2026-10-26, AI edits): a new host, a changed host, a transport set or removed. */
+const EDIT_DESCRIPTION = "Review what would change before saving. Saving does not connect, trust a server key or change AI access. The MCP client cannot approve this request.";
+const PROPOSAL_WORDS: Record<string, { title: string; description: string; button: string; hostLine: (request: McpPendingRequest) => string }> = {
+  create_host: {
+    title: "Add this SSH host?",
+    description: "Review these connection settings before saving. A host in an already allowed Group inherits AI access. Saving does not connect or trust a server key. The MCP client cannot approve this request.",
+    button: "Add host",
+    hostLine: () => "New record · AI access remains off",
+  },
+  update_host: { title: "Change this SSH host?", description: EDIT_DESCRIPTION, button: "Save changes", hostLine: (request) => `ID: ${request.host_id ?? "Legacy alias"}` },
+  set_transport: { title: "Change this host's transport?", description: EDIT_DESCRIPTION, button: "Save transport", hostLine: (request) => `ID: ${request.host_id ?? "Legacy alias"}` },
+  remove_transport: { title: "Remove this host's transport?", description: EDIT_DESCRIPTION, button: "Remove transport", hostLine: (request) => `ID: ${request.host_id ?? "Legacy alias"}` },
+};
+
 export function McpApprovalCardView({ request, busy, armed, expired = false, onAnswer }: McpApprovalCardViewProps) {
   const deny = useRef<HTMLButtonElement>(null);
   useEffect(() => { deny.current?.focus(); }, [request.id]);
   const endpoint = `${request.user ? `${revealHidden(request.user)}@` : ""}${revealHidden(request.hostname ?? request.alias)}${request.port ? `:${request.port}` : ""}`;
   const proposal = request.host_proposal;
+  const words = proposal ? PROPOSAL_WORDS[proposal.kind] ?? PROPOSAL_WORDS.create_host : null;
 
   return (
     <>
       <DialogHeader>
         <ShieldAlert className="size-5 text-warning" />
-        <DialogTitle>{proposal ? "Add this SSH host?" : "Allow this AI SSH command?"}</DialogTitle>
+        <DialogTitle>{words ? words.title : "Allow this AI SSH command?"}</DialogTitle>
         <DialogDescription>
-          {proposal
-            ? "Review these connection settings before saving. A host in an already allowed Group inherits AI access. Saving does not connect or trust a server key. The MCP client cannot approve this request."
+          {words
+            ? words.description
             : "Lunport will run this command once. Review the complete command and resolved target; the MCP client cannot approve it."}
         </DialogDescription>
       </DialogHeader>
       <TaskDialogBody className="break-all">
         <div className="space-y-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
-          <p>Host: {revealHidden(request.alias)} · {proposal ? "New record · AI access remains off" : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
+          <p>Host: {revealHidden(request.alias)} · {words ? words.hostLine(request) : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
           <p>Resolved: {endpoint}</p>
           {!proposal && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
           <McpAttribution requestedBy={request.requested_by} requesterId={request.requester_id} clientInfo={request.client_info} />
@@ -62,13 +77,13 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
           </pre>
         </div>}
         <p className="text-xs text-muted-foreground">
-          {proposal ? "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval." : "Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval."}
+          {words ? "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval." : "Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval."}
         </p>
         {expired && <p role="alert" className="text-xs text-destructive">This request expired. Ask the client to start a fresh request.</p>}
       </TaskDialogBody>
       <DialogFooter>
         <Button autoFocus ref={deny} variant="outline" disabled={busy} onClick={() => onAnswer(false)}>Deny</Button>
-        <Button disabled={busy || !armed || expired} onClick={() => onAnswer(true)}>{busy ? "Sending…" : proposal ? "Add host" : "Allow once"}</Button>
+        <Button disabled={busy || !armed || expired} onClick={() => onAnswer(true)}>{busy ? "Sending…" : words ? words.button : "Allow once"}</Button>
       </DialogFooter>
     </>
   );

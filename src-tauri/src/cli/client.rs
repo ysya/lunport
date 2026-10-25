@@ -267,6 +267,9 @@ impl Client {
         match message {
             ServerMessage::Opened { .. } => self.opened(),
             ServerMessage::Question(Question { kind: QuestionKind::HostKeyNotice, text, .. }) => vec![Action::Stderr(format!("{}\n", printable(&text)))],
+            // A grant is requested in Lunport's window, never typed here: a broker without a window is told so at once, and its connect
+            // fails with the refusal sentence instead of waiting for an answer nobody can give.
+            ServerMessage::Question(Question { kind: QuestionKind::Grant, question_id, .. }) => vec![cancel(question_id)],
             ServerMessage::Question(Question { question_id, text, echo, .. }) => self.ask(question_id, &text, echo),
             ServerMessage::Event(Event::Banner { text }) => {
                 let text = printable(&text);
@@ -601,6 +604,17 @@ mod tests {
             [Action::Stderr("Waiting for you to confirm web's host key in Lunport.\n".into())]
         );
         assert_eq!(client.handle(Input::Message(ServerMessage::Event(Event::Banner { text: "Authorized use only.".into() }))), [Action::Stderr("Authorized use only.\n".into())]);
+    }
+
+    /// A grant is requested in Lunport's window, never typed at the terminal: a broker without a window (none in the app) is told so at once,
+    /// so that the connect fails with the refusal sentence instead of waiting five minutes for an answer nobody can give.
+    #[test]
+    fn a_grant_question_cannot_be_answered_in_the_terminal_and_is_cancelled() {
+        use crate::session::protocol::GrantPrompt;
+        let mut client = started();
+        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None };
+        assert_eq!(client.handle(question("g1", QuestionKind::Grant, &prompt.to_text(), true)), [cancel("g1".into())]);
+        assert!(matches!(client.phase, Phase::Connecting), "no prompt mode is opened for it");
     }
 
     /// Spec §7.3: the terminal is put back before anything else, then the program exits with the shell's status.

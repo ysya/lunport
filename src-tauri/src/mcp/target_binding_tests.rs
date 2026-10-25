@@ -101,6 +101,7 @@ fn mcp_aba_resolve_cannot_connect_or_execute_on_unreviewed_target() {
     for directory in [AbaDirectory::new(), AbaDirectory::auth_drift()] {
         let engine = RecordingEngine::new(FakeEngine::new());
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &FakeKeys::new(),
@@ -251,6 +252,7 @@ fn mcp_legitimate_new_pin_and_explicit_interactive_password_fallback_still_execu
         let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
         let owner = FakeOwner::typing(&["fixture-password"]);
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &keys,

@@ -15,6 +15,7 @@ fn run(
 ) -> Result<VerifiedHostKey, String> {
     verify(
         &Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             directory,
             engine,
             confirmer,

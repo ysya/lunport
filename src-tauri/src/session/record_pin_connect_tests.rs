@@ -129,6 +129,7 @@ fn trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_backgr
         let keys = FakeKeys::new().with_key(KEY, "loopback", &server.key.private_text);
         let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
         let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
             engine: &engine,
             directory: &directory,
             keys: &keys,
