@@ -4,7 +4,7 @@
 
 **Goal:** A saved host can be reached through an IAP TCP-forwarding WebSocket tunnel that Lunport opens itself (no `gcloud` process), logged in as the OS Login user, after an optional PAM grant check.
 
-**Architecture:** A new `gcp` module holds the SSH Relay v4 codec, the WebSocket tunnel with reconnects, gcloud-file credentials, and REST clients for OS Login and PAM. The russh engine learns a `Transport` per hop and hands the tunnel stream to its existing handshake. A per-host `transport:<host-id>` record (device-local, tunnel-rule shaped) stores the settings; `RecordDirectory` maps it onto the first hop and resolves OS Login and PAM before the broker connects. The host editor gets a "Connect through" section.
+**Architecture:** A new `gcp` module holds the SSH Relay v4 codec, the WebSocket tunnel with reconnects, gcloud-file credentials, and REST clients for OS Login and PAM. The russh engine learns a `Transport` per hop and hands the tunnel stream to its existing handshake. A per-host `transport:<host-id>` record (device-local, tunnel-rule shaped) stores the settings; `RecordDirectory` maps it onto the first hop and resolves OS Login and PAM before the broker connects. A Library panel "Google Cloud" holds the transports (Task 12; the first draft's host-editor section was moved there at Frank's request).
 
 **Tech Stack:** Rust (tokio, russh 0.64.1 unchanged, `tokio-tungstenite 0.30` + `rustls-tls-native-roots`, `reqwest 0.13` blocking, `url 2`, `serde_json`, `zeroize`, `mockito` in tests), React/TypeScript (vitest), ts-rs bindings.
 
