@@ -6409,6 +6409,7 @@ dependencies = [
  "google-cloud-auth",
  "google-cloud-gax",
  "google-cloud-privilegedaccessmanager-v1",
+ "google-cloud-wkt",
  "hkdf 0.12.4",
  "hmac 0.12.1",
  "hpke",

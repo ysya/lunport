@@ -151,6 +151,12 @@ mod tests {
         fn grants(&self, _: Option<&str>, _: &str, _: &str, _: &str) -> Result<Vec<Grant>, GcpError> {
             panic!("the editor's lookup never searches grants")
         }
+        fn create_grant(&self, _: Option<&str>, _: &str, _: &str, _: &str, _: u32, _: &str) -> Result<Grant, GcpError> {
+            panic!("the editor's lookup never requests grants")
+        }
+        fn get_grant(&self, _: Option<&str>, _: &str) -> Result<Grant, GcpError> {
+            panic!("the editor's lookup never reads grants")
+        }
     }
 
     #[test]
