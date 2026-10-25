@@ -28,12 +28,15 @@ pub enum DirectoryError {
     Unsupported(String),
     /// Reading the saved hosts or the pins, or writing a pin, failed.
     Failed(String),
+    /// The account may not connect as the host is saved (design 2026-10-25): no Privileged Access Manager grant is in flight, OS Login
+    /// names another user, or Google refused the call. The broker reports it as a login failure.
+    Denied(String),
 }
 
 impl fmt::Display for DirectoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DirectoryError::NotFound(text) | DirectoryError::Ambiguous(text) | DirectoryError::Unsupported(text) | DirectoryError::Failed(text) => {
+            DirectoryError::NotFound(text) | DirectoryError::Ambiguous(text) | DirectoryError::Unsupported(text) | DirectoryError::Failed(text) | DirectoryError::Denied(text) => {
                 f.write_str(text)
             }
         }
@@ -62,6 +65,15 @@ pub trait HostDirectory: Send + Sync {
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
     /// Public resolution for approval and noninteractive connections. Implementations must not read private material here.
     fn resolve_public(&self, query:&HostQuery)->Result<Target,DirectoryError>{self.resolve(query)}
+
+    /// Everything a resolved target needs settled with the outside world before the engine connects (design 2026-10-25): for a first hop
+    /// that goes through Google Cloud IAP, the Privileged Access Manager grant check and OS Login (the key registration, the username
+    /// check). Reads `target`, changes nothing, may wait on the network for a while; called on the broker's thread between the resolve and
+    /// the connect, never while a lock is held. `public_key` is the vault's OpenSSH public line for a key id. The default does nothing: a
+    /// directory without transports has nothing to settle.
+    fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &super::connect::CancelToken) -> Result<(), DirectoryError> {
+        Ok(())
+    }
 
     /// Handshake-only identity verification must not require destination login credentials.
     /// Jump hosts still require their normal credentials to reach the destination.

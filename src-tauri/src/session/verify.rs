@@ -98,6 +98,9 @@ impl HostDirectory for ProbeDirectory<'_> {
     fn password_account(&self, id: &HostId) -> String {
         self.inner.password_account(id)
     }
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<(), DirectoryError> {
+        self.inner.prepare(target, public_key, cancel)
+    }
 }
 
 struct StopBeforeLogin<'a> {

@@ -92,6 +92,18 @@ impl HostDirectory for FormatDirectory {
     fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
         self.with_active(|d| d.password_authorized(hop, server_key))
     }
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<(), DirectoryError> {
+        // Google may take seconds to answer: choose the directory under lifecycle, call it outside.
+        let directory = {
+            let _lifecycle = self.lifecycle.lock().unwrap();
+            match (self.mode)() {
+                (RuntimeFormat::Records, _) => self.records.clone(),
+                (RuntimeFormat::Legacy, false) => self.legacy.clone(),
+                _ => return Err(DirectoryError::Unsupported("Choose a workspace or resolve the blocked state before connecting.".into())),
+            }
+        };
+        directory.prepare(target, public_key, cancel)
+    }
     fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
         // Records' native reader owns lifecycle while checking its exact saved owner. Never
         // hold this adapter's lifecycle across that protected read or an OS authorization.
@@ -205,5 +217,48 @@ mod tests {
             d.pinned_for(&hop).unwrap_err(),
             DirectoryError::Failed("records:changed.example:2200".into())
         );
+    }
+    #[test]
+    fn prepare_reaches_the_active_directory_outside_the_lifecycle_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Notes {
+            lifecycle: Arc<Mutex<()>>,
+            calls: AtomicUsize,
+        }
+        impl HostDirectory for Notes {
+            fn resolve(&self, _: &HostQuery) -> Result<Target, DirectoryError> {
+                Err(DirectoryError::NotFound("notes".into()))
+            }
+            fn pinned(&self, _: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+                Ok(None)
+            }
+            fn pin(&self, _: &HostId, _: &HostKey) -> Result<(), DirectoryError> {
+                panic!("not used")
+            }
+            fn replace_pin(&self, _: &HostId, _: &HostKey, _: &HostKey) -> Result<(), DirectoryError> {
+                panic!("not used")
+            }
+            fn password_account(&self, id: &HostId) -> String {
+                format!("notes:{id}")
+            }
+            fn prepare(&self, _: &Target, _: &dyn Fn(&str) -> Option<String>, _: &super::super::connect::CancelToken) -> Result<(), DirectoryError> {
+                // Google may take seconds to answer: the adapter must not hold the lifecycle while it waits.
+                assert!(self.lifecycle.try_lock().is_ok(), "prepare ran under the lifecycle lock");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let lifecycle: Arc<Mutex<()>> = Arc::default();
+        let records = Arc::new(Notes { lifecycle: Arc::clone(&lifecycle), calls: AtomicUsize::new(0) });
+        let mode = Arc::new(Mutex::new((RuntimeFormat::Records, false)));
+        let read = mode.clone();
+        let d = FormatDirectory { lifecycle, mode: Box::new(move || *read.lock().unwrap()), legacy: Arc::new(Fake("legacy")), records: records.clone() };
+        let target = Target { hops: vec![crate::ssh::Hop::new("id", "web", "fixture.invalid", 22, "fixture", crate::ssh::AuthMethod::Password)] };
+        let cancel = super::super::connect::CancelToken::default();
+        d.prepare(&target, &|_| None, &cancel).unwrap();
+        assert_eq!(records.calls.load(Ordering::SeqCst), 1);
+        *mode.lock().unwrap() = (RuntimeFormat::Blocked, false);
+        assert!(matches!(d.prepare(&target, &|_| None, &cancel), Err(DirectoryError::Unsupported(_))));
+        assert_eq!(records.calls.load(Ordering::SeqCst), 1);
     }
 }
