@@ -456,7 +456,10 @@ fn changed_rows(state: &SyncStateV3, next: &SyncStateV3, before: &repo::HostView
     row("Username", "user", user(&b.user), user(&a.user));
     row("Authentication", "authentication", format!("{:?}", b.auth), format!("{:?}", a.auth));
     row("SSH key", "authentication", key_label(state, b.key_id.as_deref()), key_label(next, a.key_id.as_deref()));
-    row("Route", "jump", route_label(state, &before.host.id)?, route_label(next, &after.host.id)?);
+    // The route is a row only when the jump hosts change: the chain's label repeats the destination's own address, which has its rows.
+    if b.jump != a.jump {
+        row("Route", "jump", route_label(state, &before.host.id)?, route_label(next, &after.host.id)?);
+    }
     row("Keepalive interval / missed", "keepalive_secs", format!("{} s / {}", b.keepalive_secs, b.keepalive_max_missed), format!("{} s / {}", a.keepalive_secs, a.keepalive_max_missed));
     row("Connect timeout", "connect_timeout_secs", format!("{} s", b.connect_timeout_secs), format!("{} s", a.connect_timeout_secs));
     row("Tags", "", b.tags.join(", "), a.tags.join(", "));
@@ -831,6 +834,9 @@ pub(super) fn set_transport(
     let state = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
     let host = find_host(&state, &changes.alias)?;
     permissions::ensure_record(&policy, &state, &host.host.id)?;
+    if host.group_error.is_some() {
+        return Err("Host Group inheritance needs review.".into());
+    }
     let before = crate::sync::transports::get(&state, &host.host.id);
     let after = changes.merged(&host.host.id, before.as_ref())?;
     transport_change(env, runtime, policy, context, cancel, approve, changes.alias, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
@@ -859,6 +865,9 @@ pub(super) fn remove_transport(
     let state = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
     let host = find_host(&state, &alias)?;
     permissions::ensure_record(&policy, &state, &host.host.id)?;
+    if host.group_error.is_some() {
+        return Err("Host Group inheritance needs review.".into());
+    }
     let before = crate::sync::transports::get(&state, &host.host.id);
     if before.is_none() {
         return Err("This host has no transport.".into());

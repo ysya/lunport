@@ -435,6 +435,7 @@ fn an_update_asks_shows_old_and_new_and_saves_only_on_consent() {
             assert!(rows.contains(&("Hostname".into(), "fixture.invalid → 10.20.0.8".into())), "{rows:?}");
             assert!(rows.contains(&("Port".into(), "2222 → 22".into())), "{rows:?}");
             assert!(!rows.iter().any(|(label, _)| label == "Username"), "an unchanged field is not a row: {rows:?}");
+            assert!(!rows.iter().any(|(label, _)| label == "Route"), "the route (its hops) did not change: {rows:?}");
             assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid", "nothing saved before consent");
             ApprovalDecision::Allow
         })
@@ -724,4 +725,55 @@ fn transport_tools_need_the_hosts_ai_permission() {
     assert_eq!(set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), sentence);
     assert_eq!(remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), sentence);
     assert!(transport_of(&d, &id).is_none());
+}
+
+
+/// A host whose Group inheritance is broken is not edited by any of the tools: the refusal is `metadata`'s, before any window, and
+/// the audit cannot contradict a save that happened (Review Focus 2).
+#[test]
+fn tools_refuse_a_host_whose_group_needs_review_before_the_window() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let group_id = "0000000000000031";
+    let id = "0000000000000041";
+    crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+        let state = crate::sync::record_groups::create_group(state, group_id, HostScope::Local, serde_json::from_value(json!({"schema":1,"name":"Operations","defaults":{"port":2222}})).unwrap(), true, now).map_err(|e| AppError::Other(e.to_string()))?;
+        let payload = serde_json::from_value(json!({"schema":3,"alias":"grouped","hostname":"g.invalid","user":"ops","auth":"password","group_id":group_id,"inherit":["port"]})).unwrap();
+        repo::create_host(&state, id, HostScope::Local, payload, now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    r.policy.lock().unwrap().allowed_hosts.insert(id.into());
+    set_transport(&d.env(), &r, &json!({"alias":"grouped","project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox"}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    // The Group the host inherits from goes away under it: the host needs review.
+    crate::sync::record_commands::edit_records(&d.env(), |state, _now| {
+        let mut next = state.clone();
+        let row = next.local.hosts.values_mut().find(|row| row.record.id == id).expect("the host");
+        row.record.payload["group_id"] = json!("0000000000000099");
+        Ok(next)
+    })
+    .unwrap();
+    assert!(host_of(&d, id).group_error.is_some(), "needs review");
+    let before = r.recent.lock().unwrap().len();
+    for result in [
+        update(&d.env(), &r, &json!({"alias":"grouped","hostname":"h.invalid"}), RequestContext::default(), &CancelToken::default(), &never),
+        set_transport(&d.env(), &r, &json!({"alias":"grouped","instance":"jumpbox-2"}), RequestContext::default(), &CancelToken::default(), &never),
+        remove_transport(&d.env(), &r, &json!({"alias":"grouped"}), RequestContext::default(), &CancelToken::default(), &never),
+    ] {
+        assert_eq!(result.unwrap_err(), "Host Group inheritance needs review.");
+    }
+    assert_eq!(r.recent.lock().unwrap().len(), before, "nothing to audit: no window opened");
+    assert!(transport_of(&d, id).is_some(), "the transport is as it was");
+}
+
+#[test]
+fn a_denied_timed_out_or_cancelled_transport_change_changes_nothing_and_is_audited() {
+    for (decision, sentence) in [(ApprovalDecision::Deny, "Transport change was denied."), (ApprovalDecision::TimedOut, "Transport change approval timed out."), (ApprovalDecision::Cancel, "Transport change was canceled.")] {
+        let d = device();
+        let r = runtime(ApprovalMode::AutoLog);
+        let id = created(&d, &r);
+        assert_eq!(set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| decision).unwrap_err(), sentence);
+        assert!(transport_of(&d, &id).is_none());
+        assert_eq!(last_outcome(&r), "transport_not_set");
+        assert!(r.records_active.lock().unwrap().is_empty());
+    }
 }
