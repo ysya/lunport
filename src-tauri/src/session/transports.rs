@@ -92,6 +92,10 @@ pub async fn transports_oslogin_profile(
         return Err("Enter the Google Cloud project id.".into());
     }
     let account = account.filter(|account| !account.trim().is_empty());
+    // The account names a directory under gcloud's config: the same rule as a saved transport, before it reaches a path.
+    if account.as_deref().is_some_and(|account| !crate::sync::transports::is_email(account)) {
+        return Err("Enter the Google account as an email address.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let public_key = key_id.as_deref().and_then(|id| vault_public_line(&app, id));
         let label = account.clone().unwrap_or_else(active_account_label);
