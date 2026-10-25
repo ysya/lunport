@@ -127,7 +127,7 @@ The Records adapter uses an OS-authenticated local session broker. It can start 
 | Tool | Behavior |
 | --- | --- |
 | `list_hosts` | List hosts allowed individually or through a Group. |
-| `get_host` | Read sanitized public settings for a permitted host. |
+| `get_host` | Read sanitized public settings for a permitted host, including its Google Cloud IAP transport when it has one. |
 | `ssh_exec` | Execute a bounded command under Ask or explicitly acknowledged Auto-log. |
 | `create_host` | Propose public connection settings for your review. Saving does not grant AI access or trust a server key. |
 | `verify_host_key` | Verify a permitted host's fingerprint, with an in-app trust decision for a new or changed key. |
