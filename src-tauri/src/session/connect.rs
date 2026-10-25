@@ -276,7 +276,8 @@ impl Connector<'_> {
                 // 1½ minutes to see a grant (design 2026-10-25), and the person is told so instead of doubting the grant.
                 ConnectError::Tunnel { code: Some(4033), .. } if prepared.recent_grant => {
                     let mut failure = failure_of(&error, &target);
-                    failure.text.push_str(" The grant became active moments ago; IAP can take about 1½ minutes to see it.");
+                    let sentence = failure.text.trim_end_matches('.').to_string();
+                    failure.text = format!("{sentence}; the grant became active moments ago, and IAP can take about 1½ minutes to see it.");
                     return Err(failure);
                 }
                 other => return Err(failure_of(&other, &target)),
@@ -1565,9 +1566,10 @@ mod tests {
             world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails")
         };
         let bare = "frank@retower.io is not authorized to tunnel to jumpbox through IAP.";
+        // One sentence, as every failure text is (design 2026-10-25, "Error texts").
         assert_eq!(
             fails_with(refused(4033), Prepared { recent_grant: true }),
-            failure(kinds::CONNECT, &format!("{bare} The grant became active moments ago; IAP can take about 1½ minutes to see it."))
+            failure(kinds::CONNECT, "frank@retower.io is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.")
         );
         assert_eq!(fails_with(refused(4033), Prepared { recent_grant: false }), failure(kinds::CONNECT, bare));
         assert_eq!(fails_with(refused(4003), Prepared { recent_grant: true }), failure(kinds::CONNECT, bare));

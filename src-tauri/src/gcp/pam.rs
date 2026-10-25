@@ -41,13 +41,14 @@ pub fn in_flight(grants: &[Grant]) -> Vec<&Grant> {
     grants.iter().filter(|grant| matches!(grant.state.as_str(), "ACTIVE" | "ACTIVATING" | "SCHEDULED")).collect()
 }
 
-/// Whether the grant's access was given within `window` before `now` (IAP can take a while to honour a fresh grant).
+/// Whether the grant's access was given within `window` before `now` (IAP can take a while to honour a fresh grant). A grant time ahead
+/// of `now` is a grant just given by a clock that runs ahead of this one: recent.
 pub fn granted_within(grant: &Grant, now: SystemTime, window: Duration) -> bool {
     grant
         .access_grant_time
         .as_deref()
         .and_then(parse_rfc3339)
-        .is_some_and(|granted| now.duration_since(granted).is_ok_and(|age| age <= window))
+        .is_some_and(|granted| now.duration_since(granted).map_or(true, |age| age <= window))
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fraction]Z`, the only shape Google's APIs write. Anything else is `None`.
@@ -148,6 +149,8 @@ mod tests {
         assert!(granted_within(&grant("ACTIVE", Some("2027-01-15T07:59:00Z")), now, window));
         assert!(granted_within(&grant("ACTIVE", Some("2027-01-15T07:59:30.5Z")), now, window));
         assert!(!granted_within(&grant("ACTIVE", Some("2027-01-15T07:50:00Z")), now, window));
+        // A grant time ahead of this clock is a grant just given by a clock that runs ahead: recent.
+        assert!(granted_within(&grant("ACTIVE", Some("2027-01-15T08:00:30Z")), now, window));
         assert!(!granted_within(&grant("ACTIVE", None), now, window));
         assert!(!granted_within(&grant("ACTIVE", Some("yesterday")), now, window));
         assert_eq!(parse_rfc3339("2027-01-15T08:00:00Z"), Some(now));

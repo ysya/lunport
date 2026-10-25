@@ -756,7 +756,7 @@ mod gcp_transport {
         let target = d.resolve(&gate()).unwrap();
         assert_eq!(
             denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err()),
-            "OS Login names frank@retower.io frank_retower_io on eng-dev-396409, but the host is saved with user frank; update the host (Use OS Login username)."
+            "OS Login names frank@retower.io frank_retower_io on eng-dev-396409, but the host is saved with user frank; save that username into the host (Use OS Login username in the host's Google Cloud transport)."
         );
     }
 
@@ -791,8 +791,11 @@ mod gcp_transport {
         assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
         *gcp.grants.lock().unwrap() = vec![given(600)];
         assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
+        // A grant still activating is as fresh as one just given, and a grant time ahead of this clock (Google's clock is ahead) is fresh too.
         *gcp.grants.lock().unwrap() = vec![grant("ACTIVATING")];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
+        *gcp.grants.lock().unwrap() = vec![Grant { access_grant_time: Some(rfc3339(SystemTime::now() + Duration::from_secs(30))), ..grant("ACTIVE") }];
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
     }
 
     #[test]
