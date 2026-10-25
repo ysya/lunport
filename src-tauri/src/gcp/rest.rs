@@ -1,21 +1,28 @@
-//! The blocking REST client behind the broker's Google calls: OS Login's login profile and key import, PAM's grant search. One
-//! `reqwest::blocking::Client`, the bearer token from a `TokenSource`, a sentence per failure, and a trait so the directory tests can
-//! script the answers.
+//! The blocking client behind the broker's Google calls: OS Login's login profile and key import over one `reqwest::blocking::Client`,
+//! and the Privileged Access Manager calls (the grant search, requesting a grant, reading one back) through Google's client library
+//! with Lunport's credentials plugged in (`gcp/credentials.rs`). The bearer token comes from a `TokenSource`, every failure is a
+//! sentence, and a trait lets the directory tests script the answers.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use google_cloud_gax::paginator::ItemPaginator as _;
+use google_cloud_privilegedaccessmanager_v1 as pam_api;
+
 use super::auth::{user_agent, AuthError, TokenSource};
+use super::credentials::credentials;
 use super::oslogin::{parse_profile, LoginProfile};
-use super::pam::{parse_grants, Grant};
+use super::pam::Grant;
 
 const OSLOGIN_BASE: &str = "https://oslogin.googleapis.com";
 const PAM_BASE: &str = "https://privilegedaccessmanager.googleapis.com";
+const PAM_API: &str = "Privileged Access Manager";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// A page of the grant search, which answers every grant the caller ever created on the entitlement (ended ones included) and may hold
 /// fewer than asked: every page is read, up to `GRANTS_PAGES`, so the one active grant of someone who requests one every day is found.
-const GRANTS_PAGE: &str = "50";
+const GRANTS_PAGE: i32 = 50;
 const GRANTS_PAGES: usize = 10;
 
 /// Why a call to Google did not answer. Every text is a sentence for the person.
@@ -26,6 +33,9 @@ pub enum GcpError {
     Denied { api: &'static str, status: u16, account: String },
     /// Any other unsuccessful status.
     Http { api: &'static str, status: u16 },
+    /// `400`: the API refused what was asked, and said why in its own words (a duration over the entitlement's maximum, a missing
+    /// justification).
+    Refused { api: &'static str, message: String },
     Network(String),
     /// The answer was not the JSON the API documents.
     Malformed(String),
@@ -37,6 +47,7 @@ impl fmt::Display for GcpError {
             GcpError::Auth(error) => write!(f, "{error}"),
             GcpError::Denied { api, status, account } => write!(f, "{account} may not call the {api} API (HTTP {status})."),
             GcpError::Http { api, status } => write!(f, "The {api} API answered {status}."),
+            GcpError::Refused { api, message } => write!(f, "{api} refused the request: {message}."),
             GcpError::Network(text) => write!(f, "Google's API could not be reached: {text}."),
             GcpError::Malformed(text) => write!(f, "Google's API answered with something unexpected: {text}."),
         }
@@ -54,14 +65,23 @@ pub trait GcpClient: Send + Sync {
     fn import_ssh_public_key(&self, account: Option<&str>, project: &str, key_line: &str) -> Result<LoginProfile, GcpError>;
     /// The caller's own grants on `entitlement`, whatever their state.
     fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError>;
+    /// Requests a grant on `entitlement` for `duration_secs` with `justification`, and answers the grant as PAM created it (usually
+    /// still `ACTIVATING`).
+    fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError>;
+    /// The grant `name` (`projects/…/grants/…`) as it is now.
+    fn get_grant(&self, account: Option<&str>, name: &str) -> Result<Grant, GcpError>;
 }
 
-/// `GcpClient` over HTTPS.
+/// `GcpClient` over HTTPS: reqwest for OS Login, the client library for PAM.
 pub struct RestClient {
     tokens: Arc<dyn TokenSource>,
     http: reqwest::blocking::Client,
     oslogin_base: String,
     pam_base: String,
+    /// The client library is asynchronous; the calls here block on this runtime, as reqwest's blocking client blocks on its own.
+    runtime: tokio::runtime::Runtime,
+    /// One library client per account (the credentials differ), built on first use.
+    pam: Mutex<HashMap<String, pam_api::client::PrivilegedAccessManager>>,
 }
 
 impl RestClient {
@@ -72,7 +92,39 @@ impl RestClient {
     /// The client against other base URLs (tests point both at a mock server).
     pub fn with_bases(tokens: Arc<dyn TokenSource>, oslogin_base: &str, pam_base: &str) -> RestClient {
         let http = reqwest::blocking::Client::builder().timeout(HTTP_TIMEOUT).user_agent(user_agent()).build().expect("the REST client builds from fixed options");
-        RestClient { tokens, http, oslogin_base: oslogin_base.trim_end_matches('/').to_string(), pam_base: pam_base.trim_end_matches('/').to_string() }
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime builds from fixed options");
+        RestClient {
+            tokens,
+            http,
+            oslogin_base: oslogin_base.trim_end_matches('/').to_string(),
+            pam_base: pam_base.trim_end_matches('/').to_string(),
+            runtime,
+            pam: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The account the token source resolves `account` to (the active gcloud account when none is named), for the sentences; a
+    /// credentials problem ends here, before the library is asked for anything.
+    fn pam_account(&self, account: Option<&str>) -> Result<String, GcpError> {
+        self.tokens.access_token(account).map(|token| token.account).map_err(GcpError::Auth)
+    }
+
+    /// The library's PAM client for `account`, built once.
+    fn pam_client(&self, account: Option<&str>) -> Result<pam_api::client::PrivilegedAccessManager, GcpError> {
+        let key = account.unwrap_or("").to_string();
+        if let Some(client) = self.pam.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&key) {
+            return Ok(client.clone());
+        }
+        let built = self.runtime.block_on(async {
+            pam_api::client::PrivilegedAccessManager::builder()
+                .with_credentials(credentials(Arc::clone(&self.tokens), account.map(str::to_string)))
+                .with_endpoint(self.pam_base.clone())
+                .build()
+                .await
+        });
+        let client = built.map_err(|error| GcpError::Network(format!("the {PAM_API} client could not be set up: {error}")))?;
+        self.pam.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(key, client.clone());
+        Ok(client)
     }
 
     /// Sends `request` (built once the account is known, since OS Login's URLs carry it) with the bearer token and reads the JSON answer.
@@ -131,25 +183,62 @@ impl GcpClient for RestClient {
     }
 
     fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
-        let base = &self.pam_base;
-        let mut grants = Vec::new();
-        let mut page_token: Option<String> = None;
-        for _ in 0..GRANTS_PAGES {
-            let token = page_token.take();
-            let answer = self.call("Privileged Access Manager", account, |http, _| {
-                let mut pairs = vec![("callerRelationship", "HAD_CREATED"), ("pageSize", GRANTS_PAGE)];
-                if let Some(token) = token.as_deref() {
-                    pairs.push(("pageToken", token));
+        let who = self.pam_account(account)?;
+        let client = self.pam_client(account)?;
+        let parent = entitlement_name(project, location, entitlement);
+        self.runtime.block_on(async {
+            let mut items = client
+                .search_grants()
+                .set_parent(parent)
+                .set_caller_relationship(pam_api::model::search_grants_request::CallerRelationshipType::HadCreated)
+                .set_page_size(GRANTS_PAGE)
+                .by_item();
+            let mut grants = Vec::new();
+            while let Some(item) = items.next().await {
+                grants.push(Grant::from(item.map_err(|error| gax_error(&who, error))?));
+                if grants.len() >= GRANTS_PAGE as usize * GRANTS_PAGES {
+                    break;
                 }
-                http.get(format!("{base}/v1/projects/{project}/locations/{location}/entitlements/{entitlement}/grants:search?{}", query(&pairs)))
-            })?;
-            grants.extend(parse_grants(&answer));
-            page_token = answer.get("nextPageToken").and_then(serde_json::Value::as_str).filter(|token| !token.is_empty()).map(str::to_string);
-            if page_token.is_none() {
-                break;
             }
+            Ok(grants)
+        })
+    }
+
+    fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+        let who = self.pam_account(account)?;
+        let client = self.pam_client(account)?;
+        let grant = pam_api::model::Grant::new()
+            .set_requested_duration(google_cloud_wkt::Duration::clamp(i64::from(duration_secs), 0))
+            .set_justification(pam_api::model::Justification::new().set_unstructured_justification(justification));
+        self.runtime
+            .block_on(client.create_grant().set_parent(entitlement_name(project, location, entitlement)).set_grant(grant).send())
+            .map(Grant::from)
+            .map_err(|error| gax_error(&who, error))
+    }
+
+    fn get_grant(&self, account: Option<&str>, name: &str) -> Result<Grant, GcpError> {
+        let who = self.pam_account(account)?;
+        let client = self.pam_client(account)?;
+        self.runtime.block_on(client.get_grant().set_name(name).send()).map(Grant::from).map_err(|error| gax_error(&who, error))
+    }
+}
+
+/// `projects/{project}/locations/{location}/entitlements/{entitlement}`: the parent of its grants.
+fn entitlement_name(project: &str, location: &str, entitlement: &str) -> String {
+    format!("projects/{project}/locations/{location}/entitlements/{entitlement}")
+}
+
+/// What the library's error means in Lunport's sentences: a permission refusal names the account, a `400` carries PAM's own words,
+/// any other status is just that, and a failure before any status is a network failure.
+fn gax_error(account: &str, error: pam_api::Error) -> GcpError {
+    match error.http_status_code() {
+        Some(status @ (401 | 403)) => GcpError::Denied { api: PAM_API, status, account: account.to_string() },
+        Some(400) => {
+            let message = error.status().map(|status| status.message.trim().to_string()).filter(|message| !message.is_empty()).unwrap_or_else(|| error.to_string());
+            GcpError::Refused { api: PAM_API, message: message.trim_end_matches('.').to_string() }
         }
-        Ok(grants)
+        Some(status) => GcpError::Http { api: PAM_API, status },
+        None => GcpError::Network(error.to_string().trim_end_matches('.').to_string()),
     }
 }
 
@@ -227,8 +316,9 @@ mod tests {
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants:search")
+            // The library sends enums by their number (`$alt=json;enum-encoding=int`): HAD_CREATED is 1.
             .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded("callerRelationship".into(), "HAD_CREATED".into()),
+                mockito::Matcher::UrlEncoded("callerRelationship".into(), "1".into()),
                 mockito::Matcher::UrlEncoded("pageSize".into(), "50".into()),
             ]))
             .match_header("authorization", "Bearer t0k")
@@ -242,10 +332,11 @@ mod tests {
                 .to_string(),
             )
             .create();
-        let grants = client(&server).grants(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate").unwrap();
+        let grants = client(&server).grants(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate");
+        mock.assert();
+        let grants = grants.unwrap();
         assert_eq!(grants.len(), 3);
         assert_eq!(crate::gcp::pam::in_flight(&grants).len(), 2);
-        mock.assert();
     }
 
     /// The search answers every grant the caller ever created on the entitlement, ended ones included, and a page may hold fewer than
@@ -257,7 +348,7 @@ mod tests {
         let path = "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants:search";
         let first = server
             .mock("GET", path)
-            .match_query(mockito::Matcher::UrlEncoded("callerRelationship".into(), "HAD_CREATED".into()))
+            .match_query(mockito::Matcher::UrlEncoded("callerRelationship".into(), "1".into()))
             .with_header("content-type", "application/json")
             .with_body(json!({ "grants": [{ "name": "…/grants/1", "state": "ENDED" }, { "name": "…/grants/2", "state": "ENDED" }], "nextPageToken": "page-two" }).to_string())
             .expect(1)
@@ -273,6 +364,70 @@ mod tests {
         assert_eq!(grants.iter().map(|grant| grant.state.as_str()).collect::<Vec<_>>(), vec!["ENDED", "ENDED", "ACTIVE"]);
         first.assert();
         second.assert();
+    }
+
+    /// Requesting a grant (design 2026-10-25, PAM grant requests): the entitlement as the parent, the duration and the justification
+    /// as PAM writes them, and the grant PAM answers, still activating.
+    #[test]
+    fn create_grant_sends_the_parent_duration_and_justification_and_answers_the_grant() {
+        let mut server = mockito::Server::new();
+        // The library adds its own query parameters (`$alt=json;enum-encoding=int`, an empty `requestId`); only the path matters here.
+        let mock = server
+            .mock("POST", "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants")
+            .match_query(mockito::Matcher::Any)
+            .match_header("authorization", "Bearer t0k")
+            .match_body(mockito::Matcher::PartialJson(json!({ "requestedDuration": "1800s", "justification": { "unstructuredJustification": "restart app-api" } })))
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "name": "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42",
+                    "state": "ACTIVATING",
+                    "requestedDuration": "1800s",
+                    "justification": { "unstructuredJustification": "restart app-api" }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create();
+        let grant = client(&server).create_grant(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate", 1800, "restart app-api").unwrap();
+        assert_eq!(grant.name, "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42");
+        assert_eq!((grant.state.as_str(), grant.requested_duration.as_deref(), grant.justification.as_deref()), ("ACTIVATING", Some("1800s"), Some("restart app-api")));
+        assert_eq!(grant.until(), None, "no grant time yet");
+        mock.assert();
+    }
+
+    #[test]
+    fn a_400_from_pam_is_its_own_sentence() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants")
+            .match_query(mockito::Matcher::Any)
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "error": { "code": 400, "message": "requested_duration exceeds the maximum", "status": "INVALID_ARGUMENT" } }).to_string())
+            .expect(1)
+            .create();
+        let error = client(&server).create_grant(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate", 7200, "x").unwrap_err();
+        mock.assert();
+        assert_eq!(error, GcpError::Refused { api: "Privileged Access Manager", message: "requested_duration exceeds the maximum".into() });
+        assert_eq!(error.to_string(), "Privileged Access Manager refused the request: requested_duration exceeds the maximum.");
+    }
+
+    #[test]
+    fn get_grant_reads_a_grant_by_name() {
+        let mut server = mockito::Server::new();
+        let name = "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42";
+        server
+            .mock("GET", format!("/v1/{name}").as_str())
+            .match_query(mockito::Matcher::Any)
+            .match_header("authorization", "Bearer t0k")
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "name": name, "state": "ACTIVE", "requestedDuration": "1800s", "auditTrail": { "accessGrantTime": "2027-01-15T08:00:00Z" } }).to_string())
+            .create();
+        let grant = client(&server).get_grant(Some(ACCOUNT), name).unwrap();
+        assert_eq!(grant.state, "ACTIVE");
+        assert_eq!(grant.access_grant_time.as_deref(), Some("2027-01-15T08:00:00Z"));
+        assert_eq!(grant.until(), Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000 + 1800)));
     }
 
     #[test]

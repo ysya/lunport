@@ -14,9 +14,32 @@ pub struct Grant {
     pub requested_duration: Option<String>,
     /// `auditTrail.accessGrantTime`, RFC 3339, once access was given.
     pub access_grant_time: Option<String>,
+    /// `justification.unstructuredJustification`: what the person wrote when requesting.
+    pub justification: Option<String>,
 }
 
-/// The grants of a `grants:search` answer; an answer without any is empty.
+impl Grant {
+    /// When access ends: the grant time plus the requested duration; `None` until access was given.
+    pub fn until(&self) -> Option<SystemTime> {
+        let granted = parse_rfc3339(self.access_grant_time.as_deref()?)?;
+        let seconds: f64 = self.requested_duration.as_deref()?.strip_suffix('s')?.parse().ok()?;
+        Some(granted + Duration::from_secs_f64(seconds.max(0.0)))
+    }
+
+    /// Whether nothing more will happen to the grant without a person: every state but `ACTIVATING`, `ACTIVE` and `SCHEDULED`
+    /// (`APPROVAL_AWAITED` included: Lunport does not wait for an approver).
+    pub fn is_final(&self) -> bool {
+        !matches!(self.state.as_str(), "ACTIVATING" | "ACTIVE" | "SCHEDULED")
+    }
+}
+
+/// A duration as PAM writes it (`1800s`).
+pub fn duration_text(seconds: u32) -> String {
+    format!("{seconds}s")
+}
+
+/// The grants of a `grants:search` answer as JSON (the fixtures' shape); the live client answers typed grants through `From`.
+#[cfg(test)]
 pub fn parse_grants(value: &serde_json::Value) -> Vec<Grant> {
     let text = |value: &serde_json::Value, name: &str| value.get(name).and_then(serde_json::Value::as_str).map(str::to_string);
     value
@@ -30,10 +53,26 @@ pub fn parse_grants(value: &serde_json::Value) -> Vec<Grant> {
                     state: text(grant, "state").unwrap_or_default(),
                     requested_duration: text(grant, "requestedDuration"),
                     access_grant_time: grant.get("auditTrail").and_then(|trail| text(trail, "accessGrantTime")),
+                    justification: grant.get("justification").and_then(|justification| text(justification, "unstructuredJustification")),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The client library's grant as the broker reads it: the state by its API name, the duration as `<seconds>s`, the grant time as the
+/// RFC 3339 text the library would write (so `granted_within` parses it as it parses the fixtures).
+impl From<google_cloud_privilegedaccessmanager_v1::model::Grant> for Grant {
+    fn from(grant: google_cloud_privilegedaccessmanager_v1::model::Grant) -> Grant {
+        let granted = grant.audit_trail.as_ref().and_then(|trail| trail.access_grant_time.as_ref());
+        Grant {
+            name: grant.name.clone(),
+            state: grant.state.name().map(str::to_string).unwrap_or_else(|| format!("{:?}", grant.state)),
+            requested_duration: grant.requested_duration.as_ref().map(|duration| duration_text(u32::try_from(duration.seconds()).unwrap_or(0))),
+            access_grant_time: granted.and_then(|time| serde_json::to_value(time).ok()).and_then(|value| value.as_str().map(str::to_string)),
+            justification: grant.justification.as_ref().and_then(|justification| justification.unstructured_justification().cloned()),
+        }
+    }
 }
 
 /// The grants that give access now or are about to: `ACTIVE`, `ACTIVATING`, `SCHEDULED`.
@@ -115,7 +154,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn grant(state: &str, granted: Option<&str>) -> Grant {
-        Grant { name: format!("projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: granted.map(str::to_string) }
+        Grant { name: format!("projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: granted.map(str::to_string), justification: None }
     }
 
     #[test]
@@ -153,6 +192,11 @@ mod tests {
         assert!(granted_within(&grant("ACTIVE", Some("2027-01-15T08:00:30Z")), now, window));
         assert!(!granted_within(&grant("ACTIVE", None), now, window));
         assert!(!granted_within(&grant("ACTIVE", Some("yesterday")), now, window));
+        // Access ends when the requested duration has passed since it was given; a grant not yet given has no end.
+        assert_eq!(grant("ACTIVE", Some("2027-01-15T08:00:00Z")).until(), Some(now + Duration::from_secs(1800)));
+        assert_eq!(grant("ACTIVATING", None).until(), None);
+        assert!(grant("ENDED", None).is_final() && grant("APPROVAL_AWAITED", None).is_final() && !grant("ACTIVATING", None).is_final());
+        assert_eq!(duration_text(1800), "1800s");
         assert_eq!(parse_rfc3339("2027-01-15T08:00:00Z"), Some(now));
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(UNIX_EPOCH));
         assert_eq!(parse_rfc3339("2027-13-01T00:00:00Z"), None);

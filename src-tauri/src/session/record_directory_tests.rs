@@ -589,6 +589,14 @@ mod gcp_transport {
             self.0.calls.lock().unwrap().push(format!("grants {} {project} {location} {entitlement}", account.unwrap_or("-")));
             Ok(self.0.grants.lock().unwrap().clone())
         }
+        fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+            self.0.calls.lock().unwrap().push(format!("create {} {project} {location} {entitlement} {duration_secs} {justification}", account.unwrap_or("-")));
+            Err(GcpError::Http { api: "Privileged Access Manager", status: 501 })
+        }
+        fn get_grant(&self, account: Option<&str>, name: &str) -> Result<Grant, GcpError> {
+            self.0.calls.lock().unwrap().push(format!("get {} {name}", account.unwrap_or("-")));
+            Err(GcpError::Http { api: "Privileged Access Manager", status: 501 })
+        }
     }
 
     fn linux(username: &str, keys: &[&str]) -> LoginProfile {
@@ -599,7 +607,7 @@ mod gcp_transport {
     }
 
     fn grant(state: &str) -> Grant {
-        Grant { name: format!("grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: None }
+        Grant { name: format!("grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: None, justification: None }
     }
 
     fn transport(project: &str, host: &str, os_login: bool, pam: Option<PamCheck>) -> HostTransport {
