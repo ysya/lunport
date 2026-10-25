@@ -41,6 +41,9 @@ import {
 } from "./inheritance";
 import { FormatUpgradeReview } from "./FormatUpgradeReview";
 import { HostPasswordField, saveHostPassword, type PasswordChange } from "./HostPasswordField";
+import { TransportSection } from "./TransportSection";
+import { applyOsLoginProfile, saveTransportDraft } from "./editor";
+import { fetchOsLoginProfile, transportFor, transportProblem, type HostTransport } from "@/lib/transports";
 export function RecordHostEditor({
   host,
   hostId,
@@ -96,7 +99,12 @@ export function RecordHostEditor({
   );
   const [busy, setBusy] = useState(false);
   const [passwordChange, setPasswordChange] = useState<PasswordChange>(null);
-  const dirty = state.dirty || passwordChange !== null;
+  // `undefined`: the Connect through section was not touched; `null`: Direct was chosen; a value: the IAP transport as edited.
+  const [transportDraft, setTransportDraft] = useState<HostTransport | null | undefined>(undefined);
+  const [osLoginNote, setOsLoginNote] = useState<string | null>(null);
+  const dirty = state.dirty || passwordChange !== null || transportDraft !== undefined;
+  const savedTransport = transportFor(overview, state.id);
+  const shownTransport = transportDraft === undefined ? savedTransport : transportDraft;
   const currentHost = state.id ? selectHost(overview.hosts, state.id) : host;
   const [askingUpgrade, setAskingUpgrade] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
@@ -167,6 +175,15 @@ export function RecordHostEditor({
         }
         await saveHostPassword(saved, passwordChange, accepted);
         setPasswordChange(null);
+      }
+      if (transportDraft !== undefined) {
+        if (!id) {
+          setState(current => ({ ...current, unavailable: true }));
+          throw new Error("The host was saved, but its identity is unavailable. Reopen the host to save how it connects.");
+        }
+        const result = await saveTransportDraft(id, transportDraft, accepted);
+        if (result) accept(result);
+        setTransportDraft(undefined);
       }
       onSaved(id);
     });
@@ -296,7 +313,7 @@ export function RecordHostEditor({
               size="sm"
               className="ml-3"
               disabled={busy || !host}
-              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); }}
+              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); setTransportDraft(undefined); setOsLoginNote(null); }}
             >
               Reload saved settings
             </Button>
@@ -385,6 +402,28 @@ export function RecordHostEditor({
                   onChange={(e) => patch({ user: e.target.value })}
                 />
                 {inheritedControl("user")}
+                {shownTransport?.kind.os_login && (
+                  <div className="space-y-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || inherits("user") || !shownTransport.kind.project}
+                      onClick={() =>
+                        run(async () => {
+                          const view = await fetchOsLoginProfile(shownTransport.kind.account, shownTransport.kind.project, state.payload.key_id);
+                          const applied = applyOsLoginProfile(state, view);
+                          setState(applied.state);
+                          setOsLoginNote(applied.note);
+                        })
+                      }
+                    >
+                      Use OS Login username
+                    </Button>
+                    <p className="text-xs text-muted-foreground">OS Login decides the username; fetch it with Use OS Login username.</p>
+                    {osLoginNote && <p className="text-xs text-muted-foreground">{osLoginNote}</p>}
+                  </div>
+                )}
               </RecordField>
             </div>
           </FormSection>
@@ -548,6 +587,12 @@ export function RecordHostEditor({
               </div>
             </div>
           </details>
+          <TransportSection
+            hostId={state.id}
+            value={shownTransport}
+            onChange={(next) => setTransportDraft(next)}
+            disabled={busy || sharedBlocked || state.unavailable}
+          />
           <FormSection title="Organization" description="Add searchable tags and notes for this host.">
             <RecordField label="Tags">
               <Input
@@ -675,7 +720,7 @@ export function RecordHostEditor({
             <Button
               variant="ghost"
               disabled={busy || !currentHost}
-              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); }}
+              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); setTransportDraft(undefined); setOsLoginNote(null); }}
             >
               Discard changes
             </Button>
@@ -691,6 +736,7 @@ export function RecordHostEditor({
               sharedBlocked ||
               (!dirty && state.id !== null) ||
               (passwordChange?.kind === "set" && passwordChange.value.length === 0) ||
+              (transportDraft != null && transportProblem(transportDraft) !== null) ||
               editorProblem(state) !== null
             }
             onClick={() => save()}
