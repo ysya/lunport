@@ -816,6 +816,8 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "create_host"
             | "verify_host_key"
             | "update_host"
+            | "set_transport"
+            | "remove_transport"
     ) {
         Ok(())
     } else {
@@ -880,6 +882,18 @@ pub(crate) fn dispatch(
         .map_err(|e| e.to_string())?,
         "update_host" => crate::sync::engine::with_env(app, |env| {
             super::management::update(env, &state.mcp, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "set_transport" | "remove_transport" => crate::sync::engine::with_env(app, |env| {
+            let tool = if method == "set_transport" { super::management::set_transport } else { super::management::remove_transport };
+            tool(env, &state.mcp, params, context, cancel, &|request| {
                 state
                     .mcp
                     .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {

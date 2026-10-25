@@ -289,7 +289,9 @@ fn records_tool_inventory_is_explicit_and_legacy_tools_remain_compatible() {
             "ssh_exec",
             "create_host",
             "verify_host_key",
-            "update_host"
+            "update_host",
+            "set_transport",
+            "remove_transport"
         ]
     );
     let legacy_value = tools_for_mode("legacy");
@@ -569,4 +571,157 @@ fn an_update_rejects_private_data_group_moves_and_a_loop_through_itself() {
     }
     assert!(update(&d.env(), &r, &json!({"alias":"fixture-web","jump":[id]}), RequestContext::default(), &CancelToken::default(), &never).is_err());
     assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid");
+}
+
+
+// ---- set_transport / remove_transport (design 2026-10-26, AI edits) ----
+
+fn transport_of(d: &TestDevice, id: &str) -> Option<crate::sync::transports::HostTransport> {
+    crate::sync::transports::get(&snapshot(d), id)
+}
+
+fn pam_transport() -> Value {
+    json!({"alias":"fixture-web","project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox","account":"frank@retower.io","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"]}})
+}
+
+fn never(_: &McpPendingRequest) -> ApprovalDecision {
+    panic!("no window")
+}
+
+/// The transport as saved, for the assertions.
+fn kind_of(transport: &crate::sync::transports::HostTransport) -> (String, String, String, Option<String>, bool, Option<crate::sync::transports::PamCheck>) {
+    let crate::sync::transports::TransportKind::GcpIap { project, zone, instance, account, os_login, pam, .. } = &transport.kind;
+    (project.clone(), zone.clone(), instance.clone(), account.clone(), *os_login, pam.clone())
+}
+
+#[test]
+fn a_new_transport_needs_its_place_and_shows_every_field() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::AutoLog] {
+        let d = device();
+        let r = runtime(mode);
+        let id = created(&d, &r);
+        assert_eq!(
+            set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":{"entitlements":["prod-operate"]}}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(),
+            "Provide the project, zone and instance of a new transport."
+        );
+        let asked = AtomicUsize::new(0);
+        let value = set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|q| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(q.host_proposal.as_ref().unwrap().kind, proposal_kinds::SET_TRANSPORT);
+            let rows = rows(q);
+            for row in [("Project", "knowknow-prod"), ("OS Login", "off"), ("PAM entitlements", "prod-operate, prod-admin"), ("Grant duration", "30 min"), ("Account", "frank@retower.io")] {
+                assert!(rows.contains(&(row.0.into(), row.1.into())), "{row:?} in {rows:?}");
+            }
+            assert!(transport_of(&d, &id).is_none(), "nothing saved before consent");
+            ApprovalDecision::Allow
+        })
+        .unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        let (project, zone, instance, account, os_login, pam) = kind_of(&transport_of(&d, &id).expect("saved"));
+        assert_eq!((project.as_str(), zone.as_str(), instance.as_str(), account.as_deref(), os_login), ("knowknow-prod", "asia-east1-b", "jumpbox", Some("frank@retower.io"), false));
+        let pam = pam.unwrap();
+        assert_eq!((pam.entitlements.clone(), pam.location.as_str(), pam.duration_secs, pam.justification), (vec!["prod-operate".to_string(), "prod-admin".to_string()], "global", 1800, None));
+        assert_eq!(value["host"]["transport"]["project"], "knowknow-prod");
+        assert_eq!(value["message"], "Transport saved.");
+        assert_eq!(last_outcome(&r), "transport_set");
+        assert!(r.records_active.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_transport_change_keeps_what_was_not_sent_and_shows_old_to_new() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+        crate::sync::transports::remember_grant_request(state, &id, "restart app-api", 1800, now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":{"entitlements":["prod-admin"],"duration_minutes":45}}), RequestContext::default(), &CancelToken::default(), &|q| {
+        let rows = rows(q);
+        assert!(rows.contains(&("PAM entitlements".into(), "prod-operate, prod-admin → prod-admin".into())), "{rows:?}");
+        assert!(rows.contains(&("Grant duration".into(), "30 min → 45 min".into())), "{rows:?}");
+        assert!(!rows.iter().any(|(label, _)| label == "Instance"), "unchanged fields are not rows: {rows:?}");
+        ApprovalDecision::Allow
+    })
+    .unwrap();
+    let (_, _, instance, _, _, pam) = kind_of(&transport_of(&d, &id).unwrap());
+    let pam = pam.unwrap();
+    assert_eq!((instance.as_str(), pam.entitlements.clone(), pam.duration_secs, pam.justification.as_deref()), ("jumpbox", vec!["prod-admin".to_string()], 2700, Some("restart app-api")));
+    set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":null}), RequestContext::default(), &CancelToken::default(), &|q| {
+        assert!(rows(q).contains(&("PAM entitlements".into(), "prod-admin → none".into())), "{:?}", rows(q));
+        ApprovalDecision::Allow
+    })
+    .unwrap();
+    assert!(kind_of(&transport_of(&d, &id).unwrap()).5.is_none(), "the check is gone");
+}
+
+#[test]
+fn a_transport_that_would_not_change_or_fails_the_editors_rules_gets_no_window() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let _id = created(&d, &r);
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    assert_eq!(set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), "Nothing would change.");
+    assert_eq!(set_transport(&d.env(), &r, &json!({"alias":"fixture-web","zone":"Asia East"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), "Enter the zone of the instance.");
+    assert_eq!(set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":{"entitlements":[]}}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), "Enter at least one PAM entitlement.");
+}
+
+#[test]
+fn removing_a_transport_asks_and_restores_the_saved_address() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    assert_eq!(remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), "This host has no transport.");
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    let value = remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &|q| {
+        assert_eq!(q.host_proposal.as_ref().unwrap().kind, proposal_kinds::REMOVE_TRANSPORT);
+        assert!(rows(q).contains(&("Instance".into(), "jumpbox".into())), "{:?}", rows(q));
+        assert!(transport_of(&d, &id).is_some(), "still there before consent");
+        ApprovalDecision::Allow
+    })
+    .unwrap();
+    assert!(transport_of(&d, &id).is_none());
+    assert_eq!(value["message"], "Transport removed; the host is reached at its saved address.");
+    assert_eq!(value["host"]["transport"], Value::Null);
+    assert_eq!(last_outcome(&r), "transport_removed");
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    assert_eq!(remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err(), "Transport removal was denied.");
+    assert!(transport_of(&d, &id).is_some());
+    assert_eq!(last_outcome(&r), "transport_not_removed");
+}
+
+#[test]
+fn a_transport_changed_meanwhile_is_refused() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    let error = set_transport(&d.env(), &r, &json!({"alias":"fixture-web","instance":"jumpbox-2"}), RequestContext::default(), &CancelToken::default(), &|_| {
+        crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+            let current = crate::sync::transports::get(state, &id).unwrap();
+            let mut other = current.clone();
+            let crate::sync::transports::TransportKind::GcpIap { zone, .. } = &mut other.kind;
+            *zone = "asia-east1-c".into();
+            crate::sync::transports::set(state, &id, Some(&current), Some(other), now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    assert_eq!(error, "The transport changed while the request was open; read it again and retry.");
+    assert_eq!(kind_of(&transport_of(&d, &id).unwrap()).1, "asia-east1-c", "the other change stands");
+}
+
+#[test]
+fn transport_tools_need_the_hosts_ai_permission() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    r.policy.lock().unwrap().allowed_hosts.clear();
+    let sentence = format!("host '{id}' is not allowed for AI access");
+    assert_eq!(set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), sentence);
+    assert_eq!(remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), sentence);
+    assert!(transport_of(&d, &id).is_none());
 }
