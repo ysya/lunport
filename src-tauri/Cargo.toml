@@ -66,7 +66,11 @@ zeroize = "1"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 # Google Cloud IAP tunnels (src/gcp/): the relay's WebSocket. rustls, tokio-rustls, the native roots and url are already in the lockfile
 # through reqwest; only tungstenite and tokio-tungstenite are new. futures-util splits the socket into its read and write halves.
+# rustls and rustls-native-certs are named directly because the tunnel builds its own TLS configuration: this build has both of rustls's
+# crypto providers (aws-lc-rs through reqwest, ring through the updater), so rustls cannot pick a process default by itself.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-native-certs = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 url = "2"
 # 金鑰保管庫(src/vault/material.rs):解析、解密 OpenSSH 私鑰並簽章。ssh-key 0.6.7 的 RSA 簽章有錯,RSA 改用 rsa 套件;

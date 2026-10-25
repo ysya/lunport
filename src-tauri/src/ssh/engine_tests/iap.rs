@@ -12,7 +12,7 @@ use crate::ssh::testing::doubles::{TestPolicy, VaultAuth};
 use crate::ssh::testing::fixture::Server;
 use crate::ssh::testing::harness::tools;
 use crate::ssh::testing::{closed_port, eventually};
-use crate::ssh::{AuthMethod, ConnectError, Ended, Hop, IapTarget, Phase, Pty, SshEngine, Target, Transport};
+use crate::ssh::{AuthMethod, ConnectError, DisconnectKind, Ended, Hop, IapTarget, Phase, Pty, SshEngine, Target, Transport};
 
 const TOKEN: &str = "t0k";
 const MIB: usize = 1024 * 1024;
@@ -91,6 +91,27 @@ fn output_survives_a_dropped_websocket() {
     assert!(result.stdout.iter().all(|byte| *byte == b'x'));
     assert_eq!(relay.reconnects(), 1);
     assert!(session.is_alive());
+}
+
+/// Design 2026-10-25, "Error texts": when the relay ends the session, the connection's reason is the relay's sentence, not russh's
+/// end-of-file on the pipe.
+#[test]
+fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, SHELL_SERVER);
+    let relay = FakeRelay::start(server.sshd.port, TOKEN);
+    let target = Target { hops: vec![iap_hop(&server, &relay, "jumpbox", "k1")] };
+    let session = engine().connect(&target, &*TestPolicy::trusting(), &server.vault("k1")).expect("the hop connects through the relay");
+    settle(&*session);
+    relay.set(Behaviour::CloseAfter(0, 4033, "not authorized"));
+    let _ = session.exec("echo poke", Duration::from_secs(10), MIB);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while session.is_alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!session.is_alive(), "the relay ended the session");
+    let reason = session.disconnect_reason().expect("a dead session says why");
+    assert_eq!((reason.kind, reason.detail.as_str()), (DisconnectKind::ConnectionLost, "the relay closed the tunnel (4033: not authorized)"));
 }
 
 #[test]

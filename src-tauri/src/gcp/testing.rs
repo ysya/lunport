@@ -36,6 +36,8 @@ pub enum Behaviour {
     DropAfter(u64),
     /// The WebSocket opens and the relay says nothing, ever.
     NeverSucceed,
+    /// The TCP connection is accepted and the HTTP handshake never answered (a half-dead link, a captive portal).
+    StallHandshake,
 }
 
 #[derive(Default)]
@@ -194,6 +196,12 @@ async fn serve(stream: TcpStream, shared: &Arc<Shared>) -> Result<(), ()> {
         response.headers_mut().insert("sec-websocket-protocol", SUBPROTOCOL.parse().expect("a header value"));
         Ok(response)
     };
+    if behaviour == Behaviour::StallHandshake {
+        // Hold the connection open and say nothing, until the client gives up and the task is dropped with it.
+        let _held = stream;
+        std::future::pending::<()>().await;
+        return Ok(());
+    }
     let websocket = tokio_tungstenite::accept_hdr_async(stream, callback).await;
     *locked(&shared.headers) = locked(&headers_sink).clone();
     let websocket = websocket.map_err(|_| ())?;

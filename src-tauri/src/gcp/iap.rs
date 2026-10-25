@@ -1,25 +1,27 @@
 //! An IAP TCP-forwarding tunnel as a byte stream: a WebSocket to Google's relay speaking `gcp::relay`'s frames, pumped into a duplex
 //! pipe whose other end the SSH engine reads and writes like a socket. Ported from gcloud's `iap_tunnel_websocket.py` and
-//! `iap_tunnel_websocket_helper.py` (Apache License 2.0, see `NOTICE.md`), including its reconnect rule: a WebSocket that fails without
-//! a Close frame, or that the relay closes with code 4004 (reauthentication), is reconnected by session id with a fresh token and the
-//! unacknowledged frames are sent again; any other Close frame is the relay ending the session, and so ends the stream.
+//! `iap_tunnel_websocket_helper.py` (Apache License 2.0, see `NOTICE.md`), including the reconnect rule its `_OnClose` documents: a
+//! WebSocket that fails without a Close frame, or that the relay closes with code 4004 (reauthentication), is reconnected by session id
+//! with a fresh token and the unacknowledged frames are sent again; any other Close frame is the relay ending the session, and so ends
+//! the stream. The two directions are pumped independently, as gcloud's two threads do: russh writes a whole batch of packets before it
+//! reads again, so a pump that waited on the engine's reader while the engine waited on the pump's would stop both for good.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{HeaderValue, AUTHORIZATION, ORIGIN as ORIGIN_HEADER, SEC_WEBSOCKET_PROTOCOL, USER_AGENT};
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{self, Message};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use super::auth::{AuthError, TokenSource};
-use super::relay::{self, Bookkeeping, Endpoint, Frame, MAX_DATA_FRAME, MAX_UNSENT_FRAMES, ORIGIN, SUBPROTOCOL};
+use super::relay::{self, Bookkeeping, Endpoint, Frame, MAX_DATA_FRAME, MAX_FRAME_BYTES, MAX_UNSENT_FRAMES, ORIGIN, SUBPROTOCOL};
 use crate::ssh::Secret;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -27,8 +29,10 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// How much the engine may write ahead of the relay: gcloud queues `MAX_UNSENT_FRAMES` frames; here the pipe between the engine and the
 /// pump holds that many frames' worth of bytes, and a full pipe holds the engine's writer back.
 pub const DUPLEX_BUFFER: usize = MAX_UNSENT_FRAMES * MAX_DATA_FRAME;
-/// How long a reconnect attempt waits for the relay's acknowledgement (gcloud's `MAX_WEBSOCKET_OPEN_WAIT_TIME_SEC`).
+/// How long a reconnect attempt may take in all, up to the relay's acknowledgement (gcloud's `MAX_WEBSOCKET_OPEN_WAIT_TIME_SEC`).
 const OPEN_WAIT: Duration = Duration::from_secs(60);
+/// How long the pump waits for the WebSocket's Close handshake when the tunnel is done.
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
 /// The relay's "reauthentication required" close code: the one close that is reconnected, with a fresh token.
 const REAUTH_CLOSE_CODE: u16 = 4004;
 
@@ -102,6 +106,24 @@ impl std::error::Error for IapError {}
 pub struct Tunnel {
     pub stream: DuplexStream,
     pub guard: TunnelGuard,
+    ended: TunnelEnd,
+}
+
+/// Where the pump writes why it ended, shared with the engine, which reads it when it explains why the connection ended.
+pub type TunnelEnd = Arc<Mutex<Option<IapError>>>;
+
+impl Tunnel {
+    /// Why the pump ended, once it has: the relay's Close, a credential error, or the reconnect budget spent. `None` while the tunnel
+    /// is up, and when the engine itself closed it. The engine reads the same record through `end_record`.
+    #[cfg(test)]
+    pub fn ended(&self) -> Option<IapError> {
+        self.ended.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    /// The shared record of why the pump ended, for the engine to keep with the hop.
+    pub fn end_record(&self) -> TunnelEnd {
+        Arc::clone(&self.ended)
+    }
 }
 
 /// Holds the pump's abort handle. Dropped before `release` (the handshake over the tunnel ran out of time), it aborts the pump: the pump's
@@ -138,9 +160,10 @@ pub async fn open_with(endpoint: Endpoint, tokens: Arc<dyn TokenSource>, account
         other => return Err(IapError::Protocol(format!("the relay answered the connect with {}", describe_frame(&other)))),
     };
     let (ours, theirs) = tokio::io::duplex(DUPLEX_BUFFER);
-    let session = Session { endpoint, tokens, account, user_agent, sid, books: Bookkeeping::default(), backoff };
+    let ended: TunnelEnd = Arc::default();
+    let session = Session { endpoint, tokens, account, user_agent, sid, books: Bookkeeping::default(), backoff, ended: Arc::clone(&ended) };
     let pump = tokio::spawn(pump(session, socket, theirs));
-    Ok(Tunnel { stream: ours, guard: TunnelGuard(Some(pump.abort_handle())) })
+    Ok(Tunnel { stream: ours, guard: TunnelGuard(Some(pump.abort_handle())), ended })
 }
 
 /// The access token, fetched on the blocking pool: `TokenSource` is synchronous (it may read files and call the token service).
@@ -153,7 +176,36 @@ async fn fetch_token(tokens: &Arc<dyn TokenSource>, account: Option<&str>) -> Re
     }
 }
 
-/// The WebSocket handshake with the headers gcloud sends.
+/// The TLS side of the relay's WebSocket, built once: rustls with its provider named (this build has both of rustls's providers,
+/// reqwest's aws-lc-rs and the updater's ring, so rustls cannot choose a process default by itself and panics when asked to) and the
+/// system's root certificates; there is no way to skip verification.
+fn tls_connector() -> Result<Connector, IapError> {
+    static CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
+    let config = CONFIG.get_or_init(|| {
+        let loaded = rustls_native_certs::load_native_certs();
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in loaded.certs {
+            let _ = roots.add(certificate);
+        }
+        if roots.is_empty() {
+            let why = loaded.errors.first().map_or_else(|| "none were found".to_string(), |error| error.to_string());
+            return Err(format!("no system root certificates could be loaded ({why})"));
+        }
+        rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map(|builder| Arc::new(builder.with_root_certificates(roots).with_no_client_auth()))
+            .map_err(|error| error.to_string())
+    });
+    config.clone().map(Connector::Rustls).map_err(IapError::Io)
+}
+
+/// The WebSocket's own limits: a message a little over the codec's frame cap is refused before it is buffered whole (the default is 64 MiB).
+fn socket_config() -> WebSocketConfig {
+    WebSocketConfig::default().max_message_size(Some(2 * MAX_FRAME_BYTES)).max_frame_size(Some(2 * MAX_FRAME_BYTES))
+}
+
+/// The WebSocket handshake with the headers gcloud sends. Nagle is off, as in gcloud's websocket-client: every keystroke of a shell
+/// goes through this socket.
 async fn dial(url: &str, token: &str, user_agent: &str) -> Result<Socket, IapError> {
     let mut request = url.into_client_request().map_err(|error| IapError::Protocol(format!("the relay URL is invalid: {error}")))?;
     let header = |value: &str| HeaderValue::from_str(value).map_err(|_| IapError::Protocol("a header value is not valid HTTP".to_string()));
@@ -164,7 +216,7 @@ async fn dial(url: &str, token: &str, user_agent: &str) -> Result<Socket, IapErr
     headers.insert(ORIGIN_HEADER, header(ORIGIN)?);
     headers.insert(SEC_WEBSOCKET_PROTOCOL, header(SUBPROTOCOL)?);
     headers.insert(USER_AGENT, header(user_agent)?);
-    match tokio_tungstenite::connect_async(request).await {
+    match tokio_tungstenite::connect_async_tls_with_config(request, Some(socket_config()), true, Some(tls_connector()?)).await {
         Ok((socket, _response)) => Ok(socket),
         Err(tungstenite::Error::Http(response)) => Err(IapError::Refused { status: response.status().as_u16() }),
         Err(error) => Err(IapError::Io(error.to_string())),
@@ -211,41 +263,113 @@ struct Session {
     sid: Vec<u8>,
     books: Bookkeeping,
     backoff: Backoff,
+    /// Written once, when the pump ends for a reason the engine should repeat.
+    ended: TunnelEnd,
+}
+
+impl Session {
+    /// Why the pump ended, for the engine; the first reason stands.
+    fn record(&self, error: IapError) {
+        let mut ended = self.ended.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ended.get_or_insert(error);
+    }
 }
 
 /// How one WebSocket of a session ended.
 enum Outcome {
     /// The engine dropped its end of the pipe: the tunnel is done.
     LocalClosed,
-    /// The relay ended the session, or broke the subprotocol: the tunnel is done.
-    Fatal,
+    /// The relay ended the session, or broke the subprotocol: the tunnel is done, and this is why.
+    Fatal(IapError),
     /// The link broke, or the relay asked for a fresh token: connect again by session id.
     Reconnect,
 }
 
-/// Carries bytes between the pipe and the relay until the tunnel is done. Dropping `local` at the end is what tells the engine.
-async fn pump(mut session: Session, mut socket: Socket, mut local: DuplexStream) {
+/// The engine's end of the tunnel as the pump sees it: the pipe's two halves, read and written independently, and the relay's last
+/// data frame while the engine has not taken all of it.
+struct Pipe {
+    read: ReadHalf<DuplexStream>,
+    write: WriteHalf<DuplexStream>,
+    /// The relay's bytes not yet with the engine; `written` of them are in the pipe already.
+    pending: Vec<u8>,
+    written: usize,
+}
+
+impl Pipe {
+    fn new(stream: DuplexStream) -> Pipe {
+        let (read, write) = tokio::io::split(stream);
+        Pipe { read, write, pending: Vec::new(), written: 0 }
+    }
+
+    /// Waits `wait` while the relay is away: what the engine writes meanwhile goes into the books (sent after the reconnect with
+    /// everything else unconfirmed; the engine's own flow control bounds it), and what the relay had sent keeps flowing to the engine.
+    /// `false` once the engine dropped its end: nobody reconnects for a session that is gone.
+    async fn absorb(&mut self, books: &mut Bookkeeping, wait: Duration) -> bool {
+        let sleep = tokio::time::sleep(wait);
+        tokio::pin!(sleep);
+        let mut buffer = vec![0u8; MAX_DATA_FRAME];
+        let Pipe { read, write, pending, written } = self;
+        loop {
+            tokio::select! {
+                _ = &mut sleep => return true,
+                count = read.read(&mut buffer) => match count {
+                    Ok(0) | Err(_) => return false,
+                    Ok(count) => books.note_sent(buffer[..count].to_vec()),
+                },
+                wrote = write.write(&pending[*written..]), if *written < pending.len() => match wrote {
+                    Ok(0) | Err(_) => return false,
+                    Ok(count) => advance(pending, written, count),
+                },
+            }
+        }
+    }
+}
+
+/// `count` more of the pending bytes are with the engine.
+fn advance(pending: &mut Vec<u8>, written: &mut usize, count: usize) {
+    *written += count;
+    if *written == pending.len() {
+        pending.clear();
+        *written = 0;
+    }
+}
+
+/// Carries bytes between the pipe and the relay until the tunnel is done. Dropping the pipe at the end is what tells the engine, and
+/// `Session::record` tells it why when the relay or the credentials ended the tunnel.
+async fn pump(mut session: Session, mut socket: Socket, local: DuplexStream) {
+    let mut local = Pipe::new(local);
     loop {
         match run_socket(&mut session, &mut socket, &mut local).await {
-            Outcome::LocalClosed | Outcome::Fatal => {
-                let _ = socket.close(None).await;
+            Outcome::LocalClosed => {
+                let _ = tokio::time::timeout(CLOSE_WAIT, socket.close(None)).await;
                 return;
             }
-            Outcome::Reconnect => match reconnect(&mut session).await {
+            Outcome::Fatal(error) => {
+                session.record(error);
+                let _ = tokio::time::timeout(CLOSE_WAIT, socket.close(None)).await;
+                return;
+            }
+            Outcome::Reconnect => match reconnect(&mut session, &mut local).await {
                 Ok(next) => socket = next,
-                Err(_) => return,
+                Err(Some(error)) => {
+                    session.record(error);
+                    return;
+                }
+                Err(None) => return,
             },
         }
     }
 }
 
 /// Pumps until the WebSocket fails or one side is done. A write the relay does not take, or a read that fails without a Close frame, is a
-/// broken link; a Close frame is the relay's decision, reconnected only for 4004.
-async fn run_socket(session: &mut Session, socket: &mut Socket, local: &mut DuplexStream) -> Outcome {
+/// broken link; a Close frame is the relay's decision, reconnected only for 4004. The engine's bytes are always read; the relay's next
+/// frame is read once its last data frame is with the engine, so the WebSocket's own flow control holds the relay back meanwhile.
+async fn run_socket(session: &mut Session, socket: &mut Socket, local: &mut Pipe) -> Outcome {
     let mut buffer = vec![0u8; MAX_DATA_FRAME];
+    let Pipe { read, write, pending, written } = local;
     loop {
         tokio::select! {
-            read = local.read(&mut buffer) => match read {
+            count = read.read(&mut buffer) => match count {
                 Ok(0) | Err(_) => return Outcome::LocalClosed,
                 Ok(count) => {
                     let chunk = buffer[..count].to_vec();
@@ -255,13 +379,16 @@ async fn run_socket(session: &mut Session, socket: &mut Socket, local: &mut Dupl
                     }
                 }
             },
-            message = socket.next() => match message {
+            wrote = write.write(&pending[*written..]), if *written < pending.len() => match wrote {
+                Ok(0) | Err(_) => return Outcome::LocalClosed,
+                Ok(count) => advance(pending, written, count),
+            },
+            message = socket.next(), if *written >= pending.len() => match message {
                 Some(Ok(Message::Binary(bytes))) => match relay::decode(&bytes) {
                     Ok(Frame::Data(data)) => {
-                        if local.write_all(&data).await.is_err() {
-                            return Outcome::LocalClosed;
-                        }
                         session.books.note_received(data.len());
+                        *pending = data;
+                        *written = 0;
                         if let Some(total) = session.books.ack_due() {
                             if socket.send(Message::Binary(relay::encode_ack(total).into())).await.is_err() {
                                 return Outcome::Reconnect;
@@ -270,16 +397,19 @@ async fn run_socket(session: &mut Session, socket: &mut Socket, local: &mut Dupl
                         }
                     }
                     Ok(Frame::Ack(ack)) => {
-                        if session.books.confirm(ack).is_err() {
-                            return Outcome::Fatal;
+                        if let Err(error) = session.books.confirm(ack) {
+                            return Outcome::Fatal(IapError::Protocol(error.to_string()));
                         }
                     }
                     Ok(Frame::Unknown(_)) => {}
-                    Ok(Frame::ConnectSuccess { .. } | Frame::ReconnectSuccess { .. }) | Err(_) => return Outcome::Fatal,
+                    Ok(other @ (Frame::ConnectSuccess { .. } | Frame::ReconnectSuccess { .. })) => {
+                        return Outcome::Fatal(IapError::Protocol(format!("the relay sent {} in the middle of the session", describe_frame(&other))));
+                    }
+                    Err(error) => return Outcome::Fatal(IapError::Protocol(error.to_string())),
                 },
                 Some(Ok(Message::Close(frame))) => {
                     let code = frame.as_ref().map(|frame| u16::from(frame.code));
-                    return if code == Some(REAUTH_CLOSE_CODE) { Outcome::Reconnect } else { Outcome::Fatal };
+                    return if code == Some(REAUTH_CLOSE_CODE) { Outcome::Reconnect } else { Outcome::Fatal(closed(frame)) };
                 }
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => return Outcome::Reconnect,
@@ -288,53 +418,62 @@ async fn run_socket(session: &mut Session, socket: &mut Socket, local: &mut Dupl
     }
 }
 
-/// Connects again by session id, paced by the backoff, until the relay acknowledges or the budget is spent. A fresh token each time;
-/// a credential error that needs a person ends the tunnel, a transient one is retried. The frames the relay had not confirmed are sent
+/// Connects again by session id, paced by the backoff, until the relay acknowledges or the budget is spent; every attempt (token, TCP,
+/// TLS, handshake, the relay's answer) is bounded by `OPEN_WAIT` and by what is left of the budget. A fresh token each time; a credential
+/// error that needs a person ends the tunnel, a transient one is retried, and so is a refused or broken attempt. The engine's writes are
+/// taken in meanwhile; the engine dropping its end ends the reconnect (`Err(None)`). The frames the relay had not confirmed are sent
 /// again before the socket is handed back.
-async fn reconnect(session: &mut Session) -> Result<Socket, IapError> {
+async fn reconnect(session: &mut Session, local: &mut Pipe) -> Result<Socket, Option<IapError>> {
     let started = Instant::now();
     let mut schedule = session.backoff.schedule();
     loop {
         let wait = schedule.next();
         if started.elapsed() + wait > session.backoff.budget {
-            return Err(IapError::ReconnectExhausted);
+            return Err(Some(IapError::ReconnectExhausted));
         }
-        tokio::time::sleep(wait).await;
-        let token = match fetch_token(&session.tokens, session.account.as_deref()).await {
-            Ok(token) => token,
-            Err(error) if error.is_retryable() => continue,
-            Err(error) => return Err(IapError::Credentials(error)),
+        if !local.absorb(&mut session.books, wait).await {
+            return Err(None);
+        }
+        let remaining = session.backoff.budget.saturating_sub(started.elapsed());
+        let attempt = async {
+            let token = fetch_token(&session.tokens, session.account.as_deref()).await.map_err(IapError::Credentials)?;
+            let url = session.endpoint.reconnect_url(&session.sid, session.books.total_received());
+            let mut socket = dial(&url, &token, &session.user_agent).await?;
+            let frame = first_frame(&mut socket).await?;
+            Ok::<_, IapError>((socket, frame))
         };
-        let url = session.endpoint.reconnect_url(&session.sid, session.books.total_received());
-        let Ok(mut socket) = dial(&url, &token, &session.user_agent).await else { continue };
-        match tokio::time::timeout(OPEN_WAIT, first_frame(&mut socket)).await {
-            Ok(Ok(Frame::ReconnectSuccess { ack })) => {
-                if let Err(error) = session.books.confirm(ack) {
-                    return Err(IapError::Protocol(error.to_string()));
-                }
-                let pending = session.books.take_unconfirmed();
-                let mut failed = false;
-                for chunk in &pending {
-                    if socket.send(Message::Binary(relay::encode_data(chunk).into())).await.is_err() {
-                        failed = true;
-                        break;
-                    }
-                }
-                for chunk in pending {
-                    session.books.requeue(chunk);
-                }
-                if failed {
-                    continue;
-                }
-                return Ok(socket);
-            }
+        let (mut socket, frame) = match tokio::time::timeout(OPEN_WAIT.min(remaining), attempt).await {
+            Ok(Ok(opened)) => opened,
+            Ok(Err(IapError::Credentials(error))) if error.is_retryable() => continue,
+            Ok(Err(IapError::Credentials(error))) => return Err(Some(IapError::Credentials(error))),
             // A Close frame on a reconnect: the relay does not know the session any more (or asked for yet another token, which the next
-            // attempt brings); anything else said instead of the acknowledgement is a broken relay.
+            // attempt brings). A refusal, a broken link or an attempt that ran out of time is tried again.
             Ok(Err(IapError::Closed { code, .. })) if code == REAUTH_CLOSE_CODE => continue,
-            Ok(Err(error @ IapError::Closed { .. })) => return Err(error),
-            Ok(Ok(other)) => return Err(IapError::Protocol(format!("the relay answered the reconnect with {}", describe_frame(&other)))),
+            Ok(Err(error @ IapError::Closed { .. })) => return Err(Some(error)),
             Ok(Err(_)) | Err(_) => continue,
+        };
+        let Frame::ReconnectSuccess { ack } = frame else {
+            // Anything else said instead of the acknowledgement is a broken relay.
+            return Err(Some(IapError::Protocol(format!("the relay answered the reconnect with {}", describe_frame(&frame)))));
+        };
+        if let Err(error) = session.books.confirm(ack) {
+            return Err(Some(IapError::Protocol(error.to_string())));
         }
+        let pending = session.books.take_unconfirmed();
+        let mut failed = false;
+        for chunk in &pending {
+            if socket.send(Message::Binary(relay::encode_data(chunk).into())).await.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        for chunk in pending {
+            session.books.requeue(chunk);
+        }
+        if failed {
+            continue;
+        }
+        return Ok(socket);
     }
 }
 
@@ -568,7 +707,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropping_the_guard_before_release_aborts_the_pump() {
         let relay = FakeRelay::start(echo_server().await, TOKEN);
-        let Tunnel { mut stream, guard } = open_quick(&relay, Arc::new(StaticToken(TOKEN.into()))).await.expect("the tunnel opens");
+        let Tunnel { mut stream, guard, .. } = open_quick(&relay, Arc::new(StaticToken(TOKEN.into()))).await.expect("the tunnel opens");
         drop(guard);
         assert_eq!(read_to_end_within(&mut stream, Duration::from_secs(2)).await, Some(0));
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -576,6 +715,111 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(relay.open_connections(), 0, "the relay saw the socket go");
+    }
+
+    /// This build has both of rustls's crypto providers (reqwest brings aws-lc-rs, the updater ring), so rustls cannot choose a process
+    /// default by itself and panics when a `wss://` dial asks it to; the tunnel must build its own TLS configuration. A listener that
+    /// never answers makes the dial end in the caller's timeout instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tls_dial_builds_its_own_rustls_configuration() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let dialled = tokio::time::timeout(Duration::from_secs(2), dial(&format!("wss://127.0.0.1:{port}/v4/connect"), TOKEN, "lunport-test")).await;
+        assert!(matches!(dialled, Err(_) | Ok(Err(IapError::Io(_)))), "a TLS dial neither panics nor succeeds against a silent listener");
+    }
+
+    /// russh writes a whole batch of packets before it reads again, so the pump may never wait on the engine's reader while the engine's
+    /// writer is blocked (gcloud pumps each direction on its own thread). With the relay echoing everything, a megabyte written before
+    /// anything reads the echo must still go through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_large_write_completes_while_nothing_reads_the_echo() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let mut tunnel = open_quick(&relay, Arc::new(StaticToken(TOKEN.into()))).await.expect("the tunnel opens");
+        let pattern: Vec<u8> = (0..1024 * 1024u32).map(|index| (index % 251) as u8).collect();
+        tokio::time::timeout(Duration::from_secs(10), tunnel.stream.write_all(&pattern))
+            .await
+            .expect("the write is not held back by the unread echo")
+            .expect("the stream is writable");
+        assert_eq!(read_exact(&mut tunnel.stream, pattern.len()).await, pattern, "the echo arrives whole once it is read");
+        assert_eq!(relay.reconnects(), 0);
+    }
+
+    /// A relay that ends the session says why, and the tunnel keeps the reason for the engine's disconnect reason (design 2026-10-25,
+    /// "Error texts": the person reads why the session ended, not russh's end-of-file).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_tunnel_records_why_it_ended() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        relay.set(Behaviour::CloseAfter(0, 4033, "not authorized"));
+        let mut tunnel = open_quick(&relay, Arc::new(StaticToken(TOKEN.into()))).await.expect("the tunnel opens");
+        assert_eq!(read_to_end_within(&mut tunnel.stream, Duration::from_secs(2)).await, Some(0));
+        assert_eq!(tunnel.ended(), Some(IapError::Closed { code: 4033, reason: "not authorized".to_string() }));
+
+        // A link that breaks and a relay that refuses every reconnect: the budget runs out, and the tunnel says so.
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let short = Backoff { initial: Duration::from_millis(200), multiplier: 1.1, ceiling: Duration::from_millis(300), budget: Duration::from_secs(1) };
+        let mut tunnel = open_with(endpoint(&relay), Arc::new(StaticToken(TOKEN.into())), Some("frank@retower.io".into()), "lunport-test".into(), short)
+            .await
+            .expect("the tunnel opens");
+        relay.set(Behaviour::DropAfter(1));
+        tunnel.stream.write_all(b"x").await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while relay.open_connections() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        relay.set(Behaviour::RefuseHandshake(503));
+        assert!(read_to_end_within(&mut tunnel.stream, Duration::from_secs(5)).await.is_some(), "the stream ends once the budget is spent");
+        assert_eq!(tunnel.ended(), Some(IapError::ReconnectExhausted));
+    }
+
+    /// Every reconnect attempt is bounded: a relay that accepts the TCP connection and never answers the handshake does not stop the
+    /// budget from running out (the engine's own waits are all bounded; the tunnel's must be too).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reconnect_attempt_that_never_answers_is_bounded_by_the_budget() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let short = Backoff { initial: Duration::from_millis(200), multiplier: 1.1, ceiling: Duration::from_millis(300), budget: Duration::from_secs(1) };
+        let mut tunnel = open_with(endpoint(&relay), Arc::new(StaticToken(TOKEN.into())), Some("frank@retower.io".into()), "lunport-test".into(), short)
+            .await
+            .expect("the tunnel opens");
+        relay.set(Behaviour::DropAfter(1));
+        tunnel.stream.write_all(b"x").await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while relay.open_connections() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        relay.set(Behaviour::StallHandshake);
+        assert!(read_to_end_within(&mut tunnel.stream, Duration::from_secs(5)).await.is_some(), "the stream ends once the budget is spent");
+        assert_eq!(tunnel.ended(), Some(IapError::ReconnectExhausted));
+    }
+
+    /// The engine dropping its end of the pipe ends the tunnel even while it is reconnecting: nobody keeps dialling for a session that
+    /// is gone (gcloud's `Close` stops its reconnects the same way).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_the_stream_stops_a_reconnect_in_progress() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let slow = Backoff { initial: Duration::from_millis(200), multiplier: 1.0, ceiling: Duration::from_millis(200), budget: Duration::from_secs(30) };
+        let tokens = Scripted::new(vec![Ok(TOKEN.into())]);
+        let Tunnel { mut stream, guard, .. } = open_with(endpoint(&relay), tokens.clone(), Some("frank@retower.io".into()), "lunport-test".into(), slow).await.expect("the tunnel opens");
+        guard.release();
+        relay.set(Behaviour::DropAfter(1));
+        stream.write_all(b"x").await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while relay.open_connections() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        relay.set(Behaviour::RefuseHandshake(503));
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(tokens.calls.load(Ordering::SeqCst) >= 2, "the pump is reconnecting");
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let after_drop = tokens.calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(tokens.calls.load(Ordering::SeqCst) <= after_drop + 1, "no more attempts once the engine is gone");
     }
 
     #[test]
