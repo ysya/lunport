@@ -527,12 +527,14 @@ mod tests {
             "Google sign-in for frank@retower.io has expired or was revoked; run `gcloud auth login frank@retower.io` and connect again."
         );
         assert_eq!(AuthError::Http { status: 503 }.to_string(), "Google's token service answered 503.");
+        // The file is named as the platform writes its path (`/d\\x.json` on Windows), so the expectation is built the same way.
+        let file = dir.join("x.json");
         assert_eq!(
-            AuthError::Unsupported { path: dir.join("x.json"), kind: "service_account".into() }.to_string(),
-            "/d/x.json holds service_account credentials, which Lunport does not use; sign in with `gcloud auth login`."
+            AuthError::Unsupported { path: file.clone(), kind: "service_account".into() }.to_string(),
+            format!("{} holds service_account credentials, which Lunport does not use; sign in with `gcloud auth login`.", file.display())
         );
         assert_eq!(AuthError::Network("timed out".into()).to_string(), "Google's token service could not be reached: timed out.");
-        assert_eq!(AuthError::Malformed { path: dir.join("x.json") }.to_string(), "/d/x.json is not a credentials file Lunport can read.");
+        assert_eq!(AuthError::Malformed { path: file.clone() }.to_string(), format!("{} is not a credentials file Lunport can read.", file.display()));
         let token = StaticToken("ya29.secret".into()).access_token(None).unwrap();
         assert_eq!(token.account, "static@example.com");
         assert!(!format!("{token:?}").contains("ya29.secret"), "a token never prints its value");
