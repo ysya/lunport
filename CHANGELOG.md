@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.12.0](https://github.com/ysya/lunport/compare/v1.11.4...v1.12.0) (2026-10-25)
+
+
+### Features
+
+* **gcp:** add OS Login profile and PAM grant clients ([83d1471](https://github.com/ysya/lunport/commit/83d1471e2f1884f0cf2449e87207eeffcc37b715))
+* **gcp:** add the IAP relay v4 frame codec and URL builder ([154de55](https://github.com/ysya/lunport/commit/154de5540ba10b117b66a1f096cf45f50f834a1e))
+* **gcp:** create and read PAM grants through Google's client library ([dafd307](https://github.com/ysya/lunport/commit/dafd307436832db1312fe6578d9c24538a2e817c))
+* **gcp:** open IAP TCP-forwarding tunnels over WebSocket with reconnects ([e006c8f](https://github.com/ysya/lunport/commit/e006c8f08abff4a7dcf9e31d117b06eeb0094dbc))
+* **gcp:** plug Lunport's gcloud credentials into Google's Rust client library ([ff30710](https://github.com/ysya/lunport/commit/ff30710e49758033588ad27f65ca8a4c1323b262))
+* **gcp:** read Google user credentials from gcloud's files and refresh access tokens ([848c9e6](https://github.com/ysya/lunport/commit/848c9e6513d3b3868b08786e65b3906dcfd9bc60))
+* **mcp:** a proposal says what kind of change it is, and the window says so ([197c5fb](https://github.com/ysya/lunport/commit/197c5fbb3bace80269b3ce5fbfe6838aaf4c3b7e))
+* **mcp:** set_transport and remove_transport propose a host's IAP transport for consent ([22b921e](https://github.com/ysya/lunport/commit/22b921e640b22e82595d3f1bead1d02e118ce1a2))
+* **mcp:** the host view the AI reads carries the host's transport ([6fb7602](https://github.com/ysya/lunport/commit/6fb76029719b56e14da8b0a6389fb9219c16c256))
+* **mcp:** update_host proposes a host change for the person's consent ([b086e96](https://github.com/ysya/lunport/commit/b086e96910f0e6c38586edf5a1e207a97db323f8))
+* PAM grant requests, AI edits with consent, and the in-app terminal as everyone's default ([179d6ee](https://github.com/ysya/lunport/commit/179d6ee9adc20ea88e3bb60cb82b78ca698b4dfb))
+* **records:** remember a transport's grant duration and last justification ([6b0d167](https://github.com/ysya/lunport/commit/6b0d167aa398cac18828e93011cedb09be512445))
+* **records:** save and delete host transports from the app ([fe2f9c1](https://github.com/ysya/lunport/commit/fe2f9c18f86c10d8626e04112fd8c7aed9cd3877))
+* **records:** store a device-local transport record per host ([f78e307](https://github.com/ysya/lunport/commit/f78e30790d34176088e0308c2ca795bd6a668762))
+* **session:** a Request-a-grant question of its own, shown by Lunport's window ([2376610](https://github.com/ysya/lunport/commit/237661004f1fea67320866c9cbb3bd5aa2a1993f))
+* **session:** ask once for a PAM grant, request it, and wait for IAP to see it ([9549a20](https://github.com/ysya/lunport/commit/9549a207f26b8d34366f5af92d34ce05797d88c0))
+* **session:** resolve IAP transports, OS Login users and PAM grants before connecting ([f8cdff2](https://github.com/ysya/lunport/commit/f8cdff214e85054d1d5b4899451be8c427c78f52))
+* **session:** say when IAP may not see a fresh PAM grant yet ([6c75d7b](https://github.com/ysya/lunport/commit/6c75d7bad0f1a6c43bb7d393bbb84d7606fb3935))
+* **session:** the directory reports a missing PAM grant and can request one ([4ec9012](https://github.com/ysya/lunport/commit/4ec90129f47ce53b60f5f9a120cb8f8f4e2f3250))
+* **ssh:** connect a hop through a Google Cloud IAP tunnel ([f50b250](https://github.com/ysya/lunport/commit/f50b2504736faab7f119e9c897901de7a105ec69))
+* **ui:** choose a Google Cloud IAP transport in the host editor ([4d76b6b](https://github.com/ysya/lunport/commit/4d76b6bd6f2a637816565036408af7e7f005dd5b))
+* **ui:** move Google Cloud IAP transports to their own Library panel ([61b0bab](https://github.com/ysya/lunport/commit/61b0babca1834db08e4c22ef6024258c39186b16))
+* **ui:** show a transport's PAM grant and request one from the Google Cloud panel ([42f8e57](https://github.com/ysya/lunport/commit/42f8e576d8265af72f39ec2bc3e8072c923ca55a))
+
+
+### Bug Fixes
+
+* **gcp:** bound the library's PAM calls, share one client, and refuse what the broker would ([89a280f](https://github.com/ysya/lunport/commit/89a280f80f5f5bf66fde9dbe46940eadac6412dd))
+* **gcp:** make the IAP tunnel safe over TLS and under load ([df452bc](https://github.com/ysya/lunport/commit/df452bc7189492bd46b0be7d7fc00f15f90753ee))
+* **gcp:** read every page of the PAM grant search ([82c5d00](https://github.com/ysya/lunport/commit/82c5d0052c8edbd39e37fe2992ebfbe5c1b9634d))
+* **mcp:** no Route row for an address change, and no transport edit of a host that needs review ([e26eaf9](https://github.com/ysya/lunport/commit/e26eaf95ff9fe32b581518ff7bb26e17f5e386d1))
+* **records:** keep staying hosts' transports on leave; directory-safe accounts ([e2304ae](https://github.com/ysya/lunport/commit/e2304ae83261167f5ebdc0d5fda12092f95c70b6))
+* **session:** one sentence for the recent-grant note, and fresher grants ([252f62c](https://github.com/ysya/lunport/commit/252f62c64d0d79438b2459cf4cdd1fed4fecb159))
+* **settings:** Lunport's own terminal is everyone's terminal, once ([fbbd238](https://github.com/ysya/lunport/commit/fbbd238d1cc17218fa9a07fe1c4495c804bee2f8))
+* **sync:** raise the state version when a saved candidate carries transports ([635b9c4](https://github.com/ysya/lunport/commit/635b9c46d17c5e41715c44bcfc355273d93fd067))
+* **ui:** drag the window from the session tab strip in the title bar ([297f7dc](https://github.com/ysya/lunport/commit/297f7dcc93a2dfffac6fc0d908dafdcb5e51e36b))
+* **ui:** give the Google Cloud panel the workspace's page frame ([16bd837](https://github.com/ysya/lunport/commit/16bd837e267c6e656dcdbe0a5f9dfe320c9ac589))
+* **ui:** give the Request-a-grant form a taller authentication window ([6eb2f50](https://github.com/ysya/lunport/commit/6eb2f5024a545b6bbe65213baeb52f7b54d9cc1d))
+* **ui:** save the OS Login username as the connection uses it ([6795eb5](https://github.com/ysya/lunport/commit/6795eb5f9d8b6de3628d9a8e132c63981c47febc))
+
 ## [1.11.4](https://github.com/ysya/lunport/compare/v1.11.3...v1.11.4) (2026-10-23)
 
 ### Upgrade notes
