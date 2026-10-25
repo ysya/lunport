@@ -114,10 +114,6 @@ pub enum RelayError {
     OutOfOrderAck { ack: u64, confirmed: u64 },
     /// An ACK beyond what was sent.
     AckBeyondSent { ack: u64, sent: u64 },
-    /// A DATA or ACK frame before the session was announced.
-    EarlyFrame(&'static str),
-    /// A second CONNECT_SUCCESS_SID or RECONNECT_SUCCESS_ACK on one session.
-    DuplicateSuccess,
 }
 
 impl fmt::Display for RelayError {
@@ -127,8 +123,6 @@ impl fmt::Display for RelayError {
             RelayError::Oversized(length) => write!(f, "The relay announced a frame of {length} bytes, over the {MAX_FRAME_BYTES}-byte cap."),
             RelayError::OutOfOrderAck { ack, confirmed } => write!(f, "The relay acknowledged {ack} bytes after {confirmed} were already confirmed."),
             RelayError::AckBeyondSent { ack, sent } => write!(f, "The relay acknowledged {ack} bytes but only {sent} were sent."),
-            RelayError::EarlyFrame(what) => write!(f, "The relay sent {what} before the session was up."),
-            RelayError::DuplicateSuccess => f.write_str("The relay announced the session twice."),
         }
     }
 }
