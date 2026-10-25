@@ -59,6 +59,10 @@ describe("transports", () => {
     expect(transportProblem(withKind({ instance: "" }))).toBe("Enter the instance name.");
     expect(transportProblem(withKind({ interface: "eth0" }))).toBe("Enter a network interface such as nic0.");
     expect(transportProblem(withKind({ account: "frank" }))).toBe("Enter the Google account as an email address.");
+    // The account names a directory under gcloud's config: no path characters, in either validator.
+    for (const traversal of ["../../tmp/x@example.com", "/etc/x@example.com", "a\\b@example.com", "a:b@example.com", "a@b/c.example.com"])
+      expect(transportProblem(withKind({ account: traversal }))).toBe("Enter the Google account as an email address.");
+    expect(transportProblem(withKind({ account: "first.last+tag@sub.example.com" }))).toBeNull();
     expect(transportProblem(withKind({ account: null }))).toBeNull();
     expect(transportProblem(withKind({ pam: { entitlements: [], location: "global" } }))).toBe("Enter at least one PAM entitlement.");
     expect(transportProblem(withKind({ pam: { entitlements: ["Prod"], location: "global" } }))).toBe("Enter PAM entitlement ids such as prod-operate.");

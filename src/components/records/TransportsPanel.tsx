@@ -13,16 +13,20 @@ import {
   deleteTransport,
   fetchOsLoginProfile,
   newIapTransport,
-  osLoginOutcome,
+  osLoginUsernameUpdate,
   saveTransport,
   transportLabel,
   transportProblem,
   type HostTransport,
 } from "@/lib/transports";
 
+/** The sentence of a failure, without a thrown Error's "Error: " prefix. */
+const describe = (failure: unknown) => revealHidden(failure instanceof Error ? failure.message : String(failure));
+
 /**
- * Hosts reached through a Google Cloud IAP tunnel (design 2026-10-25). One transport per host, saved on this device only; the editor
- * dialog also fetches the OS Login username into the host's record, so the username check at connect time passes.
+ * Hosts reached through a Google Cloud IAP tunnel (design 2026-10-25). One transport per host, saved on this device only (so account
+ * write blocks do not apply); the editor dialog also saves the OS Login username into the host's record, so the username check at
+ * connect time passes.
  */
 export function TransportsPanel({ overview, accept }: { overview: RecordOverview; accept: (overview: RecordOverview) => RecordOverview }) {
   const transports = overview.transports ?? [];
@@ -34,9 +38,9 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
   const flight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<HostTransport | null>(null);
-  const writable = !overview.account || !overview.shared_writes_blocked;
 
   const edit = (transport: HostTransport | null) => {
     setOriginal(transport);
@@ -44,25 +48,27 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
     setEditorError(null);
     setNote(null);
   };
-  const action = async (run: () => Promise<RecordOverview>, inEditor = false) => {
+  /** Runs a save or a removal; a failure is shown where the person is looking: in the editor, in the Remove dialog, or on the panel. */
+  const action = async (run: () => Promise<RecordOverview>, where: "editor" | "remove" | "panel") => {
     if (flight.current) return;
     flight.current = true;
     setBusy(true);
     setError(null);
     setEditorError(null);
+    setRemoveError(null);
     try {
       accept(await run());
-      if (inEditor) setDraft(null);
+      if (where === "editor") setDraft(null);
       setDeleting(null);
     } catch (failure) {
-      (inEditor ? setEditorError : setError)(revealHidden(String(failure)));
+      ({ editor: setEditorError, remove: setRemoveError, panel: setError })[where](describe(failure));
     } finally {
       flight.current = false;
       setBusy(false);
     }
   };
-  /** Asks OS Login for the account's username and writes it into the host record, so the host is saved as OS Login knows it. */
-  const useOsLoginUsername = async () => {
+  /** Asks OS Login for the account's username and saves it into the host record, so the host is saved as OS Login knows it. */
+  const applyOsLoginUsername = async () => {
     const host = draft && hostOf(draft.host_id);
     if (!draft || !host || flight.current) return;
     flight.current = true;
@@ -70,18 +76,19 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
     setEditorError(null);
     setNote(null);
     try {
-      const outcome = osLoginOutcome(await fetchOsLoginProfile(draft.kind.account, draft.kind.project, host.payload.key_id));
-      if (!outcome.username) throw new Error(outcome.error ?? "OS Login answered without a username.");
-      if (outcome.username !== host.payload.user) accept(await updateRecordHost(host.id, host.revision, { ...host.payload, user: outcome.username, host_key: null }));
-      setNote([`Username: ${outcome.username}.`, outcome.note].filter(Boolean).join(" "));
+      const update = osLoginUsernameUpdate(host, await fetchOsLoginProfile(draft.kind.account, draft.kind.project, host.effective_payload.key_id));
+      if (update.error) throw new Error(update.error);
+      if (update.payload) accept(await updateRecordHost(host.id, host.revision, update.payload));
+      setNote(update.note);
     } catch (failure) {
-      setEditorError(revealHidden(String(failure)));
+      setEditorError(describe(failure));
     } finally {
       flight.current = false;
       setBusy(false);
     }
   };
   const draftHost = draft ? hostOf(draft.host_id) : undefined;
+  const inheritsUser = draftHost?.payload.inherit?.includes("user") ?? false;
   const problem = draft ? transportProblem(draft) : null;
 
   return (
@@ -91,7 +98,7 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
         count={transports.length}
         description="Reach Compute Engine hosts through IAP tunnels, with OS Login, using gcloud's sign-in on this device."
         actions={
-          <Button id="new-transport-button" disabled={busy || !free.length || !writable} onClick={() => edit(null)}>
+          <Button id="new-transport-button" disabled={busy || !free.length} onClick={() => edit(null)}>
             <Plus className="size-4" />
             New transport
           </Button>
@@ -133,10 +140,13 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
                 return (
                   <tr key={transport.host_id} className="border-b last:border-0 hover:bg-muted/20">
                     <td className="max-w-60 px-4 py-3">
-                      <button className="block max-w-full truncate text-left font-medium hover:text-primary disabled:cursor-default" disabled={busy || !writable} onClick={() => edit(transport)}>
+                      <button className="block max-w-full truncate text-left font-medium hover:text-primary disabled:cursor-default" disabled={busy} onClick={() => edit(transport)}>
                         {host ? revealHidden(host.payload.alias) : "Host unavailable"}
                       </button>
-                      <span className="mt-1 block truncate text-xs text-muted-foreground">{host ? `${revealHidden(host.payload.user || "Terminal default")} · port ${host.payload.port}` : transport.host_id}</span>
+                      {/* The username and port the connection uses: a Group may supply them. */}
+                      <span className="mt-1 block truncate text-xs text-muted-foreground">
+                        {host ? `${revealHidden(host.effective_payload.user || "Terminal default")} · port ${host.effective_payload.port}` : transport.host_id}
+                      </span>
                     </td>
                     <td className="max-w-80 px-4 py-3">
                       <span className="block truncate text-xs" title={transportLabel(transport)}>
@@ -148,10 +158,10 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
                     <td className="px-4 py-3 text-xs">{checks.length ? checks.join(" · ") : "None"}</td>
                     <td className="px-3 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <Button size="icon-sm" variant="ghost" aria-label={`Edit the transport of ${host?.payload.alias ?? transport.host_id}`} disabled={busy || !writable} onClick={() => edit(transport)}>
+                        <Button size="icon-sm" variant="ghost" aria-label={`Edit the transport of ${host?.payload.alias ?? transport.host_id}`} disabled={busy} onClick={() => edit(transport)}>
                           <PencilLine className="size-3.5" />
                         </Button>
-                        <Button size="icon-sm" variant="ghost" aria-label={`Remove the transport of ${host?.payload.alias ?? transport.host_id}`} disabled={busy || !writable} onClick={() => setDeleting(transport)}>
+                        <Button size="icon-sm" variant="ghost" aria-label={`Remove the transport of ${host?.payload.alias ?? transport.host_id}`} disabled={busy} onClick={() => { setRemoveError(null); setDeleting(transport); }}>
                           <Trash2 className="size-3.5" />
                         </Button>
                       </div>
@@ -195,11 +205,12 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
                 {draft.kind.os_login && (
                   <div className="space-y-1 rounded-lg bg-muted/50 p-3 text-sm">
                     <p>
-                      The host is saved with the username <span className="font-mono">{revealHidden(draftHost?.payload.user || "(terminal default)")}</span>; OS Login decides the username, and the connection checks that they agree.
+                      The connection logs in as <span className="font-mono">{revealHidden(draftHost?.effective_payload.user || "(terminal default)")}</span>; OS Login decides the username, and the connection checks that they agree.
                     </p>
-                    <Button type="button" variant="outline" size="sm" disabled={busy || !draftHost || !draft.kind.project} onClick={() => void useOsLoginUsername()}>
+                    <Button type="button" variant="outline" size="sm" disabled={busy || !draftHost || inheritsUser || !draft.kind.project} onClick={() => void applyOsLoginUsername()}>
                       Use OS Login username
                     </Button>
+                    {inheritsUser && <p className="text-xs text-muted-foreground">This host takes its username from its Group; change it there, or stop inheriting it in the host editor.</p>}
                     {note && <p className="text-xs text-muted-foreground">{note}</p>}
                   </div>
                 )}
@@ -210,7 +221,7 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
             <Button variant="outline" disabled={busy} onClick={() => setDraft(null)}>
               Cancel
             </Button>
-            <Button disabled={busy || !draft || problem !== null || !draft.host_id} onClick={() => draft && void action(() => saveTransport(draft, original), true)}>
+            <Button disabled={busy || !draft || !draftHost || problem !== null} onClick={() => draft && void action(() => saveTransport(draft, original), "editor")}>
               {busy && <LoaderCircle className="size-3 animate-spin" />}
               Save transport
             </Button>
@@ -228,9 +239,14 @@ export function TransportsPanel({ overview, accept }: { overview: RecordOverview
             <AlertDialogTitle>Remove the transport of {deleting ? hostOf(deleting.host_id)?.payload.alias ?? deleting.host_id : ""}?</AlertDialogTitle>
             <AlertDialogDescription>The host is then reached at its saved address again. The host record itself stays.</AlertDialogDescription>
           </AlertDialogHeader>
+          {removeError && (
+            <p role="alert" className="text-sm text-destructive">
+              {removeError}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-            <Button variant="destructive" disabled={busy} onClick={() => deleting && void action(() => deleteTransport(deleting))}>
+            <Button variant="destructive" disabled={busy} onClick={() => deleting && void action(() => deleteTransport(deleting), "remove")}>
               Remove transport
             </Button>
           </AlertDialogFooter>
