@@ -1,5 +1,5 @@
 //! A broker survives a confirmed cutover; every request uses the current single runtime owner.
-use super::directory::{DirectoryError, HostDirectory, PinnedKey};
+use super::directory::{DirectoryError, HostDirectory, PinnedKey, Prepared};
 use super::protocol::HostQuery;
 use crate::ssh::{HopRef, HostId, HostKey, Target};
 use crate::sync::record_runtime::RuntimeFormat;
@@ -92,7 +92,7 @@ impl HostDirectory for FormatDirectory {
     fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
         self.with_active(|d| d.password_authorized(hop, server_key))
     }
-    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<(), DirectoryError> {
+    fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
         // Google may take seconds to answer: choose the directory under lifecycle, call it outside.
         let directory = {
             let _lifecycle = self.lifecycle.lock().unwrap();
@@ -241,11 +241,11 @@ mod tests {
             fn password_account(&self, id: &HostId) -> String {
                 format!("notes:{id}")
             }
-            fn prepare(&self, _: &Target, _: &dyn Fn(&str) -> Option<String>, _: &super::super::connect::CancelToken) -> Result<(), DirectoryError> {
+            fn prepare(&self, _: &Target, _: &dyn Fn(&str) -> Option<String>, _: &super::super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
                 // Google may take seconds to answer: the adapter must not hold the lifecycle while it waits.
                 assert!(self.lifecycle.try_lock().is_ok(), "prepare ran under the lifecycle lock");
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(Prepared::default())
             }
         }
         let lifecycle: Arc<Mutex<()>> = Arc::default();
