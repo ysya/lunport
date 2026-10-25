@@ -13,8 +13,10 @@ use super::pam::{parse_grants, Grant};
 const OSLOGIN_BASE: &str = "https://oslogin.googleapis.com";
 const PAM_BASE: &str = "https://privilegedaccessmanager.googleapis.com";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
-/// One page of grants is plenty: a person's own in-flight grants on one entitlement are a handful.
+/// A page of the grant search, which answers every grant the caller ever created on the entitlement (ended ones included) and may hold
+/// fewer than asked: every page is read, up to `GRANTS_PAGES`, so the one active grant of someone who requests one every day is found.
 const GRANTS_PAGE: &str = "50";
+const GRANTS_PAGES: usize = 10;
 
 /// Why a call to Google did not answer. Every text is a sentence for the person.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,13 +132,24 @@ impl GcpClient for RestClient {
 
     fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
         let base = &self.pam_base;
-        let answer = self.call("Privileged Access Manager", account, |http, _| {
-            http.get(format!(
-                "{base}/v1/projects/{project}/locations/{location}/entitlements/{entitlement}/grants:search?{}",
-                query(&[("callerRelationship", "HAD_CREATED"), ("pageSize", GRANTS_PAGE)])
-            ))
-        })?;
-        Ok(parse_grants(&answer))
+        let mut grants = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..GRANTS_PAGES {
+            let token = page_token.take();
+            let answer = self.call("Privileged Access Manager", account, |http, _| {
+                let mut pairs = vec![("callerRelationship", "HAD_CREATED"), ("pageSize", GRANTS_PAGE)];
+                if let Some(token) = token.as_deref() {
+                    pairs.push(("pageToken", token));
+                }
+                http.get(format!("{base}/v1/projects/{project}/locations/{location}/entitlements/{entitlement}/grants:search?{}", query(&pairs)))
+            })?;
+            grants.extend(parse_grants(&answer));
+            page_token = answer.get("nextPageToken").and_then(serde_json::Value::as_str).filter(|token| !token.is_empty()).map(str::to_string);
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(grants)
     }
 }
 
@@ -233,6 +246,33 @@ mod tests {
         assert_eq!(grants.len(), 3);
         assert_eq!(crate::gcp::pam::in_flight(&grants).len(), 2);
         mock.assert();
+    }
+
+    /// The search answers every grant the caller ever created on the entitlement, ended ones included, and a page may hold fewer than
+    /// asked: the active grant of someone who requests one every day sits on a later page. Every page is read (mockito answers the
+    /// most recently created matching mock, so the page-two mock comes second).
+    #[test]
+    fn grants_are_read_across_pages() {
+        let mut server = mockito::Server::new();
+        let path = "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants:search";
+        let first = server
+            .mock("GET", path)
+            .match_query(mockito::Matcher::UrlEncoded("callerRelationship".into(), "HAD_CREATED".into()))
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "grants": [{ "name": "…/grants/1", "state": "ENDED" }, { "name": "…/grants/2", "state": "ENDED" }], "nextPageToken": "page-two" }).to_string())
+            .expect(1)
+            .create();
+        let second = server
+            .mock("GET", path)
+            .match_query(mockito::Matcher::UrlEncoded("pageToken".into(), "page-two".into()))
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "grants": [{ "name": "…/grants/3", "state": "ACTIVE" }] }).to_string())
+            .expect(1)
+            .create();
+        let grants = client(&server).grants(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate").unwrap();
+        assert_eq!(grants.iter().map(|grant| grant.state.as_str()).collect::<Vec<_>>(), vec!["ENDED", "ENDED", "ACTIVE"]);
+        first.assert();
+        second.assert();
     }
 
     #[test]
