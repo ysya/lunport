@@ -93,7 +93,7 @@ mod tests {
     #[tokio::test]
     async fn a_token_failure_is_a_credentials_error_that_says_why() {
         let credentials = credentials(Arc::new(Refusing(AuthError::SignInExpired { account: "frank@retower.io".into() })), None);
-        let error = credentials.headers(Extensions::new()).await.err().expect("no header without a token");
+        let error = credentials.headers(Extensions::new()).await.unwrap_err();
         assert!(error.to_string().contains("run `gcloud auth login frank@retower.io`"), "{error}");
     }
 }

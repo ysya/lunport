@@ -852,6 +852,7 @@ mod gcp_transport {
         let target = d.resolve(&gate()).unwrap();
         let error = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err();
         let DirectoryError::GrantNeeded(need) = error.clone() else { panic!("expected GrantNeeded, got {error:?}") };
+        let need = *need;
         assert_eq!(
             need,
             GrantNeed {

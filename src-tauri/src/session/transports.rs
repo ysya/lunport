@@ -139,7 +139,7 @@ pub fn pam_request_with(
 /// The form's rules, the transport editor's: whole minutes from 1 to 480, a justification with something in it, on one line, at most 512
 /// characters. The sentences are the editor's too.
 fn checked_request(justification: &str, duration_secs: u32) -> Result<String, String> {
-    if duration_secs < 60 || duration_secs > transports::MAX_DURATION_SECS || duration_secs % 60 != 0 {
+    if !(60..=transports::MAX_DURATION_SECS).contains(&duration_secs) || !duration_secs.is_multiple_of(60) {
         return Err("Enter a grant duration between 1 and 480 minutes.".into());
     }
     let justification = justification.trim();

@@ -696,7 +696,7 @@ mod tests {
             self.0.password_account(host)
         }
         fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<Prepared, DirectoryError> {
-            Err(DirectoryError::GrantNeeded(need()))
+            Err(DirectoryError::GrantNeeded(Box::new(need())))
         }
     }
 
@@ -718,7 +718,7 @@ mod tests {
             confirmer: &FakeConfirmer::default(),
             grants: GrantGates::for_tests(),
         };
-        let error = execute(&runtime, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow).err().expect("refused");
+        let error = execute(&runtime, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow).unwrap_err();
         assert_eq!(error, need().refusal_sentence());
         assert!(owner.asked().is_empty(), "nobody was asked");
         assert!(!engine.events().iter().any(|event| matches!(event, FakeEvent::Connect { .. })), "nothing connected");

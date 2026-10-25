@@ -347,7 +347,7 @@ impl HostDirectory for RecordDirectory {
                 }
             }
             if !in_flight {
-                return Err(DirectoryError::GrantNeeded(GrantNeed {
+                return Err(DirectoryError::GrantNeeded(Box::new(GrantNeed {
                     host: hop.id.clone(),
                     account: account.clone(),
                     project: project.clone(),
@@ -356,7 +356,7 @@ impl HostDirectory for RecordDirectory {
                     entitlements: pam.entitlements.clone(),
                     duration_secs: pam.duration_secs,
                     justification: pam.justification.clone(),
-                }));
+                })));
             }
             if cancel.is_cancelled() {
                 return Err(cancelled());
