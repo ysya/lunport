@@ -8,6 +8,7 @@ import {
   type RecordOverview,
   type ImportPreviewResult,
 } from "@/lib/records";
+import { deleteTransport, saveTransport, transportFor, type HostTransport, type OsLoginProfileView } from "@/lib/transports";
 export type EditorState = {
   originalScope?: HostScope;
   id: string | null;
@@ -160,6 +161,39 @@ export async function submitEditor(
   if (!state.revision) throw new Error("The saved revision is unavailable.");
   return updateRecordHost(state.id, state.revision, payload, upgradeConfirmed);
 }
+/**
+ * The transport step of a save, after the host is saved and its id known: `undefined` means the section was not touched, `null` that
+ * Direct was chosen (the saved transport goes), a value that it is saved against the one displayed. The overview the backend answers,
+ * or `null` when nothing was sent.
+ */
+export async function saveTransportDraft(
+  id: string,
+  draft: HostTransport | null | undefined,
+  overview: RecordOverview,
+): Promise<RecordOverview | null> {
+  if (draft === undefined) return null;
+  const saved = transportFor(overview, id);
+  if (draft === null) return saved ? deleteTransport(saved) : null;
+  return saveTransport({ ...draft, host_id: id }, saved);
+}
+
+/** What the Use OS Login username button does with the profile it fetched: the username goes into the draft; the note is about the key. */
+export function applyOsLoginProfile(
+  state: EditorState,
+  view: OsLoginProfileView,
+): { state: EditorState; note: string | null } {
+  if (!view.username)
+    return {
+      state: { ...state, error: `OS Login has no POSIX account for ${view.account} in this project; the project may not have OS Login enabled.` },
+      note: null,
+    };
+  const next = view.username === state.payload.user ? { ...state, error: null } : changeEditor(state, { user: view.username });
+  return {
+    state: next,
+    note: view.key_registered === false ? "This key is not registered with OS Login yet; it is registered at the first connection." : null,
+  };
+}
+
 export function selectHost(
   hosts: RecordHostView[],
   id: string,
