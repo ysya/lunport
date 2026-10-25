@@ -6,6 +6,7 @@ mod connect;
 mod environment;
 mod exec;
 mod forward;
+mod iap;
 mod jump;
 mod liveness;
 mod login_methods;

@@ -14,6 +14,9 @@ pub enum ConnectError {
     BadJumpChain { why: String },
     /// DNS or TCP failed, or the jump host could not open a connection to `hop`.
     Unreachable { hop: HopRef, reason: String },
+    /// The Google Cloud IAP tunnel that carries `hop` could not be opened. `text` is the whole sentence (design 2026-10-25, "Error
+    /// texts"): it names the instance and the account, which `Unreachable`'s "Could not reach host:port" would not.
+    Tunnel { hop: HopRef, text: String },
     /// `hop` did not answer in time: its `connect_timeout` ran out during `phase`, or the server stopped answering the login. The wait for
     /// the handshake and for each login request can end sooner than `connect_timeout` when the keepalive interval is short (see `Hop`).
     Timeout { hop: HopRef, phase: Phase },
@@ -51,6 +54,7 @@ impl fmt::Display for ConnectError {
         match self {
             ConnectError::BadJumpChain { why } => write!(f, "The jump chain cannot be used: {why}"),
             ConnectError::Unreachable { hop, reason } => write!(f, "Could not reach {}:{} ({reason}).", hop.hostname, hop.port),
+            ConnectError::Tunnel { text, .. } => f.write_str(text),
             ConnectError::Timeout { hop, phase } => write!(f, "Could not reach {}:{} (timed out during {}).", hop.hostname, hop.port, phase_text(*phase)),
             ConnectError::HostKeyUnknown { hop, .. } => write!(f, "The host key of {} has not been confirmed yet.", hop.alias),
             ConnectError::HostKeyMismatch { hop, .. } => write!(f, "The host key of {} changed. Connection refused.", hop.alias),
@@ -163,6 +167,8 @@ mod tests {
             (ConnectError::AuthAbandoned { hop: hop(), reason: "the prompt timed out".into() }, "Authentication for web was abandoned (the prompt timed out)."),
             (ConnectError::Protocol { hop: hop(), text: "Key exchange failed".into() }, "SSH error: Key exchange failed"),
             (ConnectError::BadJumpChain { why: "web appears twice".into() }, "The jump chain cannot be used: web appears twice"),
+            // An IAP tunnel sentence is shown as it is: it names the instance, not the hostname and port the relay never uses.
+            (ConnectError::Tunnel { hop: hop(), text: "IAP could not reach port 22 on jumpbox: nothing is listening.".into() }, "IAP could not reach port 22 on jumpbox: nothing is listening."),
         ];
         for (error, text) in cases {
             assert_eq!(error.to_string(), text);

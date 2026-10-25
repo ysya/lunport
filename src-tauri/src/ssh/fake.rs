@@ -299,6 +299,7 @@ fn hop_of(error: &ConnectError) -> Option<&HopRef> {
     match error {
         ConnectError::BadJumpChain { .. } => None,
         ConnectError::Unreachable { hop, .. }
+        | ConnectError::Tunnel { hop, .. }
         | ConnectError::Timeout { hop, .. }
         | ConnectError::HostKeyUnknown { hop, .. }
         | ConnectError::HostKeyMismatch { hop, .. }

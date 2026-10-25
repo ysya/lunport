@@ -22,6 +22,7 @@
 //! engine does for a hop that starts with the password method.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -43,15 +44,18 @@ use super::channel::{ByteQueue, ExitCell, QueuedShell, ShellInput};
 use super::error::{AuthError, ConnectError, SessionError};
 use super::traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
 use super::types::{
-    AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Phase, Prompt, Pty, RsaHash, Secret, Target,
+    AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, IapTarget, Phase, Prompt, Pty, RsaHash, Secret,
+    Target, Transport,
 };
+use crate::gcp::auth::{user_agent, FileStore, TokenSource};
+use crate::gcp::iap::{self, IapError};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Knobs of the engine that are not part of a host record. The defaults are what the app uses; tests turn some of them down.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EngineOptions {
     /// Bytes of shell output kept between the channel reader and the thread that reads the shell (see `ByteQueue`).
     pub shell_queue_bytes: usize,
@@ -61,11 +65,25 @@ pub struct EngineOptions {
     pub prompt_wait: Option<Duration>,
     /// Worker threads of the engine's runtime.
     pub worker_threads: usize,
+    /// Where a Google Cloud IAP tunnel gets its access tokens: gcloud's credential files by default; `None` refuses every IAP hop with a
+    /// sentence. Tests give a fixed token.
+    pub gcp_tokens: Option<Arc<dyn TokenSource>>,
 }
 
 impl Default for EngineOptions {
     fn default() -> Self {
-        EngineOptions { shell_queue_bytes: 4 * 1024 * 1024, prompt_wait: None, worker_threads: 2 }
+        EngineOptions { shell_queue_bytes: 4 * 1024 * 1024, prompt_wait: None, worker_threads: 2, gcp_tokens: Some(Arc::new(FileStore::from_environment())) }
+    }
+}
+
+impl fmt::Debug for EngineOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EngineOptions")
+            .field("shell_queue_bytes", &self.shell_queue_bytes)
+            .field("prompt_wait", &self.prompt_wait)
+            .field("worker_threads", &self.worker_threads)
+            .field("gcp_tokens", &self.gcp_tokens.as_ref().map(|_| "<token source>"))
+            .finish()
     }
 }
 
@@ -472,12 +490,16 @@ async fn connect_chain(target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dy
     Ok(connection)
 }
 
-/// A chain needs at least one hop and may not list a host twice.
+/// A chain needs at least one hop, may not list a host twice, and may put an IAP tunnel only first (a tunnel replaces the client's own
+/// connection; a later hop is reached through the hop before it).
 fn check_chain(target: &Target) -> Result<(), ConnectError> {
     if target.hops.is_empty() {
         return Err(ConnectError::BadJumpChain { why: "the target has no hosts".to_string() });
     }
     for (index, hop) in target.hops.iter().enumerate() {
+        if index > 0 && matches!(hop.transport, Transport::GcpIap(_)) {
+            return Err(ConnectError::BadJumpChain { why: format!("{} connects through Google Cloud IAP and cannot be reached through a jump host", hop.alias) });
+        }
         if target.hops[..index].iter().any(|earlier| earlier.id == hop.id) {
             return Err(ConnectError::BadJumpChain { why: format!("{} appears twice", hop.alias) });
         }
@@ -496,17 +518,17 @@ async fn connect_one(
     // A hop that starts with the password method asks for it before anything is connected: a person typing must not keep an
     // unauthenticated connection waiting (the server's login grace time runs, and russh spins while it idles).
     let password = (hop.auth == AuthMethod::Password).then(|| auth.password(&reference));
-    let (mut handle, shared) = connect_hop(hop, via, host_keys).await?;
+    let (mut handle, shared) = connect_hop(hop, via, host_keys, options).await?;
     let login = authenticate(hop, &mut handle, &shared, auth, password, options).await;
     deliver_banners(&shared, auth, &reference);
     login?;
     Ok(Established { hop: reference, handle, shared })
 }
 
-/// Connects one hop: over TCP for the first, through a direct-tcpip channel of the hop in front of it for every later one (the way
-/// OpenSSH's ProxyJump does), and runs the handshake with the host key check. TCP (or the tunnel) plus handshake share the hop's
-/// connect timeout.
-async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
+/// Connects one hop: over TCP for the first (or through a Google Cloud IAP tunnel, when its transport says so), through a direct-tcpip
+/// channel of the hop in front of it for every later one (the way OpenSSH's ProxyJump does), and runs the handshake with the host key
+/// check. TCP (or the tunnel) plus handshake share the hop's connect timeout.
+async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy, options: &EngineOptions) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
     let reference = hop.reference();
     let shared = HopShared::new();
     let (questions_in, mut questions) = mpsc::unbounded_channel();
@@ -514,8 +536,8 @@ async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostK
     let config = Arc::new(client_config(hop));
     let phase = std::cell::Cell::new(Phase::Tcp);
     let attempt = async {
-        match via {
-            None => {
+        match (via, &hop.transport) {
+            (None, Transport::Tcp) => {
                 let tcp = TcpStream::connect((hop.hostname.as_str(), hop.port)).await.map_err(|error| ConnectError::Unreachable { hop: reference.clone(), reason: describe_io(&error) })?;
                 if hop.nodelay {
                     let _ = tcp.set_nodelay(true);
@@ -526,7 +548,22 @@ async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostK
                 closer.release();
                 Ok(handle)
             }
-            Some(previous) => {
+            // The tunnel is opened within the hop's budget (still `Phase::Tcp`: it stands in for the TCP connection), then the handshake
+            // runs over it. The guard plays `SocketGuard`'s part: a handshake that runs out of time drops it, which aborts the tunnel's pump
+            // and ends russh's detached task on end-of-file.
+            (None, Transport::GcpIap(target)) => {
+                let Some(tokens) = options.gcp_tokens.clone() else {
+                    return Err(ConnectError::Tunnel { hop: reference.clone(), text: "Google Cloud credentials are not configured.".to_string() });
+                };
+                let iap::Tunnel { stream, guard } = iap::open(target.endpoint(hop.port), tokens, target.account.clone(), user_agent())
+                    .await
+                    .map_err(|error| iap_failure(&reference, target, hop.port, error))?;
+                phase.set(Phase::Handshake);
+                let handle = handshake(stream, config, handler, &mut questions, host_keys, hop, &shared).await?;
+                guard.release();
+                Ok(handle)
+            }
+            (Some(previous), _) => {
                 let tunnel = previous
                     .handle
                     .channel_open_direct_tcpip(hop.hostname.as_str(), u32::from(hop.port), "127.0.0.1", 0)
@@ -574,6 +611,27 @@ where
         }
     };
     connected.map_err(|error| handshake_error(&reference, shared, error))
+}
+
+/// The sentence for a Google Cloud IAP tunnel that could not be opened (design 2026-10-25, "Error texts"), as a `ConnectError::Tunnel`.
+/// The account named is the target's; without one, gcloud's active account was used.
+fn iap_failure(hop: &HopRef, target: &IapTarget, port: u16, error: IapError) -> ConnectError {
+    let instance = target.instance.as_str();
+    let account = target.account.as_deref().unwrap_or("the active gcloud account");
+    let text = match error {
+        IapError::Refused { status } => format!(
+            "Google Cloud IAP refused the tunnel to {instance} (HTTP {status}): check that {account} has roles/iap.tunnelResourceAccessor on the instance, and for production that a PAM grant is active."
+        ),
+        IapError::Closed { code: 4003, .. } => format!("IAP could not reach port {port} on {instance}: nothing is listening, or the firewall does not allow 35.235.240.0/20."),
+        IapError::Closed { code: 4033, .. } => format!("{account} is not authorized to tunnel to {instance} through IAP."),
+        IapError::Closed { code: 4004, .. } => "IAP asked for a fresh sign-in and the new token was refused.".to_string(),
+        IapError::Closed { code, reason } if reason.is_empty() => format!("IAP closed the tunnel to {instance} ({code})."),
+        IapError::Closed { code, reason } => format!("IAP closed the tunnel to {instance} ({code}: {reason})."),
+        IapError::Credentials(error) => error.to_string(),
+        IapError::Protocol(text) | IapError::Io(text) => format!("The IAP tunnel to {instance} could not be opened: {text}."),
+        IapError::ReconnectExhausted => format!("The IAP tunnel to {instance} could not be reconnected within 15 minutes."),
+    };
+    ConnectError::Tunnel { hop: hop.clone(), text }
 }
 
 /// Why the jump host `via` could not give us a connection to `hop`: it refused to open the tunnel, or it is gone.

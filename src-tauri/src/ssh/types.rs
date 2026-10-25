@@ -125,6 +125,43 @@ impl AuthMethod {
     }
 }
 
+/// How a hop's connection is made (design 2026-10-25: Google Cloud IAP transports).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// A TCP connection to `hostname:port`.
+    Tcp,
+    /// A WebSocket tunnel through Google's Identity-Aware Proxy to port `port` of a GCE instance; `hostname` is not used to reach it.
+    GcpIap(IapTarget),
+}
+
+/// The instance an IAP tunnel goes to, and the Google account that opens it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IapTarget {
+    pub project: String,
+    pub zone: String,
+    pub instance: String,
+    /// The instance's network interface, `nic0` for the first.
+    pub interface: String,
+    /// The Google account whose gcloud credentials open the tunnel; `None` for gcloud's active account.
+    pub account: Option<String>,
+    /// Replaces the relay's URL root (tests point it at a fake relay); never set from a host record.
+    pub url_root: Option<String>,
+}
+
+impl IapTarget {
+    /// The relay endpoint of a tunnel to `port` of the instance.
+    pub fn endpoint(&self, port: u16) -> crate::gcp::relay::Endpoint {
+        crate::gcp::relay::Endpoint {
+            project: self.project.clone(),
+            zone: self.zone.clone(),
+            instance: self.instance.clone(),
+            interface: self.interface.clone(),
+            port,
+            url_root: self.url_root.clone(),
+        }
+    }
+}
+
 /// One connection of a chain: a stored host with everything the engine needs to reach it and log in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hop {
@@ -149,6 +186,9 @@ pub struct Hop {
     pub keepalive_max_missed: u32,
     /// `TCP_NODELAY` on the socket of the first hop (set it for shells; Nagle delays keystroke echo).
     pub nodelay: bool,
+    /// How the first hop of a chain is reached: over TCP, or through a Google Cloud IAP tunnel. A later hop rides a channel of the hop
+    /// before it whatever this says, so the engine refuses a chain with a tunnel anywhere but first.
+    pub transport: Transport,
 }
 
 impl Hop {
@@ -166,6 +206,7 @@ impl Hop {
             keepalive_every: DEFAULT_KEEPALIVE_EVERY,
             keepalive_max_missed: DEFAULT_KEEPALIVE_MAX_MISSED,
             nodelay: true,
+            transport: Transport::Tcp,
         }
     }
 
@@ -341,5 +382,27 @@ mod tests {
         assert_eq!(AuthMethod::Key { key_id: "k".into() }.name(), "publickey");
         assert_eq!(AuthMethod::Password.name(), "password");
         assert_eq!(AuthMethod::Interactive.name(), "keyboard-interactive");
+    }
+
+    #[test]
+    fn a_new_hop_connects_over_tcp() {
+        assert_eq!(Hop::new("h", "h", "h", 22, "u", AuthMethod::Password).transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn an_iap_target_becomes_a_relay_endpoint_with_the_hops_port() {
+        let target = IapTarget {
+            project: "eng-dev-396409".into(),
+            zone: "asia-east1-b".into(),
+            instance: "jumpbox".into(),
+            interface: "nic0".into(),
+            account: Some("frank@retower.io".into()),
+            url_root: Some("ws://127.0.0.1:1/v4".into()),
+        };
+        let endpoint = target.endpoint(2222);
+        assert_eq!(
+            (endpoint.project.as_str(), endpoint.zone.as_str(), endpoint.instance.as_str(), endpoint.interface.as_str(), endpoint.port, endpoint.url_root.as_deref()),
+            ("eng-dev-396409", "asia-east1-b", "jumpbox", "nic0", 2222, Some("ws://127.0.0.1:1/v4"))
+        );
     }
 }
