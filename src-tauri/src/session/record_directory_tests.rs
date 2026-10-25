@@ -558,18 +558,23 @@ mod gcp_transport {
     use crate::gcp::pam::Grant;
     use crate::gcp::rest::{GcpClient, GcpError};
     use crate::session::connect::CancelToken;
+    use crate::session::directory::{GrantNeed, GrantReceipt};
     use crate::ssh::{IapTarget, Transport};
     use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
+    use std::collections::VecDeque;
 
     const ACCOUNT: &str = "frank@retower.io";
     const LINE: &str = test_keys::PLAIN_PUBLIC;
+    const GRANT_NAME: &str = "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42";
 
-    /// A scripted Google: one login profile, optionally another one after an import, the grants of every entitlement, and the calls made.
+    /// A scripted Google: one login profile, optionally another one after an import, the grants of every entitlement, the states a
+    /// requested grant goes through (`get_grant` answers them in turn, the last one again and again), and the calls made.
     #[derive(Default)]
     struct FakeGcp {
         profile: Mutex<LoginProfile>,
         after_import: Mutex<Option<LoginProfile>>,
         grants: Mutex<Vec<Grant>>,
+        states: Mutex<VecDeque<&'static str>>,
         calls: Mutex<Vec<String>>,
     }
 
@@ -591,11 +596,25 @@ mod gcp_transport {
         }
         fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
             self.0.calls.lock().unwrap().push(format!("create {} {project} {location} {entitlement} {duration_secs} {justification}", account.unwrap_or("-")));
-            Err(GcpError::Http { api: "Privileged Access Manager", status: 501 })
+            Ok(Grant {
+                name: GRANT_NAME.into(),
+                state: "ACTIVATING".into(),
+                requested_duration: Some(crate::gcp::pam::duration_text(duration_secs)),
+                access_grant_time: None,
+                justification: Some(justification.to_string()),
+            })
         }
         fn get_grant(&self, account: Option<&str>, name: &str) -> Result<Grant, GcpError> {
             self.0.calls.lock().unwrap().push(format!("get {} {name}", account.unwrap_or("-")));
-            Err(GcpError::Http { api: "Privileged Access Manager", status: 501 })
+            let mut states = self.0.states.lock().unwrap();
+            let state = if states.len() > 1 { states.pop_front().unwrap() } else { states.front().copied().unwrap_or("ACTIVE") };
+            Ok(Grant {
+                name: name.into(),
+                state: state.into(),
+                requested_duration: Some("1800s".into()),
+                access_grant_time: (state == "ACTIVE").then(|| crate::gcp::pam::rfc3339(std::time::SystemTime::now())),
+                justification: None,
+            })
         }
     }
 
@@ -662,6 +681,17 @@ mod gcp_transport {
     fn directory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> RecordDirectory {
         let (d, _, _) = fixture(s, true, true);
         d.with_gcp(Box::new(Handle(Arc::clone(gcp))))
+    }
+
+    /// `directory` that also records what a grant request asked the transport to remember: `(host, justification, duration)`.
+    fn directory_with_memory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> (RecordDirectory, Arc<Mutex<Vec<(String, String, u32)>>>) {
+        let remembered = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&remembered);
+        let d = directory(s, gcp).with_grant_memory(Box::new(move |host, justification, duration| {
+            sink.lock().unwrap().push((host.to_string(), justification.to_string(), duration));
+            Ok(())
+        }));
+        (d, remembered)
     }
 
     fn public_key(key_id: &str) -> Option<String> {
@@ -774,7 +804,10 @@ mod gcp_transport {
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("DENIED")];
         let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
-        let text = denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err());
+        // A missing grant is a `GrantNeeded` now (design 2026-10-25, PAM grant requests); its sentence is the refusal of old.
+        let error = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err();
+        assert!(matches!(error, DirectoryError::GrantNeeded(_)), "{error:?}");
+        let text = error.to_string();
         assert!(text.starts_with("No active Privileged Access Manager grant for prod-operate or prod-admin on knowknow-prod."), "{text}");
         assert!(
             text.contains("gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=knowknow-prod"),
@@ -782,7 +815,7 @@ mod gcp_transport {
         );
         assert_eq!(calls(&gcp), vec![format!("grants {ACCOUNT} knowknow-prod global prod-operate"), format!("grants {ACCOUNT} knowknow-prod global prod-admin")]);
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("ACTIVE")];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, false);
     }
 
     /// Design 2026-10-25: IAP can take about 1½ minutes to see a grant, so the broker is told when the grant it found is that fresh and
@@ -796,14 +829,125 @@ mod gcp_transport {
         let target = d.resolve(&gate()).unwrap();
         let given = |ago: u64| Grant { access_grant_time: Some(rfc3339(SystemTime::now() - Duration::from_secs(ago))), ..grant("ACTIVE") };
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), given(60)];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, true);
         *gcp.grants.lock().unwrap() = vec![given(600)];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: false });
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, false);
         // A grant still activating is as fresh as one just given, and a grant time ahead of this clock (Google's clock is ahead) is fresh too.
         *gcp.grants.lock().unwrap() = vec![grant("ACTIVATING")];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, true);
         *gcp.grants.lock().unwrap() = vec![Grant { access_grant_time: Some(rfc3339(SystemTime::now() + Duration::from_secs(30))), ..grant("ACTIVE") }];
-        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap(), Prepared { recent_grant: true });
+        assert_eq!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant, true);
+    }
+
+    /// Design 2026-10-25 (PAM grant requests): a missing grant is reported with everything the broker needs to ask and request, and
+    /// the refusal sentence stays the one that quotes the gcloud command.
+    #[test]
+    fn prepare_asks_for_a_grant_with_the_transports_defaults_when_none_is_in_flight() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.grants.lock().unwrap() = vec![grant("ENDED")];
+        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let error = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err();
+        let DirectoryError::GrantNeeded(need) = error.clone() else { panic!("expected GrantNeeded, got {error:?}") };
+        assert_eq!(
+            need,
+            GrantNeed {
+                host: GATE.into(),
+                account: Some(ACCOUNT.into()),
+                project: "knowknow-prod".into(),
+                location: "global".into(),
+                entitlement: "prod-operate".into(),
+                entitlements: vec!["prod-operate".into(), "prod-admin".into()],
+                duration_secs: 1800,
+                justification: None,
+            }
+        );
+        assert_eq!(
+            need.refusal_sentence(),
+            "No active Privileged Access Manager grant for prod-operate or prod-admin on knowknow-prod. Request one (for example gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=knowknow-prod) and connect again."
+        );
+        assert_eq!(error.to_string(), need.refusal_sentence());
+        // Automation (an MCP request, the verification probe) gets the refusal, never a question.
+        assert_eq!(error.for_automation(), DirectoryError::Denied(need.refusal_sentence()));
+        assert_eq!(DirectoryError::Failed("x".into()).for_automation(), DirectoryError::Failed("x".into()));
+    }
+
+    #[test]
+    fn prepare_dates_a_fresh_grant_and_never_in_the_future() {
+        use crate::gcp::pam::rfc3339;
+        let gcp = Arc::new(FakeGcp::default());
+        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let at = |offset: i64| {
+            let time = if offset >= 0 { std::time::SystemTime::now() + std::time::Duration::from_secs(offset as u64) } else { std::time::SystemTime::now() - std::time::Duration::from_secs((-offset) as u64) };
+            Grant { access_grant_time: Some(rfc3339(time)), ..grant("ACTIVE") }
+        };
+        let age = |prepared: Prepared| std::time::SystemTime::now().duration_since(prepared.granted_at.expect("a date")).unwrap_or_default().as_secs();
+        *gcp.grants.lock().unwrap() = vec![at(-60)];
+        assert!((58..=62).contains(&age(d.prepare(&target, &public_key, &CancelToken::default()).unwrap())));
+        *gcp.grants.lock().unwrap() = vec![at(30)];
+        assert!(age(d.prepare(&target, &public_key, &CancelToken::default()).unwrap()) <= 2, "a time ahead of this clock counts as now");
+        *gcp.grants.lock().unwrap() = vec![grant("ACTIVATING")];
+        assert!(age(d.prepare(&target, &public_key, &CancelToken::default()).unwrap()) <= 2, "still activating: as fresh as now");
+        *gcp.grants.lock().unwrap() = vec![at(-600)];
+        let old = d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
+        assert!(!old.recent_grant && old.granted_at.is_some());
+    }
+
+    #[test]
+    fn request_grant_creates_remembers_polls_and_answers_a_receipt() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.states.lock().unwrap() = VecDeque::from(vec!["ACTIVATING", "ACTIVE"]);
+        let (d, remembered) = directory_with_memory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
+        let receipt = d.request_grant_with(&need, "restart app-api", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(receipt.entitlement, "prod-operate");
+        assert_eq!(receipt.active_until, receipt.granted_at + std::time::Duration::from_secs(1800));
+        assert!(std::time::SystemTime::now().duration_since(receipt.granted_at).unwrap_or_default().as_secs() <= 2);
+        assert_eq!(*remembered.lock().unwrap(), vec![(GATE.to_string(), "restart app-api".to_string(), 1800)]);
+        let calls = calls(&gcp);
+        assert!(calls.contains(&format!("create {ACCOUNT} knowknow-prod global prod-operate 1800 restart app-api")), "{calls:?}");
+        assert_eq!(calls.iter().filter(|call| call.starts_with("get ")).count(), 2, "polled until ACTIVE: {calls:?}");
+    }
+
+    #[test]
+    fn request_grant_reuses_a_grant_that_appeared_meanwhile() {
+        let gcp = Arc::new(FakeGcp::default());
+        let (d, remembered) = directory_with_memory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
+        // Another connection (or the panel) requested one in between: PAM would refuse a second request with the same scope.
+        *gcp.grants.lock().unwrap() = vec![Grant { access_grant_time: Some(crate::gcp::pam::rfc3339(std::time::SystemTime::now())), ..grant("ACTIVE") }];
+        let receipt = d.request_grant_with(&need, "restart app-api", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(receipt.entitlement, "prod-operate");
+        assert!(!calls(&gcp).iter().any(|call| call.starts_with("create ")), "nothing requested: {:?}", calls(&gcp));
+        assert!(remembered.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn request_grant_names_a_state_that_will_not_activate_and_gives_up_after_a_while() {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.states.lock().unwrap() = VecDeque::from(vec!["APPROVAL_AWAITED"]);
+        let (d, _) = directory_with_memory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
+        let waiting = d.request_grant_with(&need, "x", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap_err();
+        assert_eq!(denied(waiting), "The prod-operate grant did not become active (state: APPROVAL_AWAITED); Lunport does not wait for an approver.");
+        *gcp.states.lock().unwrap() = VecDeque::from(vec!["ACTIVATING"]);
+        let stuck = d.request_grant_with(&need, "x", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_millis(50)).unwrap_err();
+        assert_eq!(denied(stuck), "The prod-operate grant did not become active within a minute (state: ACTIVATING); try connecting again.");
+        *gcp.states.lock().unwrap() = VecDeque::from(vec!["DENIED"]);
+        assert_eq!(
+            denied(d.request_grant_with(&need, "x", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap_err()),
+            "The prod-operate grant did not become active (state: DENIED)."
+        );
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        assert_eq!(d.request_grant_with(&need, "x", 1800, &cancel, std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap_err(), DirectoryError::Failed("The connection was cancelled.".into()));
+        // The trait method is the inner one with the design's pacing: a cancelled token returns at once there too.
+        assert_eq!(d.request_grant(&need, "x", 1800, &cancel).unwrap_err(), DirectoryError::Failed("The connection was cancelled.".into()));
+        let _: Option<GrantReceipt> = None;
     }
 
     #[test]

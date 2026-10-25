@@ -1568,10 +1568,10 @@ mod tests {
         let bare = "frank@retower.io is not authorized to tunnel to jumpbox through IAP.";
         // One sentence, as every failure text is (design 2026-10-25, "Error texts").
         assert_eq!(
-            fails_with(refused(4033), Prepared { recent_grant: true }),
+            fails_with(refused(4033), Prepared { recent_grant: true, ..Default::default() }),
             failure(kinds::CONNECT, "frank@retower.io is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.")
         );
-        assert_eq!(fails_with(refused(4033), Prepared { recent_grant: false }), failure(kinds::CONNECT, bare));
-        assert_eq!(fails_with(refused(4003), Prepared { recent_grant: true }), failure(kinds::CONNECT, bare));
+        assert_eq!(fails_with(refused(4033), Prepared { recent_grant: false, ..Default::default() }), failure(kinds::CONNECT, bare));
+        assert_eq!(fails_with(refused(4003), Prepared { recent_grant: true, ..Default::default() }), failure(kinds::CONNECT, bare));
     }
 }
