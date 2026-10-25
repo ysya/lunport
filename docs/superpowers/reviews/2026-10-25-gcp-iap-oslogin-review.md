@@ -2,6 +2,8 @@
 
 The branch `claude/project-thread-whbjuy` (design `docs/superpowers/specs/2026-10-25-gcp-iap-oslogin-design.md`, plan `docs/superpowers/plans/2026-10-25-gcp-iap-oslogin.md`) was reviewed twice by fresh readers before it was handed over: the whole branch up to the documentation commit, and the four commits that followed (the Google Cloud panel, the state-version fix, the recent-grant note). This file records what they found, what was fixed, the calls made on the rest, and what is left for later. Each fix was made test-first; the test named is the one that failed before the fix and passes after it.
 
+Later on the same branch, the plan `docs/superpowers/plans/2026-10-25-pam-grant-request.md` (design `docs/superpowers/specs/2026-10-25-pam-grant-request-design.md`) added requesting a PAM grant from Lunport: the Request-a-grant question and window, the gate for connections needing the same grant, the IAP grace retry and the panel's grant state. Its review is recorded in `docs/superpowers/reviews/2026-10-25-pam-grant-request-review.md`.
+
 ## Fixed
 
 | Finding | Fix | Test |
