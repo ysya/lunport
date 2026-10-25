@@ -320,8 +320,10 @@ impl TokenSource for FileStore {
 }
 
 /// One fixed token, for tests and fakes. The account is the one asked for, or `static@example.com`.
+#[cfg(test)]
 pub struct StaticToken(pub String);
 
+#[cfg(test)]
 impl TokenSource for StaticToken {
     fn access_token(&self, account: Option<&str>) -> Result<Token, AuthError> {
         Ok(Token { value: Zeroizing::new(self.0.clone()), account: account.unwrap_or("static@example.com").to_string() })

@@ -248,6 +248,7 @@ impl Bookkeeping {
         self.received
     }
 
+    #[cfg(test)]
     pub fn total_confirmed(&self) -> u64 {
         self.confirmed
     }
@@ -287,7 +288,7 @@ mod tests {
         assert_eq!(decode(&[0, 9]), Ok(Frame::Unknown(9)));
         // A server may send more than a client's frame size; gcloud takes it, and so does the port (within the cap).
         let mut big = vec![0, 4, 0, 0, 0x4e, 0x20];
-        big.extend(std::iter::repeat(1u8).take(20000));
+        big.extend(vec![1u8; 20000]);
         assert_eq!(decode(&big), Ok(Frame::Data(vec![1; 20000])));
     }
 
@@ -305,7 +306,7 @@ mod tests {
         let length = (MAX_FRAME_BYTES + 1) as u32;
         let mut frame = vec![0, 1];
         frame.extend(length.to_be_bytes());
-        frame.extend(std::iter::repeat(0u8).take(MAX_FRAME_BYTES + 1));
+        frame.extend(vec![0u8; MAX_FRAME_BYTES + 1]);
         assert_eq!(decode(&frame), Err(RelayError::Oversized(MAX_FRAME_BYTES + 1)));
     }
 
