@@ -6001,6 +6001,8 @@ dependencies = [
  "reqwest",
  "rsa 0.9.10",
  "russh",
+ "rustls",
+ "rustls-native-certs",
  "secret-service",
  "security-framework",
  "serde",

@@ -164,6 +164,9 @@ struct HopShared {
     no_login_method: std::sync::atomic::AtomicBool,
     /// Banner text the server sent during the login, not yet handed to the auth source (`deliver_banners`); bounded, see `Banners`.
     banners: Mutex<Banners>,
+    /// For a hop carried by a Google Cloud IAP tunnel: where the tunnel writes why it ended, which explains the connection's end better
+    /// than the end-of-file russh then sees.
+    tunnel: Mutex<Option<iap::TunnelEnd>>,
 }
 
 impl HopShared {
@@ -174,7 +177,13 @@ impl HopShared {
             ended: Mutex::new(None),
             no_login_method: std::sync::atomic::AtomicBool::new(false),
             banners: Mutex::new(Banners::default()),
+            tunnel: Mutex::new(None),
         })
+    }
+
+    /// Why the hop's IAP tunnel ended, when it was one and the relay or the credentials ended it.
+    fn tunnel_ended(&self) -> Option<iap::IapError> {
+        locked(&self.tunnel).as_ref().and_then(|record| record.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone())
     }
 }
 
@@ -446,7 +455,11 @@ impl Connection {
         loop {
             for established in &self.hops {
                 if let Some((kind, detail)) = locked(&established.shared.ended).clone() {
-                    return Some(DisconnectReason { hop: established.hop.clone(), kind, detail });
+                    // A hop carried by an IAP tunnel that the relay or the credentials ended: the tunnel's sentence, not russh's end-of-file.
+                    return Some(match established.shared.tunnel_ended() {
+                        Some(reason) => DisconnectReason { hop: established.hop.clone(), kind: DisconnectKind::ConnectionLost, detail: reason.to_string() },
+                        None => DisconnectReason { hop: established.hop.clone(), kind, detail },
+                    });
                 }
             }
             if self.closing.load(Ordering::SeqCst) {
@@ -555,9 +568,11 @@ async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostK
                 let Some(tokens) = options.gcp_tokens.clone() else {
                     return Err(ConnectError::Tunnel { hop: reference.clone(), text: "Google Cloud credentials are not configured.".to_string(), code: None });
                 };
-                let iap::Tunnel { stream, guard } = iap::open(target.endpoint(hop.port), tokens, target.account.clone(), user_agent())
+                let tunnel = iap::open(target.endpoint(hop.port), tokens, target.account.clone(), user_agent())
                     .await
                     .map_err(|error| iap_failure(&reference, target, hop.port, error))?;
+                *locked(&shared.tunnel) = Some(tunnel.end_record());
+                let iap::Tunnel { stream, guard, .. } = tunnel;
                 phase.set(Phase::Handshake);
                 let handle = handshake(stream, config, handler, &mut questions, host_keys, hop, &shared).await?;
                 guard.release();
