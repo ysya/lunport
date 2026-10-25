@@ -171,6 +171,8 @@ async fn serve(stream: TcpStream, shared: &Arc<Shared>) -> Result<(), ()> {
     let token = shared.token.clone();
     let headers_sink = Arc::new(Mutex::new(Vec::new()));
     let headers_out = Arc::clone(&headers_sink);
+    // tungstenite fixes the callback's signature; its `ErrorResponse` is as large as it is.
+    #[allow(clippy::result_large_err)]
     let callback = move |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
         let headers: Vec<(String, String)> =
             request.headers().iter().map(|(name, value)| (name.as_str().to_lowercase(), value.to_str().unwrap_or("").to_string())).collect();
