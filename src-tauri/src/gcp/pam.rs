@@ -83,7 +83,9 @@ pub fn in_flight(grants: &[Grant]) -> Vec<&Grant> {
 }
 
 /// Whether the grant's access was given within `window` before `now` (IAP can take a while to honour a fresh grant). A grant time ahead
-/// of `now` is a grant just given by a clock that runs ahead of this one: recent.
+/// of `now` is a grant just given by a clock that runs ahead of this one: recent. The broker dates grants with `granted_at` now; this
+/// stays for its test of the time parsing.
+#[cfg(test)]
 pub fn granted_within(grant: &Grant, now: SystemTime, window: Duration) -> bool {
     grant
         .access_grant_time

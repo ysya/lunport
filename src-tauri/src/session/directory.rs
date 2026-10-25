@@ -82,7 +82,7 @@ pub enum DirectoryError {
     Denied(String),
     /// No Privileged Access Manager grant is in flight for the host's transport (design 2026-10-25, PAM grant requests): a connection a
     /// person drives asks them and requests one; automation gets `for_automation`'s refusal.
-    GrantNeeded(GrantNeed),
+    GrantNeeded(Box<GrantNeed>),
 }
 
 impl DirectoryError {

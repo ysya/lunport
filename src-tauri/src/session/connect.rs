@@ -1694,7 +1694,7 @@ mod tests {
         fn prepare(&self, target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<Prepared, DirectoryError> {
             locked(&self.prepared).push(target.clone());
             if let Some(need) = self.need.as_ref().filter(|_| locked(&self.requested).is_empty()) {
-                return Err(DirectoryError::GrantNeeded(need.clone()));
+                return Err(DirectoryError::GrantNeeded(Box::new(need.clone())));
             }
             self.answer.clone()
         }

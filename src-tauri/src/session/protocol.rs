@@ -298,6 +298,8 @@ pub struct GrantAnswer {
 }
 
 impl GrantAnswer {
+    /// The window encodes (`mcp-flow.ts`); the broker only decodes. Tests build answers with this.
+    #[cfg(test)]
     pub fn encode(&self) -> String {
         format!("{}\n{}", self.minutes, self.justification)
     }
