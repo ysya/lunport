@@ -203,6 +203,9 @@ describe("transports", () => {
     // Each read checks every sign-in with Google.
     expect(gcloudAccountsQuery.staleTime).toBe(60_000);
     expect(gcloudAccountsQuery.retry).toBe(false);
+    // The answer comes from this app's backend, which words a Google outage itself: a webview that thinks it is offline (a VPN or a
+    // Wi-Fi switch) must still ask, or a computer with no cached answer would never show that the sign-ins could not be checked.
+    expect(gcloudAccountsQuery.networkMode).toBe("always");
   });
 
   it("reads the grants the routes need through the backend, when the section shows and every minute, but not on window focus", async () => {

@@ -124,7 +124,8 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, jus
  * The Request-a-grant dialog (design 2026-10-25, PAM grant requests; 2026-10-26, Commands): a justification and a duration, prefilled
  * from what this computer remembers of its last request for the host (`memory`), else the route's default length; requested on
  * `entitlement`, else the route's first as the connect would; the grant's state, or the refusal, shows inside once Lunport has waited
- * for it. Mount it for one transport at a time (key it by the host).
+ * for it. Mount it for one request at a time, keyed by what the request is for, so another starts afresh: the details pane keys the
+ * section that holds it by the host, the Google Cloud page keys the dialog by the row (account, project, location and entitlement).
  */
 export function GrantRequestDialog({ transport, entitlement, memory, alias, onClose, onRequested }: {
   transport: HostTransport;

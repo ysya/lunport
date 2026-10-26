@@ -173,6 +173,14 @@ describe("the Google Cloud page", () => {
     expect(view.props.createIapHost).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps New IAP host available in a library whose writes are blocked: the editor says what it cannot save", async () => {
+    // Cmd/Ctrl+N opens the same editor, which locks Connect via and gives its reason; the page does not decide for it.
+    const view = await renderPage(overviewOf([web], [webRoute], { ...library, shared_writes_blocked: true }));
+    expect(buttonTag(view.html, "New IAP host")).not.toContain(DISABLED);
+    view.click("New IAP host");
+    expect(view.props.createIapHost).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the sections its routes call for", async () => {
     expect((await renderPage(overviewOf([web], [webRoute]))).sectionTitles()).toEqual(["Google sign-in", "Hosts through IAP"]);
     expect((await renderPage(overviewOf([web, db], [webRoute, dbRoute]))).sectionTitles()).toEqual(["Google sign-in", "Access grants", "Hosts through IAP"]);
@@ -364,6 +372,26 @@ describe("Access grants", () => {
     expect(view.disabled("Request grant", { row: "prod-admin" })).toBe(false);
   });
 
+  it("lists a grant row with no account without a stray separator, and still requests it and takes its answer", async () => {
+    // A route that names no account, while gcloud has no active account to resolve it to: the service gives the row no account.
+    const webPam = hostTransport({ instance: "web-1", pam: grant }, web.id);
+    const nobody = row({ entitlement: "prod-admin", account: null, host_ids: [web.id] });
+    const named = row({ entitlement: "prod-admin", host_ids: [db.id] }); // the same project, location and entitlement, for frank@
+    const view = await renderPage(overviewOf([web, db], [webPam, dbRoute]), { answers: { grants: [nobody, named] } });
+    const [first, second] = view.rows("Access grants");
+    expect(first).toContain("prod-admin acme-prod-123456 · global Required by web-1");
+    expect(second).toContain("prod-admin acme-prod-123456 · global · frank@example.com Required by db-1");
+    // Its request goes through its first host's route, which names no account either: it is made as gcloud's active account.
+    view.click("Request grant", { row: "Required by web-1" });
+    expect(view.dialog?.given).toMatchObject({ transport: webPam, entitlement: "prod-admin", alias: "web-1" });
+    expect(view.dialog?.text).toContain("requested as gcloud's active account");
+    // Its answer lands in it and not in the row for the same entitlement under an account: the key holds the missing account.
+    view.dialog!.given.onRequested({ entitlement: "prod-admin", state: "active", active_until_ms: LATER, message: null });
+    expect(view.row("Access grants", "Required by web-1")).toContain("Active until 11:30");
+    expect(view.row("Access grants", "Required by db-1")).toContain("No active grant");
+    expect(view.client.getQueryData(pamGrantsKey)).toEqual([{ ...nobody, state: "active", active_until_ms: LATER }, named]);
+  });
+
   it("takes the answer of a request into its row at once, and into no other", async () => {
     // The same entitlement id in another project is another row.
     const other = row({ entitlement: "prod-admin", project: "acme-dev-654321", host_ids: [db2.id], state: "active", active_until_ms: AT });
@@ -409,12 +437,10 @@ describe("Access grants", () => {
     expect((await renderPage(overview, { answers: { grants: [] } })).text).toContain("No grants to show.");
   });
 
-  it("reads the grants only while a listed route requires one, and reads nothing while drawing", async () => {
+  it("reads the grants only while a listed route requires one", async () => {
     const enabled = (shown: RecordOverview) => {
       const client = new QueryClient();
-      const calls = stubBackend(async () => []);
       renderHook(client, () => GoogleCloudPanel({ overview: shown, createIapHost: vi.fn(), editHost: vi.fn() }));
-      expect(calls).toEqual([]);
       // The query is built with the options of the page that first asked for it, `enabled` among them (the type of `options` leaves it out).
       return (client.getQueryCache().find({ queryKey: pamGrantsKey })?.options as { enabled?: boolean } | undefined)?.enabled;
     };

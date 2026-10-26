@@ -47,9 +47,18 @@ export const listGcloudAccounts = () => tauriInvoke<GcloudAccountsView>("gcp_acc
 export const gcloudAccountsKey = ["gcp", "accounts"] as const;
 /**
  * `listGcloudAccounts` as the host editor's account picker and the Google Cloud page read it, from one cache entry. Each read checks
- * every sign-in with Google, so a minute-old answer is reused across mounts, switches and window focus. Not retried.
+ * every sign-in with Google, so a minute-old answer is reused across mounts, switches and window focus. Not retried, and read even when
+ * the webview thinks it is offline (a VPN or Wi-Fi switch), since the answer comes from this app's backend, which says in its own
+ * sentence when Google cannot be reached: otherwise a computer with no cached answer would wait for the network and never show that
+ * the sign-ins could not be checked.
  */
-export const gcloudAccountsQuery = queryOptions({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts, retry: false, staleTime: 60_000 });
+export const gcloudAccountsQuery = queryOptions({
+  queryKey: gcloudAccountsKey,
+  queryFn: listGcloudAccounts,
+  retry: false,
+  staleTime: 60_000,
+  networkMode: "always",
+});
 /** One row per entitlement the saved routes require, with the state of the grant on it, read now. */
 export const listPamGrants = () => tauriInvoke<PamGrantView[]>("gcp_pam_grants");
 /** The query key of `listPamGrants`, for the Google Cloud page's Access grants. */
