@@ -208,6 +208,20 @@ describe("Connect via in the host editor", () => {
     expect(checkedVia(html)).toBe("Google Cloud IAP");
   });
 
+  it("shows the grant fields only while a grant is required, with the entitlements as the route has them", () => {
+    const plain = renderEditor(iapHost);
+    expect(text(plain)).toContain("Network interface");
+    expect(text(plain)).not.toContain("Entitlements");
+    expect(text(plain)).not.toContain("Default grant (minutes)");
+    const grant = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null };
+    const html = renderEditor(withRoute(jumpbox(), { pam: grant }));
+    expect(text(html)).toContain("Entitlements");
+    expect(html).toContain('value="prod-operate, prod-admin"');
+    expect(text(html)).toContain("Default grant (minutes)");
+    expect(inputAfter(html, "Default grant (minutes)")).toContain('value="30"');
+    expect(inputAfter(html, "Location")).toContain('value="global"');
+  });
+
   it("dials an address host at its hostname, as before", () => {
     const html = renderEditor(hostView({ id: HOST, payload: hostPayload({ hostname: "server.example.com" }) }));
     expect(html).toContain("Hostname or IP");

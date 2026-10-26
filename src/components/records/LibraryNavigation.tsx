@@ -243,7 +243,7 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
           {row("Needs attention", <AlertCircle className="size-4" />, panel === "hosts" && filter.kind === "attention", () => choose({ kind: "attention" }), attention || undefined)}
           {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.filter((key) => key.status !== "deleted").length)}
           {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
-          {row("Google Cloud", <Cloud className="size-4" />, panel === "transports", () => navigate("transports"), overview.transports?.length || undefined)}
+          {row("Google Cloud", <Cloud className="size-4" />, panel === "transports", () => navigate("transports"))}
         </nav>
         <div
           className="library-nav-collections min-h-0 flex-1 overflow-y-auto"

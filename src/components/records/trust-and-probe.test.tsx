@@ -17,7 +17,7 @@ import {
   type CheckOutcome,
   type ConnectionCheckViewProps,
 } from "./ConnectionCheck";
-import { GrantRequestCardView, GrantRequestDialog, grantRequestDefaults, requestGrant, type GrantRequestCardViewProps } from "./GrantRequestDialog";
+import { GrantRequestCardView, GrantRequestDialog, grantRequestDefaults, grantRequestReady, requestGrant, type GrantRequestCardViewProps } from "./GrantRequestDialog";
 import { forgetRecordHostKey, probeRecordHost, setRecordGroupOrder, type ConnectionProbe, type RecordHostView } from "@/lib/records";
 import type { HostTransport, IapProbeView, PamStatusView } from "@/lib/transports";
 import { KnownHostsFilePanel } from "@/components/KnownHostsDialog";
@@ -212,7 +212,7 @@ describe("requesting a grant for a host's route", () => {
     const onRequested = vi.fn();
     const dialog = (props: Partial<Parameters<typeof GrantRequestDialog>[0]>) =>
       elementsOf(
-        firstRender(() => GrantRequestDialog({ transport: pamRoute(), alias: "web-1", onClose: () => {}, onRequested, ...props })),
+        firstRender(() => GrantRequestDialog({ transport: pamRoute(), memory: null, alias: "web-1", onClose: () => {}, onRequested, ...props })),
         GrantRequestCardView,
       )[0].props as unknown as GrantRequestCardViewProps;
     const card = dialog({ entitlement: "prod-admin", memory: { host_id: host.id, justification: "Deploy hotfix", duration_secs: 2700 } });
@@ -220,8 +220,30 @@ describe("requesting a grant for a host's route", () => {
     card.onRequest();
     await vi.waitFor(() => expect(onRequested).toHaveBeenCalledWith(granted));
     expect(calls).toEqual([["transports_pam_request", { hostId: host.id, justification: "Deploy hotfix", durationSecs: 2700, entitlement: "prod-admin" }]]);
-    // A caller that names no entitlement and passes no memory gets the route's first entitlement and its default length.
+    // A request with no entitlement named and no memory of the host gets the route's first entitlement and its default length.
     expect(dialog({ transport: pamRoute(5400) })).toMatchObject({ entitlement: undefined, justification: "", minutes: "90" });
+  });
+
+  it("asks for a justification and a duration, and is ready only for ones the backend accepts", () => {
+    expect(grantRequestReady("restart app-api", "30")).toBe(true);
+    for (const [justification, minutes] of [["", "30"], ["   ", "30"], ["x", "0"], ["x", "481"], ["x", "abc"], ["x", "30.5"], ["restart\tapp-api", "30"], ["two\nlines", "30"]]) {
+      expect(grantRequestReady(justification, minutes), `${justification}/${minutes}`).toBe(false);
+    }
+    const html = renderToStaticMarkup(
+      <Dialog open>
+        <GrantRequestCardView transport={pamRoute()} alias="web-1" justification="restart app-api" minutes="30" busy={false} result={null} error={null}
+          onJustification={() => {}} onMinutes={() => {}} onRequest={() => {}} onClose={() => {}} />
+      </Dialog>,
+    );
+    expect(html).toContain("Request a grant");
+    expect(html).toContain("web-1");
+    expect(html).toContain("prod-operate");
+    expect(html).toContain("Justification");
+    expect(html).toContain("Duration (minutes)");
+    expect(html).toContain('value="restart app-api"');
+    expect(html).toContain('value="30"');
+    expect(html).toMatch(/<button[^>]*>Request</);
+    expect(html).not.toMatch(/<button[^>]*>Request grant</);
   });
 
   it("names the entitlement being requested", () => {

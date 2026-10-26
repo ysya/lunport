@@ -409,6 +409,10 @@ describe("a host's route on its card and in its details", () => {
     expect(text(answered.html)).toContain(refused);
     expect(text(answered.html)).not.toContain("No active grant");
     expect(buttonTag(answered.html, "Request grant…")).not.toContain(DISABLED);
+    // A sentence about a grant on a named entitlement stands alone, as it does for one that names none.
+    const named = await settled(library(withGrant), () => status("error", "prod-operate", null, refused));
+    expect(text(named.html)).toContain(refused);
+    expect(text(named.html)).not.toContain("prod-operate ·");
     // The command itself failing reads the same way.
     const failed = await settled(library(withGrant), () => {
       throw "Invalid host identity.";

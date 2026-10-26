@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { tauriInvoke } from "./ipc";
-import type { HostPayload, RecordHostView, RecordOverview } from "./records";
+import type { RecordOverview } from "./records";
 import type { HostTransport } from "@/bindings/HostTransport";
 import type { TransportKind } from "@/bindings/TransportKind";
 import type { PamCheck } from "@/bindings/PamCheck";
@@ -15,9 +15,6 @@ export type { HostTransport, TransportKind, PamCheck, OsLoginProfileView, PamSta
 /** A placeholder for the PAM entitlements field, never a default: Lunport is a public product. */
 export const pamPlaceholder = "prod-operate, prod-admin";
 
-export const saveTransport = (transport: HostTransport, expected: HostTransport | null) =>
-  tauriInvoke<RecordOverview>("transports_save", { transport, expected });
-export const deleteTransport = (expected: HostTransport) => tauriInvoke<RecordOverview>("transports_delete", { expected });
 export const fetchOsLoginProfile = (account: string | null, project: string, keyId: string | null) =>
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
 export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
@@ -48,8 +45,29 @@ export const requestPamGrant = (hostId: string, justification: string, durationS
 export const listGcloudAccounts = () => tauriInvoke<GcloudAccountsView>("gcp_accounts");
 /** The query key of `listGcloudAccounts`, shared by every view of gcloud's accounts. */
 export const gcloudAccountsKey = ["gcp", "accounts"] as const;
+/**
+ * `listGcloudAccounts` as the host editor's account picker and the Google Cloud page read it, from one cache entry. Each read checks
+ * every sign-in with Google, so a minute-old answer is reused across mounts, switches and window focus. Not retried.
+ */
+export const gcloudAccountsQuery = queryOptions({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts, retry: false, staleTime: 60_000 });
 /** One row per entitlement the saved routes require, with the state of the grant on it, read now. */
 export const listPamGrants = () => tauriInvoke<PamGrantView[]>("gcp_pam_grants");
+/** The query key of `listPamGrants`, for the Google Cloud page's Access grants. */
+export const pamGrantsKey = ["gcp", "pam-grants"] as const;
+/**
+ * The Google Cloud page's Access grants: read when the section shows and again every minute while it stays open. As with
+ * `pamStatusQuery`, a window gaining focus does not read it again (every read is a Google call for each entitlement), it is not retried
+ * (the next minute reads it again), and it is read even when the webview thinks it is offline, since the answer comes from this app's
+ * backend, which says in its own sentence when Google cannot be reached. The page turns it on only while a listed route requires a grant.
+ */
+export const pamGrantsQuery = queryOptions({
+  queryKey: pamGrantsKey,
+  queryFn: listPamGrants,
+  refetchInterval: 60_000,
+  refetchOnWindowFocus: false,
+  retry: false,
+  networkMode: "always",
+});
 /** Check through IAP: whether this computer reaches the host's instance through its route. It attempts no SSH. */
 export const probeIap = (hostId: string) => tauriInvoke<IapProbeView>("transports_iap_probe", { hostId });
 
@@ -57,6 +75,9 @@ const hhmm = (ms: number) => {
   const at = new Date(ms);
   return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
 };
+
+/** What a grant that could not be checked says in place of its state: the API's own sentence. */
+const grantProblem = (grant: { message: string | null }) => grant.message ?? "The grant could not be checked.";
 
 /** One line about a transport's PAM grant (design 2026-10-25): which entitlement holds it and until when, on this computer's clock, or why there is none. */
 export function pamStatusLine(view: PamStatusView): string {
@@ -66,13 +87,13 @@ export function pamStatusLine(view: PamStatusView): string {
     case "activating":
       return `${view.entitlement ?? "grant"} · activating…`;
     case "error":
-      return view.message ?? "The grant could not be checked.";
+      return grantProblem(view);
     default:
       return "no active grant";
   }
 }
 
-/** One line about a grant, as a row of the Google Cloud page or a host's details shows it. A grant in the `error` state shows its `message` instead; this line reads "No active grant" for it. */
+/** One line about a grant, as a row of the Google Cloud page or a host's details shows it. A grant in the `error` state shows its `message` instead; this line reads "No active grant" for it (see `grantStateOrMessage`). */
 export function grantStateLine(grant: { state: string; active_until_ms: number | null }): string {
   switch (grant.state) {
     case "active":
@@ -82,6 +103,14 @@ export function grantStateLine(grant: { state: string; active_until_ms: number |
     default:
       return "No active grant";
   }
+}
+
+/**
+ * What a row of the Google Cloud page and the details pane say of a grant they read: `grantStateLine`, except for a grant in the
+ * `error` state, which has the API's own sentence (its `message`) instead of "No active grant", since it could not be checked.
+ */
+export function grantStateOrMessage(grant: { state: string; active_until_ms: number | null; message: string | null }): string {
+  return grant.state === "error" ? grantProblem(grant) : grantStateLine(grant);
 }
 
 export function newIapTransport(hostId: string): HostTransport {
@@ -117,27 +146,6 @@ export function osLoginOutcome(view: OsLoginProfileView): { username: string | n
     note: view.key_registered === false ? "This key is not registered with OS Login yet; it is registered at the first connection." : null,
     error: null,
   };
-}
-
-/**
- * What the Use OS Login username button writes into `host` for the profile it fetched: the payload to save (`null` when the connection
- * already uses that username, or when nothing may be written), the note to show, or why not. The comparison is with the username the
- * connection uses (the effective payload); a host that inherits its username from its Group is left alone, since its own field is not
- * what the connection uses.
- */
-export function osLoginUsernameUpdate(host: RecordHostView, view: OsLoginProfileView): { payload: HostPayload | null; note: string | null; error: string | null } {
-  const outcome = osLoginOutcome(view);
-  if (!outcome.username) return { payload: null, note: null, error: outcome.error };
-  if (host.payload.inherit?.includes("user"))
-    return { payload: null, note: null, error: "This host takes its username from its Group; change it there, or stop inheriting it in the host editor." };
-  const note = [`Username: ${outcome.username}.`, outcome.note].filter(Boolean).join(" ");
-  if (host.effective_payload.user === outcome.username) return { payload: null, note, error: null };
-  return { payload: { ...host.payload, user: outcome.username, host_key: null }, note, error: null };
-}
-
-export function transportLabel(transport: HostTransport): string {
-  const kind = transport.kind;
-  return `Google Cloud IAP · ${kind.project} / ${kind.zone} / ${kind.instance}`;
 }
 
 /** Where a route goes, as a card and the details pane name it: `project / instance`. */

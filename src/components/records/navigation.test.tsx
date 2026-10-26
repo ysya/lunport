@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LibraryNavigation } from "./LibraryNavigation";
-import { groupView, recordOverview } from "./fixtures";
+import { groupView, hostTransport, recordOverview } from "./fixtures";
 const navigationState = vi.hoisted(() => ({
   librarySidebarCollapsed: false,
   collapsedRecordGroups: [] as string[],
@@ -28,6 +28,21 @@ function navigation() {
 }
 
 describe("Records navigation controls", () => {
+  it("names Google Cloud without a count, whatever routes the library holds", () => {
+    const html = renderToStaticMarkup(<LibraryNavigation
+      overview={recordOverview({ transports: [hostTransport()] })}
+      panel="transports"
+      filter={{ kind: "all" }}
+      navigate={vi.fn()}
+      changeFilter={vi.fn()}
+      createGroup={vi.fn()}
+    />);
+    expect(html).toContain('aria-label="Google Cloud"');
+    expect(html).not.toContain('aria-label="Google Cloud (');
+    // The rows with a count keep it.
+    expect(html).toContain('aria-label="All hosts (1)"');
+  });
+
   it("keeps group navigation separate from its disclosure and removes closed children from interaction", () => {
     navigationState.collapsedRecordGroups = ["local:0000000000000010"];
     const html = navigation();

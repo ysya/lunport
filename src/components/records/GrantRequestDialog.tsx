@@ -126,12 +126,12 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, jus
  * `entitlement`, else the route's first as the connect would; the grant's state, or the refusal, shows inside once Lunport has waited
  * for it. Mount it for one transport at a time (key it by the host).
  */
-export function GrantRequestDialog({ transport, entitlement, memory = null, alias, onClose, onRequested }: {
+export function GrantRequestDialog({ transport, entitlement, memory, alias, onClose, onRequested }: {
   transport: HostTransport;
   /** The entitlement to request, one the route lists; the route's first when left out. */
   entitlement?: string;
-  /** This computer's memory of its last request for the host, if it made one. */
-  memory?: GrantMemoryView | null;
+  /** This computer's memory of its last request for the host; `null` when it made none. */
+  memory: GrantMemoryView | null;
   alias: string;
   onClose: () => void;
   onRequested: (view: PamStatusView) => void;

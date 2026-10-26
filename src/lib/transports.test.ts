@@ -4,22 +4,27 @@ import { stubBackend } from "./test-ipc";
 import type { RecordOverview } from "./records";
 import { recordOverview } from "@/components/records/fixtures";
 import {
-  deleteTransport,
   fetchOsLoginProfile,
+  gcloudAccountsKey,
+  gcloudAccountsQuery,
   grantMemoryFor,
   grantStateLine,
+  grantStateOrMessage,
   iapTarget,
   listGcloudAccounts,
   listPamGrants,
   newIapTransport,
+  osLoginOutcome,
+  pamGrantsKey,
+  pamGrantsQuery,
   pamPlaceholder,
+  pamStatusLine,
   pamStatusQuery,
+  parseEntitlements,
   probeIap,
   requestPamGrant,
   routeSynced,
-  saveTransport,
   transportFor,
-  transportLabel,
   transportProblem,
   type GcloudAccountsView,
   type HostTransport,
@@ -56,8 +61,7 @@ describe("transports", () => {
     expect(transportFor(recordOverview(), HOST)).toBeNull();
   });
 
-  it("labels a transport and starts a new one with the defaults", () => {
-    expect(transportLabel(iap())).toBe("Google Cloud IAP · eng-dev-396409 / asia-east1-b / jumpbox");
+  it("starts a new route with the defaults", () => {
     expect(newIapTransport(HOST)).toEqual({
       host_id: HOST,
       kind: { type: "gcp_iap", project: "", zone: "", instance: "", interface: "nic0", account: null, os_login: true, pam: null },
@@ -90,17 +94,6 @@ describe("transports", () => {
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: "x".repeat(513) } }))).toBe("Keep the justification under 512 characters on one line.");
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: "restart\napp-api" } }))).toBe("Keep the justification under 512 characters on one line.");
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "global", duration_secs: 3600, justification: "restart app-api" } }))).toBeNull();
-  });
-
-  it("saves and deletes through the backend with the displayed value", async () => {
-    const overview = recordOverview();
-    const calls = stubBackend(async () => overview);
-    expect(await saveTransport(iap(), null)).toBe(overview);
-    await deleteTransport(iap());
-    expect(calls).toEqual([
-      ["transports_save", { transport: iap(), expected: null }],
-      ["transports_delete", { expected: iap() }],
-    ]);
   });
 
   it("asks the backend for the OS Login profile", async () => {
@@ -162,6 +155,8 @@ describe("transports", () => {
     expect(grantStateLine({ state: "active", active_until_ms: null })).toBe("Active");
     expect(grantStateLine({ state: "activating", active_until_ms: null })).toBe("Activating…");
     expect(grantStateLine({ state: "none", active_until_ms: null })).toBe("No active grant");
+    // A grant that could not be checked reads like none here, which is why rows show `grantStateOrMessage` instead.
+    expect(grantStateLine({ state: "error", active_until_ms: null })).toBe("No active grant");
     // A row the page shows from PamGrantView or PamStatusView needs no conversion.
     const row: PamGrantView = { account: null, project: "p", location: "global", entitlement: "prod-operate", state: "activating", active_until_ms: null, message: null, host_ids: [] };
     expect(grantStateLine(row)).toBe("Activating…");
@@ -183,6 +178,79 @@ describe("transports", () => {
     expect(routeSynced(recordOverview({ central_mode: true }), HOST)).toBe(false);
     expect(routeSynced(recordOverview({ central_mode: true, account }), HOST)).toBe(true);
     expect(routeSynced(recordOverview({ central_mode: true, account }), null)).toBe(true);
+  });
+
+  it("says what a grant that was read says for itself: its state, or the API's sentence when it could not be checked", () => {
+    const at = new Date(2026, 9, 26, 9, 5).getTime();
+    expect(grantStateOrMessage({ state: "active", active_until_ms: at, message: null })).toBe("Active until 09:05");
+    expect(grantStateOrMessage({ state: "activating", active_until_ms: null, message: null })).toBe("Activating…");
+    expect(grantStateOrMessage({ state: "none", active_until_ms: null, message: null })).toBe("No active grant");
+    const refused = "Privileged Access Manager refused the request: quota exceeded.";
+    expect(grantStateOrMessage({ state: "error", active_until_ms: null, message: refused })).toBe(refused);
+    // An error that carries no sentence still says it could not be checked, never "No active grant".
+    expect(grantStateOrMessage({ state: "error", active_until_ms: null, message: null })).toBe("The grant could not be checked.");
+    // A row of the page and a status of the details pane both fit.
+    const row: PamGrantView = { account: null, project: "p", location: "global", entitlement: "prod-operate", state: "error", active_until_ms: null, message: refused, host_ids: [HOST] };
+    expect(grantStateOrMessage(row)).toBe(refused);
+  });
+
+  it("reads gcloud's accounts through one cache entry the editor and the page share, and reuses a minute-old answer", async () => {
+    const accounts: GcloudAccountsView = { config_found: true, active: null, accounts: [] };
+    const calls = stubBackend(async () => accounts);
+    expect(await new QueryClient().fetchQuery(gcloudAccountsQuery)).toEqual(accounts);
+    expect(calls).toEqual([["gcp_accounts", {}]]);
+    expect(gcloudAccountsQuery.queryKey).toEqual(gcloudAccountsKey);
+    // Each read checks every sign-in with Google.
+    expect(gcloudAccountsQuery.staleTime).toBe(60_000);
+    expect(gcloudAccountsQuery.retry).toBe(false);
+  });
+
+  it("reads the grants the routes need through the backend, when the section shows and every minute, but not on window focus", async () => {
+    const rows: PamGrantView[] = [
+      { account: "ops@example.com", project: "acme-prod-123456", location: "global", entitlement: "prod-operate", state: "none", active_until_ms: null, message: null, host_ids: [HOST] },
+    ];
+    const calls = stubBackend(async () => rows);
+    expect(await new QueryClient().fetchQuery(pamGrantsQuery)).toEqual(rows);
+    expect(calls).toEqual([["gcp_pam_grants", {}]]);
+    expect(pamGrantsQuery.queryKey).toEqual(pamGrantsKey);
+    expect(pamGrantsQuery.refetchInterval).toBe(60_000);
+    // A window gaining focus would cost a Google call for each entitlement that nothing asked for; a failed read waits for the next minute.
+    expect(pamGrantsQuery.refetchOnWindowFocus).toBe(false);
+    expect(pamGrantsQuery.retry).toBe(false);
+    expect(pamGrantsQuery.networkMode).toBe("always");
+  });
+
+  it("words a grant request's result in one line", () => {
+    const at = new Date(2026, 9, 25, 11, 7).getTime();
+    expect(pamStatusLine({ entitlement: "prod-admin", state: "active", active_until_ms: at, message: null })).toBe("prod-admin · active until 11:07");
+    expect(pamStatusLine({ entitlement: "prod-operate", state: "activating", active_until_ms: null, message: null })).toBe("prod-operate · activating…");
+    expect(pamStatusLine({ entitlement: null, state: "none", active_until_ms: null, message: null })).toBe("no active grant");
+    expect(pamStatusLine({ entitlement: null, state: "error", active_until_ms: null, message: "Privileged Access Manager refused the request: quota exceeded." })).toBe(
+      "Privileged Access Manager refused the request: quota exceeded.",
+    );
+    expect(pamStatusLine({ entitlement: null, state: "error", active_until_ms: null, message: null })).toBe("The grant could not be checked.");
+  });
+
+  it("turns an OS Login profile into the username to save and a note about the key", () => {
+    expect(osLoginOutcome({ account: "ops@example.com", username: "ops_example_com", key_registered: false })).toEqual({
+      username: "ops_example_com",
+      note: "This key is not registered with OS Login yet; it is registered at the first connection.",
+      error: null,
+    });
+    expect(osLoginOutcome({ account: "ops@example.com", username: "ops_example_com", key_registered: true }).note).toBeNull();
+    expect(osLoginOutcome({ account: "ops@example.com", username: null, key_registered: null })).toEqual({
+      username: null,
+      note: null,
+      error: "OS Login has no POSIX account for ops@example.com in this project; the project may not have OS Login enabled.",
+    });
+  });
+
+  it("lets the entitlements be typed with commas: the field keeps its text and the list is parsed from it", () => {
+    // A controlled input rebuilt from the parsed list would eat the comma as it is typed; the field keeps the text and parses it.
+    expect(parseEntitlements("prod-operate,")).toEqual(["prod-operate"]);
+    expect(parseEntitlements("prod-operate, prod-admin")).toEqual(["prod-operate", "prod-admin"]);
+    expect(parseEntitlements(" , prod-admin,,")).toEqual(["prod-admin"]);
+    expect(parseEntitlements("")).toEqual([]);
   });
 
   it("finds what this computer remembers of the host's last grant request", () => {

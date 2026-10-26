@@ -15,7 +15,7 @@ import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
   grantMemoryFor,
-  grantStateLine,
+  grantStateOrMessage,
   iapTarget,
   pamStatusQuery,
   transportFor,
@@ -32,8 +32,8 @@ import { ConnectionCheck } from "./ConnectionCheck";
 
 /** What the Access grant section says of the grant: the entitlement holding it and until when, or that there is none, or why it could not be read. */
 function grantLine(status: PamStatusView): string {
-  if (status.state === "error") return status.message ?? "The grant could not be checked.";
-  return `${status.entitlement ? `${status.entitlement} · ` : ""}${grantStateLine(status)}`;
+  const line = grantStateOrMessage(status);
+  return status.state === "error" || !status.entitlement ? line : `${status.entitlement} · ${line}`;
 }
 
 /**

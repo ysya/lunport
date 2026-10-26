@@ -9,8 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import type { RecordOverview } from "@/lib/records";
 import {
   fetchOsLoginProfile,
-  gcloudAccountsKey,
-  listGcloudAccounts,
+  gcloudAccountsQuery,
   newPamCheck,
   osLoginOutcome,
   pamPlaceholder,
@@ -133,8 +132,8 @@ export function IapRouteFields({
 }) {
   const patch = (changes: Partial<TransportKind>) => onChange({ ...kind, ...changes });
   const patchPam = (changes: Partial<PamCheck>) => patch({ pam: { ...(kind.pam ?? newPamCheck()), ...changes } });
-  // Each read checks every sign-in with Google, so a minute-old answer is reused across mounts, switches and window focus.
-  const accounts = useQuery({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts, retry: false, staleTime: 60_000 }).data;
+  // The Google Cloud page reads the same cache entry.
+  const accounts = useQuery(gcloudAccountsQuery).data;
   const summary = [
     kind.account ?? "gcloud's active account",
     kind.os_login ? "OS Login" : null,
