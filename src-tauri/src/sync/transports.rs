@@ -316,9 +316,10 @@ pub fn has_data(state: &SyncStateV3) -> bool {
 
 /// Saves (`Some`) or removes (`None`) the transport of `host_id`, provided `expected` is what `get` reads now: the compare-and-set the
 /// editor relies on, refused with `RepositoryError::RouteChanged` (`ROUTE_CHANGED`). In a library that uses central sync the route is
-/// the library's: a library whose writes are blocked refuses it, and the account's row is written (`write_library`), so a save must
-/// leave the Catalog room (`NO_ROOM`). Otherwise the route is saved on this device and the version raised to `STATE_VERSION`. A removal
-/// also forgets what grant requests taught this device about the host (`grant_memory`).
+/// the library's: a library whose writes are blocked refuses it, and the account's row is written (`write_library`, which leaves out a
+/// justification an earlier release kept), so a save must leave the Catalog room (`NO_ROOM`). Otherwise the route is saved on this
+/// device and the version raised to `STATE_VERSION`. A removal also forgets what grant requests taught this device about the host
+/// (`grant_memory`).
 pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
     if !records_v3::is_host_id(host_id) {
         return Err(repo::invalid("transport", host_id, "Invalid host identity."));
@@ -440,11 +441,13 @@ fn write(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, n
 }
 
 /// Writes the library's row for `host_id` (`central_library`), dirty so that the next capture publishes it, as `tunnel_rules::set`
-/// writes a rule's. The copy this device kept before the library held the route goes: the row supersedes it, and a tombstone would
-/// otherwise let it come back. A save must leave the Catalog room: at most `MAX_ROUTES` routes, counted first because the Catalog would
-/// refuse a longer list with a sentence of its own, and an encoding that fits in one record (`ensure_room`). The version is raised to
-/// `SYNC_STATE_VERSION`, which the library's rows need.
+/// writes a rule's. The row holds the route as the Catalog does, without the justification an earlier release kept in it (the editor
+/// sends such a route back as it displayed it), so what is read back is what the library publishes. The copy this device kept before the
+/// library held the route goes: the row supersedes it, and a tombstone would otherwise let it come back. A save must leave the Catalog
+/// room: at most `MAX_ROUTES` routes, counted first because the Catalog would refuse a longer list with a sentence of its own, and an
+/// encoding that fits in one record (`ensure_room`). The version is raised to `SYNC_STATE_VERSION`, which the library's rows need.
 fn write_library(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
+    let transport = transport.map(without_justification);
     let wire = wire_id(host_id);
     let key = record_key(RecordKind::Meta, &wire);
     let mut next = state.clone();
@@ -464,6 +467,16 @@ fn write_library(state: &SyncStateV3, host_id: &str, transport: Option<HostTrans
         ensure_room(&next, "transport", host_id)?;
     }
     Ok(next)
+}
+
+/// A route as the library holds it: without the justification earlier releases kept in it. The device that asked remembers that
+/// (`GrantMemory`); it never syncs (design 2026-10-26, On the wire).
+pub(crate) fn without_justification(mut route: HostTransport) -> HostTransport {
+    let TransportKind::GcpIap { pam, .. } = &mut route.kind;
+    if let Some(pam) = pam {
+        pam.justification = None;
+    }
+    route
 }
 
 /// Re-keys what this device keeps by host id to the ids `host_ids` gives the hosts (old → new), as an adoption gives the hosts it

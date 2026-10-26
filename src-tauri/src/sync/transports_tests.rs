@@ -689,3 +689,21 @@ fn a_refused_route_write_reads_as_a_sentence() {
     let saved = apply_route_change(&with_local_host(state(), HOST), HOST, &change, 1).unwrap();
     assert_eq!(refusal(apply_route_change(&saved, HOST, &change, 2).unwrap_err()), ROUTE_CHANGED);
 }
+
+/// Final review (minor): a route an earlier release saved kept the justification of its last grant request, and the host editor sends
+/// the route back as it displayed it. The library's row leaves the justification out, as the Catalog does, so the route read back after
+/// the save is the one saved, not one the next projection changes under the editor.
+#[test]
+fn the_librarys_row_leaves_out_the_justification_an_earlier_release_kept() {
+    let mut legacy = with_pam(HOST);
+    let TransportKind::GcpIap { pam: Some(pam), .. } = &mut legacy.kind else { unreachable!("with_pam has a PAM check") };
+    pam.justification = Some("restart app-api".into());
+    let kept = saved_on_this_device(&central_with_host(HOST), &legacy);
+    assert_eq!(get(&kept, HOST), Some(legacy.clone()), "this device's own copy keeps it");
+    let edited = with_zone(legacy.clone(), "asia-east1-c");
+    let saved = set(&kept, HOST, Some(&legacy), Some(edited), 2).unwrap();
+    assert_eq!(get(&saved, HOST), Some(with_zone(with_pam(HOST), "asia-east1-c")));
+    let row = &saved.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &wire_id(HOST))];
+    assert_eq!(row.record.payload["transport"]["kind"]["pam"]["justification"], serde_json::Value::Null);
+    assert!(synced(&saved, HOST) && saved.local.transports.is_empty());
+}
