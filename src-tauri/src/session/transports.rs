@@ -3,19 +3,24 @@
 //! and removed with its host (`records_host_create`, `records_host_update`, `records_host_delete`; design 2026-10-26, Commands);
 //! connections read it through `RecordDirectory`. `gcp_accounts` lists the Google accounts gcloud holds credentials for on this computer
 //! and whether each sign-in works; `gcp_pam_grants` lists the grants the saved routes require, one row per entitlement, and
-//! `transports_pam_request` requests the entitlement the person chose.
+//! `transports_pam_request` requests the entitlement the person chose. `transports_iap_probe` checks a host's route (design 2026-10-26,
+//! Check through IAP): it opens a tunnel to the route's instance on the host's port and closes it again, with no grant request, no
+//! sign-in prompt and no SSH.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::Manager;
 
+use crate::connection_probe::{BUSY, CHECKS};
 use crate::gcp::auth;
+use crate::gcp::iap::{self, IapError};
 use crate::gcp::pam;
 use crate::gcp::rest::GcpClient;
+use crate::ssh::IapTarget;
 use crate::state::AppState;
 use crate::sync::record_repository as repo;
 use crate::sync::records_v3::{self, SyncStateV3};
@@ -337,6 +342,102 @@ pub async fn gcloud_accounts(dir: PathBuf, tokens: Arc<dyn auth::TokenSource>, b
     Ok(GcloudAccountsView { config_found, active, accounts })
 }
 
+/// What **Check through IAP** learns of a host's route (design 2026-10-26, Check through IAP): `reachable` (the relay connected to the
+/// instance's port), `denied` (IAP, or the Google sign-in, refused this computer's account) or `unreachable` (anything else that ended
+/// the open, running out of time included). `latency_ms` is how long the tunnel took to open, when it did; `elapsed_ms` how long the
+/// whole check took; `checked_at_ms` when it ended; `message` the sentence why, for a check that did not reach the instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct IapProbeView {
+    pub status: String,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub latency_ms: Option<u64>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub elapsed_ms: u64,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub checked_at_ms: u64,
+    pub message: Option<String>,
+}
+
+/// What a refusal by IAP itself says, and what a route that requires a grant adds to it.
+const IAP_REFUSED: &str = "IAP refused this Google account.";
+const REQUEST_A_GRANT: &str = "Request a grant, then check again.";
+/// What a check says when the tunnel did not open in time.
+const IAP_SILENT: &str = "IAP did not answer in time.";
+/// How long a check through IAP waits for the tunnel to open, as every call to Google is bounded.
+const IAP_CHECK_BOUND: Duration = Duration::from_secs(20);
+
+impl IapProbeView {
+    /// For a route that requires a grant, a refusal by IAP points to requesting one: a grant that ended or never came is the usual
+    /// reason IAP refuses an account that is signed in. Nothing else is touched: a sign-in that failed is not a missing grant.
+    fn pointing_to_the_grant(mut self) -> IapProbeView {
+        if self.message.as_deref() == Some(IAP_REFUSED) {
+            self.message = Some(format!("{IAP_REFUSED} {REQUEST_A_GRANT}"));
+        }
+        self
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
+/// Opens an IAP tunnel to `port` of the instance `target` names, as its account, and closes it at once, for `deadline` at most (design
+/// 2026-10-26, Check through IAP). `iap::open` returns once the relay answers the connect with success, that is once the relay has
+/// reached the instance's port, so that is `reachable`. The relay refusing the handshake with 403 or closing the tunnel with 4033 "not
+/// authorized" is IAP refusing the account, and a sign-in that gives no token is `denied` too, with the sentence of why; every other
+/// end of the open, and the deadline, is `unreachable` with its text. Nothing is asked of the person (no grant, no sign-in) and nothing
+/// is sent through the tunnel: no SSH, so no host key and no login.
+pub async fn probe_iap(target: &IapTarget, port: u16, tokens: Arc<dyn auth::TokenSource>, deadline: Duration) -> IapProbeView {
+    let started = Instant::now();
+    let opened = tokio::time::timeout(deadline, iap::open(target.endpoint(port), tokens, target.account.clone(), auth::user_agent())).await;
+    let opening = started.elapsed();
+    let (status, message) = match opened {
+        Ok(Ok(tunnel)) => {
+            drop(tunnel);
+            ("reachable", None)
+        }
+        Ok(Err(IapError::Refused { status: 403 } | IapError::Closed { code: 4033, .. })) => ("denied", Some(IAP_REFUSED.to_string())),
+        Ok(Err(IapError::Credentials(error))) => ("denied", Some(error.to_string())),
+        Ok(Err(error)) => ("unreachable", Some(error.to_string())),
+        Err(_) => ("unreachable", Some(IAP_SILENT.to_string())),
+    };
+    IapProbeView {
+        status: status.to_string(),
+        latency_ms: (status == "reachable").then(|| millis(opening)),
+        elapsed_ms: millis(started.elapsed()),
+        checked_at_ms: epoch_ms(SystemTime::now()),
+        message,
+    }
+}
+
+/// What a check of one host's route is made of.
+struct Probe {
+    target: IapTarget,
+    port: u16,
+    /// Whether the route requires a Privileged Access Manager grant, so that IAP's refusal can point to requesting one.
+    requires_grant: bool,
+}
+
+/// What a check of `host_id`'s route needs, read from one state (design 2026-10-26, Check through IAP): the instance and account the
+/// route names, as a connection takes them (`RecordDirectory`), and the port the host is saved with, its effective one, which a group
+/// may supply and a connection dials. A host whose group settings need review has no effective port to trust, so the check, like the
+/// port check, declines.
+fn probe_target(records: &SyncStateV3, host_id: &str) -> Result<Probe, String> {
+    let TransportKind::GcpIap { project, zone, instance, interface, account, pam, .. } = transports::get(records, host_id).ok_or("This host has no transport.")?.kind;
+    let host = repo::get_host(records, host_id).map_err(|error| error.to_string())?;
+    if host.group_error.is_some() {
+        return Err("Review the host’s group settings before checking it through IAP.".into());
+    }
+    Ok(Probe { target: IapTarget { project, zone, instance, interface, account, url_root: None }, port: host.effective_payload.port, requires_grant: pam.is_some() })
+}
+
+/// One of the places for connection checks at once, which the port check takes from too; with none free, the port check's sentence.
+fn check_place() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+    CHECKS.try_acquire().map_err(|_| BUSY.to_string())
+}
+
 /// The form's rules, the transport editor's: whole minutes from 1 to 480, a justification with something in it, on one line, at most 512
 /// characters. The sentences are the editor's too.
 fn checked_request(justification: &str, duration_secs: u32) -> Result<String, String> {
@@ -368,6 +469,13 @@ fn transport_of(app: &tauri::AppHandle, host_id: &str) -> Result<HostTransport, 
     let core = state.sync.core.lock().unwrap();
     let records = core.records.as_ref().ok_or("The saved records are unavailable.")?;
     transports::get(records, host_id).ok_or_else(|| "This host has no transport.".to_string())
+}
+
+/// What a check of `host_id`'s route needs, from the saved records (Records workspace only).
+fn probe_target_of(app: &tauri::AppHandle, host_id: &str) -> Result<Probe, String> {
+    let state = app.state::<AppState>();
+    let core = state.sync.core.lock().unwrap();
+    probe_target(core.records.as_ref().ok_or("The saved records are unavailable.")?, host_id)
 }
 
 /// The routes of the saved hosts (Records workspace only): what the Access grants section is made of.
@@ -496,6 +604,21 @@ pub async fn gcp_pam_grants(app: tauri::AppHandle, window: tauri::WebviewWindow)
     .map_err(|error| error.to_string())?
 }
 
+/// Checks whether this computer reaches the instance `host_id`'s route names, on the host's port, through IAP with its Google sign-in
+/// (design 2026-10-26, Check through IAP): a tunnel is opened as the route's account and closed at once (`probe_iap`), for 20 s at most
+/// and among the four connection checks at once the port check shares. It never requests a grant or asks for a sign-in, and attempts
+/// no SSH. A refusal by IAP on a route that requires a grant says to request one.
+#[tauri::command]
+pub async fn transports_iap_probe(app: tauri::AppHandle, window: tauri::WebviewWindow, host_id: String) -> Result<IapProbeView, String> {
+    main_only(&window)?;
+    checked_host_id(&host_id)?;
+    let tokens = app.state::<AppState>().gcp.tokens();
+    let probe = tauri::async_runtime::spawn_blocking(move || probe_target_of(&app, &host_id)).await.map_err(|error| error.to_string())??;
+    let _place = check_place()?;
+    let view = probe_iap(&probe.target, probe.port, tokens, IAP_CHECK_BOUND).await;
+    Ok(if probe.requires_grant { view.pointing_to_the_grant() } else { view })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,9 +626,11 @@ mod tests {
     use crate::gcp::oslogin::{LoginProfile, PosixAccount};
     use crate::gcp::pam::{self, Grant};
     use crate::gcp::rest::{GcpClient, GcpError};
+    use crate::gcp::testing::{Behaviour, FakeRelay};
     use crate::sync::record_commands;
+    use crate::sync::record_groups;
     use crate::sync::record_repository as repo;
-    use crate::sync::records_v3::{HostPayload, HostScope, SyncStateV3};
+    use crate::sync::records_v3::{GroupDefaults, GroupPayload, HostPayload, HostScope, SyncStateV3};
     use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
@@ -1252,5 +1377,278 @@ mod tests {
                 line("c@example.com", "signed_in", None),
             ]
         );
+    }
+
+    /// A TCP server that echoes everything, on the test's runtime: the instance's port, which the fake relay connects to (the one the
+    /// `gcp::iap` tests use).
+    async fn echo_server() -> u16 {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (mut read, mut write) = socket.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// The instance of `iap()` as the account `account` reaches it, through `relay`: nothing in these tests may reach Google's own relay.
+    fn iap_target(relay: &FakeRelay, account: Option<&str>) -> IapTarget {
+        IapTarget {
+            project: "eng-dev-396409".into(),
+            zone: "asia-east1-b".into(),
+            instance: "jumpbox".into(),
+            interface: "nic0".into(),
+            account: account.map(str::to_string),
+            url_root: Some(relay.url_root.clone()),
+        }
+    }
+
+    /// The token the fake relay accepts.
+    fn tokens() -> Arc<dyn TokenSource> {
+        Arc::new(StaticToken(TOKEN.into()))
+    }
+
+    /// Design 2026-10-26 (Check through IAP): the check opens a tunnel and closes it. A relay that connects is `reachable`; one that
+    /// refuses the handshake with 403, or closes the tunnel with 4033 instead of announcing the session, is IAP refusing the account
+    /// (`denied`); any other end of the open, 4003 "failed to connect to backend" for one, is `unreachable` with the relay's reason.
+    /// (The Close that ends the open is `CloseAtOpen`: `CloseAfter` comes after the announcement, when the open is over, see below.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_probe_reports_reachable_denied_and_unreachable() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let target = iap_target(&relay, None);
+        let began = ms(SystemTime::now());
+        let reachable = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!((reachable.status.as_str(), reachable.message.as_deref()), ("reachable", None));
+        assert!(reachable.latency_ms.is_some_and(|latency| latency <= reachable.elapsed_ms), "{reachable:?}");
+        assert!(reachable.checked_at_ms >= began && reachable.checked_at_ms <= ms(SystemTime::now()), "{reachable:?}");
+        assert_eq!(relay.connects(), 1);
+
+        relay.set(Behaviour::RefuseHandshake(403));
+        let refused = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!((refused.status.as_str(), refused.latency_ms, refused.message.as_deref()), ("denied", None, Some("IAP refused this Google account.")));
+
+        relay.set(Behaviour::CloseAtOpen(4033, "not authorized"));
+        let unauthorized = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!((unauthorized.status.as_str(), unauthorized.latency_ms, unauthorized.message.as_deref()), ("denied", None, Some("IAP refused this Google account.")));
+
+        relay.set(Behaviour::CloseAtOpen(4003, "failed to connect to backend"));
+        let unreachable = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!(
+            (unreachable.status.as_str(), unreachable.latency_ms, unreachable.message.as_deref()),
+            ("unreachable", None, Some("the relay closed the tunnel (4003: failed to connect to backend)"))
+        );
+
+        // Anything else that ends the open says what it was.
+        relay.set(Behaviour::RefuseHandshake(503));
+        let failed = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!((failed.status.as_str(), failed.message.as_deref()), ("unreachable", Some("the relay refused the WebSocket handshake with HTTP 503")));
+    }
+
+    /// The tunnel is asked for the port the check is given, on the instance the target names: read off the connect request a relay
+    /// that hangs up receives (the fake relay answers any port, so it cannot tell). A relay that hangs up is `unreachable`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_probe_asks_the_relay_for_the_given_port_of_the_targets_instance() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url_root = format!("ws://127.0.0.1:{}/v4", listener.local_addr().unwrap().port());
+        let request_line = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut seen, mut buffer) = (Vec::new(), [0u8; 1024]);
+            while !seen.windows(4).any(|end| end == b"\r\n\r\n") {
+                match socket.read(&mut buffer).await.unwrap() {
+                    0 => break,
+                    count => seen.extend_from_slice(&buffer[..count]),
+                }
+            }
+            String::from_utf8_lossy(&seen).lines().next().unwrap_or_default().to_string()
+        });
+        let target = IapTarget {
+            project: "eng-dev-396409".into(),
+            zone: "asia-east1-b".into(),
+            instance: "jumpbox".into(),
+            interface: "nic1".into(),
+            account: None,
+            url_root: Some(url_root),
+        };
+        let view = probe_iap(&target, 2222, tokens(), Duration::from_secs(5)).await;
+        assert_eq!(view.status, "unreachable", "{view:?}");
+        let line = request_line.await.unwrap();
+        assert!(line.starts_with("GET /v4/connect?"), "{line}");
+        for wanted in ["project=eng-dev-396409", "port=2222", "zone=asia-east1-b", "instance=jumpbox", "interface=nic1"] {
+            assert!(line.contains(wanted), "{wanted} in {line}");
+        }
+    }
+
+    /// "Reachable" is the relay having connected to the instance's port, which is when it announces the session. A Close that follows
+    /// the announcement (`CloseAfter`) ends a tunnel that was open; it does not undo the connection the check is about.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_after_the_session_is_announced_does_not_undo_the_connection() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        relay.set(Behaviour::CloseAfter(0, 4033, "not authorized"));
+        let view = probe_iap(&iap_target(&relay, None), 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!((view.status.as_str(), view.message.as_deref()), ("reachable", None));
+    }
+
+    /// The check opens the tunnel as the account the route names (none: gcloud's active account, as a connection asks), with Lunport's
+    /// user agent, and leaves nothing open at the relay: the tunnel is closed at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_probe_opens_the_tunnel_as_the_routes_account_and_closes_it() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let named = Arc::new(Answers::ok());
+        let view = probe_iap(&iap_target(&relay, Some("frank@retower.io")), 22, named.clone(), Duration::from_secs(5)).await;
+        assert_eq!(view.status, "reachable");
+        assert_eq!(named.asked(), [Some("frank@retower.io".to_string())]);
+        let user_agent = relay.last_headers().into_iter().find(|(name, _)| name == "user-agent").map(|(_, value)| value);
+        assert_eq!(user_agent, Some(auth::user_agent()));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while relay.open_connections() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(relay.open_connections(), 0, "the relay saw the socket go");
+        let active = Arc::new(Answers::ok());
+        probe_iap(&iap_target(&relay, None), 22, active.clone(), Duration::from_secs(5)).await;
+        assert_eq!(active.asked(), [None], "a route that names no account asks for gcloud's active one");
+        assert_eq!(relay.connects(), 2);
+    }
+
+    /// A sign-in that gives no token is `denied` with the sentence the person is used to (`gcloud auth login <account>`), and the relay
+    /// is never asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sign_in_that_gives_no_token_is_denied_with_its_sentence() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let expired = AuthError::SignInExpired { account: "frank@retower.io".into() };
+        let sentence = expired.to_string();
+        let view = probe_iap(&iap_target(&relay, Some("frank@retower.io")), 22, Arc::new(Answers::err(expired)), Duration::from_secs(5)).await;
+        assert_eq!((view.status.as_str(), view.latency_ms, view.message), ("denied", None, Some(sentence)));
+        assert_eq!(relay.connects(), 0, "without a token nothing reached the relay");
+    }
+
+    /// The check is bounded: a relay that opens the WebSocket and never announces the session is `unreachable` once the time is up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_that_does_not_answer_is_unreachable_when_the_time_is_up() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        relay.set(Behaviour::NeverSucceed);
+        let started = Instant::now();
+        let view = probe_iap(&iap_target(&relay, None), 22, tokens(), Duration::from_millis(300)).await;
+        let waited = started.elapsed();
+        assert_eq!((view.status.as_str(), view.latency_ms, view.message.as_deref()), ("unreachable", None, Some("IAP did not answer in time.")));
+        assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(2), "bounded by the deadline asked for: {waited:?}");
+        assert!(view.elapsed_ms >= 300, "{view:?}");
+    }
+
+    /// What the pane reads, whichever way the check ended, and never the token the tunnel was opened with.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_view_carries_what_the_pane_reads_and_no_token() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        for behaviour in [Behaviour::Bridge, Behaviour::RefuseHandshake(403), Behaviour::CloseAtOpen(4003, "failed to connect to backend"), Behaviour::NeverSucceed] {
+            relay.set(behaviour);
+            let view = probe_iap(&iap_target(&relay, None), 22, tokens(), Duration::from_millis(500)).await;
+            let wire = serde_json::to_value(&view).unwrap();
+            let keys: Vec<&str> = wire.as_object().unwrap().keys().map(String::as_str).collect();
+            assert_eq!(keys, ["checked_at_ms", "elapsed_ms", "latency_ms", "message", "status"], "{behaviour:?}");
+            assert!(wire["elapsed_ms"].is_u64() && wire["checked_at_ms"].is_u64(), "{wire}");
+            let text = wire.to_string();
+            assert!(!text.contains(TOKEN) && !format!("{view:?}").contains(TOKEN), "{behaviour:?}: {text}");
+        }
+        let offline = Arc::new(Answers::err(AuthError::Network("offline".into())));
+        let view = probe_iap(&iap_target(&relay, None), 22, offline, Duration::from_millis(500)).await;
+        assert!(!serde_json::to_string(&view).unwrap().contains(TOKEN));
+    }
+
+    /// For a route that requires a grant, IAP's refusal points to requesting one: a grant that ended or never came is the usual reason
+    /// a signed-in account is refused. A sign-in that failed is not a missing grant, and nothing but a refusal gets the pointer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_refusal_by_iap_points_to_requesting_a_grant() {
+        let relay = FakeRelay::start(echo_server().await, TOKEN);
+        let target = iap_target(&relay, None);
+        relay.set(Behaviour::RefuseHandshake(403));
+        let refused = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!(refused.clone().pointing_to_the_grant().message.as_deref(), Some("IAP refused this Google account. Request a grant, then check again."));
+        relay.set(Behaviour::CloseAtOpen(4033, "not authorized"));
+        let unauthorized = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!(unauthorized.pointing_to_the_grant().message.as_deref(), Some("IAP refused this Google account. Request a grant, then check again."));
+
+        let expired = probe_iap(&target, 22, Arc::new(Answers::err(AuthError::SignInExpired { account: "frank@retower.io".into() })), Duration::from_secs(5)).await;
+        assert_eq!(expired.clone().pointing_to_the_grant(), expired, "a sign-in that failed is not a missing grant");
+        relay.set(Behaviour::CloseAtOpen(4003, "failed to connect to backend"));
+        let unreachable = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!(unreachable.clone().pointing_to_the_grant(), unreachable);
+        relay.set(Behaviour::Bridge);
+        let reachable = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
+        assert_eq!(reachable.clone().pointing_to_the_grant(), reachable);
+    }
+
+    /// A library with host `HOST` saved with `port` and `route` as its route.
+    fn saved_with(port: u16, route: HostTransport) -> SyncStateV3 {
+        let host: HostPayload = serde_json::from_value(json!({"schema": 2, "alias": "prod-jump", "hostname": "prod-jump.example.com", "port": port, "auth": "password"})).unwrap();
+        let saved = repo::create_host(&state(), HOST, HostScope::Local, host, 1).unwrap();
+        transports::set(&saved, HOST, None, Some(route), 2).unwrap()
+    }
+
+    /// The tunnel goes to the instance the route names, as the account it names, on the port the host is saved with, which a connection
+    /// dials too; a route with a grant check says so, so that a refusal can point to it.
+    #[test]
+    fn a_check_goes_to_the_routes_instance_on_the_hosts_port() {
+        let saved = saved_with(2222, pam_route(HOST, Some("frank@retower.io"), &["prod-operate"]));
+        let probe = probe_target(&saved, HOST).unwrap();
+        let instance = |account: Option<&str>| IapTarget {
+            project: "eng-dev-396409".into(),
+            zone: "asia-east1-b".into(),
+            instance: "jumpbox".into(),
+            interface: "nic0".into(),
+            account: account.map(str::to_string),
+            url_root: None,
+        };
+        assert_eq!(probe.target, instance(Some("frank@retower.io")));
+        assert_eq!((probe.port, probe.requires_grant), (2222, true));
+        let plain = probe_target(&saved_with(22, iap()), HOST).unwrap();
+        assert_eq!((plain.target, plain.port, plain.requires_grant), (instance(None), 22, false));
+        // The endpoint it makes carries that port, and no URL root of a fake.
+        let endpoint = probe.target.endpoint(probe.port);
+        assert_eq!((endpoint.port, endpoint.url_root), (2222, None));
+    }
+
+    /// A port the host's group supplies is the effective one; a group that cannot be resolved leaves no effective port, so the check
+    /// refuses to guess one (the port check refuses in the same case).
+    #[test]
+    fn a_port_the_hosts_group_supplies_is_the_one_checked() {
+        let group = "00000000000000a1";
+        let defaults = GroupDefaults { port: Some(2200), ..GroupDefaults::default() };
+        let payload = GroupPayload { schema: 1, name: "Prod".into(), parent_id: None, defaults };
+        let grouped = record_groups::create_group(&state(), group, HostScope::Local, payload, true, 1).unwrap();
+        let host: HostPayload = serde_json::from_value(json!({"schema": 3, "alias": "prod-jump", "hostname": "prod-jump.example.com", "port": 22, "auth": "password", "group_id": group, "inherit": ["port"]})).unwrap();
+        let saved = repo::create_host(&grouped, HOST, HostScope::Local, host, 2).unwrap();
+        let saved = transports::set(&saved, HOST, None, Some(iap()), 3).unwrap();
+        assert_eq!(probe_target(&saved, HOST).unwrap().port, 2200, "the group's port, not the 22 the host itself holds");
+        let mut broken = saved.clone();
+        broken.local.groups.clear();
+        assert_eq!(probe_target(&broken, HOST).err(), Some("Review the host’s group settings before checking it through IAP.".to_string()));
+    }
+
+    /// A host with no route has no tunnel to check; a route whose host is gone has no port to check.
+    #[test]
+    fn a_host_without_a_route_or_a_route_without_a_host_has_nothing_to_check() {
+        let host: HostPayload = serde_json::from_value(json!({"schema": 2, "alias": "prod-jump", "hostname": "prod-jump.example.com", "auth": "password"})).unwrap();
+        let plain = repo::create_host(&state(), HOST, HostScope::Local, host, 1).unwrap();
+        assert_eq!(probe_target(&plain, HOST).err(), Some("This host has no transport.".to_string()));
+        let orphan = transports::set(&state(), HOST, None, Some(iap()), 1).unwrap();
+        assert!(probe_target(&orphan, HOST).is_err());
+    }
+
+    /// The check takes one of the four places the port check takes from, and the port check's sentence says when none is free.
+    #[test]
+    fn a_check_through_iap_shares_the_port_checks_four_places() {
+        let all_four = CHECKS.try_acquire_many(4).expect("no check is running in a test");
+        assert_eq!(check_place().err(), Some("Four connection checks are already running. Try again shortly.".to_string()));
+        drop(all_four);
+        let first = check_place().expect("a place is free again");
+        let rest = CHECKS.try_acquire_many(3).expect("one place is taken, three are free");
+        assert!(check_place().is_err(), "the fourth place was the check's own");
+        drop((first, rest));
+        assert_eq!(CHECKS.available_permits(), 4);
     }
 }
