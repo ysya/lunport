@@ -1,3 +1,4 @@
+import { queryOptions } from "@tanstack/react-query";
 import { tauriInvoke } from "./ipc";
 import type { HostPayload, RecordHostView, RecordOverview } from "./records";
 import type { HostTransport } from "@/bindings/HostTransport";
@@ -20,6 +21,19 @@ export const deleteTransport = (expected: HostTransport) => tauriInvoke<RecordOv
 export const fetchOsLoginProfile = (account: string | null, project: string, keyId: string | null) =>
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
 export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
+/**
+ * A host's Access grant as the details pane keeps it: read when the pane opens and again every minute while it stays open. Not retried
+ * (the next minute reads it again), and read even when the webview thinks it is offline, since the answer comes from this app's
+ * backend, which says in its own sentence when Google cannot be reached.
+ */
+export const pamStatusQuery = (hostId: string) =>
+  queryOptions({
+    queryKey: ["gcp", "pam-status", hostId],
+    queryFn: () => fetchPamStatus(hostId),
+    refetchInterval: 60_000,
+    retry: false,
+    networkMode: "always",
+  });
 /** Requests a grant for the host's route and waits for it: on `entitlement`, which the route must list, else on the first it lists. */
 export const requestPamGrant = (hostId: string, justification: string, durationSecs: number, entitlement?: string) =>
   tauriInvoke<PamStatusView>("transports_pam_request", {

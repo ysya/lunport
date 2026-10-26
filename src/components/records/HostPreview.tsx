@@ -1,19 +1,78 @@
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRight,
   ArrowRight,
+  Cloud,
   KeyRound,
+  LockKeyhole,
   Pencil,
   ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
+import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
-import { transportFor, transportLabel } from "@/lib/transports";
+import {
+  grantMemoryFor,
+  grantStateLine,
+  iapTarget,
+  pamStatusQuery,
+  transportFor,
+  type GrantMemoryView,
+  type HostTransport,
+  type PamStatusView,
+} from "@/lib/transports";
+import { GrantRequestDialog } from "./GrantRequestDialog";
 import { groupPath } from "./group-tree";
 import { readinessLabel } from "./HostList";
 import { DetailPane } from "./DetailPane";
 import { KnownHostsManager } from "./KnownHostsManager";
 import { ConnectionCheck } from "./ConnectionCheck";
+
+/** What the Access grant section says of the grant: the entitlement holding it and until when, or that there is none, or why it could not be read. */
+function grantLine(status: PamStatusView): string {
+  if (status.state === "error") return status.message ?? "The grant could not be checked.";
+  return `${status.entitlement ? `${status.entitlement} · ` : ""}${grantStateLine(status)}`;
+}
+
+/**
+ * A route's Privileged Access Manager grant as it stands now (design 2026-10-26, Host list and details): read when the pane opens and
+ * every minute, with Request grant…, which is off while a grant is active or activating. Mount it for one host at a time (key it).
+ */
+function AccessGrant({ transport, alias, memory }: { transport: HostTransport; alias: string; memory: GrantMemoryView | null }) {
+  const [requesting, setRequesting] = useState(false);
+  const client = useQueryClient();
+  const query = pamStatusQuery(transport.host_id);
+  const read = useQuery(query);
+  // The latest read failing speaks for the grant, whatever an earlier read found.
+  const status = read.isError ? null : (read.data ?? null);
+  const held = status?.state === "active" || status?.state === "activating";
+  return (
+    <div className="library-preview-section">
+      <h3>
+        <LockKeyhole className="size-3.5" />
+        Access grant
+      </h3>
+      <p className={held ? "text-primary" : undefined}>
+        {revealHidden(status ? grantLine(status) : read.isError ? errorMessage(read.error) : "Checking the grant…")}
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">Required: {revealHidden(transport.kind.pam?.entitlements.join(", ") ?? "")}</p>
+      <Button variant="outline" size="sm" className="mt-3" disabled={held} onClick={() => setRequesting(true)}>
+        Request grant…
+      </Button>
+      {requesting && (
+        <GrantRequestDialog
+          transport={transport}
+          alias={alias}
+          memory={memory}
+          onClose={() => setRequesting(false)}
+          onRequested={(view) => client.setQueryData(query.queryKey, view)}
+        />
+      )}
+    </div>
+  );
+}
 
 export function HostPreview({
   host,
@@ -43,7 +102,14 @@ export function HostPreview({
     <DetailPane itemId={host.id} title="Connection details" label="Host details" close={close}>
         <h2>{revealHidden(host.payload.alias)}</h2>
         <p className="library-preview-address">
-          {revealHidden(payload.hostname)}
+          {transport ? (
+            <>
+              <Cloud className="mr-1.5 inline size-3.5 align-[-2px]" aria-hidden="true" />
+              {revealHidden(iapTarget(transport.kind))}
+            </>
+          ) : (
+            revealHidden(payload.hostname)
+          )}
         </p>
         <div className="library-preview-buttons">
           <Button disabled={!ready || busy} onClick={connect}>
@@ -75,8 +141,18 @@ export function HostPreview({
         <div className="library-preview-section">
           <h3>Connection</h3>
           <dl>
-            {field("Address", payload.hostname, true)}
-            {transport && field("Connect through", transportLabel(transport))}
+            {transport ? (
+              <>
+                {field("Connect via", "Google Cloud IAP")}
+                {field("Instance", `${transport.kind.instance} · ${transport.kind.zone}`, true)}
+                {field("Project", transport.kind.project, true)}
+                {field("Google account", transport.kind.account ?? "gcloud's active account")}
+                {(transport.kind.os_login || transport.kind.pam) &&
+                  field("Checks", [transport.kind.os_login ? "OS Login" : null, transport.kind.pam ? "PAM grant" : null].filter(Boolean).join(" · "))}
+              </>
+            ) : (
+              field("Address", payload.hostname, true)
+            )}
             {field("Username", payload.user || "Terminal default", true)}
             {field("Port", String(payload.port), true)}
             {field(
@@ -108,7 +184,10 @@ export function HostPreview({
             </p>
           )}
         </div>
-        <ConnectionCheck host={host} />
+        {transport?.kind.pam && (
+          <AccessGrant key={host.id} transport={transport} alias={host.payload.alias} memory={grantMemoryFor(overview, host.id)} />
+        )}
+        <ConnectionCheck host={host} transport={transport} />
         {!!host.payload.tags.length && (
           <div className="library-preview-section">
             <h3>Tags</h3>

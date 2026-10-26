@@ -135,8 +135,8 @@ describe("Google Cloud IAP transports", () => {
     );
     expect(editor).not.toContain("Connect through");
     const preview = render(<HostPreview host={host} overview={overview} connect={() => {}} edit={() => {}} close={() => {}} busy={false} />);
-    expect(preview).toContain("Connect through");
-    expect(preview).toContain("Google Cloud IAP · eng-dev-396409 / asia-east1-b / jumpbox");
+    expect(preview).toContain("Connect via");
+    expect(preview).toContain("eng-dev-396409 / jumpbox");
     const direct = render(<HostPreview host={host} overview={recordOverview({ hosts: [host] })} connect={() => {}} edit={() => {}} close={() => {}} busy={false} />);
     expect(direct).not.toContain("Google Cloud IAP");
   });
@@ -167,10 +167,10 @@ describe("PAM grants in the Google Cloud panel", () => {
     expect(plain).not.toContain("Request grant");
   });
 
-  it("asks for a justification and a duration, prefilled from the transport", () => {
-    const defaults = grantRequestDefaults(withPam);
+  it("asks for a justification and a duration, prefilled from what this computer remembers", () => {
+    const defaults = grantRequestDefaults(withPam, { host_id: HOST, justification: "restart app-api", duration_secs: 1800 });
     expect(defaults).toEqual({ justification: "restart app-api", minutes: "30" });
-    expect(grantRequestDefaults(iap)).toEqual({ justification: "", minutes: "30" });
+    expect(grantRequestDefaults(iap, null)).toEqual({ justification: "", minutes: "30" });
     expect(grantRequestReady("restart app-api", "30")).toBe(true);
     for (const [justification, minutes] of [["", "30"], ["   ", "30"], ["x", "0"], ["x", "481"], ["x", "abc"], ["x", "30.5"], ["restart\tapp-api", "30"], ["two\nlines", "30"]]) {
       expect(grantRequestReady(justification, minutes), `${justification}/${minutes}`).toBe(false);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { QueryClient } from "@tanstack/react-query";
 import { stubBackend } from "./test-ipc";
 import type { RecordOverview } from "./records";
 import { recordOverview } from "@/components/records/fixtures";
@@ -12,6 +13,7 @@ import {
   listPamGrants,
   newIapTransport,
   pamPlaceholder,
+  pamStatusQuery,
   probeIap,
   requestPamGrant,
   routeSynced,
@@ -137,6 +139,15 @@ describe("transports", () => {
     ]);
     // Without an entitlement the argument is left out, not sent as undefined or null: the backend then asks for the first one.
     expect(Object.keys(calls[0][1] as object)).toEqual(["hostId", "justification", "durationSecs"]);
+  });
+
+  it("reads a host's grant through the backend, apart for each host, and again every minute", async () => {
+    const view: PamStatusView = { entitlement: "prod-operate", state: "active", active_until_ms: 1_700_000_000_000, message: null };
+    const calls = stubBackend(async () => view);
+    expect(await new QueryClient().fetchQuery(pamStatusQuery(HOST))).toEqual(view);
+    expect(calls).toEqual([["transports_pam_status", { hostId: HOST }]]);
+    expect(pamStatusQuery(HOST).queryKey).not.toEqual(pamStatusQuery("0000000000000002").queryKey);
+    expect(pamStatusQuery(HOST).refetchInterval).toBe(60_000);
   });
 
   it("names a route's target as project / instance", () => {
