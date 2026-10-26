@@ -29,9 +29,9 @@ pub struct GrantNeed {
     pub location: String,
     pub entitlement: String,
     pub entitlements: Vec<String>,
-    /// The transport's stored duration, in seconds.
+    /// The length offered, in seconds: what this computer last asked for on the host, else the route's own default.
     pub duration_secs: u32,
-    /// The transport's last justification, offered again.
+    /// The justification offered again: what this computer last gave for the host; none for a host it never asked a grant for.
     pub justification: Option<String>,
 }
 

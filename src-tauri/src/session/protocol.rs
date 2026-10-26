@@ -257,8 +257,9 @@ pub struct Question {
     pub deadline_ms: Option<u64>,
 }
 
-/// What a `QuestionKind::Grant` question asks about: the grant a connection needs, with the transport's stored duration and last
-/// justification to prefill the window. It travels as the question's `text` (JSON) and, with the `kind` word `grant`, in `AuthRequest`.
+/// What a `QuestionKind::Grant` question asks about: the grant a connection needs, with the length and justification to prefill the
+/// window (what this computer last asked for on the host, else the route's default length and no justification). It travels as the
+/// question's `text` (JSON) and, with the `kind` word `grant`, in `AuthRequest`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
@@ -284,8 +285,8 @@ impl GrantPrompt {
     }
 }
 
-/// The longest grant the window lets a person ask for, in minutes, and the longest justification: the transport record's own limits
-/// (`sync::transports`), so that what the person answers can be remembered as the transport's defaults.
+/// The longest grant the window lets a person ask for, in minutes, and the longest justification: the limits of the grant memory
+/// (`sync::transports`), so that what the person answers can always be remembered on this computer.
 pub const MAX_GRANT_MINUTES: u32 = 480;
 pub const MAX_GRANT_JUSTIFICATION_CHARS: usize = 512;
 
@@ -395,7 +396,7 @@ mod tests {
             assert_eq!(GrantAnswer::decode(nonsense), None, "{nonsense:?}");
         }
         assert_eq!(GrantAnswer::decode(&format!("30\n{}", "x".repeat(512))).map(|answer| answer.justification.len()), Some(512));
-        // The window's limits are the transport record's, so that an answer can always be remembered as the transport's defaults.
+        // The window's limits are the grant memory's, so that an answer can always be remembered on this computer.
         assert_eq!(MAX_GRANT_MINUTES * 60, crate::sync::transports::MAX_DURATION_SECS);
         assert_eq!(MAX_GRANT_JUSTIFICATION_CHARS, crate::sync::transports::MAX_JUSTIFICATION_CHARS);
         let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };

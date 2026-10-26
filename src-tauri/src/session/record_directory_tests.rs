@@ -686,10 +686,10 @@ mod gcp_transport {
         d.with_gcp(Arc::new(Handle(Arc::clone(gcp))))
     }
 
-    /// What grant requests asked the transport to remember: `(host, justification, duration)`.
+    /// What grant requests asked this computer to remember: `(host, justification, duration)`.
     type Remembered = Arc<Mutex<Vec<(String, String, u32)>>>;
 
-    /// `directory` that also records what a grant request asked the transport to remember.
+    /// `directory` that also records what a grant request asked this computer to remember.
     fn directory_with_memory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> (RecordDirectory, Remembered) {
         let remembered = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&remembered);
@@ -877,6 +877,50 @@ mod gcp_transport {
         // Automation (an MCP request, the verification probe) gets the refusal, never a question.
         assert_eq!(error.for_automation(), DirectoryError::Denied(need.refusal_sentence()));
         assert_eq!(DirectoryError::Failed("x".into()).for_automation(), DirectoryError::Failed("x".into()));
+    }
+
+    /// The grant `prepare` says GATE's connection needs, with no grant in flight.
+    fn grant_needed(s: SyncStateV3) -> GrantNeed {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.grants.lock().unwrap() = vec![grant("ENDED")];
+        let d = directory(s, &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
+        *need
+    }
+
+    /// Design 2026-10-26 (Grant requests): the question a connection asks offers what this computer last asked for on the host, as the
+    /// request dialog does, not what the route holds: that justification and that length, whatever the route's default length is.
+    #[test]
+    fn the_grant_question_offers_what_this_computer_last_asked_for_on_the_host() {
+        let routed = gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam())));
+        let remembered = transports::remember_grant_request(&routed, GATE, "restart app-api", 2700, 2).unwrap();
+        let need = grant_needed(remembered);
+        assert_eq!((need.duration_secs, need.justification.as_deref()), (2700, Some("restart app-api")));
+        // The rest of the question is the route's, as before.
+        assert_eq!((need.entitlement.as_str(), need.entitlements.len(), need.project.as_str()), ("prod-operate", 2, "knowknow-prod"));
+        // The route itself keeps the default (1800 s): the memory is not part of it.
+        let TransportKind::GcpIap { pam, .. } = transports::get(&routed, GATE).unwrap().kind;
+        assert_eq!(pam.map(|pam| pam.duration_secs), Some(1800));
+    }
+
+    /// A host this computer never asked a grant for is offered the route's own default length and nothing to prefill: a justification
+    /// an earlier release left in the route is not offered (no request writes it any more), nor is another host's memory.
+    #[test]
+    fn without_a_memory_the_grant_question_offers_the_routes_default_length_and_no_justification() {
+        let mut pam = prod_pam();
+        let check = pam.as_mut().unwrap();
+        (check.duration_secs, check.justification) = (3600, Some("left by an earlier release".into()));
+        let mut s = gate_state("deploy", Some(transport("knowknow-prod", GATE, false, pam)));
+        let need = grant_needed(s.clone());
+        assert_eq!((need.duration_secs, need.justification), (3600, None));
+        // Another host's memory is that host's.
+        s = add(&s, WEB, payload("web"));
+        s = transports::set(&s, WEB, None, Some(transport("knowknow-prod", WEB, false, prod_pam())), 2).unwrap();
+        s = transports::remember_grant_request(&s, WEB, "rotate certs", 600, 3).unwrap();
+        assert!(transports::grant_memory(&s, WEB).is_some() && transports::grant_memory(&s, GATE).is_none());
+        let need = grant_needed(s);
+        assert_eq!((need.duration_secs, need.justification), (3600, None));
     }
 
     #[test]
