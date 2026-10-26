@@ -422,7 +422,7 @@ pub(super) fn prepare(
         }],
     };
     // The routes saved on this device stay there: they move into the library after the cutover.
-    let public = super::projection_local::public_rows(&next, &empty, &storage, false)?;
+    let public = super::projection_local::public_rows(&next, &empty, &storage)?;
     let catalog = public
         .iter()
         .find_map(|(_, value)| match value {

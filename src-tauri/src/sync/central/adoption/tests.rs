@@ -2330,7 +2330,7 @@ fn adopting_a_library_whose_catalog_holds_a_route_keeps_the_route() {
 }
 
 /// Design 2026-10-26 (Existing routes move in): adoption keeps the routes this device saved, and what its grant requests taught it,
-/// under the ids the merge gives their hosts. They stay this device's until the next capture publishes them.
+/// under the ids the merge gives their hosts. They stay this device's until the publish step moves them into the library (R64a).
 #[test]
 fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
     use crate::sync::{
@@ -2370,7 +2370,7 @@ fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
         assert_eq!(transports::get(&adopted, &host), None);
         assert!(
             !transports::synced(&adopted, &new_id),
-            "this device's until a capture publishes it"
+            "this device's until the publish step moves it in"
         );
         assert_eq!(transports::grant_memory(&adopted, &new_id), Some(memory.clone()));
         assert_eq!(transports::grant_memory(&adopted, &host), None);
@@ -2380,7 +2380,8 @@ fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
         );
         assert_eq!(adopted.version, transports::SYNC_STATE_VERSION);
         crate::sync::records_v3::validate_state(&adopted).unwrap();
-        // The next round's capture publishes the route; the device that published the library receives it.
+        // The next round's publish step makes the route the library's and its capture publishes it; the device that published the
+        // library receives it.
         let route = HostTransport {
             host_id: new_id.clone(),
             ..with_pam(&host)
@@ -2564,7 +2565,7 @@ fn followed_host_ids_come_from_the_rows_the_merge_rewrites() {
 }
 
 /// R22: a replacement keeps the replaced library's routes. The route of a host that survives becomes this device's own, under the
-/// host's new id, for the next capture to publish into the new library; a route whose host does not survive is gone. The merge itself
+/// host's new id, for the publish step to move into the new library (R64a); a route whose host does not survive is gone. The merge itself
 /// brings no routes (R11).
 #[test]
 fn a_replacement_keeps_the_replaced_librarys_route_of_a_surviving_host_as_this_devices_own() {
@@ -2709,7 +2710,7 @@ fn a_replacement_moves_a_collection_hosts_route_to_the_id_the_merge_wrote() {
                 ..iap(&host)
             })
         );
-        assert!(!transports::synced(&after, &merged), "this device's own until a capture publishes it");
+        assert!(!transports::synced(&after, &merged), "this device's own until the publish step moves it in");
         assert_eq!(transports::get(&after, &host), None);
         crate::sync::records_v3::validate_state(&after).unwrap();
     });

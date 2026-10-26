@@ -81,10 +81,10 @@ impl Ledger {
             })
             .collect();
         let mut local = BTreeMap::new();
-        // The ledger records the library as published, though its owner has cut over: the routes saved on this device are not in it
-        // yet, and a capture publishes them.
+        // The ledger records the library as published, though its owner has cut over: the routes saved on this device are not in it,
+        // and no capture takes them; the publish step moves them into the library (R64a).
         for (identity, data) in
-            super::projection_local::public_rows(state, &catalog, &storage, false)?
+            super::projection_local::public_rows(state, &catalog, &storage)?
         {
             let opaque = identity.opaque(keys)?;
             let hash = crypto::hash(&payload::encode(&identity, &data)?);
@@ -713,7 +713,7 @@ impl Ledger {
         let mut classifications = self.local_sources.classifications();
         classifications.extend(self.storage.clone());
         for (identity, data) in
-            super::projection_local::public_rows(state, &self.catalog, &classifications, true)?
+            super::projection_local::public_rows(state, &self.catalog, &classifications)?
         {
             let opaque = identity.opaque(keys)?;
             if !seen.insert(opaque.clone()) {
@@ -967,14 +967,16 @@ pub(super) mod tests {
         // Preserve the authenticated collection and group-order vector order exactly.
         assert_eq!(ledger.catalog.collections[0].id, "f".repeat(64));
         let rows =
-            super::super::projection_local::public_rows(&state, &ledger.catalog, &ledger.storage, true)
+            super::super::projection_local::public_rows(&state, &ledger.catalog, &ledger.storage)
                 .unwrap();
         assert!(rows
             .iter()
             .any(|(_, data)| matches!(data,Data::Catalog(c) if c==&ledger.catalog)));
     }
+    /// R64a: the initial ledger records the library as published, though its owner has cut over, and no capture takes the routes this
+    /// device saved alone: the publish step makes them the library's rows first, and the capture publishes those.
     #[test]
-    fn the_initial_ledger_records_the_library_as_published_and_a_capture_publishes_this_devices_routes() {
+    fn the_initial_ledger_records_the_library_as_published_and_a_capture_leaves_this_devices_routes_to_the_publish_step() {
         let (mut state, keys, ledger) = initial();
         let plan = Plan::current(state.local.central.clone().unwrap(), &keys).unwrap();
         for space in state.spaces.values_mut() {
@@ -986,7 +988,12 @@ pub(super) mod tests {
         let state = crate::sync::transports::tests::saved_on_this_device(&state, &route);
         assert!(records_v3::central_cutover(&state));
         assert_eq!(Ledger::initial(&plan, &state, &keys).unwrap(), ledger);
-        let changes = ledger.public_changes(&state, &keys).unwrap();
+        assert!(
+            !ledger.public_changes(&state, &keys).unwrap().iter().any(|change| matches!(change.data, Data::Catalog(_))),
+            "a capture leaves the Catalog as it is"
+        );
+        let moved = crate::sync::transports::publish_local(&state, 200).unwrap().expect("the publish step takes it: the library has its host");
+        let changes = ledger.public_changes(&moved, &keys).unwrap();
         assert!(changes.iter().any(|change| matches!(&change.data, Data::Catalog(catalog) if catalog.transports == [route.clone()])));
     }
     #[test]

@@ -449,7 +449,7 @@ pub(super) fn owned_collections(
 }
 /// The ids this merge gives the hosts that routes and grant memory name on the source (old → new): this device's own routes and, in a
 /// replacement, the replaced library's too (`transports::view`). They follow their hosts as this device's own (design 2026-10-26,
-/// Existing routes move in; R22) until a capture publishes them. Hosts are read from the rows `history` rewrites, not from the
+/// Existing routes move in; R22) until the publish step moves them into the library (R64a). Hosts are read from the rows `history` rewrites, not from the
 /// source's own tables (R24), so a route lands on exactly the id the merge writes for its host.
 pub(super) fn route_host_ids(
     package: &super::super::source_package::Package,

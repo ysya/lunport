@@ -5,6 +5,11 @@
 //! routes live in `local.transports` only, so `set` consults neither the account nor opaque shadows, and an account join leaves them
 //! alone. Saving the first local one raises the local state version to `STATE_VERSION`, which an older Lunport refuses to open.
 //!
+//! The routes a device saved alone (before its library used central sync, or with an earlier release) move into a central library by
+//! one publish step (design 2026-10-26, Existing routes move in; R64a): `local_routes` walks them, and `publish_local` makes the ones the
+//! library takes its rows. A capture never takes them; the central dispatch runs the step before its capture, once this device's rows
+//! hold the library's latest Catalog.
+//!
 //! The host editor saves a route with its host, in one edit, and deleting a host removes its route in the same edit (design 2026-10-26,
 //! Commands): `RouteChange`, `apply_route_change` and `remove_route` are what the host commands apply after the host write.
 //!
@@ -12,9 +17,11 @@
 //! `local.transport_grants` as a `GrantMemory`, under `SYNC_STATE_VERSION` (design 2026-10-26), so that requesting a grant never edits
 //! the route.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::AppError;
 
 use super::central::{
     self,
@@ -301,12 +308,75 @@ pub(crate) fn central_library(state: &SyncStateV3) -> bool {
 /// on this device alone, which simply stay there while there is no room. A Catalog that cannot be built refuses the save with its own
 /// sentence, under `field` and `id`. Removing a route or a tunnel is never checked.
 pub(crate) fn ensure_room(next: &SyncStateV3, field: &'static str, id: &str) -> Result<(), RepositoryError> {
-    let catalog = central::catalog_of(next, &Catalog::default(), false).map_err(|error| repo::invalid(field, id, &error.to_string()))?;
+    let catalog = central::catalog_of(next, &Catalog::default()).map_err(|error| repo::invalid(field, id, &error.to_string()))?;
     if catalog_fits(&catalog) {
         Ok(())
     } else {
         Err(RepositoryError::NoRoom)
     }
+}
+
+/// Where the routes saved on this device alone stand in a library that uses central sync (design 2026-10-26, Existing routes move in;
+/// Room in the Catalog; R64a, R65): what the publish step would move into the library, and which stay for want of room.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LocalRoutes {
+    /// The routes the library takes, in host-id order.
+    pub fit: Vec<HostTransport>,
+    /// The hosts whose routes stay on this device because the library has no room for them.
+    pub no_room: BTreeSet<String>,
+}
+
+/// One pass over the routes saved on this device alone (`local.transports`, keyed `meta:transport:<host id>`, so in host-id order) of a
+/// library that uses central sync. A route whose host this device does not have, or that the library holds a row for (a route, or a
+/// removed one's tombstone), is passed over and the walk goes on. Every other route joins the Catalog the library would publish, as the
+/// capture builds it from the one last read (the ledger's), while that Catalog fits: the first route that does not (one past
+/// `MAX_ROUTES`, or an encoding past one sync record) stops the walk, and it and every later route the library could have taken stay on
+/// this device for want of room. Outside a central library nothing moves.
+pub(crate) fn local_routes(state: &SyncStateV3) -> Result<LocalRoutes, AppError> {
+    let mut walk = LocalRoutes::default();
+    let Some(account) = state.account.as_ref().filter(|_| central_library(state) && !state.local.transports.is_empty()) else {
+        return Ok(walk);
+    };
+    let unread = Catalog::default();
+    let last_read = state.local.central_projection.as_ref().map_or(&unread, |ledger| &ledger.catalog);
+    let mut catalog = central::catalog_of(state, last_read)?;
+    let mut full = false;
+    for row in state.local.transports.values() {
+        let Some(route) = decode(&row.record) else { continue };
+        if account.records.contains_key(&record_key(RecordKind::Meta, &row.record.id)) || repo::get_host(state, &route.host_id).is_err() {
+            continue;
+        }
+        if !full {
+            catalog.transports.push(without_justification(route.clone()));
+            full = catalog.transports.len() > MAX_ROUTES || !catalog_fits(&catalog);
+        }
+        if full {
+            walk.no_room.insert(route.host_id);
+        } else {
+            walk.fit.push(route);
+        }
+    }
+    Ok(walk)
+}
+
+/// The publish step's move (design 2026-10-26, Existing routes move in; R64a): in a library that uses central sync whose writes are not
+/// blocked, each route `local_routes` lets in becomes the library's row (`write_library`: dirty, so the next capture publishes it, and
+/// without a justification) and leaves `local.transports`; nothing else changes. `None` when no route moves. When the step runs is its
+/// caller's to decide: the central dispatch runs it before its capture, once this device's rows hold the library's latest Catalog.
+pub(crate) fn publish_local(state: &SyncStateV3, now: u64) -> Result<Option<SyncStateV3>, AppError> {
+    if !central_library(state) || records_v3::account_writes_blocked(state) {
+        return Ok(None);
+    }
+    let fit = local_routes(state)?.fit;
+    if fit.is_empty() {
+        return Ok(None);
+    }
+    let mut next = state.clone();
+    for route in fit {
+        let host_id = route.host_id.clone();
+        next = write_library(&next, &host_id, Some(route), now).map_err(|error| AppError::Other(refusal(error)))?;
+    }
+    Ok(Some(next))
 }
 
 /// Whether the map holds anything, tombstones included: they too need the state version.

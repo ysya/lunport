@@ -2,14 +2,63 @@
 //! A caller must CAS/persist it under the single SyncCore before dispatch; no I/O or ACK here.
 use super::{
     crypto::{DeviceKeys, VaultKeys},
-    payload::{self, Data},
-    replica::Conflict,
+    payload::{self, Data, Identity},
+    projection_state::Ledger,
+    replica::{Base, Conflict, Replica},
     wire::{invalid, RecordHeader},
 };
 use crate::{
     error::AppError,
     sync::records_v3::{self, SyncStateV3},
 };
+
+/// The basis a capture holds a change of the public record `opaque` against: the remote version a pending change of it was last
+/// confirmed on, else the one this device last read into its rows (the ledger's). A change captured while the replica's current version
+/// is another becomes a conflict (`public_candidate`).
+fn basis_of<'a>(replica: &'a Replica, ledger: &'a Ledger, opaque: &str) -> Option<&'a Base> {
+    replica
+        .pending
+        .get(opaque)
+        .and_then(|pending| pending.confirmed.as_ref())
+        .or_else(|| ledger.bases.get(opaque).map(|basis| &basis.wire))
+}
+
+/// Whether this device can change the library's Catalog now without a conflict (R64a): none is held on it, and its basis
+/// (`basis_of`) is the replica's current Catalog, so the latest Catalog the pull staged has been read into this device's rows (the
+/// delta projection reads it at the end of the round that staged it). Until then a Catalog captured from those rows would be held
+/// against an older basis and conflict with the library's.
+pub(super) fn catalog_settled(state: &SyncStateV3, keys: &VaultKeys) -> Result<bool, AppError> {
+    let ledger = state.local.central_projection.as_ref().ok_or_else(invalid)?;
+    let replica = state
+        .local
+        .central
+        .as_ref()
+        .and_then(|owner| owner.replica.as_ref())
+        .ok_or_else(invalid)?;
+    let opaque = Identity {
+        kind: "meta".into(),
+        id: "catalog".into(),
+        scope: None,
+    }
+    .opaque(keys)?;
+    Ok(!replica.conflicts.contains_key(&opaque)
+        && basis_of(replica, ledger, &opaque) == replica.current.get(&opaque))
+}
+
+/// The publish step (design 2026-10-26, Existing routes move in; R64a) as a pure transition: `state` with the routes saved on this
+/// device alone that the library takes made its rows (`transports::publish_local`), or `None` when none moves. It waits while the
+/// Catalog is not settled (`catalog_settled`): while the library's latest Catalog is not yet read into this device's rows, or is in
+/// conflict. The central dispatch saves what it returns before its capture.
+pub(super) fn move_local_routes(
+    state: &SyncStateV3,
+    keys: &VaultKeys,
+    now: u64,
+) -> Result<Option<SyncStateV3>, AppError> {
+    if state.local.transports.is_empty() || !catalog_settled(state, keys)? {
+        return Ok(None);
+    }
+    crate::sync::transports::publish_local(state, now)
+}
 
 pub fn public_candidate(
     state: &SyncStateV3,
@@ -61,10 +110,7 @@ pub fn public_candidate(
         // Remote ciphertext may have advanced while the material/public cache transaction still
         // held A. Keep signed A + encrypted local B + signed C; never silently rebase B over C.
         if let Some(remote) = replica.current.get(&opaque) {
-            let basis = pending
-                .confirmed
-                .as_ref()
-                .or_else(|| ledger.bases.get(&opaque).map(|basis| &basis.wire));
+            let basis = basis_of(replica, ledger, &opaque);
             let own_source_ack =
                 basis.is_none() && ledger.own_unprojected_keyslot(before, keys, &opaque, remote)?;
             if basis != Some(remote)
@@ -546,5 +592,53 @@ pub(super) mod tests {
         assert!(public_candidate(&state, &VaultKeys::generate().unwrap(), &signer()).is_err());
         state.local.central.as_mut().unwrap().control.cutover = false;
         assert!(public_candidate(&state, &keys, &signer()).is_err());
+    }
+    /// `state` with a local-scope host `id` and an IAP route for it saved on this device alone, as 1.12 saved it.
+    fn with_local_route(state: &SyncStateV3, id: &str) -> SyncStateV3 {
+        let host: crate::sync::records_v3::HostPayload = serde_json::from_value(serde_json::json!({"schema":2,"alias":format!("jump-{id}"),"hostname":"fixture.invalid","auth":"password"})).unwrap();
+        let state = crate::sync::record_repository::create_host(state, id, HostScope::Local, host, 100).unwrap();
+        let route = serde_json::from_value(serde_json::json!({"host_id":id,"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+        crate::sync::transports::tests::saved_on_this_device(&state, &route)
+    }
+    fn catalog_identity() -> Identity {
+        Identity {
+            kind: "meta".into(),
+            id: "catalog".into(),
+            scope: None,
+        }
+    }
+    /// R64a: the publish step waits while a Catalog captured now would conflict with the library's: while the latest Catalog a pull
+    /// staged is not yet read into this device's rows, and while the Catalog is in conflict. Otherwise it moves the routes in.
+    #[test]
+    fn the_publish_step_waits_for_the_staged_catalog_to_be_read_and_while_it_is_in_conflict() {
+        use crate::sync::transports;
+        let (state, keys, _) = initial();
+        let catalog_id = catalog_identity().opaque(&keys).unwrap();
+        let (x, y) = ("0000000000000009", "000000000000000a");
+        let state = with_local_route(&state, x);
+        assert!(catalog_settled(&state, &keys).unwrap());
+        let moved = move_local_routes(&state, &keys, 200).unwrap().expect("the Catalog is settled");
+        assert!(transports::synced(&moved, x) && moved.local.transports.is_empty());
+        // Another device's Catalog, staged by a pull and not yet read into this device's rows: the basis is behind the current one.
+        let mut staged = state.clone();
+        let mut catalog = staged.local.central_projection.as_ref().unwrap().catalog.clone();
+        catalog.collections.reverse();
+        super::super::projection_delta::tests::append(&mut staged, &keys, catalog_identity(), Data::Catalog(catalog));
+        assert!(!catalog_settled(&staged, &keys).unwrap());
+        assert!(transports::publish_local(&staged, 200).unwrap().is_some(), "the basis alone holds the route back");
+        assert_eq!(move_local_routes(&staged, &keys, 200).unwrap(), None);
+        // Moving it in regardless is what the step must not do: the capture holds the Catalog against the older basis, a conflict.
+        let forced = public_candidate(&transports::publish_local(&staged, 200).unwrap().unwrap(), &keys, &signer()).unwrap();
+        let mut conflicted = with_local_route(&forced, y);
+        let replica = conflicted.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+        assert!(replica.conflicts.contains_key(&catalog_id));
+        // Held in conflict, it waits even once its basis is the current Catalog (here: the pending change confirmed on it).
+        let current = replica.current[&catalog_id].clone();
+        let replica = conflicted.local.central.as_mut().unwrap().replica.as_mut().unwrap();
+        replica.pending.get_mut(&catalog_id).unwrap().confirmed = Some(current.clone());
+        assert_eq!(basis_of(replica, conflicted.local.central_projection.as_ref().unwrap(), &catalog_id), Some(&current));
+        assert!(transports::publish_local(&conflicted, 300).unwrap().is_some(), "y could move");
+        assert!(!catalog_settled(&conflicted, &keys).unwrap());
+        assert_eq!(move_local_routes(&conflicted, &keys, 300).unwrap(), None);
     }
 }

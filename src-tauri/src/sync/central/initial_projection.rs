@@ -46,8 +46,8 @@ impl Prepared {
     }
 }
 /// The state version of an initial projection's candidate: central sync's, unless it holds what routes need, then the version of the
-/// library's route rows: the account's rows themselves (R19), the routes this device keeps for the next capture to turn into such rows,
-/// or what its grant requests taught it (R8). The initial publication requires exactly this version.
+/// library's route rows: the account's rows themselves (R19), the routes this device keeps for the publish step to turn into such rows
+/// (R64a), or what its grant requests taught it (R8). The initial publication requires exactly this version.
 pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
     if transports::needs_sync_version(candidate) || transports::has_data(candidate) {
         transports::SYNC_STATE_VERSION
@@ -57,8 +57,8 @@ pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
 }
 
 /// What this device keeps by host id, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate (R8, design
-/// 2026-10-26, Existing routes move in): its routes, which the next capture publishes while the library has their hosts, and what its
-/// grant requests taught it.
+/// 2026-10-26, Existing routes move in): its routes, which the publish step moves into the library while it has their hosts (R64a), and
+/// what its grant requests taught it.
 /// - A first publication (`host_ids` is `None`) keeps every host's id, so it keeps both as they are.
 /// - An adoption or a replacement gives the hosts new ids (`host_ids`): every route that applies on the source, a replaced library's
 ///   included (R22), follows its host as this device's own, with its grant memory; one whose host does not survive goes
@@ -625,9 +625,9 @@ pub(in crate::sync) mod tests {
     }
 
     /// Design 2026-10-26 (Existing routes move in): the first publication keeps the routes this device saved, as its own, for the
-    /// next capture to publish; the shadow, from which the delta is rebuilt, holds none (R8).
+    /// publish step to move into the library (R64a); the shadow, from which the delta is rebuilt, holds none (R8).
     #[test]
-    fn first_publication_keeps_the_devices_routes_local_for_the_next_capture() {
+    fn first_publication_keeps_the_devices_routes_local_for_the_publish_step() {
         let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
         let source = saved_on_this_device(&source, &iap(HOST));
         let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
@@ -639,7 +639,7 @@ pub(in crate::sync) mod tests {
         assert_eq!(transports::get(&projected, HOST), Some(iap(HOST)));
         assert!(
             !transports::synced(&projected, HOST),
-            "it is this device's until a capture publishes it"
+            "it is this device's until the publish step moves it in"
         );
         assert!(projected.version >= transports::STATE_VERSION);
         assert_eq!(
@@ -648,12 +648,17 @@ pub(in crate::sync) mod tests {
             "the version the initial publication requires"
         );
         records_v3::validate_state(&projected).unwrap();
+        assert_eq!(
+            transports::local_routes(&projected).unwrap().fit,
+            [iap(HOST)],
+            "the publish step takes it: the library has its host"
+        );
         let ledger = projected.local.central_projection.as_ref().unwrap();
         assert!(
-            ledger.public_changes(&projected, &keys).unwrap().iter().any(
-                |change| matches!(&change.data, Data::Catalog(catalog) if catalog.transports == [iap(HOST)])
+            !ledger.public_changes(&projected, &keys).unwrap().iter().any(
+                |change| matches!(change.data, Data::Catalog(_))
             ),
-            "the next capture publishes it: the library has its host"
+            "a capture alone leaves it out"
         );
     }
 

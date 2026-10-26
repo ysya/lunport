@@ -405,7 +405,7 @@ pub(crate) fn filled_past_the_limit_with_tunnels(mut state: SyncStateV3) -> Sync
         let id = crate::sync::tunnel_rules::wire_id(&rule.id);
         let record = Record { kind: RecordKind::Meta, id: id.clone(), version: 1, updated_at_ms: 1, device_id: state.device_id.clone(), deleted: false, payload: json!({"schema":1,"rule":rule}) };
         state.account.as_mut().unwrap().records.insert(record_key(RecordKind::Meta, &id), LocalRecord { record, seq: 0, dirty: false });
-        if !catalog_fits(&crate::sync::central::catalog_of(&state, &Catalog::default(), false).unwrap()) {
+        if !catalog_fits(&crate::sync::central::catalog_of(&state, &Catalog::default()).unwrap()) {
             return state;
         }
     }
@@ -706,4 +706,159 @@ fn the_librarys_row_leaves_out_the_justification_an_earlier_release_kept() {
     let row = &saved.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &wire_id(HOST))];
     assert_eq!(row.record.payload["transport"]["kind"]["pam"]["justification"], serde_json::Value::Null);
     assert!(synced(&saved, HOST) && saved.local.transports.is_empty());
+}
+
+// ---- The room check measures the Catalog after the save (final review, deferred Task 5 test) ----
+
+/// `state` with library tunnels added until the Catalog it publishes still fits in one sync record, but would not with what `more`
+/// adds to it: the boundary at which a room check that measured the Catalog before the save instead of after it would let the save
+/// through.
+pub(crate) fn filled_short_of(mut state: SyncStateV3, more: impl Fn(&mut crate::sync::central::payload::Catalog)) -> SyncStateV3 {
+    use crate::sync::central::{catalog_of, payload::{catalog_fits, Catalog}};
+    let fits = |state: &SyncStateV3, with_more: bool| {
+        let mut catalog = catalog_of(state, &Catalog::default()).unwrap();
+        if with_more {
+            more(&mut catalog);
+        }
+        catalog_fits(&catalog)
+    };
+    // One more library tunnel whose name is `name` characters long.
+    let tunnel = |state: &SyncStateV3, name: usize| {
+        let records = &state.account.as_ref().unwrap().records;
+        let n = records.keys().filter(|key| key.starts_with("meta:tunnel:")).count();
+        let rule: crate::sync::tunnel_rules::TunnelRule = serde_json::from_value(json!({"id":format!("{:016x}", 0x1000 + n),"name":"t".repeat(name),"host_id":HOST,
+            "forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"db.internal","target_port":5432}})).unwrap();
+        let id = crate::sync::tunnel_rules::wire_id(&rule.id);
+        let record = Record { kind: RecordKind::Meta, id: id.clone(), version: 1, updated_at_ms: 1, device_id: state.device_id.clone(), deleted: false, payload: json!({"schema":1,"rule":rule}) };
+        let mut next = state.clone();
+        next.account.as_mut().unwrap().records.insert(record_key(RecordKind::Meta, &id), LocalRecord { record, seq: 0, dirty: false });
+        next
+    };
+    while fits(&tunnel(&state, 128), true) {
+        state = tunnel(&state, 128);
+    }
+    // The shortest last tunnel that leaves no room for `more`: one byte less and `more` would still fit.
+    let name = (1..=128).find(|name| !fits(&tunnel(&state, *name), true)).expect("a tunnel of 128 leaves no room for more");
+    let state = tunnel(&state, name);
+    assert!(fits(&state, false) && !fits(&state, true), "the Catalog fits now, and would not with more");
+    state
+}
+
+// ---- The publish step (design 2026-10-26, Existing routes move in; R64a) ----
+
+/// A route as an earlier release could save it: names at their longest, the most entitlements and the justification of its last grant
+/// request inside, about 1.2 KB in the Catalog.
+fn big(host: &str) -> HostTransport {
+    HostTransport {
+        host_id: host.into(),
+        kind: TransportKind::GcpIap {
+            project: format!("p{}", "x".repeat(29)),
+            zone: format!("z{}", "x".repeat(62)),
+            instance: format!("i{}", "x".repeat(62)),
+            interface: "nic7".into(),
+            account: Some(format!("{}@{}.example.com", "a".repeat(64), "b".repeat(63))),
+            os_login: true,
+            pam: Some(PamCheck {
+                entitlements: (0..8).map(|e| format!("{}{e}", "e".repeat(62))).collect(),
+                location: format!("l{}", "x".repeat(62)),
+                duration_secs: 480 * 60,
+                justification: Some("Investigate the outage".into()),
+            }),
+        },
+    }
+}
+
+/// `state` with a host for `route` and `route` saved on this device alone, as 1.12 saved it.
+fn with_local_route(state: SyncStateV3, route: &HostTransport) -> SyncStateV3 {
+    saved_on_this_device(&with_local_host(state, &route.host_id), route)
+}
+
+fn hosts_of(routes: &[HostTransport]) -> Vec<&str> {
+    routes.iter().map(|route| route.host_id.as_str()).collect()
+}
+
+fn no_room(state: &SyncStateV3) -> Vec<String> {
+    local_routes(state).unwrap().no_room.into_iter().collect()
+}
+
+#[test]
+fn the_publish_step_makes_the_routes_the_library_takes_its_rows() {
+    let library = with_local_route(with_local_route(in_central_mode(state()), &big(A)), &iap(B));
+    let remembered = remember_grant_request(&library, A, "restart app-api", 1800, 2).unwrap();
+    assert_eq!(hosts_of(&local_routes(&remembered).unwrap().fit), [A, B], "in host-id order");
+    let moved = publish_local(&remembered, 3).unwrap().expect("both move");
+    assert!(moved.local.transports.is_empty(), "this device's copies leave");
+    assert_eq!(view(&moved), vec![without_justification(big(A)), iap(B)], "without the justification an earlier release kept");
+    assert!(synced(&moved, A) && synced(&moved, B));
+    for host in [A, B] {
+        assert!(moved.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &wire_id(host))].dirty, "for the next capture to publish");
+    }
+    assert_eq!(grant_memory(&moved, A), grant_memory(&remembered, A), "what grant requests taught this device stays");
+    assert_eq!(moved.version, SYNC_STATE_VERSION);
+    validate_state(&moved).unwrap();
+    assert_eq!(publish_local(&moved, 4).unwrap(), None, "once");
+}
+
+/// The walk passes over a route whose host this device lacks, and one the library holds or removed, and goes on to the next.
+#[test]
+fn the_publish_step_passes_over_a_route_without_its_host_or_held_by_the_library_and_goes_on() {
+    const D: &str = "0000000000000004";
+    // A's host is missing. The library holds a route of its own for B and removed C's; this device keeps a copy of each.
+    let library = in_central_mode(with_local_host(with_local_host(state(), B), C));
+    let library = set(&set(&set(&library, B, None, Some(with_zone(iap(B), "asia-east1-c")), 1).unwrap(), C, None, Some(iap(C)), 2).unwrap(), C, Some(&iap(C)), None, 3).unwrap();
+    let kept = with_local_route([iap(A), iap(B), iap(C)].iter().fold(library, |state, route| saved_on_this_device(&state, route)), &iap(D));
+    assert_eq!(hosts_of(&local_routes(&kept).unwrap().fit), [D], "the walk went on past A, B and C");
+    assert!(no_room(&kept).is_empty(), "room is not why they stay");
+    let moved = publish_local(&kept, 4).unwrap().unwrap();
+    assert!(synced(&moved, D));
+    assert_eq!(get(&moved, A), Some(iap(A)), "A's route stays this device's own");
+    assert!(!synced(&moved, A));
+    assert_eq!(get(&moved, B), Some(with_zone(iap(B), "asia-east1-c")), "the library's route for B, not this device's");
+}
+
+/// The walk stops at the first route that does not fit: that route and every later one stay, though a later, smaller one would have fit.
+#[test]
+fn the_publish_step_stops_at_the_first_route_that_does_not_fit() {
+    let kept = [iap(A), big(B), iap(C)].iter().fold(in_central_mode(state()), |state, route| with_local_route(state, route));
+    let brink = filled_short_of(kept, |catalog| {
+        catalog.transports.push(iap(A));
+        catalog.transports.push(without_justification(big(B)));
+    });
+    let mut smaller = crate::sync::central::catalog_of(&brink, &crate::sync::central::payload::Catalog::default()).unwrap();
+    smaller.transports.extend([iap(A), iap(C)]);
+    assert!(crate::sync::central::payload::catalog_fits(&smaller), "C would have fit after A");
+    assert_eq!(hosts_of(&local_routes(&brink).unwrap().fit), [A]);
+    assert_eq!(no_room(&brink), [B, C], "B does not fit, and the walk stops there");
+    let moved = publish_local(&brink, 2).unwrap().unwrap();
+    assert!(synced(&moved, A) && !synced(&moved, B) && !synced(&moved, C));
+    assert_eq!(no_room(&moved), [B, C], "they still have no room");
+}
+
+/// The walk stops at the most routes a library holds, though room is not what keeps the next one out.
+#[test]
+fn the_publish_step_stops_at_the_most_routes_a_library_holds() {
+    let others: Vec<String> = (1..MAX_ROUTES).map(|n| format!("{:016x}", 0x1000 + n)).collect();
+    let library = others.iter().fold(in_central_mode(state()), |state, host| set(&state, host, None, Some(iap(host)), 1).unwrap());
+    let kept = with_local_route(with_local_route(library, &iap(A)), &iap(B));
+    assert_eq!(hosts_of(&local_routes(&kept).unwrap().fit), [A]);
+    assert_eq!(no_room(&kept), [B]);
+    let mut more = crate::sync::central::catalog_of(&kept, &crate::sync::central::payload::Catalog::default()).unwrap();
+    more.transports.extend([iap(A), iap(B)]);
+    assert!(serde_json::to_vec(&more).unwrap().len() < crate::sync::central::wire::MAX_PLAINTEXT_BYTES, "room is not what keeps B out");
+    let moved = publish_local(&kept, 2).unwrap().unwrap();
+    let library = moved.account.as_ref().unwrap().records.values().filter(|row| decode(&row.record).is_some()).count();
+    assert_eq!(library, MAX_ROUTES);
+    assert!(synced(&moved, A) && !synced(&moved, B));
+}
+
+/// Without central sync routes stay on this device by design, and a library whose writes are blocked takes none.
+#[test]
+fn the_publish_step_moves_nothing_outside_a_central_library_or_while_its_writes_are_blocked() {
+    for alone in [with_local_route(state(), &iap(A)), with_local_route(chain_account_with_host(B), &iap(A))] {
+        assert_eq!(local_routes(&alone).unwrap(), LocalRoutes::default());
+        assert_eq!(publish_local(&alone, 2).unwrap(), None);
+    }
+    let paused = blocked(with_local_route(in_central_mode(state()), &iap(A)));
+    assert_eq!(publish_local(&paused, 2).unwrap(), None);
+    assert_eq!(get(&paused, A), Some(iap(A)));
 }

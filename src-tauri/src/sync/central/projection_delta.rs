@@ -165,7 +165,8 @@ fn catalog(
     }
     state.local.tunnel_rules.clear();
     // Routes take the tunnels' path, orphans included. The library's route for a host also replaces the one this device kept alone,
-    // whether a capture published that one or it differs; what grant requests taught this device stays (`transport_grants`).
+    // whether the publish step moved that one in or the library holds another device's; what grant requests taught this device stays
+    // (`transport_grants`).
     let previous_routes: BTreeMap<_, _> = account
         .records
         .iter()
@@ -995,7 +996,7 @@ pub(super) mod tests {
     }
 
     /// Only the routes the library now holds retire this device's own: a route for a host the Catalog holds no route for stays here,
-    /// for a capture to publish once the library has its host.
+    /// for the publish step to move in once the library has its host.
     #[test]
     fn a_local_route_for_a_host_the_catalog_holds_no_route_for_stays() {
         let local = with_local_route(

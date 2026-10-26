@@ -319,7 +319,7 @@ fn read_inner(
             );
         }
         for (id, data) in
-            super::projection_local::public_rows(state, &ledger.catalog, &storage, true)?
+            super::projection_local::public_rows(state, &ledger.catalog, &storage)?
         {
             reader.rows.push_retained(id, data)?;
         }

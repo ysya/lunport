@@ -198,7 +198,7 @@ pub(super) fn capture_projected(
     }
     let mut selected = History::empty_retained();
     for (id, data) in
-        super::projection_local::public_rows(state, &ledger.catalog, &storage, true)?
+        super::projection_local::public_rows(state, &ledger.catalog, &storage)?
     {
         selected.push_selected(id, data)?;
     }

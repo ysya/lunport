@@ -847,3 +847,64 @@ fn a_delta_raising_the_version_for_routes_still_refuses_a_saved_source_that_chan
         .unwrap()
         .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(&backup)));
 }
+
+/// R64a (final review I1): a device upgraded from 1.12 holds routes it saved alone, one for a host whose route another device has
+/// published meanwhile (X), with settings of its own, and one for a host the library holds no route for (Y), and the Catalog it last read
+/// is older than that publication. Its first round reads the library's Catalog and raises no conflict over it: the library keeps the
+/// other device's route for X, whose projection retires this device's copy, and nothing is published. Y waits on this device until the
+/// following round, which moves it into the library and publishes it.
+#[test]
+fn a_device_upgraded_with_routes_of_its_own_keeps_the_librarys_and_publishes_the_rest_without_a_conflict() {
+    use crate::sync::{
+        record::{record_key, RecordKind},
+        records_v3::SyncStateV3,
+        transports::{self, TransportKind},
+    };
+    let f = fixture();
+    round::sync_once(&f.d.env()).unwrap();
+    let (x, y) = ("0000000000000009", "000000000000000a");
+    record_runtime::mutate_records(&f.d.env(), |state| {
+        let mut next = state.clone();
+        for host in [x, y] {
+            next = record_repository::create_host(&next, host, HostScope::Local, serde_json::from_value(json!({"schema":2,"alias":format!("jump-{host}"),"hostname":"jumpbox.invalid","auth":"password"})).unwrap(), 900)
+                .map_err(|e| crate::error::AppError::Other(e.to_string()))?;
+        }
+        Ok(next)
+    })
+    .unwrap();
+    round::sync_once(&f.d.env()).unwrap();
+    let catalog_id = Identity { kind: "meta".into(), id: "catalog".into(), scope: None }.opaque(&f.keys).unwrap();
+    let catalog_conflict = |state: &SyncStateV3| state.local.central.as_ref().unwrap().replica.as_ref().unwrap().conflicts.contains_key(&catalog_id);
+    // The routes 1.12 saved on this device.
+    let mut mine_x = iap_route(x);
+    let TransportKind::GcpIap { zone, .. } = &mut mine_x.kind;
+    *zone = "asia-east1-a".into();
+    let mine_y = iap_route(y);
+    record_runtime::mutate_records(&f.d.env(), |state| {
+        Ok(transports::tests::saved_on_this_device(&transports::tests::saved_on_this_device(state, &mine_x), &mine_y))
+    })
+    .unwrap();
+    // The other device's route for X, published while this device could not read it.
+    remote_catalog(&f, |catalog| catalog.transports.push(iap_route(x)));
+    let pushed = f.batches.lock().unwrap().len();
+    round::sync_once(&f.d.env()).unwrap();
+    let first = state(&f.d);
+    assert!(!catalog_conflict(&first), "the first round raises no Catalog conflict");
+    assert_eq!(f.batches.lock().unwrap().len(), pushed, "and publishes nothing over the library's Catalog");
+    assert_eq!(transports::get(&first, x), Some(iap_route(x)), "the library keeps the other device's route");
+    assert!(transports::synced(&first, x));
+    assert_eq!(
+        first.local.transports.keys().collect::<Vec<_>>(),
+        [&record_key(RecordKind::Meta, &transports::wire_id(y))],
+        "this device's copy for X is gone; Y waits"
+    );
+    assert!(!transports::synced(&first, y));
+    round::sync_once(&f.d.env()).unwrap();
+    let second = state(&f.d);
+    let replica = second.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+    assert!(!catalog_conflict(&second) && replica.pending.is_empty(), "published and read back, without a conflict");
+    assert_eq!(second.local.central_projection.as_ref().unwrap().catalog.transports, vec![iap_route(x), mine_y.clone()]);
+    assert_eq!(transports::get(&second, y), Some(mine_y));
+    assert!(transports::synced(&second, y) && second.local.transports.is_empty());
+    assert_eq!(second.version, transports::SYNC_STATE_VERSION);
+}
