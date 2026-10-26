@@ -1,8 +1,8 @@
 //! Google access tokens from the files `gcloud auth login` leaves behind, without running gcloud: the config directory as gcloud finds it
 //! (`CLOUDSDK_CONFIG`, `~/.config/gcloud`, `%APPDATA%\gcloud`), `legacy_credentials/<account>/adc.json` for a named account, the active
 //! account's file and then the application default credentials otherwise, and the refresh-token grant against Google's token endpoint.
-//! `credentialed_accounts` lists the accounts that have such a file. Only `authorized_user` credentials are read; tokens are cached in
-//! memory and zeroed when dropped, and nothing here writes under gcloud's directory.
+//! `credentialed_accounts` lists the accounts that have such a file and that a route can name (email addresses). Only `authorized_user`
+//! credentials are read; tokens are cached in memory and zeroed when dropped, and nothing here writes under gcloud's directory.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use crate::ssh::Secret;
+use crate::sync::transports::is_email;
 
 /// Google's OAuth 2.0 token endpoint.
 pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -179,13 +180,18 @@ fn account_of_folder(folder: &str, windows: bool) -> &str {
 /// the account being the folder as `legacy_credentials_path` spells it. A folder with no such file (a service account, a file that cannot
 /// be read, a stray entry) is not listed, and a directory that is not there lists nothing: this is a look at what is on disk, never an
 /// error, and it writes nothing. Only each file's `type` is read.
+///
+/// Only an email address is an account: a folder named otherwise (`default`, which gcloud uses for an empty account) is skipped like a
+/// service account, whatever its file holds, because a route can name only an email (`is_email`, the rule the route editor applies) and
+/// the account picker must never offer one the editor would then refuse. Such a folder's file is not opened.
 pub fn credentialed_accounts(config_dir: &Path) -> Vec<String> {
     let Ok(folders) = std::fs::read_dir(config_dir.join("legacy_credentials")) else { return Vec::new() };
     let mut accounts: Vec<String> = folders
         .filter_map(Result::ok)
         .filter_map(|folder| {
             let name = folder.file_name().into_string().ok()?;
-            is_authorized_user(&folder.path().join("adc.json")).then(|| account_of_folder(&name, cfg!(windows)).to_string())
+            let account = account_of_folder(&name, cfg!(windows));
+            (is_email(account) && is_authorized_user(&folder.path().join("adc.json"))).then(|| account.to_string())
         })
         .collect();
     accounts.sort();
@@ -448,14 +454,17 @@ mod tests {
         write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "r1"));
         write(dir.path(), "legacy_credentials/ops@example.com/adc.json", &authorized_user("ops@example.com", "r2"));
         write(dir.path(), "legacy_credentials/robot/adc.json", r#"{"type":"service_account"}"#);
+        // R31: a folder that is no email address is no account a route can name, however good its file (gcloud uses `default` for an empty account).
+        write(dir.path(), "legacy_credentials/default/adc.json", &authorized_user("default", "r3"));
         assert_eq!(credentialed_accounts(dir.path()), ["frank@example.com", "ops@example.com"]);
         let missing = dir.path().join("missing");
         assert!(credentialed_accounts(&missing).is_empty()); // Review Focus 4: no gcloud directory is no accounts, not an error
         assert!(!missing.exists(), "listing reads gcloud's directory and creates nothing");
     }
 
-    /// A folder counts only for an `authorized_user` file it holds: a file that is not one, cannot be read, or is not there lists nothing
-    /// (never an error), and the application default credentials are not an account of `legacy_credentials`.
+    /// A folder counts only for an `authorized_user` file it holds and a name a route can use, an email address (R31): a file that is not
+    /// one, cannot be read, or is not there lists nothing (never an error), nor does a folder that is no email even with a good file, and
+    /// the application default credentials are not an account of `legacy_credentials`.
     #[test]
     fn credentialed_accounts_skips_every_folder_without_an_authorized_user_file_and_sorts() {
         let dir = tempfile::tempdir().unwrap();
@@ -472,6 +481,10 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("legacy_credentials/adc-is-a-folder@example.com/adc.json")).unwrap();
         write(dir.path(), "legacy_credentials/stray-file", "not a folder");
         write(dir.path(), "application_default_credentials.json", &authorized_user("adc@example.com", "rt-adc"));
+        // Good `authorized_user` files in folders no route could name: no `@`, a domain of one label, a space.
+        for folder in ["default", "frank@localhost", "frank smith@example.com"] {
+            write(dir.path(), &format!("legacy_credentials/{folder}/adc.json"), &authorized_user(folder, "rt-not-an-email"));
+        }
         assert_eq!(credentialed_accounts(dir.path()), ["ann@example.com", "mia@example.com", "zoe@example.com"]);
         // gcloud's directory with nothing signed in.
         let bare = tempfile::tempdir().unwrap();

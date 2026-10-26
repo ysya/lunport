@@ -732,10 +732,11 @@ mod tests {
     }
 
     /// Design 2026-10-26 (`gcp_accounts`): each account gcloud holds credentials for, in order of name, with its sign-in checked through
-    /// the token source by name; the active account; a service account listed by nobody and asked about by nobody.
+    /// the token source by name; the active account; a service account, and a folder that is no email address (R31: the picker offers
+    /// only accounts a route accepts), listed by nobody and asked about by nobody.
     #[tokio::test]
     async fn gcloud_accounts_lists_each_account_with_its_sign_in_state_and_the_active_one() {
-        let dir = gcloud_dir(&["ops@example.com", "frank@example.com", "late@example.com"], Some("ops@example.com"));
+        let dir = gcloud_dir(&["ops@example.com", "frank@example.com", "late@example.com", "default"], Some("ops@example.com"));
         std::fs::create_dir_all(dir.path().join("legacy_credentials/robot")).unwrap();
         std::fs::write(dir.path().join("legacy_credentials/robot/adc.json"), r#"{"type":"service_account","client_email":"robot@example.com"}"#).unwrap();
         let answers = Arc::new(
