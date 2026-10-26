@@ -340,6 +340,7 @@ pub(in crate::sync) mod tests {
         }
         history[0].1 = Data::Catalog(Catalog {
             tunnels: vec![],
+            transports: vec![],
             collections: vec![Collection {
                 id: "e".repeat(64),
                 name: "unselected".into(),

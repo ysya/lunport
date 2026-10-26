@@ -793,6 +793,7 @@ pub(super) mod tests {
             },
             Data::Catalog(Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections,
                 group_orders: vec![
                     payload::GroupOrder {
@@ -847,7 +848,7 @@ pub(super) mod tests {
             }),
         };
         let (ws, keys) = fixture(vec![
-            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { tunnels: vec![], collections: vec![], group_orders: vec![] })),
+            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { tunnels: vec![], transports: vec![], collections: vec![], group_orders: vec![] })),
             (Identity { kind: "host".into(), id: id.into(), scope: Some(HostScope::Local) }, Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":"local-preserved","hostname":"fixture.invalid","auth":"password"})).unwrap())),
             (deleted.clone(), Data::Deleted),
         ]);
@@ -1022,6 +1023,7 @@ pub(super) mod tests {
                 },
                 Data::Catalog(Catalog {
                     tunnels: vec![],
+                    transports: vec![],
                     collections: vec![],
                     group_orders: vec![],
                 }),

@@ -414,6 +414,7 @@ pub(super) fn prepare(
     let next = normalized(state, known, &active)?;
     let empty = Catalog {
         tunnels: vec![],
+        transports: vec![],
         collections: vec![],
         group_orders: vec![GroupOrder {
             scope: HostScope::Local,

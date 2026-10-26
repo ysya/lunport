@@ -453,6 +453,7 @@ pub(super) mod tests {
             identity("meta", "catalog"),
             Data::Catalog(Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),
@@ -612,6 +613,7 @@ pub(super) mod tests {
             };
             let catalogue = Data::Catalog(Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections: if named {
                     vec![super::super::payload::Collection {
                         id: collection.clone(),

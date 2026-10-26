@@ -20,6 +20,8 @@ pub const STATE_VERSION: u32 = records_v3::TRANSPORT_STATE_VERSION;
 /// The local state version of grant memory and of the library's route rows.
 pub const SYNC_STATE_VERSION: u32 = records_v3::TRANSPORT_SYNC_STATE_VERSION;
 const MAX_ENTITLEMENTS: usize = 8;
+/// The most routes one library holds, as many as it holds tunnels (design 2026-10-26, Room in the Catalog). The central Catalog enforces it.
+pub const MAX_ROUTES: usize = 256;
 
 /// A host's transport: which host, and how this device reaches it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

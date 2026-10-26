@@ -118,6 +118,7 @@ fn fixture_with_service(mut service: Service) -> Fixture {
     };
     let catalog = Data::Catalog(Catalog {
         tunnels: vec![],
+        transports: vec![],
         collections: vec![],
         group_orders: vec![GroupOrder {
             scope: HostScope::Local,

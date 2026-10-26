@@ -256,6 +256,7 @@ mod tests {
         };
         let catalogue = Catalog {
             tunnels: vec![],
+            transports: vec![],
             collections: vec![Collection {
                 id: collection.clone(),
                 name: "Private collection".into(),

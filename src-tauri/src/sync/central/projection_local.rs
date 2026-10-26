@@ -193,6 +193,7 @@ pub fn public_rows(
     next_tunnels.extend(tunnels.into_values());
     let catalog = Catalog {
         tunnels: next_tunnels,
+        transports: vec![],
         collections: next_collections,
         group_orders: next_orders,
     };

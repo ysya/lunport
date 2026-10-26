@@ -112,6 +112,7 @@ impl merge::Plan {
             }
             None => Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections: vec![],
                 group_orders: vec![],
             },
