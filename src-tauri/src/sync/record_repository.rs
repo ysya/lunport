@@ -736,7 +736,9 @@ fn ensure_host_authority(state: &SyncStateV3, host: &HostRecord) -> Result<(), R
     }
     Ok(())
 }
-fn checked_host(
+/// The host `id` as an edit of it finds it: at the revision the editor read (else `RepositoryError::RevisionConflict`), in a scope this
+/// device may write, with no opaque version shadowing it.
+pub(crate) fn checked_host(
     state: &SyncStateV3,
     id: &str,
     expected: &RecordRevision,

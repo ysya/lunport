@@ -612,7 +612,10 @@ pub(crate) fn create_host_with_route(
     with_route(created, id, route, now)
 }
 /// A host's save and its route change, as one edit: the route is applied to the state the host write produced, so either both are
-/// saved or neither.
+/// saved or neither. A route change sent with the host's fields as they are saved (the editor sends them whatever changed) writes the
+/// route alone: rewriting the host would publish a new version of it for nothing, which another device's edit of the host would meet as
+/// a conflict. The host's revision is checked all the same (`repo::checked_host`), so a host changed meanwhile refuses the save as it
+/// always did.
 pub(crate) fn update_host_with_route(
     state: &SyncStateV3,
     id: &str,
@@ -622,8 +625,22 @@ pub(crate) fn update_host_with_route(
     route: Option<&RouteChange>,
     now: u64,
 ) -> Result<SyncStateV3, AppError> {
-    let updated = crate::sync::record_library::update_host(state, id, revision, payload.clone(), upgrade_confirmed, now).map_err(error)?;
+    let updated = if route.is_some() && same_host_fields(state, id, payload) {
+        repo::checked_host(state, id, revision).map_err(error)?;
+        state.clone()
+    } else {
+        crate::sync::record_library::update_host(state, id, revision, payload.clone(), upgrade_confirmed, now).map_err(error)?
+    };
     with_route(updated, id, route, now)
+}
+/// Whether `payload` holds the host's fields as they are saved. The editor never sends a pinned key, and a save keeps the saved one
+/// while the address stays (`repo::update_host`), so the key does not count.
+fn same_host_fields(state: &SyncStateV3, id: &str, payload: &HostPayload) -> bool {
+    repo::get_host(state, id).is_ok_and(|saved| {
+        let mut sent = payload.clone();
+        sent.host_key = saved.host.payload.host_key.clone();
+        sent == saved.host.payload
+    })
 }
 /// A host's deletion takes its route with it, in the same edit; a library that cannot take the route's removal keeps the host too.
 pub(crate) fn delete_host_with_route(state: &SyncStateV3, id: &str, revision: &RecordRevision, now: u64) -> Result<SyncStateV3, AppError> {
@@ -1856,6 +1873,41 @@ mod tests {
         library.shared_writes_blocked = true;
         let error = delete_host_with_route(&library, HOST, &revision_of(&library, HOST), 2).unwrap_err();
         assert_eq!(error.to_string(), PAUSED);
+    }
+
+    /// A key pinned for `HOST`'s address, as the first connection pins it.
+    fn pinned(state: &SyncStateV3) -> SyncStateV3 {
+        let public = crate::sync::slot_rules::test_keys::PLAIN_PUBLIC;
+        let key = ssh_key::PublicKey::from_openssh(public).unwrap();
+        let pin = crate::sync::records_v3::StoredHostKey {
+            algorithm: key.algorithm().as_str().into(),
+            public_key: public.split_whitespace().nth(1).unwrap().into(),
+            fingerprint: key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+            pinned_at_ms: 1,
+            pinned_by_device_id: "d".repeat(32),
+        };
+        let endpoint = repo::HostEndpoint { hostname: "fixture.invalid".into(), port: 22 };
+        repo::pin_host_key(state, HOST, &endpoint, None, pin, 2).unwrap()
+    }
+
+    /// Final review (minor): a save that changes only the route leaves the host's record as it is, though the editor sends the host's
+    /// fields with it (without its pinned key): a new version of an unchanged host would be published for nothing, and would meet
+    /// another device's edit of that host as a conflict. The host's revision is checked all the same.
+    #[test]
+    fn a_route_only_save_leaves_the_host_record_as_it_is() {
+        let base = pinned(&host_with(&bare_state(), None));
+        let revision = revision_of(&base, HOST);
+        let saved = update_host_with_route(&base, HOST, &revision, &web("web"), false, Some(&first_route(HOST)), 3).unwrap();
+        assert_eq!(transports::get(&saved, HOST), Some(fixtures::iap(HOST)));
+        assert_eq!(saved.local.hosts, base.local.hosts, "the host's record, its pinned key included, is as it was");
+        // A host changed since the editor read it refuses the save as before, though the fields sent are now its fields.
+        let renamed = update_host_with_route(&base, HOST, &revision, &web("renamed"), false, None, 4).unwrap();
+        let refused = update_host_with_route(&renamed, HOST, &revision, &web("renamed"), false, Some(&first_route(HOST)), 5).unwrap_err();
+        assert_eq!(refused.to_string(), repo::update_host(&renamed, HOST, &revision, web("renamed"), 5).unwrap_err().to_string());
+        // A change of the host's own fields still saves the host, with its route.
+        let both = update_host_with_route(&base, HOST, &revision, &web("renamed"), false, Some(&first_route(HOST)), 6).unwrap();
+        assert_eq!(repo::get_host(&both, HOST).unwrap().host.payload.alias, "renamed");
+        assert_eq!(transports::get(&both, HOST), Some(fixtures::iap(HOST)));
     }
 
     /// R65: the overview says why a route of a central library stays on this computer only when the library has no room for it, as the
