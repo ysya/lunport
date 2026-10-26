@@ -421,7 +421,8 @@ pub(super) fn prepare(
             ids: vec![],
         }],
     };
-    let public = super::projection_local::public_rows(&next, &empty, &storage)?;
+    // The routes saved on this device stay there: they move into the library after the cutover.
+    let public = super::projection_local::public_rows(&next, &empty, &storage, false)?;
     let catalog = public
         .iter()
         .find_map(|(_, value)| match value {

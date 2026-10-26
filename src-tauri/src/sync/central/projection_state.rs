@@ -81,7 +81,11 @@ impl Ledger {
             })
             .collect();
         let mut local = BTreeMap::new();
-        for (identity, data) in super::projection_local::public_rows(state, &catalog, &storage)? {
+        // The ledger records the library as published, though its owner has cut over: the routes saved on this device are not in it
+        // yet, and a capture publishes them.
+        for (identity, data) in
+            super::projection_local::public_rows(state, &catalog, &storage, false)?
+        {
             let opaque = identity.opaque(keys)?;
             let hash = crypto::hash(&payload::encode(&identity, &data)?);
             let accepted = plan.receipts().get(&opaque).ok_or_else(invalid)?;
@@ -709,7 +713,7 @@ impl Ledger {
         let mut classifications = self.local_sources.classifications();
         classifications.extend(self.storage.clone());
         for (identity, data) in
-            super::projection_local::public_rows(state, &self.catalog, &classifications)?
+            super::projection_local::public_rows(state, &self.catalog, &classifications, true)?
         {
             let opaque = identity.opaque(keys)?;
             if !seen.insert(opaque.clone()) {
@@ -963,11 +967,26 @@ pub(super) mod tests {
         // Preserve the authenticated collection and group-order vector order exactly.
         assert_eq!(ledger.catalog.collections[0].id, "f".repeat(64));
         let rows =
-            super::super::projection_local::public_rows(&state, &ledger.catalog, &ledger.storage)
+            super::super::projection_local::public_rows(&state, &ledger.catalog, &ledger.storage, true)
                 .unwrap();
         assert!(rows
             .iter()
             .any(|(_, data)| matches!(data,Data::Catalog(c) if c==&ledger.catalog)));
+    }
+    #[test]
+    fn the_initial_ledger_records_the_library_as_published_and_a_capture_publishes_this_devices_routes() {
+        let (mut state, keys, ledger) = initial();
+        let plan = Plan::current(state.local.central.clone().unwrap(), &keys).unwrap();
+        for space in state.spaces.values_mut() {
+            space.selected = false; // the route's host is then found once, in this device's own scope
+        }
+        let route: crate::sync::transports::HostTransport = serde_json::from_value(serde_json::json!({"host_id":"0000000000000001","kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+        let state = crate::sync::transports::set(&state, &route.host_id, None, Some(route.clone()), 1).unwrap();
+        // The projection's owner has cut over, yet the route saved here is not the library's yet.
+        assert!(records_v3::central_cutover(&state));
+        assert_eq!(Ledger::initial(&plan, &state, &keys).unwrap(), ledger);
+        let changes = ledger.public_changes(&state, &keys).unwrap();
+        assert!(changes.iter().any(|change| matches!(&change.data, Data::Catalog(catalog) if catalog.transports == [route.clone()])));
     }
     #[test]
     fn physical_deletion_and_new_records_are_changes_and_unselected_rows_are_included() {

@@ -234,6 +234,11 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
         })
 }
 
+/// Whether this device has moved its library to central sync: its central owner has cut over.
+pub fn central_cutover(state: &SyncStateV3) -> bool {
+    state.local.central.as_ref().is_some_and(|c| c.control.cutover)
+}
+
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
     if let Some(central) = &state.local.central {
         if state.version < CENTRAL_STATE_VERSION || central.validate().is_err() {
