@@ -1,7 +1,7 @@
 import "./tunnels.css";
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeftRight, LoaderCircle, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowLeftRight, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
@@ -10,10 +10,44 @@ import { TaskDialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { RecordField, selectClass } from "./form";
 import { revealHidden } from "@/lib/sync-approvals";
+import { errorMessage } from "@/lib/sync";
 import type { RecordOverview } from "@/lib/records";
+import { pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";
 import { listTunnels, saveTunnel, deleteTunnel, startTunnel, stopTunnel, tunnelsKey, tunnelKinds, tunnelBusy, tunnelRoute, newTunnel, type TunnelRule, type TunnelView, type ForwardKind } from "@/lib/tunnels";
 
 const phases = { stopped: "Stopped", connecting: "Connecting", running: "Running", stopping: "Stopping", error: "Failed" };
+
+/**
+ * The host a connection to `hostId` dials first, as the backend chains jump hosts (`record_repository::route_indices`): the host
+ * itself, or else its first jump host's own first hop. It is the only hop an IAP route applies to. `null` when the chain cannot be
+ * followed: a host this computer has not got, or jump hosts that go round in a circle (the backend refuses both).
+ */
+function firstHop(overview: RecordOverview, hostId: string): string | null {
+  const seen = new Set<string>();
+  let host = overview.hosts.find((candidate) => candidate.id === hostId);
+  while (host && !seen.has(host.id)) {
+    seen.add(host.id);
+    const jump: string | undefined = host.effective_payload.jump[0];
+    if (jump === undefined) return host.id;
+    host = overview.hosts.find((candidate) => candidate.id === jump);
+  }
+  return null;
+}
+
+/**
+ * The grant a tunnel's first hop needs, on the tunnel's row (design 2026-10-26, Tunnels through a host that needs a grant): read when
+ * the panel opens and every minute through the host's `pamStatusQuery`, so the rows that share a first hop (and its details pane) share
+ * one read. Drawn only for a first hop whose route has a PAM check; the other rows hold no query.
+ */
+function TunnelGrant({ hostId, pam }: { hostId: string; pam: PamCheck }) {
+  const read = useQuery(pamStatusQuery(hostId));
+  // The latest read failing speaks for the grant, whatever an earlier read found.
+  const status = read.isError ? null : (read.data ?? null);
+  const line = revealHidden(status ? tunnelGrantLine(status, pam) : read.isError ? errorMessage(read.error) : "Checking the grant…");
+  const held = status?.state === "active" || status?.state === "activating";
+  return <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${held ? "text-primary" : "text-muted-foreground"}`} title={line}><LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate">{line}</span></span>;
+}
+
 export function TunnelsPanel({ overview }: { overview: RecordOverview }) {
   const query = useQuery({ queryKey: tunnelsKey, queryFn: listTunnels, refetchInterval: 1500 });
   const [search, setSearch] = useState("");
@@ -63,12 +97,13 @@ export function TunnelsPanel({ overview }: { overview: RecordOverview }) {
       <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Tunnel</th><th className="tunnel-route-column px-4 py-3 font-medium">Route</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{visible.map((row) => {
           const host = overview.hosts.find((h) => h.id === row.rule.host_id);
+          const grantRoute = transportFor(overview, firstHop(overview, row.rule.host_id));
           const active = tunnelBusy(row);
           const route = tunnelRoute(row.rule, active ? row.live.forwarding.port || row.rule.forward.port : row.rule.forward.port);
           const changing = row.live.phase === "connecting" || row.live.phase === "stopping";
           const warning = row.removed ? "Deleted on another device. Stop this running tunnel to remove it here." : row.changed ? "The rule changed on another device. Stop and start again to apply it." : row.live.forwarding.error;
           return <tr key={row.rule.id} className="border-b last:border-0 hover:bg-muted/20">
-            <td className="max-w-60 px-4 py-3"><button className="block max-w-full truncate text-left font-medium hover:text-primary disabled:cursor-default" disabled={active || row.blocked || busy} onClick={() => edit(row.rule)}>{revealHidden(row.rule.name)}</button><span className="mt-1 block truncate text-xs text-muted-foreground">{tunnelKinds[row.rule.forward.kind]} · {host ? revealHidden(host.payload.alias) : "Host unavailable"}</span><span className="tunnel-route-compact mt-1 max-w-56 truncate font-mono text-xs text-muted-foreground" title={route}>{route}</span></td>
+            <td className="max-w-60 px-4 py-3"><button className="block max-w-full truncate text-left font-medium hover:text-primary disabled:cursor-default" disabled={active || row.blocked || busy} onClick={() => edit(row.rule)}>{revealHidden(row.rule.name)}</button><span className="mt-1 block truncate text-xs text-muted-foreground">{tunnelKinds[row.rule.forward.kind]} · {host ? revealHidden(host.payload.alias) : "Host unavailable"}</span>{grantRoute?.kind.pam && <TunnelGrant hostId={grantRoute.host_id} pam={grantRoute.kind.pam} />}<span className="tunnel-route-compact mt-1 max-w-56 truncate font-mono text-xs text-muted-foreground" title={route}>{route}</span></td>
             <td className="tunnel-route-column max-w-80 px-4 py-3"><span className="block truncate font-mono text-xs" title={route}>{route}</span><span className="mt-1 block text-xs text-muted-foreground">{row.removed ? "Removed elsewhere" : row.synced ? "Synced rule" : "On this computer"}</span></td>
             <td className="whitespace-nowrap px-4 py-3"><span className="inline-flex items-center gap-1.5" title={warning ? revealHidden(warning) : undefined}>
               {changing ? <LoaderCircle className="size-3 animate-spin" /> : <span className={`size-1.5 rounded-full ${row.live.phase === "running" ? "bg-success" : row.live.phase === "error" ? "bg-destructive" : "bg-muted-foreground/50"}`} />}

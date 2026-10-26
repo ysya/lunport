@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::{settle, ShellProbe, SHELL_SERVER};
 use crate::gcp::auth::{StaticToken, TokenSource};
+use crate::gcp::iap::IapError;
 use crate::gcp::testing::{Behaviour, FakeRelay};
 use crate::ssh::russh_engine::{EngineOptions, RusshEngine};
 use crate::ssh::testing::doubles::{TestPolicy, VaultAuth};
@@ -74,6 +75,7 @@ fn a_shell_and_a_command_work_through_the_relay() {
     probe.wait_for_text(10, "relay-42").expect("the shell answers through the relay");
     assert_eq!((relay.connects(), relay.reconnects()), (1, 0));
     session.close();
+    assert_eq!(session.tunnel_end(), None, "a tunnel Lunport closed did not end on its own");
 }
 
 #[test]
@@ -103,6 +105,7 @@ fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
     let target = Target { hops: vec![iap_hop(&server, &relay, "jumpbox", "k1")] };
     let session = engine().connect(&target, &*TestPolicy::trusting(), &server.vault("k1")).expect("the hop connects through the relay");
     settle(&*session);
+    assert_eq!(session.tunnel_end(), None, "the tunnel is up");
     relay.set(Behaviour::CloseAfter(0, 4033, "not authorized"));
     let _ = session.exec("echo poke", Duration::from_secs(10), MIB);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -110,6 +113,9 @@ fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!session.is_alive(), "the relay ended the session");
+    // The tunnel wrote down why it ended before the connection saw its end, so the first look after `is_alive` turned false has it
+    // (design 2026-10-26, Tunnels through a host that needs a grant).
+    assert_eq!(session.tunnel_end(), Some(IapError::Closed { code: 4033, reason: "not authorized".into() }));
     let reason = session.disconnect_reason().expect("a dead session says why");
     assert_eq!((reason.kind, reason.detail.as_str()), (DisconnectKind::ConnectionLost, "the relay closed the tunnel (4033: not authorized)"));
 }

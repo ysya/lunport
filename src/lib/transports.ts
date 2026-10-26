@@ -122,6 +122,23 @@ export function grantStateOrMessage(grant: { state: string; active_until_ms: num
   return grant.state === "error" ? grantProblem(grant) : grantStateLine(grant);
 }
 
+/** What a host's Access grant says of the grant it read: the entitlement holding it and its state, or why it could not be checked. */
+export function grantLine(status: PamStatusView): string {
+  const line = grantStateOrMessage(status);
+  return status.state === "error" || !status.entitlement ? line : `${status.entitlement} · ${line}`;
+}
+
+/**
+ * What a tunnel's row says of the grant its first hop needs (design 2026-10-26, Tunnels through a host that needs a grant): a grant
+ * active or activating as the host's Access grant says it, the API's sentence when it could not be checked, and otherwise the
+ * entitlements of the route's PAM check, any of which can hold one.
+ */
+export function tunnelGrantLine(status: PamStatusView, pam: PamCheck): string {
+  return status.state === "active" || status.state === "activating" || status.state === "error"
+    ? grantLine(status)
+    : `Needs a grant: ${pam.entitlements.join(", ")}`;
+}
+
 export function newIapTransport(hostId: string): HostTransport {
   return { host_id: hostId, kind: { type: "gcp_iap", project: "", zone: "", instance: "", interface: "nic0", account: null, os_login: true, pam: null } };
 }

@@ -14,14 +14,13 @@ import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
+  grantLine,
   grantMemoryFor,
-  grantStateOrMessage,
   iapTarget,
   pamStatusQuery,
   transportFor,
   type GrantMemoryView,
   type HostTransport,
-  type PamStatusView,
 } from "@/lib/transports";
 import { GrantRequestDialog } from "./GrantRequestDialog";
 import { groupPath } from "./group-tree";
@@ -29,12 +28,6 @@ import { readinessLabel } from "./HostList";
 import { DetailPane } from "./DetailPane";
 import { KnownHostsManager } from "./KnownHostsManager";
 import { ConnectionCheck } from "./ConnectionCheck";
-
-/** What the Access grant section says of the grant: the entitlement holding it and until when, or that there is none, or why it could not be read. */
-function grantLine(status: PamStatusView): string {
-  const line = grantStateOrMessage(status);
-  return status.state === "error" || !status.entitlement ? line : `${status.entitlement} · ${line}`;
-}
 
 /**
  * A route's Privileged Access Manager grant as it stands now (design 2026-10-26, Host list and details): read when the pane opens and

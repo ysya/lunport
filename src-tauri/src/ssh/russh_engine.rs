@@ -1150,6 +1150,12 @@ impl Session for RusshSession {
         }
     }
 
+    /// Read from the first hop only: a tunnel can carry no other (`check_chain`). Nothing to wait for: the pump writes its record before
+    /// it drops its end of the pipe, which is what ends the hop's connection (`iap::pump`).
+    fn tunnel_end(&self) -> Option<IapError> {
+        self.connection.hops.first()?.shared.tunnel_ended()
+    }
+
     fn close(&self) {
         if !self.connection.is_open() {
             let _ = self.connection.reason();

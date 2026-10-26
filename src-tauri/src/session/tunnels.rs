@@ -4,7 +4,15 @@ use super::{
     connect::{CancelToken, Connector},
     protocol::HostQuery,
 };
-use crate::{ssh::forward::ForwardStatus, state::AppState};
+use crate::{
+    gcp::iap::IapError,
+    ssh::forward::ForwardStatus,
+    state::AppState,
+    sync::{
+        records_v3::SyncStateV3,
+        transports::{self, TransportKind},
+    },
+};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -181,12 +189,46 @@ impl Tunnels {
     }
 }
 
+/// What a tunnel whose SSH connection ended says when nothing more specific is known.
+const CONNECTION_ENDED: &str = "The SSH connection ended. Start the tunnel again to reconnect.";
+
+/// What a tunnel says when IAP stopped it because the grant its first hop needs ended (design
+/// 2026-10-26, Tunnels through a host that needs a grant).
+pub(crate) const GRANT_ENDED: &str =
+    "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one.";
+
+/// Why a tunnel that was not stopped in Lunport ended. IAP refusing the first hop's account (the
+/// relay's 4033 "not authorized" close, or a 403 handshake refusal) on a route with a PAM check
+/// means its grant ended. Every other ending keeps `fallback`. An IAP refusal for another reason on
+/// such a route (access removed in Google Cloud) reads the same (design 2026-10-26, call 14).
+pub(crate) fn stop_reason(end: Option<&IapError>, needs_grant: bool, fallback: String) -> String {
+    let refused = matches!(
+        end,
+        Some(IapError::Closed { code: 4033, .. } | IapError::Refused { status: 403 })
+    );
+    if refused && needs_grant {
+        GRANT_ENDED.to_string()
+    } else {
+        fallback
+    }
+}
+
+/// Whether `host_id`'s route has a Privileged Access Manager check.
+fn route_needs_grant(state: &SyncStateV3, host_id: &str) -> bool {
+    transports::get(state, host_id)
+        .is_some_and(|route| matches!(route.kind, TransportKind::GcpIap { pam: Some(_), .. }))
+}
+
+/// Runs the tunnel until it is stopped or its connection ends. `account` reads the sync account's
+/// id (a change stops the tunnel); `needs_grant` reads whether a host's route has a PAM check, and
+/// is asked of the first hop once the connection has ended.
 fn run(
     rule: &TunnelRule,
     entry: &Entry,
     connector: &Connector<'_>,
     owner: &dyn Owner,
     account: &dyn Fn() -> Option<String>,
+    needs_grant: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
     let connected = connector
         .connect(&HostQuery::Id(rule.host_id.clone()), owner, &entry.cancel)
@@ -223,15 +265,24 @@ fn run(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // Read before our own teardown, so that nothing the teardown does can change it.
+    let tunnel_end = connected.session.tunnel_end();
     forwarding.stop();
     let final_status = forwarding.status();
     connected.session.close();
     if entry.cancel.is_cancelled() {
         Ok(())
     } else {
-        Err(final_status.error.unwrap_or_else(|| {
-            "The SSH connection ended. Start the tunnel again to reconnect.".into()
-        }))
+        let fallback = final_status
+            .error
+            .unwrap_or_else(|| CONNECTION_ENDED.into());
+        // The first hop is the hop dialed first, the only one an IAP route applies to.
+        let first_hop = connected.target.hops.first().map(|hop| hop.id.as_str());
+        Err(stop_reason(
+            tunnel_end.as_ref(),
+            first_hop.is_some_and(needs_grant),
+            fallback,
+        ))
     }
 }
 fn finish(entry: &Entry, result: Result<(), String>) {
@@ -391,16 +442,32 @@ pub async fn tunnels_start(
                         request_id: format!("tunnel-{}-{generation}", rule.id),
                         cancel: worker_entry.cancel.clone(),
                     };
-                    run(&rule, &worker_entry, &broker.connector(), &owner, &|| {
-                        app.state::<AppState>()
-                            .sync
-                            .core
-                            .lock()
-                            .unwrap()
-                            .records
-                            .as_ref()
-                            .and_then(|s| s.account.as_ref().map(|a| a.chain_id.clone()))
-                    })
+                    run(
+                        &rule,
+                        &worker_entry,
+                        &broker.connector(),
+                        &owner,
+                        &|| {
+                            app.state::<AppState>()
+                                .sync
+                                .core
+                                .lock()
+                                .unwrap()
+                                .records
+                                .as_ref()
+                                .and_then(|s| s.account.as_ref().map(|a| a.chain_id.clone()))
+                        },
+                        &|host_id| {
+                            app.state::<AppState>()
+                                .sync
+                                .core
+                                .lock()
+                                .unwrap()
+                                .records
+                                .as_ref()
+                                .is_some_and(|s| route_needs_grant(s, host_id))
+                        },
+                    )
                 })();
                 finish(&worker_entry, result);
                 drop(activity);
@@ -429,9 +496,19 @@ pub fn tunnels_stop(
 mod tests {
     use super::*;
     use crate::{
-        ssh::forward::{ForwardKind, ForwardSpec},
-        sync::{records_v3::SyncStateV3, tunnel_rules},
+        gcp::{auth::AuthError, iap::IapError},
+        session::{
+            grants::GrantGates,
+            testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner},
+        },
+        ssh::{
+            fake::{default_server_key, FakeEngine},
+            forward::{ForwardKind, ForwardSpec},
+            AuthMethod, DisconnectKind, DisconnectReason, HopRef,
+        },
+        sync::{records_v3::SyncStateV3, testkit::MemKeychain, tunnel_rules},
     };
+    use std::time::Instant;
     fn saved() -> (SyncStateV3, TunnelRule) {
         let state = serde_json::from_value(serde_json::json!({"version":4,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap();
         let rule = TunnelRule {
@@ -511,5 +588,230 @@ mod tests {
         ));
         finish(&entry, Ok(()));
         assert!(manager.list(&deleted).is_empty());
+    }
+
+    #[test]
+    fn a_tunnel_stopped_by_an_ended_grant_says_so() {
+        let refused = IapError::Closed {
+            code: 4033,
+            reason: "not authorized".into(),
+        };
+        assert_eq!(
+            stop_reason(Some(&refused), true, "fallback".into()),
+            GRANT_ENDED
+        );
+        assert_eq!(
+            stop_reason(
+                Some(&IapError::Refused { status: 403 }),
+                true,
+                "fallback".into()
+            ),
+            GRANT_ENDED
+        );
+        assert_eq!(
+            stop_reason(Some(&refused), false, "fallback".into()),
+            "fallback"
+        );
+        let backend = IapError::Closed {
+            code: 4003,
+            reason: "failed to connect to backend".into(),
+        };
+        assert_eq!(
+            stop_reason(Some(&backend), true, "fallback".into()),
+            "fallback"
+        );
+        assert_eq!(stop_reason(None, true, "fallback".into()), "fallback");
+        // The spec's sentence, word for word.
+        assert_eq!(GRANT_ENDED, "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one.");
+    }
+
+    /// Design 2026-10-26 (R27): only IAP refusing the first hop's account names the grant; every
+    /// other way its tunnel ends keeps today's text, on a route with a PAM check too.
+    #[test]
+    fn every_other_end_of_the_iap_tunnel_keeps_todays_text() {
+        let others = [
+            IapError::Refused { status: 401 },
+            IapError::Closed {
+                code: 1000,
+                reason: "bye".into(),
+            },
+            IapError::Credentials(AuthError::SignInExpired {
+                account: "ops@example.com".into(),
+            }),
+            IapError::Protocol("the relay sent a text message".into()),
+            IapError::Io("connection reset by peer".into()),
+            IapError::ReconnectExhausted,
+        ];
+        for end in &others {
+            assert_eq!(
+                stop_reason(Some(end), true, "fallback".into()),
+                "fallback",
+                "{end:?}"
+            );
+        }
+    }
+
+    /// IAP's close when it stops authorizing the account: what a running tunnel sees when its
+    /// grant ends.
+    fn not_authorized() -> IapError {
+        IapError::Closed {
+            code: 4033,
+            reason: "not authorized".into(),
+        }
+    }
+
+    fn key() -> AuthMethod {
+        AuthMethod::Key {
+            key_id: "k-plain".into(),
+        }
+    }
+
+    /// `run` for a tunnel to `host` (a host of `directory`, every key of the chain pinned, so
+    /// nobody is asked anything) over the fake engine: once the tunnel runs, `once_running` ends it
+    /// the way the test needs, and this hands back what `run` returned. `needs_grant` answers for
+    /// the route of the hop it is asked about.
+    fn run_until(
+        directory: &FakeDirectory,
+        host: &str,
+        needs_grant: &dyn Fn(&str) -> bool,
+        once_running: &(dyn Fn(&FakeEngine, &Entry) + Sync),
+    ) -> Result<(), String> {
+        let engine = FakeEngine::new();
+        let (keys, keychain, confirmer, grants) = (
+            FakeKeys::new(),
+            MemKeychain::default(),
+            FakeConfirmer::default(),
+            GrantGates::default(),
+        );
+        let connector = Connector {
+            engine: &engine,
+            directory,
+            keys: &keys,
+            keychain: &keychain,
+            confirmer: &confirmer,
+            grants: &grants,
+        };
+        let rule = TunnelRule {
+            host_id: format!("id-{host}"),
+            ..saved().1
+        };
+        let entry = Entry {
+            rule: rule.clone(),
+            account_id: None,
+            cancel: CancelToken::default(),
+            live: Mutex::new(TunnelLive {
+                phase: TunnelPhase::Connecting,
+                ..Default::default()
+            }),
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Bounded, and `once_running` is called whatever happened, so that `run` returns
+                // and the scope with it.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !matches!(entry.live.lock().unwrap().phase, TunnelPhase::Running)
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                once_running(&engine, &entry);
+            });
+            run(
+                &rule,
+                &entry,
+                &connector,
+                &FakeOwner::default(),
+                &|| None,
+                needs_grant,
+            )
+        })
+    }
+
+    /// Design 2026-10-26, Tunnels through a host that needs a grant: a running tunnel that IAP
+    /// stops with its 4033 "not authorized" close says that its grant ended when the first hop's
+    /// route has a PAM check, which is asked of that hop (the tunnel's host here). Without a PAM
+    /// check, for another close, and for a connection lost another way, it keeps today's text.
+    #[test]
+    fn a_running_tunnel_that_iap_stops_says_why() {
+        let directory = FakeDirectory::new()
+            .with_host("db", key())
+            .with_pin("db", default_server_key());
+        let asked = Mutex::new(Vec::new());
+        let needs_grant = |host: &str| {
+            asked.lock().unwrap().push(host.to_string());
+            true
+        };
+        let refused = |engine: &FakeEngine, _: &Entry| engine.end_tunnel_now(not_authorized());
+        assert_eq!(
+            run_until(&directory, "db", &needs_grant, &refused),
+            Err(GRANT_ENDED.to_string())
+        );
+        assert_eq!(*asked.lock().unwrap(), ["id-db"]);
+
+        assert_eq!(
+            run_until(&directory, "db", &|_| false, &refused),
+            Err(CONNECTION_ENDED.to_string())
+        );
+        let unreachable = |engine: &FakeEngine, _: &Entry| {
+            engine.end_tunnel_now(IapError::Closed {
+                code: 4003,
+                reason: "failed to connect to backend".into(),
+            })
+        };
+        assert_eq!(
+            run_until(&directory, "db", &|_| true, &unreachable),
+            Err(CONNECTION_ENDED.to_string())
+        );
+        let lost = |engine: &FakeEngine, _: &Entry| {
+            let hop = HopRef {
+                id: "id-db".into(),
+                alias: "db".into(),
+                hostname: "db.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+            };
+            engine.disconnect_now(DisconnectReason {
+                hop,
+                kind: DisconnectKind::ConnectionLost,
+                detail: "connection reset by peer".into(),
+            })
+        };
+        assert_eq!(
+            run_until(&directory, "db", &|_| true, &lost),
+            Err(CONNECTION_ENDED.to_string())
+        );
+    }
+
+    /// Behind a jump host the first hop is the jump host, the only hop an IAP route applies to: its
+    /// route decides, not the tunnel's host's.
+    #[test]
+    fn the_grant_of_a_tunnel_behind_a_jump_host_is_the_jump_hosts() {
+        let directory = FakeDirectory::new()
+            .with_host("bastion", key())
+            .with_host_via("db", key(), &["bastion"])
+            .with_pin("bastion", default_server_key())
+            .with_pin("db", default_server_key());
+        let refused = |engine: &FakeEngine, _: &Entry| engine.end_tunnel_now(not_authorized());
+        assert_eq!(
+            run_until(&directory, "db", &|host| host == "id-bastion", &refused),
+            Err(GRANT_ENDED.to_string())
+        );
+        assert_eq!(
+            run_until(&directory, "db", &|host| host == "id-db", &refused),
+            Err(CONNECTION_ENDED.to_string())
+        );
+    }
+
+    /// A tunnel stopped in Lunport stops without an error, whatever IAP does meanwhile.
+    #[test]
+    fn a_tunnel_stopped_in_lunport_has_no_stop_reason() {
+        let directory = FakeDirectory::new()
+            .with_host("db", key())
+            .with_pin("db", default_server_key());
+        let stopped = |engine: &FakeEngine, entry: &Entry| {
+            entry.cancel.cancel();
+            engine.end_tunnel_now(not_authorized());
+        };
+        assert_eq!(run_until(&directory, "db", &|_| true, &stopped), Ok(()));
     }
 }
