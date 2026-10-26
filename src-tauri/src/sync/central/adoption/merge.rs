@@ -6,10 +6,7 @@ use super::super::{
     wire::{canonical, RecordHeader},
 };
 use super::*;
-use crate::sync::{
-    record::{record_key, LocalRecord, RecordKind},
-    records_v3::HostScope,
-};
+use crate::sync::records_v3::HostScope;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Plan {
@@ -231,11 +228,12 @@ pub(super) fn history(
                 };
                     merged.tunnels.push(rule);
                 }
-                // The merged Catalog is published as one record (design 2026-10-26, Room in the Catalog).
+                merged.validate()?;
+                // The merged Catalog is published as one record (design 2026-10-26, Room in the Catalog). It is checked once it is
+                // valid, so that only its size reads as the room sentence (R26).
                 if !payload::catalog_fits(&merged) {
                     return Err(AppError::Other(crate::sync::transports::NO_ROOM.into()));
                 }
-                merged.validate()?;
                 *value = merged;
             }
             _ => {}
@@ -449,34 +447,51 @@ pub(super) fn owned_collections(
     }
     Ok(owned)
 }
-/// The ids this merge gives the hosts that routes and grant memory name on `source` (old → new): this device's own routes and, in a
-/// replacement, the replaced library's too (`transports::view`). They follow their hosts there as this device's own (design 2026-10-26,
-/// Existing routes move in; R22) until a capture publishes them. A host is followed when it is live in exactly one scope of `source`:
-/// a deleted host does not survive the merge, and an id held in two scopes names no one host. What names no followed host goes.
+/// The ids this merge gives the hosts that routes and grant memory name on the source (old → new): this device's own routes and, in a
+/// replacement, the replaced library's too (`transports::view`). They follow their hosts as this device's own (design 2026-10-26,
+/// Existing routes move in; R22) until a capture publishes them. Hosts are read from the rows `history` rewrites, not from the
+/// source's own tables (R24), so a route lands on exactly the id the merge writes for its host.
 pub(super) fn route_host_ids(
-    source: &SyncStateV3,
+    package: &super::super::source_package::Package,
+    keys: &VaultKeys,
     operation: &str,
 ) -> Result<BTreeMap<String, String>, AppError> {
-    let live = |row: Option<&LocalRecord>| row.is_some_and(|row| !row.record.deleted);
-    let named: std::collections::BTreeSet<String> = crate::sync::transports::view(source)
+    let original = package
+        .structured_history(keys, &BTreeMap::new())?
+        .into_rows();
+    followed_host_ids(&package.state, &original, operation)
+}
+/// `route_host_ids` for `source` and the rows `history` rewrites (`original`). The merge writes those rows under their new ids in
+/// order, so the last row of a host identity is what the merged library holds for it. A host is followed when exactly one of its
+/// identities ends live there: a host deleted there does not survive the merge, and an id live in two scopes names no one host. What
+/// names no followed host goes.
+pub(super) fn followed_host_ids(
+    source: &SyncStateV3,
+    original: &[(Identity, Data)],
+    operation: &str,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let mut last = BTreeMap::new();
+    for (id, data) in original {
+        if id.kind == "host" {
+            let scope = id.scope.as_ref().ok_or_else(invalid)?;
+            last.insert((id.id.as_str(), scope), matches!(data, Data::Host(_)));
+        }
+    }
+    let mut live: BTreeMap<&str, Vec<&HostScope>> = BTreeMap::new();
+    for ((id, scope), alive) in last {
+        if alive {
+            live.entry(id).or_default().push(scope);
+        }
+    }
+    let followed: std::collections::BTreeSet<String> = crate::sync::transports::view(source)
         .into_iter()
         .map(|route| route.host_id)
         .chain(source.local.transport_grants.keys().cloned())
         .collect();
     let mut host_ids = BTreeMap::new();
-    for id in named {
-        let key = record_key(RecordKind::Host, &id);
-        let local = live(source.local.hosts.get(&key)).then_some(HostScope::Local);
-        let spaces = source
-            .spaces
-            .iter()
-            .filter(|(_, space)| live(space.records.get(&key)))
-            .map(|(space_id, _)| HostScope::Space {
-                space_id: space_id.clone(),
-            });
-        let mut scopes = local.into_iter().chain(spaces);
-        if let (Some(scope), None) = (scopes.next(), scopes.next()) {
-            let adopted = adopted_host_id(operation, &scope, &id)?;
+    for id in followed {
+        if let Some([scope]) = live.get(id.as_str()).map(Vec::as_slice) {
+            let adopted = adopted_host_id(operation, scope, &id)?;
             host_ids.insert(id, adopted);
         }
     }

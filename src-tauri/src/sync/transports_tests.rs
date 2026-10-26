@@ -574,16 +574,15 @@ fn leave_preserving(before: &SyncStateV3, moves: &[(&str, &str)]) -> SyncStateV3
 }
 
 /// Design 2026-10-26 (Leaving sync): the library's route for a host that stays is kept as a route saved on this device, under the
-/// host's new id; nothing of the library's stays.
+/// host's new id. The account itself goes before `preserve_on_leave` runs, as in `record_leave`.
 #[test]
 fn leaving_keeps_a_synced_route_of_a_preserved_host_as_a_local_route() {
     let central = set(&central_with_host(HOST), HOST, None, Some(iap(HOST)), 1).unwrap();
     assert!(synced(&central, HOST));
     let left = leave_preserving(&central, &[(HOST, NEW)]);
     assert_eq!(get(&left, NEW).map(|t| t.kind), Some(iap(HOST).kind));
-    assert!(!synced(&left, NEW) && left.local.transports.contains_key(&record_key(RecordKind::Meta, &wire_id(NEW))));
+    assert!(left.local.transports.contains_key(&record_key(RecordKind::Meta, &wire_id(NEW))), "kept as a route saved on this device");
     assert_eq!(get(&left, HOST), None);
-    assert!(left.account.is_none() || !left.account.as_ref().unwrap().records.keys().any(|k| k.contains("transport:")));
     validate_state(&left).unwrap();
 }
 
@@ -613,10 +612,11 @@ fn routes_follow_the_merged_hosts_as_this_devices_own() {
     let own = write(&saved_on_this_device(&saved_on_this_device(&library, &iap(OTHER)), &with_pam(C)), REMOVED, None, 2).unwrap();
     let source = remember_grant_request(&remember_grant_request(&own, HOST, "restart app-api", 1800, 3).unwrap(), C, "rotate certs", 600, 4).unwrap();
     let host_ids = BTreeMap::from([(HOST.to_string(), NEW.to_string()), (OTHER.to_string(), MOVED.to_string()), (REMOVED.to_string(), "0000000000000008".to_string())]);
-    let mut next = state();
+    // The candidate's account holds the next library's rows; the routes kept here must not join them.
+    let mut next = in_central_mode(state());
     follow_hosts(&source, &mut next, &host_ids, 5).unwrap();
     assert_eq!(view(&next), vec![HostTransport { host_id: NEW.into(), ..with_pam(HOST) }, HostTransport { host_id: MOVED.into(), ..iap(OTHER) }]);
-    assert!(!synced(&next, NEW) && next.account.is_none(), "the library's route is this device's own now");
+    assert!(!synced(&next, NEW) && !has_library_rows(&next), "the library's route is this device's own now");
     let keys: Vec<String> = next.local.transports.keys().cloned().collect();
     assert_eq!(keys, [NEW, MOVED].map(|host| record_key(RecordKind::Meta, &wire_id(host))), "no tombstone and nothing for C");
     assert_eq!(grant_memory(&next, NEW), Some(GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
