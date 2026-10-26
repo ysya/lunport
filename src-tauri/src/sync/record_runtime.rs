@@ -374,9 +374,16 @@ fn save_active_with_authority(
         {
             return Err(AppError::Other("First central library activation requires its verified initial publication transaction. Original data is retained.".into()));
         }
+        // A delta that brings the library's route rows raises the version they need from a central source (R19); the authority still
+        // verifies that exact source below.
+        let raised_for_routes = crate::sync::transports::has_library_rows(state)
+            && state.version == crate::sync::transports::SYNC_STATE_VERSION
+            && (u64::from(crate::sync::records_v3::CENTRAL_STATE_VERSION)..u64::from(state.version))
+                .contains(&previous_version);
         if projection.is_some()
             && previous_version != u64::from(state.version)
             && !initial_projection
+            && !raised_for_routes
         {
             return Err(AppError::Other("The saved central source format changed. Source and stage are retained; reload before publishing.".into()));
         }
