@@ -165,20 +165,144 @@ fn pam_defaults_decode_for_an_older_record_and_validate() {
     assert_eq!(problem(1800, Some("restart app-api")), None);
 }
 
+/// The sentence a refused edit carries.
+fn reason(error: RepositoryError) -> String {
+    match error {
+        RepositoryError::Validation(records_v3::RecordValidationError::Invalid { reason, .. }) => reason,
+        other => panic!("not a validation sentence: {other:?}"),
+    }
+}
+
+/// Design 2026-10-26 (Grant requests): what a request teaches stays on this device, beside the route, in the state's own map. The route
+/// is not edited, so a request never touches what the host's route syncs.
 #[test]
-fn remember_grant_request_keeps_everything_else_and_needs_a_pam_check() {
+fn remember_grant_request_writes_device_memory_not_the_route() {
     let saved = set(&state(), A, None, Some(with_pam(A)), 1).unwrap();
-    let next = remember_grant_request(&saved, A, "restart app-api", 3600, 2).unwrap();
-    let rows = view(&next);
-    assert_eq!(rows.len(), 1);
-    let TransportKind::GcpIap { pam: Some(pam), project, .. } = &rows[0].kind else { panic!("a PAM check") };
-    assert_eq!((pam.justification.as_deref(), pam.duration_secs, pam.entitlements.as_slice()), (Some("restart app-api"), 3600, &["prod-operate".to_string()][..]));
-    assert_eq!(project, "eng-dev-396409");
-    assert_eq!(next.version, STATE_VERSION);
-    assert_eq!(get(&next, A).as_ref(), rows.first(), "the remembered record is what compare-and-set sees");
-    assert!(remember_grant_request(&next, A, "x", 30, 3).is_err(), "the rules apply to what is remembered too");
-    assert!(remember_grant_request(&set(&state(), A, None, Some(iap(A)), 1).unwrap(), A, "x", 1800, 2).is_err(), "no PAM check to remember for");
-    assert!(remember_grant_request(&state(), A, "x", 1800, 2).is_err(), "no transport");
+    assert_eq!(grant_memory(&saved, A), None, "nothing is remembered before a request");
+    let next = remember_grant_request(&saved, A, "Deploy hotfix", 45 * 60, 2).unwrap();
+    assert_eq!(get(&next, A), get(&saved, A), "the route is untouched");
+    assert_eq!(next.local.transports, saved.local.transports, "so is its record, down to the version it carries");
+    assert_eq!(grant_memory(&next, A), Some(GrantMemory { justification: "Deploy hotfix".into(), duration_secs: 2700 }));
+    assert_eq!(grant_memory(&next, B), None, "memory is per host");
+    assert!(next.version >= SYNC_STATE_VERSION);
+    validate_state(&next).unwrap();
+}
+
+#[test]
+fn grant_memory_below_version_ten_is_refused() {
+    let mut remembered = remember_grant_request(&set(&state(), A, None, Some(with_pam(A)), 1).unwrap(), A, "x", 60, 2).unwrap();
+    assert_eq!((SYNC_STATE_VERSION, remembered.version), (10, 10), "a request raises the version to 10");
+    remembered.version = records_v3::TRANSPORT_STATE_VERSION;
+    assert!(validate_state(&remembered).is_err());
+    assert!(decode_state(&serde_json::to_string(&remembered).unwrap()).is_err(), "an older Lunport's version does not open it either");
+}
+
+/// A request replaces what the host remembered before and leaves every other host's memory, and every route, alone.
+#[test]
+fn a_later_request_replaces_the_memory_of_its_host_only() {
+    let both = set(&set(&state(), A, None, Some(with_pam(A)), 1).unwrap(), B, None, Some(with_pam(B)), 2).unwrap();
+    let first = remember_grant_request(&both, A, "restart app-api", 1800, 3).unwrap();
+    let other = remember_grant_request(&first, B, "rotate certs", 600, 4).unwrap();
+    let second = remember_grant_request(&other, A, "Deploy hotfix", 3600, 5).unwrap();
+    assert_eq!(grant_memory(&second, A), Some(GrantMemory { justification: "Deploy hotfix".into(), duration_secs: 3600 }));
+    assert_eq!(grant_memory(&second, B), Some(GrantMemory { justification: "rotate certs".into(), duration_secs: 600 }));
+    assert_eq!(second.local.transports, both.local.transports, "no request edits a route");
+    assert_eq!(second.local.transport_grants.len(), 2);
+}
+
+/// The checks `remember_grant_request` made before are still made: a host with a route that requires a grant, and the form's rules.
+#[test]
+fn remember_grant_request_needs_a_route_that_requires_a_grant() {
+    let without_pam = set(&state(), A, None, Some(iap(A)), 1).unwrap();
+    assert_eq!(reason(remember_grant_request(&without_pam, A, "x", 1800, 2).unwrap_err()), "This transport requires no grant.");
+    assert_eq!(reason(remember_grant_request(&state(), A, "x", 1800, 2).unwrap_err()), "This host has no transport.");
+    let other_host = set(&state(), B, None, Some(with_pam(B)), 1).unwrap();
+    assert_eq!(reason(remember_grant_request(&other_host, A, "x", 1800, 2).unwrap_err()), "This host has no transport.", "another host's route is not this host's");
+    let gone = set(&set(&state(), A, None, Some(with_pam(A)), 1).unwrap(), A, Some(&with_pam(A)), None, 2).unwrap();
+    assert_eq!(reason(remember_grant_request(&gone, A, "x", 1800, 3).unwrap_err()), "This host has no transport.", "a removed route is no route");
+}
+
+#[test]
+fn a_remembered_request_obeys_the_request_rules() {
+    let saved = set(&state(), A, None, Some(with_pam(A)), 1).unwrap();
+    let problem = |justification: &str, duration_secs: u32| remember_grant_request(&saved, A, justification, duration_secs, 2).err().map(reason);
+    let minutes = Some("Enter a grant duration between 1 and 480 minutes.".to_string());
+    assert_eq!(problem("x", 30), minutes);
+    assert_eq!(problem("x", 90), minutes, "whole minutes only");
+    assert_eq!(problem("x", 28_860), minutes);
+    assert_eq!(problem("x", 60), None);
+    assert_eq!(problem("x", 28_800), None);
+    assert_eq!(problem("", 1800), Some("Enter a justification.".to_string()));
+    let line = Some("Keep the justification under 512 characters on one line.".to_string());
+    assert_eq!(problem(&"x".repeat(513), 1800), line);
+    assert_eq!(problem("restart\napp-api", 1800), line);
+    assert_eq!(problem(&"x".repeat(512), 1800), None);
+    assert_eq!(saved.local.transport_grants.len(), 0, "a refusal remembers nothing");
+}
+
+/// What the state file may hold under `local.transport_grants`, whoever wrote it: a host id, a justification and a duration of the form.
+#[test]
+fn validation_rejects_bad_grant_memory() {
+    let remembering = |host: &str, justification: &str, duration_secs: u32| {
+        let mut state = state();
+        state.version = SYNC_STATE_VERSION;
+        state.local.transport_grants.insert(host.into(), GrantMemory { justification: justification.into(), duration_secs });
+        state
+    };
+    assert!(validate_state(&remembering(A, "restart app-api", 1800)).is_ok());
+    for host in ["", "nope", "000000000000000G", "transport:0000000000000001", "00000000000000011"] {
+        assert!(validate_state(&remembering(host, "x", 60)).is_err(), "host {host:?}");
+    }
+    assert!(validate_state(&remembering(A, "", 60)).is_err(), "a justification has something in it");
+    assert!(validate_state(&remembering(A, &"x".repeat(512), 60)).is_ok());
+    assert!(validate_state(&remembering(A, &"x".repeat(513), 60)).is_err());
+    for text in ["two\nlines", "tab\there", "bell\u{7}", "carriage\rreturn"] {
+        assert!(validate_state(&remembering(A, text, 60)).is_err(), "justification {text:?}");
+    }
+    for duration in [0, 30, 59, 90, 1801, 28_801, 28_860, u32::MAX] {
+        assert!(validate_state(&remembering(A, "x", duration)).is_err(), "duration {duration}");
+    }
+    for duration in [60, 1800, 28_800] {
+        assert!(validate_state(&remembering(A, "x", duration)).is_ok(), "duration {duration}");
+    }
+}
+
+/// Version 10 is what holds grant memory and what a library's synced route rows need (those arrive with a later step); a device-local
+/// route alone stays at version 9, so a state that never asked for a grant keeps opening in the releases that know version 9.
+#[test]
+fn only_grant_memory_and_synced_route_rows_need_version_ten() {
+    use crate::sync::state_v2::AccountState;
+    assert!(!needs_sync_version(&state()));
+    let local = set(&state(), A, None, Some(with_pam(A)), 1).unwrap();
+    assert!(has_data(&local) && !needs_sync_version(&local), "a device-local route needs version 9 only");
+    assert!(needs_sync_version(&remember_grant_request(&local, A, "x", 60, 2).unwrap()));
+    let route_row = local.local.transports.values().next().unwrap().clone();
+    let with_account_row = |row: LocalRecord| {
+        let mut synced = state();
+        let mut account = AccountState::new(&"a".repeat(64));
+        account.records.insert(record_key(row.record.kind, &row.record.id), row);
+        synced.account = Some(account);
+        synced
+    };
+    assert!(needs_sync_version(&with_account_row(route_row.clone())), "a route synced with the library");
+    let mut tunnel = route_row;
+    tunnel.record.id = format!("tunnel:{A}");
+    assert!(!needs_sync_version(&with_account_row(tunnel)), "another kind of library row does not");
+}
+
+#[test]
+fn the_state_file_holds_grant_memory_only_once_there_is_some() {
+    let value = serde_json::to_value(state()).unwrap();
+    assert!(value["local"].get("transport_grants").is_none(), "{value}");
+    let remembered = remember_grant_request(&set(&state(), A, None, Some(with_pam(A)), 1).unwrap(), A, "restart app-api", 1800, 2).unwrap();
+    let text = serde_json::to_string(&remembered).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["local"]["transport_grants"], json!({ A: { "justification": "restart app-api", "duration_secs": 1800 } }));
+    let DecodedState::V3(restored) = decode_state(&text).unwrap() else { panic!("the state decodes") };
+    assert_eq!(*restored, remembered);
+    let mut extra = value;
+    extra["local"]["transport_grants"][A]["surprise"] = json!(true);
+    assert!(decode_state(&extra.to_string()).is_err(), "an unknown field is not read past");
 }
 
 #[test]

@@ -649,13 +649,36 @@ fn a_transport_change_keeps_what_was_not_sent_and_shows_old_to_new() {
     .unwrap();
     let (_, _, instance, _, _, pam) = kind_of(&transport_of(&d, &id).unwrap());
     let pam = pam.unwrap();
-    assert_eq!((instance.as_str(), pam.entitlements.clone(), pam.duration_secs, pam.justification.as_deref()), ("jumpbox", vec!["prod-admin".to_string()], 2700, Some("restart app-api")));
+    assert_eq!((instance.as_str(), pam.entitlements.clone(), pam.duration_secs, pam.justification.as_deref()), ("jumpbox", vec!["prod-admin".to_string()], 2700, None));
+    // What the person last asked for is device memory beside the route (design 2026-10-26), not part of it: the AI's edit leaves it be.
+    assert_eq!(crate::sync::transports::grant_memory(&snapshot(&d), &id), Some(crate::sync::transports::GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
     set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":null}), RequestContext::default(), &CancelToken::default(), &|q| {
         assert!(rows(q).contains(&("PAM entitlements".into(), "prod-admin → none".into())), "{:?}", rows(q));
         ApprovalDecision::Allow
     })
     .unwrap();
     assert!(kind_of(&transport_of(&d, &id).unwrap()).5.is_none(), "the check is gone");
+}
+
+/// A route an earlier release saved holds the justification last sent with a request. The AI's edit of its PAM check keeps it, as it
+/// keeps every field it was not given (the justification is the person's).
+#[test]
+fn a_transport_change_keeps_a_justification_an_earlier_release_stored_in_the_route() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+        let current = crate::sync::transports::get(state, &id).unwrap();
+        let mut earlier = current.clone();
+        let crate::sync::transports::TransportKind::GcpIap { pam: Some(pam), .. } = &mut earlier.kind else { unreachable!("a PAM check") };
+        pam.justification = Some("restart app-api".into());
+        crate::sync::transports::set(state, &id, Some(&current), Some(earlier), now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":{"entitlements":["prod-admin"]}}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    let pam = kind_of(&transport_of(&d, &id).unwrap()).5.unwrap();
+    assert_eq!((pam.entitlements.clone(), pam.justification.as_deref()), (vec!["prod-admin".to_string()], Some("restart app-api")));
 }
 
 #[test]

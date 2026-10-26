@@ -2,6 +2,10 @@
 //! `Meta` record per host, `transport:<host-id>`, in the envelope tunnel rules use, so a later step can publish them; until then they live
 //! in `local.transports` only, so `set` consults neither the account nor opaque shadows, and an account join leaves them alone. Saving
 //! the first one raises the local state version to `STATE_VERSION`, which an older Lunport refuses to open.
+//!
+//! What a grant request taught this device about a host (the justification and the length) is not part of the route: it stays in
+//! `local.transport_grants` as a `GrantMemory`, under `SYNC_STATE_VERSION` (design 2026-10-26), so that requesting a grant never edits
+//! the route.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +17,8 @@ use super::records_v3::{self, SyncStateV3};
 
 pub const PREFIX: &str = "transport:";
 pub const STATE_VERSION: u32 = records_v3::TRANSPORT_STATE_VERSION;
+/// The local state version of grant memory and of the library's route rows.
+pub const SYNC_STATE_VERSION: u32 = records_v3::TRANSPORT_SYNC_STATE_VERSION;
 const MAX_ENTITLEMENTS: usize = 8;
 
 /// A host's transport: which host, and how this device reaches it.
@@ -59,13 +65,26 @@ pub struct PamCheck {
     pub entitlements: Vec<String>,
     #[serde(default = "default_location")]
     pub location: String,
-    /// How long a grant requested from Lunport asks for: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design 2026-10-25,
-    /// PAM grant requests).
+    /// How long a grant requested from Lunport asks for by default: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design
+    /// 2026-10-25, PAM grant requests). The length last asked for stays on the device that asked (`GrantMemory`), not here.
     #[serde(default = "default_duration")]
     pub duration_secs: u32,
-    /// The justification last sent with a request, offered again next time.
+    /// The justification last sent with a request, as earlier releases kept it here. It is remembered on the device now (`GrantMemory`);
+    /// no request writes this field any more.
     #[serde(default)]
     pub justification: Option<String>,
+}
+
+/// What this device's last grant request for a host taught it (design 2026-10-26, Grant requests): the justification given and the
+/// length asked for, offered again next time. It stays on this device, beside the route, so that requesting a grant never edits the
+/// route, which syncs with its host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct GrantMemory {
+    pub justification: String,
+    pub duration_secs: u32,
 }
 
 fn default_interface() -> String {
@@ -83,6 +102,32 @@ fn default_duration() -> u32 {
 /// The longest grant Lunport asks for; PAM's own maximum (the entitlement's) applies on top, in PAM's words.
 pub(crate) const MAX_DURATION_SECS: u32 = 480 * 60;
 pub(crate) const MAX_JUSTIFICATION_CHARS: usize = 512;
+
+/// A grant length Lunport asks for: whole minutes, 1–480.
+fn is_grant_duration(secs: u32) -> bool {
+    (60..=MAX_DURATION_SECS).contains(&secs) && secs.is_multiple_of(60)
+}
+
+/// A justification as one line: at most `MAX_JUSTIFICATION_CHARS` characters, none of them a control character.
+fn is_justification_line(text: &str) -> bool {
+    text.chars().count() <= MAX_JUSTIFICATION_CHARS && !text.chars().any(char::is_control)
+}
+
+impl GrantMemory {
+    /// One sentence about the first field that is not acceptable, else `Ok`: the rules of the request form.
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_grant_duration(self.duration_secs) {
+            return Err("Enter a grant duration between 1 and 480 minutes.".into());
+        }
+        if self.justification.is_empty() {
+            return Err("Enter a justification.".into());
+        }
+        if !is_justification_line(&self.justification) {
+            return Err("Keep the justification under 512 characters on one line.".into());
+        }
+        Ok(())
+    }
+}
 
 impl HostTransport {
     /// One sentence about the first field that is not acceptable, else `Ok`.
@@ -119,10 +164,10 @@ impl HostTransport {
             if !is_resource_name(&pam.location) {
                 return Err("Enter the PAM location, such as global.".into());
             }
-            if pam.duration_secs < 60 || pam.duration_secs > MAX_DURATION_SECS || pam.duration_secs % 60 != 0 {
+            if !is_grant_duration(pam.duration_secs) {
                 return Err("Enter a grant duration between 1 and 480 minutes.".into());
             }
-            if pam.justification.as_deref().is_some_and(|text| text.chars().count() > MAX_JUSTIFICATION_CHARS || text.chars().any(char::is_control)) {
+            if pam.justification.as_deref().is_some_and(|text| !is_justification_line(text)) {
                 return Err("Keep the justification under 512 characters on one line.".into());
             }
         }
@@ -231,17 +276,34 @@ pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>,
     write(state, host_id, transport, now)
 }
 
-/// What a grant request taught the transport (design 2026-10-25, PAM grant requests): the duration asked for and the justification
-/// given, offered again next time. Written without a compare-and-set (the panel may be showing the transport meanwhile); `validate`'s
-/// rules apply to what is remembered.
-pub fn remember_grant_request(state: &SyncStateV3, host_id: &str, justification: &str, duration_secs: u32, now: u64) -> Result<SyncStateV3, RepositoryError> {
-    let Some(mut transport) = get(state, host_id) else { return Err(repo::invalid("transport", host_id, "This host has no transport.")) };
-    let TransportKind::GcpIap { pam, .. } = &mut transport.kind;
-    let Some(pam) = pam.as_mut() else { return Err(repo::invalid("transport", host_id, "This transport requires no grant.")) };
-    pam.justification = Some(justification.to_string());
-    pam.duration_secs = duration_secs;
-    transport.validate().map_err(|reason| repo::invalid("transport", host_id, &reason))?;
-    write(state, host_id, Some(transport), now)
+/// What this device remembers of its last grant request for `host_id`, if it made one (design 2026-10-26, Grant requests).
+pub fn grant_memory(state: &SyncStateV3, host_id: &str) -> Option<GrantMemory> {
+    state.local.transport_grants.get(host_id).cloned()
+}
+
+/// Whether the state holds anything that needs `SYNC_STATE_VERSION`: grant memory, or a route of the library (a `transport:` row of
+/// the account), which a Lunport that does not know that version could not publish.
+pub fn needs_sync_version(state: &SyncStateV3) -> bool {
+    !state.local.transport_grants.is_empty()
+        || state.account.as_ref().is_some_and(|account| account.records.values().any(|row| row.record.kind == RecordKind::Meta && is_id(&row.record.id)))
+}
+
+/// What a grant request taught this device about the host (design 2026-10-26, Grant requests): the duration asked for and the
+/// justification given, offered again next time. They are kept on this device beside the route, not in it, so a request never edits the
+/// route. Written without a compare-and-set (the editor may be showing the route meanwhile); the route must exist and require a grant,
+/// and the request form's rules apply to what is remembered. The state version is raised to `SYNC_STATE_VERSION`.
+pub fn remember_grant_request(state: &SyncStateV3, host_id: &str, justification: &str, duration_secs: u32, _now: u64) -> Result<SyncStateV3, RepositoryError> {
+    let Some(transport) = get(state, host_id) else { return Err(repo::invalid("transport", host_id, "This host has no transport.")) };
+    let TransportKind::GcpIap { pam, .. } = &transport.kind;
+    if pam.is_none() {
+        return Err(repo::invalid("transport", host_id, "This transport requires no grant."));
+    }
+    let memory = GrantMemory { justification: justification.to_string(), duration_secs };
+    memory.validate().map_err(|reason| repo::invalid("transport", host_id, &reason))?;
+    let mut next = state.clone();
+    next.local.transport_grants.insert(host_id.to_string(), memory);
+    next.version = next.version.max(SYNC_STATE_VERSION);
+    Ok(next)
 }
 
 fn write(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
