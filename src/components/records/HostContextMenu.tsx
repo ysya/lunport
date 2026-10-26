@@ -28,6 +28,7 @@ import {
 import { copyText } from "@/lib/clipboard";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
+import { transportFor } from "@/lib/transports";
 import { applyCollectionAction } from "./collection-actions";
 import { selectGroup } from "./group-tree";
 import { deleteReviewedHost, reviewedHostIsCurrent } from "./host-actions";
@@ -203,17 +204,20 @@ export function HostContextMenu({
               Connection details
             </ContextMenuItem>
           )}
-          <ContextMenuItem
-            disabled={disabled}
-            onSelect={() => {
-              void copyText(host.effective_payload.hostname).catch(() =>
-                setError("Could not copy the address. Please retry."),
-              );
-            }}
-          >
-            <Copy />
-            Copy address
-          </ContextMenuItem>
+          {/* A host with a route is reached through it, so its saved hostname is never dialed and there is no address to copy. */}
+          {!transportFor(overview, host.id) && (
+            <ContextMenuItem
+              disabled={disabled}
+              onSelect={() => {
+                void copyText(host.effective_payload.hostname).catch(() =>
+                  setError("Could not copy the address. Please retry."),
+                );
+              }}
+            >
+              <Copy />
+              Copy address
+            </ContextMenuItem>
+          )}
           <ContextMenuSeparator />
           <ContextMenuItem
             disabled={disabled || organizeDisabled || !accept}

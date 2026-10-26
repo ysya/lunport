@@ -220,7 +220,7 @@ export function IapRouteFields({
                 <Input value={kind.pam.location} placeholder="global" disabled={disabled} onChange={(e) => patchPam({ location: e.target.value.trim() })} />
               </RecordField>
               <RecordField label="Default grant (minutes)">
-                {/* What a grant requested from Lunport asks for; the request dialog offers it, and remembers what was last used. */}
+                {/* The length a grant requested from Lunport starts from, saved with the route. The request dialog offers what this computer last asked for on the host first; that stays on this computer, not in the route. */}
                 <Input
                   type="number"
                   min={1}

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { stubBackend } from "@/lib/test-ipc";
+import { renderHook, stubBackend } from "@/lib/test-ipc";
 import { buttonsIn, buttonTag, DISABLED, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { Dialog } from "@/components/ui/dialog";
 import { hostPayload, hostTransport, hostView } from "./fixtures";
@@ -27,15 +27,7 @@ afterEach(() => vi.unstubAllGlobals());
  * The element tree a component with hooks draws on its first render. A server render keeps no state update and runs no effect, so
  * what the tree's callbacks start (a request to the backend) is real, and what they would then show is not drawn.
  */
-function firstRender(draw: () => ReactNode): ReactNode {
-  let tree: ReactNode = null;
-  const Probe = () => {
-    tree = draw();
-    return null;
-  };
-  renderToStaticMarkup(<Probe />);
-  return tree;
-}
+const firstRender = (draw: () => ReactNode): ReactNode => renderHook(new QueryClient(), draw);
 
 describe("host trust and reachability", () => {
   it("renders the populated OpenSSH tab without requiring a Legacy tooltip provider", () => {

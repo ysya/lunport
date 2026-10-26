@@ -22,15 +22,17 @@ export const fetchOsLoginProfile = (account: string | null, project: string, key
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
 export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
 /**
- * A host's Access grant as the details pane keeps it: read when the pane opens and again every minute while it stays open. Not retried
- * (the next minute reads it again), and read even when the webview thinks it is offline, since the answer comes from this app's
- * backend, which says in its own sentence when Google cannot be reached.
+ * A host's Access grant as the details pane keeps it: read when the pane opens and again every minute while it stays open. A window
+ * gaining focus does not read it again, since every read is a Google call. Not retried (the next minute reads it again), and read even
+ * when the webview thinks it is offline, since the answer comes from this app's backend, which says in its own sentence when Google
+ * cannot be reached.
  */
 export const pamStatusQuery = (hostId: string) =>
   queryOptions({
     queryKey: ["gcp", "pam-status", hostId],
     queryFn: () => fetchPamStatus(hostId),
     refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
     retry: false,
     networkMode: "always",
   });

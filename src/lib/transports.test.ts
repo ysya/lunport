@@ -141,13 +141,15 @@ describe("transports", () => {
     expect(Object.keys(calls[0][1] as object)).toEqual(["hostId", "justification", "durationSecs"]);
   });
 
-  it("reads a host's grant through the backend, apart for each host, and again every minute", async () => {
+  it("reads a host's grant through the backend, apart for each host, when the pane opens and every minute, but not on window focus", async () => {
     const view: PamStatusView = { entitlement: "prod-operate", state: "active", active_until_ms: 1_700_000_000_000, message: null };
     const calls = stubBackend(async () => view);
     expect(await new QueryClient().fetchQuery(pamStatusQuery(HOST))).toEqual(view);
     expect(calls).toEqual([["transports_pam_status", { hostId: HOST }]]);
     expect(pamStatusQuery(HOST).queryKey).not.toEqual(pamStatusQuery("0000000000000002").queryKey);
     expect(pamStatusQuery(HOST).refetchInterval).toBe(60_000);
+    // A window gaining focus would cost a Google call the design does not ask for.
+    expect(pamStatusQuery(HOST).refetchOnWindowFocus).toBe(false);
   });
 
   it("names a route's target as project / instance", () => {
