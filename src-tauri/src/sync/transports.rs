@@ -5,6 +5,9 @@
 //! routes live in `local.transports` only, so `set` consults neither the account nor opaque shadows, and an account join leaves them
 //! alone. Saving the first local one raises the local state version to `STATE_VERSION`, which an older Lunport refuses to open.
 //!
+//! The host editor saves a route with its host, in one edit, and deleting a host removes its route in the same edit (design 2026-10-26,
+//! Commands): `RouteChange`, `apply_route_change` and `remove_route` are what the host commands apply after the host write.
+//!
 //! What a grant request taught this device about a host (the justification and the length) is not part of the route: it stays in
 //! `local.transport_grants` as a `GrantMemory`, under `SYNC_STATE_VERSION` (design 2026-10-26), so that requesting a grant never edits
 //! the route.
@@ -30,8 +33,10 @@ const MAX_ENTITLEMENTS: usize = 8;
 pub const MAX_ROUTES: usize = 256;
 /// The refusal of a save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog).
 pub const NO_ROOM: &str = "This library has no room for more routes or tunnels: together they would exceed what one sync record holds. Remove a route or a tunnel, then try again.";
-/// The refusal of a save whose displayed route is no longer the saved one: `set`'s compare-and-set.
+/// The refusal of a save whose displayed route is no longer the saved one: `set`'s compare-and-set (`RepositoryError::RouteChanged`).
 pub const ROUTE_CHANGED: &str = "The host's route changed while you were editing; reload and try again.";
+/// What the host editor says of a library whose writes are blocked. A route write refused for that reason reads the same (`refusal`).
+pub const SYNC_PAUSED: &str = "Sync changes are paused while account data is reviewed.";
 
 /// A host's transport: which host, and how this device reaches it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,10 +315,10 @@ pub fn has_data(state: &SyncStateV3) -> bool {
 }
 
 /// Saves (`Some`) or removes (`None`) the transport of `host_id`, provided `expected` is what `get` reads now: the compare-and-set the
-/// editor relies on, refused with `ROUTE_CHANGED`. In a library that uses central sync the route is the library's: a library whose
-/// writes are blocked refuses it, and the account's row is written (`write_library`), so a save must leave the Catalog room (`NO_ROOM`).
-/// Otherwise the route is saved on this device and the version raised to `STATE_VERSION`. A removal also forgets what grant requests
-/// taught this device about the host (`grant_memory`).
+/// editor relies on, refused with `RepositoryError::RouteChanged` (`ROUTE_CHANGED`). In a library that uses central sync the route is
+/// the library's: a library whose writes are blocked refuses it, and the account's row is written (`write_library`), so a save must
+/// leave the Catalog room (`NO_ROOM`). Otherwise the route is saved on this device and the version raised to `STATE_VERSION`. A removal
+/// also forgets what grant requests taught this device about the host (`grant_memory`).
 pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
     if !records_v3::is_host_id(host_id) {
         return Err(repo::invalid("transport", host_id, "Invalid host identity."));
@@ -323,7 +328,7 @@ pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>,
         return Err(RepositoryError::ReadOnlyAccount);
     }
     if get(state, host_id).as_ref() != expected {
-        return Err(repo::invalid("transport", host_id, ROUTE_CHANGED));
+        return Err(RepositoryError::RouteChanged);
     }
     if let Some(transport) = &transport {
         transport.validate().map_err(|reason| repo::invalid("transport", host_id, &reason))?;
@@ -337,6 +342,46 @@ pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>,
         next.local.transport_grants.remove(host_id);
     }
     Ok(next)
+}
+
+/// The route half of a combined host save (design 2026-10-26, Commands): the route as the editor displayed it (`expected`, none for a
+/// host without one) and the route to save (`kind`, none to remove the route). It names no host: the command that carries it supplies
+/// the id, so a new host's route takes the new host's id.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct RouteChange {
+    pub expected: Option<HostTransport>,
+    pub kind: Option<TransportKind>,
+}
+
+/// `change` applied to the route of `host_id`: `set`, with the route to save named for the host. A change that leaves the route as it
+/// is, provided `expected` is what `get` reads now, writes nothing: saving a host without touching its route leaves no tombstone for a
+/// route that never was (which would raise the state version for someone who never used a route), nor moves a route kept on this device
+/// into the library.
+pub fn apply_route_change(state: &SyncStateV3, host_id: &str, change: &RouteChange, now: u64) -> Result<SyncStateV3, RepositoryError> {
+    let route = change.kind.clone().map(|kind| HostTransport { host_id: host_id.into(), kind });
+    if records_v3::is_host_id(host_id) && route == change.expected && get(state, host_id) == change.expected {
+        return Ok(state.clone());
+    }
+    set(state, host_id, change.expected.as_ref(), route, now)
+}
+
+/// Removes the route of `host_id`, if it has one, as deleting the host does (design 2026-10-26, Deleting a host); a host with no route
+/// is left as it is.
+pub fn remove_route(state: &SyncStateV3, host_id: &str, now: u64) -> Result<SyncStateV3, RepositoryError> {
+    apply_route_change(state, host_id, &RouteChange { expected: get(state, host_id), kind: None }, now)
+}
+
+/// How a refused route write reads where it is shown, for the combined host save and for MCP's route tools: a library whose writes are
+/// blocked reads as the host editor's own sentence (`SYNC_PAUSED`), and every other refusal as it reads already. The compare-and-set and
+/// the room check are sentences themselves (`ROUTE_CHANGED`, `NO_ROOM`).
+pub fn refusal(error: RepositoryError) -> String {
+    match error {
+        RepositoryError::ReadOnlyAccount => SYNC_PAUSED.to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// What this device remembers of its last grant request for `host_id`, if it made one (design 2026-10-26, Grant requests).

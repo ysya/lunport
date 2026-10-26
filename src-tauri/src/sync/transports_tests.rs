@@ -54,9 +54,10 @@ fn a_saved_transport_is_read_back_by_host_and_raises_the_state_version() {
 #[test]
 fn saving_requires_the_displayed_value() {
     let one = set(&state(), A, None, Some(iap(A)), 1).unwrap();
-    assert_eq!(reason(set(&one, A, None, Some(iap(A)), 2).unwrap_err()), ROUTE_CHANGED, "somebody saved first");
+    // The refusal reads as the sentence itself wherever it is shown (R16), not as a wrapped validation reason.
+    assert_eq!(set(&one, A, None, Some(iap(A)), 2).unwrap_err(), RepositoryError::RouteChanged, "somebody saved first");
     let changed = with_zone(iap(A), "asia-east1-c");
-    assert_eq!(reason(set(&one, A, Some(&changed), Some(iap(A)), 2).unwrap_err()), ROUTE_CHANGED, "the displayed value is stale");
+    assert_eq!(set(&one, A, Some(&changed), Some(iap(A)), 2).unwrap_err().to_string(), ROUTE_CHANGED, "the displayed value is stale");
     let two = set(&one, A, Some(&iap(A)), Some(changed.clone()), 2).unwrap();
     assert_eq!(get(&two, A), Some(changed));
     assert!(set(&two, A, Some(&iap(A)), Some(iap(B)), 3).is_err(), "a transport names its own host");
@@ -621,4 +622,68 @@ fn routes_follow_the_merged_hosts_as_this_devices_own() {
     assert_eq!(keys, [NEW, MOVED].map(|host| record_key(RecordKind::Meta, &wire_id(host))), "no tombstone and nothing for C");
     assert_eq!(grant_memory(&next, NEW), Some(GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
     assert_eq!(next.local.transport_grants.len(), 1, "C's memory goes with its host");
+}
+
+// ---- A route saved with its host (design 2026-10-26, Commands) ----
+
+/// The route half of a combined host save names no host: the command that carries it supplies the id. It saves, removes, or refuses on
+/// an `expected` that is not the route now.
+#[test]
+fn a_route_change_saves_removes_or_refuses_on_a_stale_expected_value() {
+    let state = with_local_host(state(), HOST);
+    let saved = apply_route_change(&state, HOST, &RouteChange { expected: None, kind: Some(iap(HOST).kind) }, 1).unwrap();
+    assert_eq!(get(&saved, HOST), Some(iap(HOST)));
+    let stale = RouteChange { expected: None, kind: Some(with_zone(iap(HOST), "asia-east1-a").kind) };
+    assert_eq!(apply_route_change(&saved, HOST, &stale, 2).unwrap_err().to_string(), ROUTE_CHANGED);
+    let removed = apply_route_change(&saved, HOST, &RouteChange { expected: Some(iap(HOST)), kind: None }, 3).unwrap();
+    assert_eq!(get(&removed, HOST), None);
+}
+
+/// The route displayed has to be this host's: another host's route is never the one a save was shown.
+#[test]
+fn a_route_change_expecting_another_hosts_route_is_stale() {
+    let both = set(&set(&with_local_host(state(), HOST), HOST, None, Some(iap(HOST)), 1).unwrap(), OTHER, None, Some(iap(OTHER)), 2).unwrap();
+    let change = RouteChange { expected: Some(iap(OTHER)), kind: None };
+    assert_eq!(apply_route_change(&both, HOST, &change, 3).unwrap_err(), RepositoryError::RouteChanged);
+    assert_eq!(get(&both, HOST), Some(iap(HOST)), "nothing was removed");
+}
+
+/// A change that leaves the route as it is writes nothing: a save of the host alone must not leave a tombstone for a route that never
+/// was (it would raise the state version for someone who never used a route), nor publish a route kept on this device alone. A display
+/// that is stale is refused all the same.
+#[test]
+fn a_route_change_that_changes_nothing_writes_nothing() {
+    let bare = with_local_host(state(), HOST);
+    let nothing = RouteChange { expected: None, kind: None };
+    assert_eq!(apply_route_change(&bare, HOST, &nothing, 1).unwrap(), bare, "no route to remove: no tombstone and no version");
+    assert_eq!(apply_route_change(&central_with_host(HOST), HOST, &nothing, 1).unwrap(), central_with_host(HOST), "nor a tombstone row in the library");
+    let kept = saved_on_this_device(&in_central_mode(bare.clone()), &iap(HOST));
+    let unchanged = RouteChange { expected: Some(iap(HOST)), kind: Some(iap(HOST).kind) };
+    assert_eq!(apply_route_change(&kept, HOST, &unchanged, 2).unwrap(), kept, "saving the host does not publish the route it keeps");
+    assert!(!synced(&kept, HOST));
+    assert_eq!(apply_route_change(&bare, HOST, &unchanged, 3).unwrap_err(), RepositoryError::RouteChanged, "the route displayed is gone");
+}
+
+/// The JSON a webview sends: the route displayed and the route to save, and nothing else (the host is the command's).
+#[test]
+fn a_route_change_decodes_from_what_the_editor_sends() {
+    let kind = serde_json::to_value(iap(HOST).kind).unwrap();
+    let save: RouteChange = serde_json::from_value(json!({"expected": null, "kind": kind})).unwrap();
+    assert_eq!((save.expected, save.kind), (None, Some(iap(HOST).kind)));
+    let remove: RouteChange = serde_json::from_value(json!({"expected": serde_json::to_value(iap(HOST)).unwrap(), "kind": null})).unwrap();
+    assert_eq!((remove.expected, remove.kind), (Some(iap(HOST)), None));
+    assert!(serde_json::from_value::<RouteChange>(json!({"expected": null, "kind": null, "host_id": HOST})).is_err(), "a change names no host");
+}
+
+/// R16 and R18: a refused route write reads as a sentence where it is shown. The blocked library's is the host editor's own.
+#[test]
+fn a_refused_route_write_reads_as_a_sentence() {
+    let change = RouteChange { expected: None, kind: Some(iap(HOST).kind) };
+    let paused = apply_route_change(&blocked(central_with_host(HOST)), HOST, &change, 1).unwrap_err();
+    assert_eq!(paused, RepositoryError::ReadOnlyAccount);
+    assert_eq!(refusal(paused), "Sync changes are paused while account data is reviewed.");
+    let full = filled_past_the_limit_with_tunnels(central_with_host(OTHER));
+    assert_eq!(refusal(apply_route_change(&full, OTHER, &RouteChange { expected: None, kind: Some(iap(OTHER).kind) }, 1).unwrap_err()), NO_ROOM);
+    let saved = apply_route_change(&with_local_host(state(), HOST), HOST, &change, 1).unwrap();
+    assert_eq!(refusal(apply_route_change(&saved, HOST, &change, 2).unwrap_err()), ROUTE_CHANGED);
 }

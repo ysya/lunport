@@ -759,6 +759,38 @@ fn set_transport_refuses_a_route_that_does_not_fit() {
     assert!(transport_of(&d, &id).is_none());
 }
 
+/// R18: a library whose writes are paused refuses a route edit in the sentence the host editor shows for it, whether the pause is there
+/// before the window opens or begins while it is open.
+#[test]
+fn transport_tools_in_a_paused_library_say_sync_is_paused() {
+    const PAUSED: &str = "Sync changes are paused while account data is reviewed.";
+    let d = device_with(crate::sync::transports::tests::in_central_mode);
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    let pause = || {
+        record_runtime::mutate_records(&d.env(), |state| {
+            let mut next = state.clone();
+            next.shared_writes_blocked = true;
+            Ok(next)
+        })
+        .unwrap();
+    };
+    let zone = json!({"alias":"fixture-web","zone":"asia-east1-c"});
+    // The pause begins after the person has seen the proposal: the save refuses it.
+    let error = set_transport(&d.env(), &r, &zone, RequestContext::default(), &CancelToken::default(), &|_| {
+        pause();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    assert_eq!(error, PAUSED);
+    assert_eq!(last_outcome(&r), "transport_not_set");
+    // Already paused: refused before any window.
+    assert_eq!(set_transport(&d.env(), &r, &zone, RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), PAUSED);
+    assert_eq!(remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), PAUSED);
+    assert_eq!(kind_of(&transport_of(&d, &id).unwrap()).1, "asia-east1-b", "the route stays as it was");
+}
+
 #[test]
 fn transport_tools_need_the_hosts_ai_permission() {
     let d = device();

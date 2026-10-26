@@ -81,6 +81,8 @@ pub enum RepositoryError {
     /// A save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog). It reads
     /// as `transports::NO_ROOM` wherever it is shown.
     NoRoom,
+    /// A route save whose displayed route is no longer the saved one. It reads as `transports::ROUTE_CHANGED` wherever it is shown.
+    RouteChanged,
 }
 impl From<RecordValidationError> for RepositoryError {
     fn from(error: RecordValidationError) -> Self {
@@ -91,6 +93,7 @@ impl std::fmt::Display for RepositoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoRoom => f.write_str(super::transports::NO_ROOM),
+            Self::RouteChanged => f.write_str(super::transports::ROUTE_CHANGED),
             _ => write!(f, "{self:?}"),
         }
     }

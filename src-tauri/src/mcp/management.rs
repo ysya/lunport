@@ -763,7 +763,7 @@ fn transport_change(
     }
     // What the save would refuse is refused before the window: a library whose writes are blocked, or one whose Catalog has no room
     // for the route (design 2026-10-26, Room in the Catalog).
-    crate::sync::transports::set(state, &id, before.as_ref(), after.clone(), env.now()).map_err(|e| e.to_string())?;
+    crate::sync::transports::set(state, &id, before.as_ref(), after.clone(), env.now()).map_err(crate::sync::transports::refusal)?;
     let proposal = McpHostProposal { kind: kind.into(), settings: rows };
     let _active = active(runtime, &mut context, &id, cancel)?;
     live(runtime, policy.approval_mode, cancel)?;
@@ -797,7 +797,7 @@ fn transport_change(
             if crate::sync::transports::get(state, &id) != before {
                 return Err(AppError::Other(TRANSPORT_CHANGED.into()));
             }
-            crate::sync::transports::set(state, &id, before.as_ref(), after.clone(), now).map_err(|e| AppError::Other(e.to_string()))
+            crate::sync::transports::set(state, &id, before.as_ref(), after.clone(), now).map_err(|e| AppError::Other(crate::sync::transports::refusal(e)))
         })
         .map_err(|e| e.to_string())?;
         let state = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;

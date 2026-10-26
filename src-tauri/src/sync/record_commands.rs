@@ -7,6 +7,7 @@ use crate::sync::record_repository::{
 };
 use crate::sync::record_runtime::{self, RuntimeFormat};
 use crate::sync::records_v3::{GroupPayload, HostPayload, HostScope, KeySlotPayload, SyncStateV3};
+use crate::sync::transports::RouteChange;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -99,6 +100,24 @@ pub struct PendingAccountView {
     kind: crate::sync::record_account::PendingAccountKind,
     phase: crate::sync::record_account::PendingAccountPhase,
 }
+/// Whether the route a host has syncs wherever the host does (the library's) or stays on this computer; one per route in `transports`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct TransportSyncView {
+    pub host_id: String,
+    pub synced: bool,
+}
+/// What this device remembers of its last grant request for a host: the justification given and the length asked for, offered again
+/// next time. It never leaves this device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct GrantMemoryView {
+    pub host_id: String,
+    pub justification: String,
+    pub duration_secs: u32,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordOverview {
     central_mode: bool,
@@ -124,8 +143,12 @@ pub struct RecordOverview {
     library_scope: Option<HostScope>,
     pending_changes: usize,
     conflicts: Vec<crate::sync::record_conflicts::ConflictView>,
-    /// Device-local host transports (Google Cloud IAP), one per host at most.
+    /// Host routes (Google Cloud IAP), one per host at most: the library's when it holds one, else the one saved on this device.
     transports: Vec<crate::sync::transports::HostTransport>,
+    /// For each route in `transports`, whether it syncs with its host.
+    transport_sync: Vec<TransportSyncView>,
+    /// What grant requests taught this device, per host.
+    grant_memory: Vec<GrantMemoryView>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupOrderView {
@@ -267,6 +290,7 @@ pub fn overview_from(
             }
         })
         .collect();
+    let routes = crate::sync::transports::view(state);
     Ok(RecordOverview {
         key_scope: crate::sync::record_import::central_local::invocation(state).map(|scope| scope.with_generation(generation)),
         central_mode: state.local.central.as_ref().is_some_and(|owner| owner.control.cutover),
@@ -276,7 +300,17 @@ pub fn overview_from(
         group_deletion_token,
         relay_url: state.relay_url.clone(),
         hosts,
-        transports: crate::sync::transports::view(state),
+        transport_sync: routes
+            .iter()
+            .map(|route| TransportSyncView { host_id: route.host_id.clone(), synced: crate::sync::transports::synced(state, &route.host_id) })
+            .collect(),
+        transports: routes,
+        grant_memory: state
+            .local
+            .transport_grants
+            .iter()
+            .map(|(host_id, memory)| GrantMemoryView { host_id: host_id.clone(), justification: memory.justification.clone(), duration_secs: memory.duration_secs })
+            .collect(),
         groups: snapshot
             .groups
             .into_iter()
@@ -539,30 +573,68 @@ pub async fn records_group_delete(
     })
     .await
 }
+/// A new host and its route, saved as one edit (design 2026-10-26, Commands): the route takes the new host's id, and a route that is
+/// refused refuses the host with it.
+pub(crate) fn create_host_with_route(
+    state: &SyncStateV3,
+    id: &str,
+    scope: &HostScope,
+    payload: &HostPayload,
+    upgrade_confirmed: bool,
+    route: Option<&RouteChange>,
+    now: u64,
+) -> Result<SyncStateV3, AppError> {
+    let scope = if *scope == HostScope::Local {
+        crate::sync::record_library::creation_scope(state).map_err(error)?
+    } else {
+        scope.clone()
+    };
+    let candidate = crate::sync::record_groups::promote_for_host(state, &scope, payload, upgrade_confirmed, now).map_err(error)?;
+    let created = repo::create_host(&candidate, id, scope, payload.clone(), now).map_err(error)?;
+    with_route(created, id, route, now)
+}
+/// A host's save and its route change, as one edit: the route is applied to the state the host write produced, so either both are
+/// saved or neither.
+pub(crate) fn update_host_with_route(
+    state: &SyncStateV3,
+    id: &str,
+    revision: &RecordRevision,
+    payload: &HostPayload,
+    upgrade_confirmed: bool,
+    route: Option<&RouteChange>,
+    now: u64,
+) -> Result<SyncStateV3, AppError> {
+    let updated = crate::sync::record_library::update_host(state, id, revision, payload.clone(), upgrade_confirmed, now).map_err(error)?;
+    with_route(updated, id, route, now)
+}
+/// A host's deletion takes its route with it, in the same edit; a library that cannot take the route's removal keeps the host too.
+pub(crate) fn delete_host_with_route(state: &SyncStateV3, id: &str, revision: &RecordRevision, now: u64) -> Result<SyncStateV3, AppError> {
+    let deleted = repo::delete_host(state, id, revision, now).map_err(error)?;
+    crate::sync::transports::remove_route(&deleted, id, now).map_err(route_error)
+}
+/// `state` with the route change applied to `host_id`, if there is one; without, the route is untouched.
+fn with_route(state: SyncStateV3, host_id: &str, route: Option<&RouteChange>, now: u64) -> Result<SyncStateV3, AppError> {
+    match route {
+        Some(change) => crate::sync::transports::apply_route_change(&state, host_id, change, now).map_err(route_error),
+        None => Ok(state),
+    }
+}
+/// A refused route write, as the person reads it (R16, R18).
+fn route_error(e: repo::RepositoryError) -> AppError {
+    AppError::Other(crate::sync::transports::refusal(e))
+}
 #[tauri::command]
 pub async fn records_host_create(
     app: AppHandle,
     scope: HostScope,
     payload: HostPayload,
     upgrade_confirmed: Option<bool>,
+    route: Option<RouteChange>,
 ) -> Result<RecordOverview, AppError> {
     let payload = new_host_payload(payload);
     let id = new_host_id()?;
     edit(app, move |s, now| {
-        let scope = if scope == HostScope::Local {
-            crate::sync::record_library::creation_scope(s).map_err(error)?
-        } else {
-            scope.clone()
-        };
-        let candidate = crate::sync::record_groups::promote_for_host(
-            s,
-            &scope,
-            &payload,
-            upgrade_confirmed.unwrap_or(false),
-            now,
-        )
-        .map_err(error)?;
-        repo::create_host(&candidate, &id, scope.clone(), payload.clone(), now).map_err(error)
+        create_host_with_route(s, &id, &scope, &payload, upgrade_confirmed.unwrap_or(false), route.as_ref(), now)
     })
     .await
 }
@@ -573,18 +645,11 @@ pub async fn records_host_update(
     revision: RevisionToken,
     payload: HostPayload,
     upgrade_confirmed: Option<bool>,
+    route: Option<RouteChange>,
 ) -> Result<RecordOverview, AppError> {
     let revision = revision.revision()?;
     edit(app, move |s, now| {
-        crate::sync::record_library::update_host(
-            s,
-            &id,
-            &revision,
-            payload.clone(),
-            upgrade_confirmed.unwrap_or(false),
-            now,
-        )
-        .map_err(error)
+        update_host_with_route(s, &id, &revision, &payload, upgrade_confirmed.unwrap_or(false), route.as_ref(), now)
     })
     .await
 }
@@ -595,10 +660,7 @@ pub async fn records_host_delete(
     revision: RevisionToken,
 ) -> Result<RecordOverview, AppError> {
     let revision = revision.revision()?;
-    edit(app, move |s, now| {
-        repo::delete_host(s, &id, &revision, now).map_err(error)
-    })
-    .await
+    edit(app, move |s, now| delete_host_with_route(s, &id, &revision, now)).await
 }
 #[tauri::command]
 pub async fn records_host_move(
@@ -1416,7 +1478,10 @@ mod tests {
     use super::*;
     use crate::sync::env::Keychain;
     use crate::sync::fake_relay::FakeRelay;
+    use crate::sync::record::{record_key, RecordKind};
+    use crate::sync::records_v3::validate_state;
     use crate::sync::testkit::{TestClock, TestDevice};
+    use crate::sync::transports::{self, tests as fixtures};
     struct ForbiddenKeyIo;
     impl Keychain for ForbiddenKeyIo {
         fn get(&self, _: &str) -> Result<Option<String>, AppError> {
@@ -1623,6 +1688,176 @@ mod tests {
         for value in ["00", "01", "+1", " 1", "1 ", "18446744073709551616", ""] {
             assert!(token_number(value).is_err(), "{value}");
         }
+    }
+
+    // ---- A host and its route are saved as one edit (design 2026-10-26, Commands) ----
+
+    const HOST: &str = "0000000000000001";
+    const OTHER: &str = "0000000000000002";
+    const PAUSED: &str = "Sync changes are paused while account data is reviewed.";
+
+    fn bare_state() -> SyncStateV3 {
+        serde_json::from_value(serde_json::json!({"version":4,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap()
+    }
+    fn web(alias: &str) -> HostPayload {
+        serde_json::from_value(serde_json::json!({"schema":2,"alias":alias,"hostname":"fixture.invalid","auth":"password"})).unwrap()
+    }
+    /// Saving `host`'s route for the first time, as the editor sends it.
+    fn first_route(host: &str) -> RouteChange {
+        RouteChange { expected: None, kind: Some(fixtures::iap(host).kind) }
+    }
+    fn revision_of(state: &SyncStateV3, id: &str) -> RecordRevision {
+        repo::get_host(state, id).unwrap().revision
+    }
+    /// `HOST` created in `state` with the route change the editor sent.
+    fn host_with(state: &SyncStateV3, change: Option<&RouteChange>) -> SyncStateV3 {
+        create_host_with_route(state, HOST, &HostScope::Local, &web("web"), false, change, 1).unwrap()
+    }
+
+    #[test]
+    fn creating_a_host_with_an_invalid_route_saves_neither() {
+        let d = device("invalid-route", &FakeRelay::new(), &TestClock::new());
+        let id = new_host_id().unwrap();
+        let mut invalid = fixtures::iap(&id);
+        let transports::TransportKind::GcpIap { project, .. } = &mut invalid.kind;
+        *project = "Eng".into();
+        let change = RouteChange { expected: None, kind: Some(invalid.kind) };
+        let refused = edit_records(&d.env(), |s, now| create_host_with_route(s, &id, &HostScope::Local, &web("web"), false, Some(&change), now));
+        assert!(refused.unwrap_err().to_string().contains("Enter the Google Cloud project id."));
+        let nothing = overview(&d.env()).unwrap();
+        assert!(nothing.hosts.is_empty() && nothing.transports.is_empty(), "the host was not saved without its route");
+        // The same save with a good route is one edit that holds both.
+        let change = first_route(&id);
+        let saved = edit_records(&d.env(), |s, now| create_host_with_route(s, &id, &HostScope::Local, &web("web"), false, Some(&change), now)).unwrap();
+        assert_eq!((saved.hosts.len(), saved.transports), (1, vec![fixtures::iap(&id)]));
+    }
+
+    /// A new host's route takes the new host's id inside the same edit; with no route change, the host is saved as it always was.
+    #[test]
+    fn creating_a_host_saves_its_route_under_the_new_id() {
+        let saved = host_with(&bare_state(), Some(&first_route(HOST)));
+        assert!(repo::get_host(&saved, HOST).is_ok());
+        assert_eq!(transports::get(&saved, HOST), Some(fixtures::iap(HOST)));
+        validate_state(&saved).unwrap();
+        let plain = host_with(&bare_state(), None);
+        assert_eq!(plain, repo::create_host(&bare_state(), HOST, HostScope::Local, web("web"), 1).unwrap(), "no route change, no route write");
+        // A host that is new has no route to have displayed.
+        let shown = RouteChange { expected: Some(fixtures::iap(HOST)), kind: Some(fixtures::iap(HOST).kind) };
+        let error = create_host_with_route(&bare_state(), HOST, &HostScope::Local, &web("web"), false, Some(&shown), 1).unwrap_err();
+        assert_eq!(error.to_string(), transports::ROUTE_CHANGED);
+    }
+
+    #[test]
+    fn updating_a_host_saves_changes_or_removes_its_route_in_the_same_edit() {
+        let base = host_with(&bare_state(), Some(&first_route(HOST)));
+        let changed = fixtures::with_zone(fixtures::iap(HOST), "asia-east1-c");
+        let edit = RouteChange { expected: Some(fixtures::iap(HOST)), kind: Some(changed.kind.clone()) };
+        let updated = update_host_with_route(&base, HOST, &revision_of(&base, HOST), &web("renamed"), false, Some(&edit), 2).unwrap();
+        assert_eq!(repo::get_host(&updated, HOST).unwrap().host.payload.alias, "renamed");
+        assert_eq!(transports::get(&updated, HOST), Some(changed.clone()));
+        // Omitted, the route is untouched, down to its record.
+        let untouched = update_host_with_route(&updated, HOST, &revision_of(&updated, HOST), &web("again"), false, None, 3).unwrap();
+        assert_eq!(untouched.local.transports, updated.local.transports);
+        assert_eq!(repo::get_host(&untouched, HOST).unwrap().host.payload.alias, "again");
+        // Removed with the host's save.
+        let removal = RouteChange { expected: Some(changed), kind: None };
+        let removed = update_host_with_route(&untouched, HOST, &revision_of(&untouched, HOST), &web("direct"), false, Some(&removal), 4).unwrap();
+        assert_eq!((repo::get_host(&removed, HOST).unwrap().host.payload.alias.as_str(), transports::get(&removed, HOST)), ("direct", None));
+        validate_state(&removed).unwrap();
+    }
+
+    /// R16: a route that is not the one the editor displayed refuses the whole save, and the person reads the route's own sentence.
+    #[test]
+    fn a_route_that_changed_meanwhile_refuses_the_whole_save_in_its_own_sentence() {
+        let d = device("stale-route", &FakeRelay::new(), &TestClock::new());
+        let id = new_host_id().unwrap();
+        let first = first_route(&id);
+        edit_records(&d.env(), |s, now| create_host_with_route(s, &id, &HostScope::Local, &web("web"), false, Some(&first), now)).unwrap();
+        let revision = revision_of(&record_runtime::snapshot(&d.env()).unwrap().0, &id);
+        // The editor displayed a host without a route, but it has one now.
+        let stale = first_route(&id);
+        let error = edit_records(&d.env(), |s, now| update_host_with_route(s, &id, &revision, &web("renamed"), false, Some(&stale), now)).unwrap_err();
+        assert_eq!(error.to_string(), "The host's route changed while you were editing; reload and try again.");
+        let after = overview(&d.env()).unwrap();
+        assert_eq!((after.hosts[0].payload.alias.as_str(), after.transports), ("web", vec![fixtures::iap(&id)]), "the host was not renamed either");
+    }
+
+    /// R18 and the room check: a library that refuses the route refuses the whole save, in a sentence.
+    #[test]
+    fn a_library_that_refuses_the_route_refuses_the_whole_save_in_a_sentence() {
+        let mut paused = fixtures::in_central_mode(bare_state());
+        paused.shared_writes_blocked = true;
+        let error = create_host_with_route(&paused, HOST, &HostScope::Local, &web("web"), false, Some(&first_route(HOST)), 1).unwrap_err();
+        assert_eq!(error.to_string(), PAUSED);
+        let host = host_with(&paused, None);
+        let error = update_host_with_route(&host, HOST, &revision_of(&host, HOST), &web("renamed"), false, Some(&first_route(HOST)), 2).unwrap_err();
+        assert_eq!(error.to_string(), PAUSED);
+        let full = fixtures::filled_past_the_limit_with_tunnels(fixtures::in_central_mode(bare_state()));
+        let error = create_host_with_route(&full, HOST, &HostScope::Local, &web("web"), false, Some(&first_route(HOST)), 1).unwrap_err();
+        assert_eq!(error.to_string(), transports::NO_ROOM);
+    }
+
+    #[test]
+    fn deleting_a_host_removes_its_route() {
+        // A route saved on this device goes with the host, and so does what grant requests taught this device about it.
+        let route = RouteChange { expected: None, kind: Some(fixtures::with_pam(HOST).kind) };
+        let base = host_with(&bare_state(), Some(&route));
+        let remembered = transports::remember_grant_request(&base, HOST, "restart app-api", 1800, 2).unwrap();
+        let deleted = delete_host_with_route(&remembered, HOST, &revision_of(&remembered, HOST), 3).unwrap();
+        assert!(repo::get_host(&deleted, HOST).is_err());
+        assert_eq!((transports::get(&deleted, HOST), transports::grant_memory(&deleted, HOST)), (None, None));
+        assert!(transports::view(&deleted).is_empty());
+        validate_state(&deleted).unwrap();
+        // The library's route goes with it, as a row for the next capture to publish.
+        let library = transports::set(&fixtures::central_with_host(HOST), HOST, None, Some(fixtures::with_pam(HOST)), 1).unwrap();
+        assert!(transports::synced(&library, HOST));
+        let deleted = delete_host_with_route(&library, HOST, &revision_of(&library, HOST), 2).unwrap();
+        let row = &deleted.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &transports::wire_id(HOST))];
+        assert!(row.dirty && row.record.deleted, "a tombstone for the next capture to publish");
+        assert_eq!(transports::get(&deleted, HOST), None);
+        validate_state(&deleted).unwrap();
+        // Another host's route stays.
+        let both = transports::set(&base, OTHER, None, Some(fixtures::iap(OTHER)), 2).unwrap();
+        let deleted = delete_host_with_route(&both, HOST, &revision_of(&both, HOST), 3).unwrap();
+        assert_eq!(transports::view(&deleted), vec![fixtures::iap(OTHER)]);
+    }
+
+    /// A host that has no route is deleted as it always was: no tombstone for a route that never was, and no state version for it.
+    #[test]
+    fn deleting_a_host_without_a_route_writes_nothing_for_a_route() {
+        for base in [host_with(&bare_state(), None), fixtures::central_with_host(HOST)] {
+            let revision = revision_of(&base, HOST);
+            assert_eq!(delete_host_with_route(&base, HOST, &revision, 2).unwrap(), repo::delete_host(&base, HOST, &revision, 2).unwrap());
+        }
+    }
+
+    /// The library's writes are paused, so the library's route cannot be removed, and the host then stays with it.
+    #[test]
+    fn deleting_a_host_whose_route_the_paused_library_keeps_refuses_the_whole_delete() {
+        let mut library = transports::set(&fixtures::central_with_host(HOST), HOST, None, Some(fixtures::iap(HOST)), 1).unwrap();
+        library.shared_writes_blocked = true;
+        let error = delete_host_with_route(&library, HOST, &revision_of(&library, HOST), 2).unwrap_err();
+        assert_eq!(error.to_string(), PAUSED);
+    }
+
+    #[test]
+    fn the_overview_reports_route_sync_and_grant_memory() {
+        // HOST's route is the library's. OTHER's stays on this device, as one saved before the library used central sync is.
+        let library = transports::set(&fixtures::central_with_host(HOST), HOST, None, Some(fixtures::with_pam(HOST)), 1).unwrap();
+        let state = fixtures::saved_on_this_device(&library, &fixtures::iap(OTHER));
+        let state = transports::remember_grant_request(&state, HOST, "restart app-api", 1800, 2).unwrap();
+        let view = overview_from(&state, 1, None).unwrap();
+        assert_eq!(view.transports, vec![fixtures::with_pam(HOST), fixtures::iap(OTHER)]);
+        let entry = |host_id: &str, synced: bool| TransportSyncView { host_id: host_id.into(), synced };
+        assert_eq!(view.transport_sync, vec![entry(HOST, true), entry(OTHER, false)]);
+        assert_eq!(view.grant_memory, vec![GrantMemoryView { host_id: HOST.into(), justification: "restart app-api".into(), duration_secs: 1800 }]);
+        // The shape the webview reads.
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["transport_sync"], serde_json::json!([{"host_id": HOST, "synced": true}, {"host_id": OTHER, "synced": false}]));
+        assert_eq!(json["grant_memory"], serde_json::json!([{"host_id": HOST, "justification": "restart app-api", "duration_secs": 1800}]));
+        // Nothing saved, nothing reported.
+        let none = overview_from(&bare_state(), 1, None).unwrap();
+        assert!(none.transport_sync.is_empty() && none.grant_memory.is_empty());
     }
 }
 

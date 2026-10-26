@@ -1,6 +1,7 @@
-//! The app's commands for a host's transport (design 2026-10-25): save or remove the device-local record, ask OS Login for the
-//! username the editor fills in, and show or request the Privileged Access Manager grant a transport needs (design 2026-10-25, PAM
-//! grant requests). Definitions are device-local; connections read them through `RecordDirectory`.
+//! The app's commands for a host's transport (design 2026-10-25): ask OS Login for the username the editor fills in, and show or
+//! request the Privileged Access Manager grant a transport needs (design 2026-10-25, PAM grant requests). A route is saved, changed
+//! and removed with its host (`records_host_create`, `records_host_update`, `records_host_delete`; design 2026-10-26, Commands);
+//! connections read it through `RecordDirectory`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,7 +12,6 @@ use crate::gcp::auth;
 use crate::gcp::pam;
 use crate::gcp::rest::GcpClient;
 use crate::state::AppState;
-use crate::sync::record_commands::RecordOverview;
 use crate::sync::records_v3;
 use crate::sync::transports::{self, HostTransport, TransportKind};
 
@@ -177,17 +177,6 @@ fn main_only(window: &tauri::WebviewWindow) -> Result<(), String> {
     }
 }
 
-/// Saves (`Some`) or removes (`None`) a host's transport against the value the editor displayed.
-fn edit(app: &tauri::AppHandle, host_id: &str, expected: Option<HostTransport>, transport: Option<HostTransport>) -> Result<RecordOverview, String> {
-    crate::sync::engine::with_env(app, |env| {
-        crate::sync::record_commands::edit_records(env, |state, now| {
-            transports::set(state, host_id, expected.as_ref(), transport.clone(), now).map_err(|error| crate::error::AppError::Other(error.to_string()))
-        })
-    })
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())
-}
-
 /// The vault key's OpenSSH public line, as the broker's key store reads it (Records workspace only).
 fn vault_public_line(app: &tauri::AppHandle, key_id: &str) -> Option<String> {
     let state = app.state::<AppState>();
@@ -200,18 +189,6 @@ fn vault_public_line(app: &tauri::AppHandle, key_id: &str) -> Option<String> {
 fn active_account_label() -> String {
     let dir = auth::config_dir(&|name| std::env::var(name).ok(), dirs::home_dir().as_deref(), cfg!(windows));
     auth::active_account(&dir).unwrap_or_else(|| "the active gcloud account".to_string())
-}
-
-#[tauri::command]
-pub async fn transports_save(app: tauri::AppHandle, window: tauri::WebviewWindow, transport: HostTransport, expected: Option<HostTransport>) -> Result<RecordOverview, String> {
-    main_only(&window)?;
-    tauri::async_runtime::spawn_blocking(move || edit(&app, &transport.host_id.clone(), expected, Some(transport))).await.map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-pub async fn transports_delete(app: tauri::AppHandle, window: tauri::WebviewWindow, expected: HostTransport) -> Result<RecordOverview, String> {
-    main_only(&window)?;
-    tauri::async_runtime::spawn_blocking(move || edit(&app, &expected.host_id.clone(), Some(expected), None)).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
