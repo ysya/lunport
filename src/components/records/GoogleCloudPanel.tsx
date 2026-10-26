@@ -11,6 +11,7 @@ import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
   gcloudAccountsQuery,
+  grantHeld,
   grantMemoryFor,
   grantStateOrMessage,
   iapTarget,
@@ -202,7 +203,7 @@ export function GoogleCloudPageView({ overview, accounts, grants, requesting, on
 
   const grantRow = (row: PamGrantView) => {
     const ask = askFor(overview, listed, row);
-    const held = row.state === "active" || row.state === "activating";
+    const held = grantHeld(row);
     const names = row.host_ids.flatMap((id) => {
       const host = hosts.get(id);
       return host ? [revealHidden(host.payload.alias)] : [];

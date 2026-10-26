@@ -197,10 +197,12 @@ const CONNECTION_ENDED: &str = "The SSH connection ended. Start the tunnel again
 pub(crate) const GRANT_ENDED: &str =
     "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one.";
 
-/// Why a tunnel that was not stopped in Lunport ended. IAP refusing the first hop's account (the
-/// relay's 4033 "not authorized" close, or a 403 handshake refusal) on a route with a PAM check
-/// means its grant ended. Every other ending keeps `fallback`. An IAP refusal for another reason on
-/// such a route (access removed in Google Cloud) reads the same (design 2026-10-26, call 14).
+/// Why a tunnel that was not stopped in Lunport ended. IAP refusing the first hop's account on a
+/// route with a PAM check means its grant ended; every other ending keeps `fallback`. An IAP
+/// refusal for another reason on such a route (access removed in Google Cloud) reads the same
+/// (design 2026-10-26, call 14). The spec names two refusals, the relay's 4033 "not authorized"
+/// close and a 403 handshake refusal; only the 4033 close reaches a running tunnel today, because
+/// `iap::reconnect` retries a 403 until its budget runs out (R61). The 403 arm stays for the spec.
 pub(crate) fn stop_reason(end: Option<&IapError>, needs_grant: bool, fallback: String) -> String {
     let refused = matches!(
         end,
@@ -221,7 +223,8 @@ fn route_needs_grant(state: &SyncStateV3, host_id: &str) -> bool {
 
 /// Runs the tunnel until it is stopped or its connection ends. `account` reads the sync account's
 /// id (a change stops the tunnel); `needs_grant` reads whether a host's route has a PAM check, and
-/// is asked of the first hop once the connection has ended.
+/// is asked of the first hop only when the connection ended with its IAP tunnel, so any other
+/// ending reads no route.
 fn run(
     rule: &TunnelRule,
     entry: &Entry,
@@ -276,11 +279,13 @@ fn run(
         let fallback = final_status
             .error
             .unwrap_or_else(|| CONNECTION_ENDED.into());
-        // The first hop is the hop dialed first, the only one an IAP route applies to.
+        // The first hop is the hop dialed first, the only one an IAP route applies to. Its route is
+        // read only for an ended IAP tunnel: an ordinary ending takes no lock.
         let first_hop = connected.target.hops.first().map(|hop| hop.id.as_str());
+        let first_hop_needs_grant = tunnel_end.is_some() && first_hop.is_some_and(needs_grant);
         Err(stop_reason(
             tunnel_end.as_ref(),
-            first_hop.is_some_and(needs_grant),
+            first_hop_needs_grant,
             fallback,
         ))
     }
@@ -730,7 +735,8 @@ mod tests {
     /// Design 2026-10-26, Tunnels through a host that needs a grant: a running tunnel that IAP
     /// stops with its 4033 "not authorized" close says that its grant ended when the first hop's
     /// route has a PAM check, which is asked of that hop (the tunnel's host here). Without a PAM
-    /// check, for another close, and for a connection lost another way, it keeps today's text.
+    /// check, for another close, and for a connection lost another way, it keeps today's text; a
+    /// connection that ended without its IAP tunnel ending does not even read the route.
     #[test]
     fn a_running_tunnel_that_iap_stops_says_why() {
         let directory = FakeDirectory::new()
@@ -777,9 +783,32 @@ mod tests {
             })
         };
         assert_eq!(
-            run_until(&directory, "db", &|_| true, &lost),
+            run_until(&directory, "db", &needs_grant, &lost),
             Err(CONNECTION_ENDED.to_string())
         );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["id-db"],
+            "an ending without a tunnel end reads no route"
+        );
+    }
+
+    /// `needs_grant`'s answer in the app: a route with a PAM check needs a grant; a route without
+    /// one and a host without a route need none.
+    #[test]
+    fn only_a_route_with_a_pam_check_needs_a_grant() {
+        let (pam_host, plain_host, bare_host) =
+            ("0000000000000003", "0000000000000004", "0000000000000005");
+        let routes = [
+            (pam_host, transports::tests::with_pam(pam_host)),
+            (plain_host, transports::tests::iap(plain_host)),
+        ];
+        let state = routes.into_iter().fold(saved().0, |state, (host, route)| {
+            transports::set(&state, host, None, Some(route), 11).unwrap()
+        });
+        assert!(route_needs_grant(&state, pam_host));
+        assert!(!route_needs_grant(&state, plain_host));
+        assert!(!route_needs_grant(&state, bare_host));
     }
 
     /// Behind a jump host the first hop is the jump host, the only hop an IAP route applies to: its

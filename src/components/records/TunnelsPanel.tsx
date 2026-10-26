@@ -12,7 +12,7 @@ import { RecordField, selectClass } from "./form";
 import { revealHidden } from "@/lib/sync-approvals";
 import { errorMessage } from "@/lib/sync";
 import type { RecordOverview } from "@/lib/records";
-import { pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";
+import { grantHeld, pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";
 import { listTunnels, saveTunnel, deleteTunnel, startTunnel, stopTunnel, tunnelsKey, tunnelKinds, tunnelBusy, tunnelRoute, newTunnel, type TunnelRule, type TunnelView, type ForwardKind } from "@/lib/tunnels";
 
 const phases = { stopped: "Stopped", connecting: "Connecting", running: "Running", stopping: "Stopping", error: "Failed" };
@@ -37,14 +37,14 @@ function firstHop(overview: RecordOverview, hostId: string): string | null {
 /**
  * The grant a tunnel's first hop needs, on the tunnel's row (design 2026-10-26, Tunnels through a host that needs a grant): read when
  * the panel opens and every minute through the host's `pamStatusQuery`, so the rows that share a first hop (and its details pane) share
- * one read. Drawn only for a first hop whose route has a PAM check; the other rows hold no query.
+ * one read. Drawn only for a first hop whose route has a PAM check; the other rows hold no query. A read that fails shows its error in
+ * place of whatever an earlier read found, as the details pane does.
  */
 function TunnelGrant({ hostId, pam }: { hostId: string; pam: PamCheck }) {
   const read = useQuery(pamStatusQuery(hostId));
-  // The latest read failing speaks for the grant, whatever an earlier read found.
   const status = read.isError ? null : (read.data ?? null);
   const line = revealHidden(status ? tunnelGrantLine(status, pam) : read.isError ? errorMessage(read.error) : "Checking the grant…");
-  const held = status?.state === "active" || status?.state === "activating";
+  const held = grantHeld(status);
   return <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${held ? "text-primary" : "text-muted-foreground"}`} title={line}><LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate">{line}</span></span>;
 }
 

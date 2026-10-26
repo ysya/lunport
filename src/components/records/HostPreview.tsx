@@ -14,6 +14,7 @@ import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
+  grantHeld,
   grantLine,
   grantMemoryFor,
   iapTarget,
@@ -40,7 +41,7 @@ function AccessGrant({ transport, alias, memory }: { transport: HostTransport; a
   const read = useQuery(query);
   // The latest read failing speaks for the grant, whatever an earlier read found.
   const status = read.isError ? null : (read.data ?? null);
-  const held = status?.state === "active" || status?.state === "activating";
+  const held = grantHeld(status);
   return (
     <div className="library-preview-section">
       <h3>

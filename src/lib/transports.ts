@@ -122,6 +122,14 @@ export function grantStateOrMessage(grant: { state: string; active_until_ms: num
   return grant.state === "error" ? grantProblem(grant) : grantStateLine(grant);
 }
 
+/**
+ * Whether a grant that was read is held: active, or activating (a request already in flight, R54). Request grant is off for both, and
+ * a held grant is shown as held. A grant not read yet, or whose read failed, is not.
+ */
+export function grantHeld(grant: { state: string } | null): boolean {
+  return grant?.state === "active" || grant?.state === "activating";
+}
+
 /** What a host's Access grant says of the grant it read: the entitlement holding it and its state, or why it could not be checked. */
 export function grantLine(status: PamStatusView): string {
   const line = grantStateOrMessage(status);
@@ -129,14 +137,12 @@ export function grantLine(status: PamStatusView): string {
 }
 
 /**
- * What a tunnel's row says of the grant its first hop needs (design 2026-10-26, Tunnels through a host that needs a grant): a grant
- * active or activating as the host's Access grant says it, the API's sentence when it could not be checked, and otherwise the
- * entitlements of the route's PAM check, any of which can hold one.
+ * What a tunnel's row says of the grant its first hop needs (design 2026-10-26, Tunnels through a host that needs a grant): a held
+ * grant as the host's Access grant says it, the API's sentence when it could not be checked, and otherwise the entitlements of the
+ * route's PAM check, any of which can hold one.
  */
 export function tunnelGrantLine(status: PamStatusView, pam: PamCheck): string {
-  return status.state === "active" || status.state === "activating" || status.state === "error"
-    ? grantLine(status)
-    : `Needs a grant: ${pam.entitlements.join(", ")}`;
+  return grantHeld(status) || status.state === "error" ? grantLine(status) : `Needs a grant: ${pam.entitlements.join(", ")}`;
 }
 
 export function newIapTransport(hostId: string): HostTransport {

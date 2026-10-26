@@ -7,6 +7,7 @@ import {
   fetchOsLoginProfile,
   gcloudAccountsKey,
   gcloudAccountsQuery,
+  grantHeld,
   grantMemoryFor,
   grantStateLine,
   grantStateOrMessage,
@@ -178,6 +179,18 @@ describe("transports", () => {
     expect(routeSynced(recordOverview({ central_mode: true }), HOST)).toBe(false);
     expect(routeSynced(recordOverview({ central_mode: true, account }), HOST)).toBe(true);
     expect(routeSynced(recordOverview({ central_mode: true, account }), null)).toBe(true);
+  });
+
+  it("holds a grant that is active or activating, and nothing else", () => {
+    expect(grantHeld({ state: "active" })).toBe(true);
+    // Activating is a request already in flight: held too, so Request grant stays off.
+    expect(grantHeld({ state: "activating" })).toBe(true);
+    for (const state of ["none", "error", "scheduled", ""]) expect(grantHeld({ state }), state).toBe(false);
+    // No answer yet, or a read that failed.
+    expect(grantHeld(null)).toBe(false);
+    // A row of the Google Cloud page fits as a host's status does.
+    const row: PamGrantView = { account: null, project: "p", location: "global", entitlement: "prod-operate", state: "activating", active_until_ms: null, message: null, host_ids: [] };
+    expect(grantHeld(row)).toBe(true);
   });
 
   it("says what a grant that was read says for itself: its state, or the API's sentence when it could not be checked", () => {
