@@ -136,8 +136,10 @@ pub(crate) fn with_pam(host: &str) -> HostTransport {
     transport
 }
 
-/// Design 2026-10-25 (PAM grant requests): the transport remembers the duration and the last justification, with defaults an older
-/// record (without the fields) decodes to, and rules a request cannot break.
+/// Design 2026-10-25 (PAM grant requests), as design 2026-10-26 (Grant requests) revises it: the route keeps the grant length, and the
+/// last justification is no longer kept in it (the device remembers that, see `remember_grant_request_writes_device_memory_not_the_route`),
+/// though a record an earlier release wrote can still carry one. A record without the fields decodes to the defaults, and the length and
+/// a justification found in the route keep the rules a request cannot break.
 #[test]
 fn pam_defaults_decode_for_an_older_record_and_validate() {
     let one = set(&state(), A, None, Some(with_pam(A)), 1).unwrap();
