@@ -24,8 +24,9 @@ pub(in crate::sync) struct Candidate {
     manifest: String,
     observed: u64,
     reconciliation: bool,
-    /// The ids an adoption gives the hosts this device's routes name (old → new); empty for a first publication, which keeps them.
-    host_ids: BTreeMap<String, String>,
+    /// The ids an adoption or a replacement gives the hosts that routes and grant memory name (old → new,
+    /// `adoption::merge::route_host_ids`); `None` for a first publication, which keeps every host's id.
+    host_ids: Option<BTreeMap<String, String>>,
 }
 /// Verified material mappings only. Still no consent or Core publication authority.
 pub(in crate::sync) struct Prepared {
@@ -57,17 +58,29 @@ pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
 
 /// What this device keeps by host id, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate (R8, design
 /// 2026-10-26, Existing routes move in): its routes, which the next capture publishes while the library has their hosts, and what its
-/// grant requests taught it. An adoption gives them the ids its hosts get (`host_ids`). A route whose host the library's Catalog
-/// already holds a route for gives way to it, as a delta projection decides. The candidate gets the state version they need.
+/// grant requests taught it.
+/// - A first publication (`host_ids` is `None`) keeps every host's id, so it keeps both as they are.
+/// - An adoption or a replacement gives the hosts new ids (`host_ids`): every route that applies on the source, a replaced library's
+///   included (R22), follows its host as this device's own, with its grant memory; one whose host does not survive goes
+///   (`transports::follow_hosts`).
+///
+/// A route whose host the library's Catalog already holds a route for gives way to it, as a delta projection decides. The candidate
+/// gets the state version they need.
 fn keep_routes(
     source: &SyncStateV3,
     candidate: &mut SyncStateV3,
-    host_ids: &BTreeMap<String, String>,
+    host_ids: Option<&BTreeMap<String, String>>,
     now: u64,
 ) -> Result<(), AppError> {
-    candidate.local.transports = source.local.transports.clone();
-    candidate.local.transport_grants = source.local.transport_grants.clone();
-    transports::rekey_local(candidate, host_ids, now).map_err(|_| invalid())?;
+    match host_ids {
+        None => {
+            candidate.local.transports = source.local.transports.clone();
+            candidate.local.transport_grants = source.local.transport_grants.clone();
+        }
+        Some(host_ids) => {
+            transports::follow_hosts(source, candidate, host_ids, now).map_err(|_| invalid())?
+        }
+    }
     // The account's route rows are the Catalog's routes, keyed as this device's own are.
     if let Some(account) = &candidate.account {
         candidate
@@ -211,10 +224,10 @@ impl Candidate {
             manifest,
             observed,
             reconciliation,
-            host_ids: BTreeMap::new(),
+            host_ids: None,
         })
     }
-    /// `host_ids`: the ids the merge gives the hosts this device's routes name (`adoption::merge::route_host_ids`).
+    /// `host_ids`: the ids the merge gives the hosts that routes and grant memory name (`adoption::merge::route_host_ids`).
     pub(super) fn adopt(
         source: &SyncStateV3,
         read: &super::active_read::VerifiedLibrary,
@@ -298,7 +311,7 @@ impl Candidate {
             Some(selections),
             reconciliation,
         )?;
-        candidate.host_ids = host_ids;
+        candidate.host_ids = Some(host_ids);
         Ok(candidate)
     }
     pub(in crate::sync) fn reconciliation(&self) -> bool {
@@ -316,7 +329,7 @@ impl Candidate {
             &self.shadow,
             self.manifest,
             verified,
-            &self.host_ids,
+            self.host_ids.as_ref(),
             self.observed,
         )
     }
@@ -336,7 +349,7 @@ impl Candidate {
             &self.shadow,
             self.manifest.clone(),
             verified,
-            &self.host_ids,
+            self.host_ids.as_ref(),
             self.observed,
         )
     }
@@ -347,7 +360,7 @@ impl Candidate {
         shadow: &SyncStateV3,
         manifest: String,
         verified: super::projection_delta::Verified,
-        host_ids: &BTreeMap<String, String>,
+        host_ids: Option<&BTreeMap<String, String>>,
         observed: u64,
     ) -> Result<Prepared, AppError> {
         if verified.before() != shadow {

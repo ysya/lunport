@@ -7,7 +7,7 @@ use super::super::{
 };
 use super::*;
 use crate::sync::{
-    record::{record_key, RecordKind},
+    record::{record_key, LocalRecord, RecordKind},
     records_v3::HostScope,
 };
 #[derive(Clone, Serialize, Deserialize)]
@@ -189,8 +189,9 @@ pub(super) fn history(
                 }
             }
             Data::Catalog(value) => {
-                // The library's routes stay as they are: this device brings none (R11). Its own stay on it, under the ids its
-                // hosts get here (`route_host_ids`), until a capture publishes them.
+                // The library's routes stay as they are: this device brings none (R11). The routes that apply on it, a replaced
+                // library's included (R22), stay on it under the ids its hosts get here (`route_host_ids`) until a capture
+                // publishes them.
                 let mut merged = remote.clone();
                 if has_local {
                     merged.collections.push(Collection {
@@ -448,34 +449,35 @@ pub(super) fn owned_collections(
     }
     Ok(owned)
 }
-/// The ids this merge gives the hosts this device's own routes name (old → new), so that those routes, and what grant requests taught
-/// this device about their hosts, follow the hosts (design 2026-10-26, Existing routes move in): they stay this device's until a
-/// capture publishes them. A host id `source` holds in no scope, or in more than one, names no one host, so it keeps its id.
+/// The ids this merge gives the hosts that routes and grant memory name on `source` (old → new): this device's own routes and, in a
+/// replacement, the replaced library's too (`transports::view`). They follow their hosts there as this device's own (design 2026-10-26,
+/// Existing routes move in; R22) until a capture publishes them. A host is followed when it is live in exactly one scope of `source`:
+/// a deleted host does not survive the merge, and an id held in two scopes names no one host. What names no followed host goes.
 pub(super) fn route_host_ids(
     source: &SyncStateV3,
     operation: &str,
 ) -> Result<BTreeMap<String, String>, AppError> {
+    let live = |row: Option<&LocalRecord>| row.is_some_and(|row| !row.record.deleted);
+    let named: std::collections::BTreeSet<String> = crate::sync::transports::view(source)
+        .into_iter()
+        .map(|route| route.host_id)
+        .chain(source.local.transport_grants.keys().cloned())
+        .collect();
     let mut host_ids = BTreeMap::new();
-    for row in source.local.transports.values() {
-        let Some(id) = row.record.id.strip_prefix(crate::sync::transports::PREFIX) else {
-            continue;
-        };
-        let key = record_key(RecordKind::Host, id);
-        let local = source
-            .local
-            .hosts
-            .contains_key(&key)
-            .then_some(HostScope::Local);
+    for id in named {
+        let key = record_key(RecordKind::Host, &id);
+        let local = live(source.local.hosts.get(&key)).then_some(HostScope::Local);
         let spaces = source
             .spaces
             .iter()
-            .filter(|(_, space)| space.records.contains_key(&key))
+            .filter(|(_, space)| live(space.records.get(&key)))
             .map(|(space_id, _)| HostScope::Space {
                 space_id: space_id.clone(),
             });
         let mut scopes = local.into_iter().chain(spaces);
         if let (Some(scope), None) = (scopes.next(), scopes.next()) {
-            host_ids.insert(id.to_owned(), adopted_host_id(operation, &scope, id)?);
+            let adopted = adopted_host_id(operation, &scope, &id)?;
+            host_ids.insert(id, adopted);
         }
     }
     Ok(host_ids)

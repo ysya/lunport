@@ -1877,6 +1877,10 @@ fn replacement_fixture() -> Fixture {
     replacement_fixture_kind(false)
 }
 fn replacement_fixture_kind(legacy: bool) -> Fixture {
+    replacement_fixture_with(legacy, |_| {})
+}
+/// `replacement_fixture_kind`, with `edit` applied to the replaced device's library just before it is archived for the replacement.
+fn replacement_fixture_with(legacy: bool, edit: impl FnOnce(&SyncEnv)) -> Fixture {
     let mut f = fixture_legacy(false, false, legacy);
     let old_env = f.first.env();
     let raw = Zeroizing::new(crate::sync::slot_rules::test_keys::encrypted());
@@ -1904,6 +1908,7 @@ fn replacement_fixture_kind(legacy: bool) -> Fixture {
         .map_err(|e| AppError::Other(e.to_string()))
     })
     .unwrap();
+    edit(&old_env);
     let original = record_runtime::snapshot(&old_env).unwrap().0;
     let old = original.local.central.as_ref().unwrap();
     assert!(!old.replica.as_ref().unwrap().pending.is_empty());
@@ -2463,47 +2468,132 @@ fn an_adoption_merge_that_would_not_fit_is_refused() {
     });
 }
 
-/// `route_host_ids` maps a route's host held in exactly one scope, this device's own or a collection's, to the id the merge gives
-/// that host's rows. A host held in two scopes, or in none, names no one host: its route keeps its id.
+/// `route_host_ids` maps each host that a route (this device's own or the library's) or grant memory names, when the host is live in
+/// exactly one scope of the source (this device's own or a collection's), to the id the merge gives that host's rows. A host held in
+/// two scopes, a deleted host and a missing one are not followed: what names them goes (R22).
 #[test]
-fn route_host_ids_follow_only_a_host_held_in_exactly_one_scope() {
+fn route_host_ids_follow_only_a_host_live_in_exactly_one_scope() {
     use crate::sync::{
         record::{record_key, LocalRecord, Record, RecordKind},
         records_v3::{HostScope, SpaceStateV3},
-        transports::tests::{iap, saved_on_this_device},
+        state_v2::AccountState,
+        transports::{self, tests::{iap, saved_on_this_device}, GrantMemory},
     };
-    let (local, shared, both, orphan) = ("1".repeat(16), "2".repeat(16), "3".repeat(16), "4".repeat(16));
+    let [local, shared, both, deleted, missing, remembered] =
+        ["1", "2", "3", "4", "5", "6"].map(|n| n.repeat(16));
     let space = "e".repeat(64);
-    let host = |id: &str| LocalRecord {
+    let row = |kind: RecordKind, id: &str, deleted: bool, payload: Value| LocalRecord {
         record: Record {
-            kind: RecordKind::Host,
+            kind,
             id: id.into(),
             version: 1,
             updated_at_ms: 1,
             device_id: "d".repeat(32),
-            deleted: false,
-            payload: json!({"schema":2,"alias":format!("host-{id}"),"hostname":"fixture.invalid","auth":"password"}),
+            deleted,
+            payload,
         },
         seq: 0,
         dirty: false,
     };
-    let mut state: SyncStateV3 = serde_json::from_value(json!({"version":9,"device_id":"d".repeat(32),"device_name":"fixture",
+    let host = |id: &str, deleted: bool| {
+        let payload = if deleted {
+            Value::Null
+        } else {
+            json!({"schema":2,"alias":format!("host-{id}"),"hostname":"fixture.invalid","auth":"password"})
+        };
+        (record_key(RecordKind::Host, id), row(RecordKind::Host, id, deleted, payload))
+    };
+    let mut state: SyncStateV3 = serde_json::from_value(json!({"version":10,"device_id":"d".repeat(32),"device_name":"fixture",
         "relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null}))
     .unwrap();
-    for id in [&local, &both] {
-        state.local.hosts.insert(record_key(RecordKind::Host, id), host(id));
-    }
-    let records = [&shared, &both].map(|id| (record_key(RecordKind::Host, id), host(id))).into();
-    state.spaces.insert(space.clone(), SpaceStateV3 { records, ..Default::default() });
-    for id in [&local, &shared, &both, &orphan] {
+    state.local.hosts = [host(&local, false), host(&both, false), host(&deleted, true), host(&remembered, false)].into();
+    state.spaces.insert(
+        space.clone(),
+        SpaceStateV3 {
+            records: [host(&shared, false), host(&both, false)].into(),
+            ..Default::default()
+        },
+    );
+    // `shared`'s route is the library's; the others are this device's own, and `remembered` has grant memory but no route.
+    let mut account = AccountState::new(&"a".repeat(64));
+    let wire = transports::wire_id(&shared);
+    account.records.insert(
+        record_key(RecordKind::Meta, &wire),
+        row(RecordKind::Meta, &wire, false, json!({"schema":1,"transport":iap(&shared)})),
+    );
+    state.account = Some(account);
+    for id in [&local, &both, &deleted, &missing] {
         state = saved_on_this_device(&state, &iap(id));
     }
+    state.local.transport_grants.insert(
+        remembered.clone(),
+        GrantMemory {
+            justification: "restart app-api".into(),
+            duration_secs: 1800,
+        },
+    );
     let operation = "7".repeat(32);
+    let adopted = |id: &str, scope: HostScope| (id.to_owned(), merge::adopted_host_id(&operation, &scope, id).unwrap());
     assert_eq!(
         merge::route_host_ids(&state, &operation).unwrap(),
         BTreeMap::from([
-            (local.clone(), merge::adopted_host_id(&operation, &HostScope::Local, &local).unwrap()),
-            (shared.clone(), merge::adopted_host_id(&operation, &HostScope::Space { space_id: space }, &shared).unwrap()),
+            adopted(&local, HostScope::Local),
+            adopted(&shared, HostScope::Space { space_id: space }),
+            adopted(&remembered, HostScope::Local),
         ])
     );
+}
+
+/// R22: a replacement keeps the replaced library's routes. The route of a host that survives becomes this device's own, under the
+/// host's new id, for the next capture to publish into the new library; a route whose host does not survive is gone. The merge itself
+/// brings no routes (R11).
+#[test]
+fn a_replacement_keeps_the_replaced_librarys_route_of_a_surviving_host_as_this_devices_own() {
+    use crate::sync::{
+        records_v3::HostScope,
+        transports::{self, tests::iap, HostTransport},
+    };
+    // The replaced device's own host, which the replacement carries over, and an id that names no host.
+    let (kept, gone) = ("9".repeat(16), "c".repeat(16));
+    let f = replacement_fixture_with(false, |env| {
+        crate::sync::record_commands::edit_records(env, |s, now| {
+            let next = transports::set(s, &kept, None, Some(iap(&kept)), now)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            transports::set(&next, &gone, None, Some(iap(&gone)), now)
+                .map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    });
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let before = record_runtime::snapshot(&env).unwrap().0;
+        assert!(
+            transports::synced(&before, &kept) && transports::synced(&before, &gone),
+            "both are the replaced library's routes"
+        );
+        let (scope, ticket) = prepared(&f);
+        let operation = load(&env).unwrap().unwrap().state.operation;
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let after = record_runtime::snapshot(&env).unwrap().0;
+        let moved = merge::adopted_host_id(&operation, &HostScope::Local, &kept).unwrap();
+        let route = HostTransport {
+            host_id: moved.clone(),
+            ..iap(&kept)
+        };
+        assert_eq!(transports::get(&after, &moved), Some(route.clone()));
+        assert!(
+            !transports::synced(&after, &moved),
+            "this device's own until a capture publishes it"
+        );
+        assert!(
+            crate::sync::record_repository::get_host(&after, &moved).is_ok(),
+            "its host survived the replacement"
+        );
+        assert_eq!(transports::get(&after, &gone), None, "its host did not survive");
+        assert_eq!(transports::view(&after), vec![route]);
+        assert_eq!(after.version, transports::SYNC_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&after).unwrap();
+    });
 }

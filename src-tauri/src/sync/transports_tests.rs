@@ -599,3 +599,26 @@ fn leaving_keeps_the_grant_memory_of_the_hosts_that_stay_under_their_new_ids() {
     assert_eq!((get(&left, OTHER), grant_memory(&left, OTHER)), (None, None), "a host that goes takes both with it");
     validate_state(&left).unwrap();
 }
+
+/// R22: what an adoption or a replacement keeps of a source's routes. Every route that applies there, the library's as well as this
+/// device's own, becomes one saved on this device under its host's new id, with its grant memory; a route or memory whose host the map
+/// does not name goes, and so does a tombstone, which is no route.
+#[test]
+fn routes_follow_the_merged_hosts_as_this_devices_own() {
+    const MOVED: &str = "0000000000000006";
+    const REMOVED: &str = "0000000000000007";
+    // HOST's route is the library's; OTHER's and C's are this device's own; REMOVED holds a tombstone. The merge carries HOST, OTHER
+    // and REMOVED, not C.
+    let library = set(&central_with_host(HOST), HOST, None, Some(with_pam(HOST)), 1).unwrap();
+    let own = write(&saved_on_this_device(&saved_on_this_device(&library, &iap(OTHER)), &with_pam(C)), REMOVED, None, 2).unwrap();
+    let source = remember_grant_request(&remember_grant_request(&own, HOST, "restart app-api", 1800, 3).unwrap(), C, "rotate certs", 600, 4).unwrap();
+    let host_ids = BTreeMap::from([(HOST.to_string(), NEW.to_string()), (OTHER.to_string(), MOVED.to_string()), (REMOVED.to_string(), "0000000000000008".to_string())]);
+    let mut next = state();
+    follow_hosts(&source, &mut next, &host_ids, 5).unwrap();
+    assert_eq!(view(&next), vec![HostTransport { host_id: NEW.into(), ..with_pam(HOST) }, HostTransport { host_id: MOVED.into(), ..iap(OTHER) }]);
+    assert!(!synced(&next, NEW) && next.account.is_none(), "the library's route is this device's own now");
+    let keys: Vec<String> = next.local.transports.keys().cloned().collect();
+    assert_eq!(keys, [NEW, MOVED].map(|host| record_key(RecordKind::Meta, &wire_id(host))), "no tombstone and nothing for C");
+    assert_eq!(grant_memory(&next, NEW), Some(GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
+    assert_eq!(next.local.transport_grants.len(), 1, "C's memory goes with its host");
+}

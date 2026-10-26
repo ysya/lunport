@@ -448,6 +448,22 @@ pub fn rekey_local(state: &mut SyncStateV3, host_ids: &BTreeMap<String, String>,
     Ok(())
 }
 
+/// What an adoption or a replacement keeps of `source`'s routes (design 2026-10-26, Existing routes move in; R22): every route that
+/// applies on `source`, the library's as well as this device's own (`view`), becomes a route saved on this device in `next`, under the
+/// id the merge gives its host (`host_ids`: old → new), and what grant requests taught this device about that host moves with it
+/// (`rekey_local`). A route or grant memory whose host the map does not name goes with that host. Both of `next`'s maps are rebuilt
+/// from `source`'s.
+pub fn follow_hosts(source: &SyncStateV3, next: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
+    next.local.transports.clear();
+    for route in view(source).into_iter().filter(|route| host_ids.contains_key(&route.host_id)) {
+        let host_id = route.host_id.clone();
+        *next = write(next, &host_id, Some(route), now)?;
+    }
+    next.local.transport_grants =
+        source.local.transport_grants.iter().filter(|(host_id, _)| host_ids.contains_key(*host_id)).map(|(host_id, memory)| (host_id.clone(), memory.clone())).collect();
+    rekey_local(next, host_ids, now)
+}
+
 /// Leaving an account keeps the transport of every host that stays on this device (a live record in `next.local.hosts`), the library's
 /// routes included, as one saved on this device, under the new local id the leave plan gave a space host (`host_ids`: old → new), and
 /// drops the transports of the hosts that go. What grant requests taught this device follows the same hosts, under the same ids (R8).
