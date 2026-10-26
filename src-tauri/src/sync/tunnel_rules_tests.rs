@@ -275,6 +275,22 @@ fn a_full_catalog_refuses_one_more_tunnel_in_central_mode() {
         "without central sync there is no Catalog to fit"
     );
 }
+/// A tunnel's save is refused when the Catalog would not fit after it, though it fits before: the room check measures the state the
+/// save makes, not the one it starts from (final review, deferred Task 5 test).
+#[test]
+fn a_tunnel_that_would_push_the_catalog_past_one_record_is_refused_though_it_fits_before() {
+    use crate::sync::transports::{
+        tests::{central_with_host, filled_short_of},
+        NO_ROOM,
+    };
+    let brink = filled_short_of(central_with_host(A), |catalog| catalog.tunnels.push(rule(B)));
+    assert_eq!(
+        set(&brink, None, B, None, Some(rule(B)), 10)
+            .unwrap_err()
+            .to_string(),
+        NO_ROOM
+    );
+}
 #[test]
 fn local_rules_publish_once_when_joining_sync_and_wrong_keys_do_not_promote() {
     let original = rule(A);
