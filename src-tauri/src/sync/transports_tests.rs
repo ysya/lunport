@@ -128,7 +128,7 @@ fn validation_rejects_bad_fields() {
 }
 
 /// A transport with the PAM check of the design's example, for the grant-request tests.
-fn with_pam(host: &str) -> HostTransport {
+pub(crate) fn with_pam(host: &str) -> HostTransport {
     let mut transport = iap(host);
     let TransportKind::GcpIap { pam, .. } = &mut transport.kind;
     *pam = Some(PamCheck { entitlements: vec!["prod-operate".into()], location: "global".into(), duration_secs: 1800, justification: None });
@@ -535,4 +535,67 @@ fn removing_a_route_forgets_the_grant_memory_of_its_host() {
         let edited = set(&remembered, A, Some(&with_pam(A)), Some(with_zone(with_pam(A), "asia-east1-c")), 5).unwrap();
         assert!(grant_memory(&edited, A).is_some(), "an edit keeps it");
     }
+}
+
+// ---- What this device keeps by host id follows its hosts (design 2026-10-26, Existing routes move in; Leaving sync) ----
+
+/// A host id no fixture holds before a leave or an adoption gives it to a host.
+const NEW: &str = "0000000000000005";
+
+/// `rekey_local` moves each entry this device keeps for a host the map names, a route or a removed one's tombstone, and what grant
+/// requests taught it about that host, to the id the map gives the host; the ids the map does not name keep theirs.
+#[test]
+fn rekeying_moves_routes_and_grant_memory_to_the_ids_the_map_gives_their_hosts() {
+    const MOVED: &str = "0000000000000006";
+    let routes = set(&set(&state(), A, None, Some(with_pam(A)), 1).unwrap(), B, None, Some(iap(B)), 2).unwrap();
+    let removed = set(&set(&routes, C, None, Some(iap(C)), 3).unwrap(), C, Some(&iap(C)), None, 4).unwrap();
+    let mut rekeyed = remember_grant_request(&removed, A, "restart app-api", 1800, 5).unwrap();
+    let host_ids = BTreeMap::from([(A.to_string(), NEW.to_string()), (C.to_string(), MOVED.to_string())]);
+    rekey_local(&mut rekeyed, &host_ids, 6).unwrap();
+    assert_eq!(view(&rekeyed), vec![iap(B), HostTransport { host_id: NEW.into(), ..with_pam(A) }]);
+    assert_eq!(get(&rekeyed, A), None);
+    assert_eq!(grant_memory(&rekeyed, NEW), Some(GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
+    assert_eq!(grant_memory(&rekeyed, A), None, "the memory moved with its host");
+    let keys: Vec<String> = rekeyed.local.transports.keys().cloned().collect();
+    assert_eq!(keys, [B, NEW, MOVED].map(|host| record_key(RecordKind::Meta, &wire_id(host))));
+    assert!(rekeyed.local.transports[&record_key(RecordKind::Meta, &wire_id(MOVED))].record.deleted, "a tombstone moves as it is");
+    validate_state(&rekeyed).unwrap();
+}
+
+/// Leaving `before`'s account as `record_leave::resume_locked` does: the hosts the leave plan keeps under new ids (`moves`: old → new)
+/// become this device's own, the account and its collections go, and then `preserve_on_leave` runs.
+fn leave_preserving(before: &SyncStateV3, moves: &[(&str, &str)]) -> SyncStateV3 {
+    let mut next = moves.iter().fold(before.clone(), |next, (_, new)| with_local_host(next, new));
+    next.account = None;
+    next.spaces.clear();
+    let host_ids = moves.iter().map(|(old, new)| (old.to_string(), new.to_string())).collect();
+    preserve_on_leave(before, &mut next, &host_ids, 9).unwrap();
+    next
+}
+
+/// Design 2026-10-26 (Leaving sync): the library's route for a host that stays is kept as a route saved on this device, under the
+/// host's new id; nothing of the library's stays.
+#[test]
+fn leaving_keeps_a_synced_route_of_a_preserved_host_as_a_local_route() {
+    let central = set(&central_with_host(HOST), HOST, None, Some(iap(HOST)), 1).unwrap();
+    assert!(synced(&central, HOST));
+    let left = leave_preserving(&central, &[(HOST, NEW)]);
+    assert_eq!(get(&left, NEW).map(|t| t.kind), Some(iap(HOST).kind));
+    assert!(!synced(&left, NEW) && left.local.transports.contains_key(&record_key(RecordKind::Meta, &wire_id(NEW))));
+    assert_eq!(get(&left, HOST), None);
+    assert!(left.account.is_none() || !left.account.as_ref().unwrap().records.keys().any(|k| k.contains("transport:")));
+    validate_state(&left).unwrap();
+}
+
+/// R8: what grant requests taught this device follows the hosts that stay, under their new ids, and goes with the hosts that go.
+#[test]
+fn leaving_keeps_the_grant_memory_of_the_hosts_that_stay_under_their_new_ids() {
+    let routes = set(&set(&central_with_host(HOST), HOST, None, Some(with_pam(HOST)), 1).unwrap(), OTHER, None, Some(with_pam(OTHER)), 2).unwrap();
+    let remembered = remember_grant_request(&remember_grant_request(&routes, HOST, "restart app-api", 1800, 3).unwrap(), OTHER, "rotate certs", 600, 4).unwrap();
+    // OTHER's host is not in the library, so it does not stay.
+    let left = leave_preserving(&remembered, &[(HOST, NEW)]);
+    assert_eq!(grant_memory(&left, NEW), Some(GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
+    assert_eq!(grant_memory(&left, HOST), None, "the memory moved with its host");
+    assert_eq!((get(&left, OTHER), grant_memory(&left, OTHER)), (None, None), "a host that goes takes both with it");
+    validate_state(&left).unwrap();
 }

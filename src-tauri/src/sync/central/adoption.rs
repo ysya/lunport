@@ -1186,6 +1186,8 @@ fn publish(
         .ciphertext_hash
         .clone();
     let selections = merge::selections(&loaded.package.state, &loaded.state.operation)?;
+    // This device's routes, and what its grant requests taught it, follow its hosts to the ids the merge gave them.
+    let host_ids = merge::route_host_ids(&loaded.package.state, &loaded.state.operation)?;
     let initial = if loaded.state.policy == "replacement-history-v1" {
         super::replacement_reconciliation::archives(
             &loaded.package.state,
@@ -1198,6 +1200,7 @@ fn publish(
             &commitment,
             loaded.state.observed,
             &selections,
+            host_ids,
         )?
     } else {
         Candidate::adopt(
@@ -1206,6 +1209,7 @@ fn publish(
             &commitment,
             loaded.state.observed,
             &selections,
+            host_ids,
         )?
     };
     if let Some(legacy) = loaded.legacy_evidence(env)? {

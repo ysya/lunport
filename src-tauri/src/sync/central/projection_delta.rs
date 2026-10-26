@@ -994,6 +994,30 @@ pub(super) mod tests {
         assert!(next.local.transports.is_empty());
     }
 
+    /// Only the routes the library now holds retire this device's own: a route for a host the Catalog holds no route for stays here,
+    /// for a capture to publish once the library has its host.
+    #[test]
+    fn a_local_route_for_a_host_the_catalog_holds_no_route_for_stays() {
+        let local = with_local_route(
+            with_local_route(cache_with_host(HOST), with_zone(iap(HOST), "asia-east1-a")),
+            iap(OTHER),
+        );
+        let next = project_delta(
+            &local,
+            &Catalog {
+                transports: vec![iap(HOST)],
+                ..Catalog::default()
+            },
+        );
+        assert_eq!(transports::get(&next, HOST), Some(iap(HOST)));
+        assert_eq!(transports::get(&next, OTHER), Some(iap(OTHER)));
+        assert!(!transports::synced(&next, OTHER));
+        assert_eq!(
+            next.local.transports.keys().collect::<Vec<_>>(),
+            [&record_key(RecordKind::Meta, &wire_id(OTHER))]
+        );
+    }
+
     #[test]
     fn retiring_a_local_route_keeps_what_grant_requests_taught_this_device() {
         let mut local =

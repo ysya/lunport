@@ -421,23 +421,64 @@ fn write_library(state: &SyncStateV3, host_id: &str, transport: Option<HostTrans
     Ok(next)
 }
 
+/// Re-keys what this device keeps by host id to the ids `host_ids` gives the hosts (old → new), as an adoption gives the hosts it
+/// imports theirs (design 2026-10-26, Existing routes move in): each entry of `local.transports` whose host the map names, a route or a
+/// removed one's tombstone, is written again under the host's new id, and what grant requests taught this device about that host
+/// (`local.transport_grants`) moves with it. Ids the map does not name keep theirs.
+pub fn rekey_local(state: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
+    let mut next = state.clone();
+    // Every old entry leaves before any new one is written, so a new id that is another entry's old id cannot be overwritten.
+    let mut moved = vec![];
+    for (key, row) in &state.local.transports {
+        let Some((old, new)) = row.record.id.strip_prefix(PREFIX).and_then(|old| Some((old, host_ids.get(old)?))) else { continue };
+        let route = match decode(&row.record) {
+            Some(route) => Some(HostTransport { host_id: new.clone(), ..route }),
+            None if row.record.deleted => None,
+            None => return Err(repo::invalid("transport", old, "invalid transport metadata")),
+        };
+        next.local.transports.remove(key);
+        moved.push((new, route));
+    }
+    for (new, route) in moved {
+        next = write(&next, new, route, now)?;
+    }
+    let remembered: Vec<_> = host_ids.iter().filter_map(|(old, new)| Some((new.clone(), next.local.transport_grants.remove(old)?))).collect();
+    next.local.transport_grants.extend(remembered);
+    *state = next;
+    Ok(())
+}
+
 /// Leaving an account keeps the transport of every host that stays on this device (a live record in `next.local.hosts`), the library's
 /// routes included, as one saved on this device, under the new local id the leave plan gave a space host (`host_ids`: old → new), and
-/// drops the transports of the hosts that go. `next`'s map starts empty.
+/// drops the transports of the hosts that go. What grant requests taught this device follows the same hosts, under the same ids (R8).
+/// Both of `next`'s maps are rebuilt from `before`'s.
 pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
     next.local.transports.clear();
     for mut transport in view(before) {
         if let Some(local_id) = host_ids.get(&transport.host_id) {
             transport.host_id = local_id.clone();
         }
-        let stays = next.local.hosts.get(&record_key(RecordKind::Host, &transport.host_id)).is_some_and(|host| !host.record.deleted);
-        if !stays {
+        if !stays_on_this_device(next, &transport.host_id) {
             continue;
         }
         let host_id = transport.host_id.clone();
         *next = write(next, &host_id, Some(transport), now)?;
     }
+    let remembered = before
+        .local
+        .transport_grants
+        .iter()
+        .map(|(host_id, memory)| (host_ids.get(host_id).unwrap_or(host_id), memory))
+        .filter(|(host_id, _)| stays_on_this_device(next, host_id))
+        .map(|(host_id, memory)| (host_id.clone(), memory.clone()))
+        .collect();
+    next.local.transport_grants = remembered;
     Ok(())
+}
+
+/// Whether a host stays on this device when it leaves an account: a live record of `next.local.hosts`.
+fn stays_on_this_device(next: &SyncStateV3, host_id: &str) -> bool {
+    next.local.hosts.get(&record_key(RecordKind::Host, host_id)).is_some_and(|host| !host.record.deleted)
 }
 
 #[cfg(test)]

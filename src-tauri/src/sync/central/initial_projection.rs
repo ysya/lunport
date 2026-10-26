@@ -24,6 +24,8 @@ pub(in crate::sync) struct Candidate {
     manifest: String,
     observed: u64,
     reconciliation: bool,
+    /// The ids an adoption gives the hosts this device's routes name (old → new); empty for a first publication, which keeps them.
+    host_ids: BTreeMap<String, String>,
 }
 /// Verified material mappings only. Still no consent or Core publication authority.
 pub(in crate::sync) struct Prepared {
@@ -42,14 +44,39 @@ impl Prepared {
         &self.manifest
     }
 }
-/// The state version of an initial projection's candidate: central sync's, or, once the library's Catalog holds routes and the account
-/// keeps them as rows, the version those rows need (R19). The initial publication requires exactly this version.
+/// The state version of an initial projection's candidate: central sync's, unless it holds what routes need, then the version of the
+/// library's route rows: the account's rows themselves (R19), the routes this device keeps for the next capture to turn into such rows,
+/// or what its grant requests taught it (R8). The initial publication requires exactly this version.
 pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
-    if transports::has_library_rows(candidate) {
+    if transports::needs_sync_version(candidate) || transports::has_data(candidate) {
         transports::SYNC_STATE_VERSION
     } else {
         records_v3::CENTRAL_STATE_VERSION
     }
+}
+
+/// What this device keeps by host id, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate (R8, design
+/// 2026-10-26, Existing routes move in): its routes, which the next capture publishes while the library has their hosts, and what its
+/// grant requests taught it. An adoption gives them the ids its hosts get (`host_ids`). A route whose host the library's Catalog
+/// already holds a route for gives way to it, as a delta projection decides. The candidate gets the state version they need.
+fn keep_routes(
+    source: &SyncStateV3,
+    candidate: &mut SyncStateV3,
+    host_ids: &BTreeMap<String, String>,
+    now: u64,
+) -> Result<(), AppError> {
+    candidate.local.transports = source.local.transports.clone();
+    candidate.local.transport_grants = source.local.transport_grants.clone();
+    transports::rekey_local(candidate, host_ids, now).map_err(|_| invalid())?;
+    // The account's route rows are the Catalog's routes, keyed as this device's own are.
+    if let Some(account) = &candidate.account {
+        candidate
+            .local
+            .transports
+            .retain(|key, _| !account.records.contains_key(key));
+    }
+    candidate.version = candidate_version(candidate);
+    Ok(())
 }
 impl Candidate {
     pub fn prepare(
@@ -149,8 +176,11 @@ impl Candidate {
         shadow.local.groups = cache.groups;
         shadow.local.group_order = cache.group_order;
         shadow.local.tunnel_rules.clear();
-        // Device-local transports are keyed by host ids this projection replaces, and the version above is below theirs: entered again.
+        // This device's routes and what its grant requests taught it stay out of the shadow (R8): with the owner cut over, the delta
+        // rebuilt from the shadow would take a route whose host the library has for a change left to capture, and the version above
+        // is below theirs. `finish` keeps them in the final candidate, under the host ids an adoption gives (`keep_routes`).
         shadow.local.transports.clear();
+        shadow.local.transport_grants.clear();
         // All source pointers and files remain in source. A native stage supplies new verified mappings.
         shadow.local.keys.clear();
         shadow.local.credential_approvals.clear();
@@ -181,16 +211,21 @@ impl Candidate {
             manifest,
             observed,
             reconciliation,
+            host_ids: BTreeMap::new(),
         })
     }
+    /// `host_ids`: the ids the merge gives the hosts this device's routes name (`adoption::merge::route_host_ids`).
     pub(super) fn adopt(
         source: &SyncStateV3,
         read: &super::active_read::VerifiedLibrary,
         commitment: &str,
         observed: u64,
         selections: &BTreeMap<String, bool>,
+        host_ids: BTreeMap<String, String>,
     ) -> Result<Self, AppError> {
-        Self::adopt_inner(source, read, commitment, observed, selections, false)
+        Self::adopt_inner(
+            source, read, commitment, observed, selections, host_ids, false,
+        )
     }
     pub(super) fn reconcile(
         source: &SyncStateV3,
@@ -198,8 +233,11 @@ impl Candidate {
         commitment: &str,
         observed: u64,
         selections: &BTreeMap<String, bool>,
+        host_ids: BTreeMap<String, String>,
     ) -> Result<Self, AppError> {
-        Self::adopt_inner(source, read, commitment, observed, selections, true)
+        Self::adopt_inner(
+            source, read, commitment, observed, selections, host_ids, true,
+        )
     }
     fn adopt_inner(
         source: &SyncStateV3,
@@ -207,6 +245,7 @@ impl Candidate {
         commitment: &str,
         observed: u64,
         selections: &BTreeMap<String, bool>,
+        host_ids: BTreeMap<String, String>,
         reconciliation: bool,
     ) -> Result<Self, AppError> {
         let before = source.local.central.as_ref().ok_or_else(invalid)?;
@@ -250,7 +289,7 @@ impl Candidate {
             }
         }
         owner.validate()?;
-        Self::from_owner(
+        let mut candidate = Self::from_owner(
             source,
             owner,
             read.keys(),
@@ -258,7 +297,9 @@ impl Candidate {
             observed,
             Some(selections),
             reconciliation,
-        )
+        )?;
+        candidate.host_ids = host_ids;
+        Ok(candidate)
     }
     pub(in crate::sync) fn reconciliation(&self) -> bool {
         self.reconciliation
@@ -270,7 +311,14 @@ impl Candidate {
         operation: &str,
     ) -> Result<Prepared, AppError> {
         let verified = self.delta.finish(vault, mapping, operation)?;
-        Self::finish_verified(self.source, &self.shadow, self.manifest, verified)
+        Self::finish_verified(
+            self.source,
+            &self.shadow,
+            self.manifest,
+            verified,
+            &self.host_ids,
+            self.observed,
+        )
     }
     /// Rebuild the delta from the exact immutable shadow so the original preparation remains
     /// available for the final filesystem verification.
@@ -288,22 +336,29 @@ impl Candidate {
             &self.shadow,
             self.manifest.clone(),
             verified,
+            &self.host_ids,
+            self.observed,
         )
     }
+    /// The final candidate: the shadow's verified delta, with what this device keeps by host id back in it (`keep_routes`), written
+    /// at `observed`.
     fn finish_verified(
         source: SyncStateV3,
         shadow: &SyncStateV3,
         manifest: String,
         verified: super::projection_delta::Verified,
+        host_ids: &BTreeMap<String, String>,
+        observed: u64,
     ) -> Result<Prepared, AppError> {
         if verified.before() != shadow {
             return Err(invalid());
         }
-        let candidate = crate::sync::record_groups::invalidate_changed_pins(
+        let mut candidate = crate::sync::record_groups::invalidate_changed_pins(
             &source,
             verified.candidate().clone(),
         )
         .map_err(|_| invalid())?;
+        keep_routes(&source, &mut candidate, host_ids, observed)?;
         records_v3::validate_state(&candidate).map_err(|_| invalid())?;
         Ok(Prepared {
             source,
@@ -336,23 +391,33 @@ pub(in crate::sync) mod tests {
             migration_history::tests::{context, initial, library},
             migration_progress::Progress,
             migration_verify::{Page, Verifier},
-            payload::{Catalog, Collection, Data},
+            payload::{Catalog, Collection, Data, Identity},
         },
         fake_relay::FakeRelay,
+        record::{record_key, LocalRecord, Record, RecordKind},
         record_runtime::{self, StartupProbe},
+        records_v3::HostScope,
         testkit::{TestClock, TestDevice},
+        transports::{
+            tests::{iap, saved_on_this_device, with_pam, with_zone},
+            GrantMemory, HostTransport,
+        },
     };
     pub(in crate::sync::central) fn fixture(
     ) -> (SyncStateV3, migration_history::Plan, VaultKeys, Committed) {
         fixture_kind(false)
     }
     fn fixture_kind(empty: bool) -> (SyncStateV3, migration_history::Plan, VaultKeys, Committed) {
-        let (owner, keys, signer) = initial();
         let mut history = library();
         if empty {
             history.truncate(1);
         }
-        history[0].1 = Data::Catalog(Catalog {
+        history[0].1 = Data::Catalog(unselected_catalog());
+        fixture_of(&history)
+    }
+    /// A Catalog of one collection, which the fixtures' source holds unselected.
+    fn unselected_catalog() -> Catalog {
+        Catalog {
             tunnels: vec![],
             transports: vec![],
             collections: vec![Collection {
@@ -360,8 +425,15 @@ pub(in crate::sync) mod tests {
                 name: "unselected".into(),
             }],
             group_orders: vec![],
-        });
-        let plan = migration_history::prepare(&owner, &keys, &signer, context(), &history).unwrap();
+        }
+    }
+    /// The verified first publication of `history`, and the enrolled source it was built from, which holds `unselected_catalog`'s
+    /// collection unselected.
+    fn fixture_of(
+        history: &[(Identity, Data)],
+    ) -> (SyncStateV3, migration_history::Plan, VaultKeys, Committed) {
+        let (owner, keys, signer) = initial();
+        let plan = migration_history::prepare(&owner, &keys, &signer, context(), history).unwrap();
         let progress: Progress = serde_json::from_value(serde_json::json!({
             "manifest":plan.manifest,"manifest_digest":plan.manifest.digest().unwrap(),
             "phase":"retired","staged":plan.rows.len().to_string(),
@@ -466,6 +538,159 @@ pub(in crate::sync) mod tests {
             assert!(!state.local.central.as_ref().unwrap().control.cutover);
             assert!(state.local.central_projection.is_none());
         }
+    }
+
+    // ---- This device's routes and grant memory (design 2026-10-26, Existing routes move in; R8) ----
+
+    /// The host the routes below name; `fixture_with_host`'s library holds it.
+    const HOST: &str = "0000000000000001";
+    /// A host the library does not hold.
+    const OTHER: &str = "0000000000000002";
+
+    /// The first publication of a library holding `host` in this device's own scope and `routes` in its Catalog, and its source, which
+    /// holds the host too: a first publication builds the library from the device's own data, under the same host ids. The history
+    /// needs no material.
+    fn fixture_with_host(
+        host: &str,
+        routes: Vec<HostTransport>,
+    ) -> (SyncStateV3, migration_history::Plan, VaultKeys, Committed) {
+        let payload = serde_json::json!({"schema":2,"alias":"jump","hostname":"jump.invalid","auth":"password"});
+        let history = [
+            (
+                Identity {
+                    kind: "meta".into(),
+                    id: "catalog".into(),
+                    scope: None,
+                },
+                Data::Catalog(Catalog {
+                    transports: routes,
+                    ..unselected_catalog()
+                }),
+            ),
+            (
+                Identity {
+                    kind: "host".into(),
+                    id: host.into(),
+                    scope: Some(HostScope::Local),
+                },
+                Data::Host(serde_json::from_value(payload.clone()).unwrap()),
+            ),
+        ];
+        let (mut state, plan, keys, committed) = fixture_of(&history);
+        let record = Record {
+            kind: RecordKind::Host,
+            id: host.into(),
+            version: 1,
+            updated_at_ms: 1,
+            device_id: state.device_id.clone(),
+            deleted: false,
+            payload,
+        };
+        state.local.hosts.insert(
+            record_key(RecordKind::Host, host),
+            LocalRecord {
+                record,
+                seq: 0,
+                dirty: false,
+            },
+        );
+        (state, plan, keys, committed)
+    }
+    /// The candidate the initial publication saves for `initial`, which reads back a Vault holding no material.
+    fn finished(initial: &Candidate, keys: &VaultKeys) -> SyncStateV3 {
+        let device = TestDevice::new("initial-readback", &FakeRelay::new(), &TestClock::new());
+        let vault = crate::vault::store::read_vault(
+            &crate::vault::store::vault_path(&device.env().state_path),
+            &device.keychain,
+        )
+        .unwrap();
+        initial
+            .finish_readback(keys, &vault, &BTreeMap::new(), &"c".repeat(32))
+            .unwrap()
+            .candidate()
+            .clone()
+    }
+
+    /// Design 2026-10-26 (Existing routes move in): the first publication keeps the routes this device saved, as its own, for the
+    /// next capture to publish; the shadow, from which the delta is rebuilt, holds none (R8).
+    #[test]
+    fn first_publication_keeps_the_devices_routes_local_for_the_next_capture() {
+        let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
+        let source = saved_on_this_device(&source, &iap(HOST));
+        let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
+        assert!(
+            transports::view(initial.shadow()).is_empty(),
+            "the shadow's delta finds no route left to capture"
+        );
+        let projected = finished(&initial, &keys);
+        assert_eq!(transports::get(&projected, HOST), Some(iap(HOST)));
+        assert!(
+            !transports::synced(&projected, HOST),
+            "it is this device's until a capture publishes it"
+        );
+        assert!(projected.version >= transports::STATE_VERSION);
+        assert_eq!(
+            projected.version,
+            candidate_version(&projected),
+            "the version the initial publication requires"
+        );
+        records_v3::validate_state(&projected).unwrap();
+        let ledger = projected.local.central_projection.as_ref().unwrap();
+        assert!(
+            ledger.public_changes(&projected, &keys).unwrap().iter().any(
+                |change| matches!(&change.data, Data::Catalog(catalog) if catalog.transports == [iap(HOST)])
+            ),
+            "the next capture publishes it: the library has its host"
+        );
+    }
+
+    /// R8: what grant requests taught this device stays through the first publication, which used to refuse such a source.
+    #[test]
+    fn first_publication_keeps_what_grant_requests_taught_this_device() {
+        let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
+        let source = transports::remember_grant_request(
+            &saved_on_this_device(&source, &with_pam(HOST)),
+            HOST,
+            "restart app-api",
+            1800,
+            2,
+        )
+        .unwrap();
+        let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
+        assert!(initial.shadow().local.transport_grants.is_empty());
+        let projected = finished(&initial, &keys);
+        assert_eq!(
+            transports::grant_memory(&projected, HOST),
+            Some(GrantMemory {
+                justification: "restart app-api".into(),
+                duration_secs: 1800
+            })
+        );
+        assert_eq!(projected.version, transports::SYNC_STATE_VERSION);
+        assert_eq!(projected.version, candidate_version(&projected));
+        records_v3::validate_state(&projected).unwrap();
+    }
+
+    /// R8: a kept route gives way to the route the library's Catalog already holds for its host, as a delta projection decides (an
+    /// adopted library may hold one); a route for a host the Catalog holds none for stays.
+    #[test]
+    fn a_kept_route_gives_way_to_the_librarys_route_for_its_host() {
+        let (source, plan, keys, committed) = fixture_with_host(HOST, vec![iap(HOST)]);
+        let source = saved_on_this_device(
+            &saved_on_this_device(&source, &with_zone(iap(HOST), "asia-east1-a")),
+            &iap(OTHER),
+        );
+        let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
+        let projected = finished(&initial, &keys);
+        assert_eq!(transports::get(&projected, HOST), Some(iap(HOST)));
+        assert!(transports::synced(&projected, HOST));
+        assert_eq!(transports::get(&projected, OTHER), Some(iap(OTHER)));
+        assert_eq!(
+            projected.local.transports.keys().collect::<Vec<_>>(),
+            [&record_key(RecordKind::Meta, &transports::wire_id(OTHER))]
+        );
+        assert_eq!(projected.version, transports::SYNC_STATE_VERSION);
+        records_v3::validate_state(&projected).unwrap();
     }
 }
 

@@ -6,7 +6,10 @@ use super::super::{
     wire::{canonical, RecordHeader},
 };
 use super::*;
-use crate::sync::records_v3::HostScope;
+use crate::sync::{
+    record::{record_key, RecordKind},
+    records_v3::HostScope,
+};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Plan {
@@ -45,7 +48,13 @@ fn scope(operation: &str, old: &HostScope) -> Result<HostScope, AppError> {
         )?,
     })
 }
-fn host(operation: &str, old_scope: &HostScope, id: &str) -> Result<String, AppError> {
+/// The id this merge gives a host it imports from `old_scope`, wherever the host's id is used: its own rows, the jumps and tunnels that
+/// name it, and what this device keeps by host id (`route_host_ids`).
+pub(crate) fn adopted_host_id(
+    operation: &str,
+    old_scope: &HostScope,
+    id: &str,
+) -> Result<String, AppError> {
     named(operation, "host", Some(old_scope), id, 16)
 }
 fn group(operation: &str, old_scope: &HostScope, id: &str) -> Result<String, AppError> {
@@ -161,7 +170,7 @@ pub(super) fn history(
                 value.jump = value
                     .jump
                     .iter()
-                    .map(|v| host(operation, s, v))
+                    .map(|v| adopted_host_id(operation, s, v))
                     .collect::<Result<_, _>>()?;
                 // Source trust approvals are scoped to their old host identity/device.
                 value.host_key = None;
@@ -175,11 +184,13 @@ pub(super) fn history(
                 if let Some(jump) = &mut value.defaults.jump {
                     *jump = jump
                         .iter()
-                        .map(|v| host(operation, s, v))
+                        .map(|v| adopted_host_id(operation, s, v))
                         .collect::<Result<_, _>>()?;
                 }
             }
             Data::Catalog(value) => {
+                // The library's routes stay as they are: this device brings none (R11). Its own stay on it, under the ids its
+                // hosts get here (`route_host_ids`), until a capture publishes them.
                 let mut merged = remote.clone();
                 if has_local {
                     merged.collections.push(Collection {
@@ -213,11 +224,15 @@ pub(super) fn history(
                     let mut rule = old.clone();
                     rule.id = named(operation, "tunnel", None, &old.id, 16)?;
                     rule.host_id = match host_scopes.get(&old.host_id) {
-                    Some(scopes) if scopes.len() == 1 => host(operation, scopes.first().ok_or_else(invalid)?, &old.host_id)?,
+                    Some(scopes) if scopes.len() == 1 => adopted_host_id(operation, scopes.first().ok_or_else(invalid)?, &old.host_id)?,
                     Some(_) => return Err(AppError::Other("A retained tunnel has an ambiguous host identity. Original data is retained; resolve its host before merging.".into())),
                     None => named(operation, "orphan-tunnel-host", None, &old.host_id, 16)?,
                 };
                     merged.tunnels.push(rule);
+                }
+                // The merged Catalog is published as one record (design 2026-10-26, Room in the Catalog).
+                if !payload::catalog_fits(&merged) {
+                    return Err(AppError::Other(crate::sync::transports::NO_ROOM.into()));
                 }
                 merged.validate()?;
                 *value = merged;
@@ -225,7 +240,7 @@ pub(super) fn history(
             _ => {}
         }
         match id.kind.as_str() {
-            "host" | "password" => id.id = host(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
+            "host" | "password" => id.id = adopted_host_id(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
             "group" => {
                 id.id = group(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?
             }
@@ -432,6 +447,38 @@ pub(super) fn owned_collections(
         }
     }
     Ok(owned)
+}
+/// The ids this merge gives the hosts this device's own routes name (old → new), so that those routes, and what grant requests taught
+/// this device about their hosts, follow the hosts (design 2026-10-26, Existing routes move in): they stay this device's until a
+/// capture publishes them. A host id `source` holds in no scope, or in more than one, names no one host, so it keeps its id.
+pub(super) fn route_host_ids(
+    source: &SyncStateV3,
+    operation: &str,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let mut host_ids = BTreeMap::new();
+    for row in source.local.transports.values() {
+        let Some(id) = row.record.id.strip_prefix(crate::sync::transports::PREFIX) else {
+            continue;
+        };
+        let key = record_key(RecordKind::Host, id);
+        let local = source
+            .local
+            .hosts
+            .contains_key(&key)
+            .then_some(HostScope::Local);
+        let spaces = source
+            .spaces
+            .iter()
+            .filter(|(_, space)| space.records.contains_key(&key))
+            .map(|(space_id, _)| HostScope::Space {
+                space_id: space_id.clone(),
+            });
+        let mut scopes = local.into_iter().chain(spaces);
+        if let (Some(scope), None) = (scopes.next(), scopes.next()) {
+            host_ids.insert(id.to_owned(), adopted_host_id(operation, &scope, id)?);
+        }
+    }
+    Ok(host_ids)
 }
 pub(super) fn selections(
     source: &SyncStateV3,

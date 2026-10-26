@@ -34,12 +34,16 @@ fn revision(read: &VerifiedLibrary, row: &RecordEnvelope) -> Result<u64, AppErro
         .get(&row.header.record_id)
         .map_or(Ok(0), |r| number(&r.version.revision, false))
 }
+/// The part of a Catalog this merge brings, which another device's edit must not have changed: its collections, their group orders and
+/// its tunnels. It brings no routes (R11), so the library's routes are never part of it: another device may edit them meanwhile, and
+/// the rebased Catalog carries them as they are.
 fn partition(
     mut c: Catalog,
     owned: &std::collections::BTreeSet<String>,
     owned_tunnels: &std::collections::BTreeSet<String>,
 ) -> Catalog {
     c.tunnels.retain(|r| owned_tunnels.contains(&r.id));
+    c.transports.clear();
     c.collections.retain(|v| owned.contains(&v.id));
     c.group_orders
         .retain(|v| matches!(&v.scope,HostScope::Space{space_id} if owned.contains(space_id)));
