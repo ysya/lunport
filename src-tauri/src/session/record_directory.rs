@@ -387,7 +387,7 @@ impl HostDirectory for RecordDirectory {
                 }
                 Some(name) if name != hop.user => {
                     return Err(DirectoryError::Denied(format!(
-                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; save that username into the host (Use OS Login username in the host's Google Cloud transport).",
+                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; save that username into the host (Use OS Login username in the host editor).",
                         hop.user
                     )));
                 }

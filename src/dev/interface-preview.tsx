@@ -133,7 +133,7 @@ else {
   /** The route a command is about, as the backend finds it; a host without one is an error there too, in the backend's words. */
   const routeOrFail = (hostId: unknown): HostTransport => {
     const route = routeOf(hostId);
-    if (!route) throw new Error("This host has no transport.");
+    if (!route) throw new Error("This host has no Google Cloud IAP route.");
     return route;
   };
   const canonical = (value: unknown): unknown =>
@@ -143,10 +143,11 @@ else {
   const sameData = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
   /**
    * The route half of records_host_create / records_host_update (`RouteChange`), as a patch of the overview: a `kind` saves or replaces
-   * the host's route, `null` removes it, and an absent `route` leaves it alone. `expected` is checked against the saved route as the
-   * backend checks it, and a route saved in a central library syncs with its host.
+   * the host's route, `null` removes it (and with it what this computer's grant requests taught it about the host), and an absent
+   * `route` leaves it alone. `expected` is checked against the saved route as the backend checks it, and a route saved in a central
+   * library syncs with its host.
    */
-  const routePatch = (hostId: string, change: RouteChange | undefined): Pick<RecordOverview, "transports" | "transport_sync"> => {
+  const routePatch = (hostId: string, change: RouteChange | undefined): Pick<RecordOverview, "transports" | "transport_sync" | "grant_memory"> => {
     if (change === undefined) return {};
     const saved = routeOf(hostId) ?? null;
     if (!sameData(change.expected, saved)) throw new Error("The host's route changed while you were editing; reload and try again.");
@@ -158,6 +159,8 @@ else {
         ...(overview.transport_sync ?? []).filter((other) => other.host_id !== hostId),
         ...route.map(() => ({ host_id: hostId, synced: overview.central_mode === true && Boolean(overview.account) })),
       ],
+      // Named only when the route goes: the patch is spread over the overview, so a key it names without a value would erase the memory.
+      ...(change.kind === null ? { grant_memory: (overview.grant_memory ?? []).filter((memory) => memory.host_id !== hostId) } : {}),
     };
   };
   let reviewedImport: ImportPreviewResult | null = null;
@@ -239,9 +242,9 @@ else {
         if (command === "transports_pam_request") {
           // The grant is asked for on the entitlement named, which the route must list, else on the first it lists; and the answer names it.
           const { kind } = routeOrFail(args.hostId);
-          if (!kind.pam) throw new Error("This transport requires no grant.");
+          if (!kind.pam) throw new Error("This host's route requires no grant.");
           const entitlement = args.entitlement === undefined ? kind.pam.entitlements[0] : kind.pam.entitlements.find((listed) => listed === args.entitlement);
-          if (entitlement === undefined) throw new Error("This transport does not list that entitlement.");
+          if (entitlement === undefined) throw new Error("This host's route does not list that entitlement.");
           await new Promise((resolve) => setTimeout(resolve, 900));
           const until = Date.now() + Number(args.durationSecs) * 1000;
           grants.set(grantKey(kind, entitlement), until);

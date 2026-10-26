@@ -247,10 +247,10 @@ pub fn pam_request_with(
     wait: Duration,
 ) -> Result<PamStatusView, String> {
     let TransportKind::GcpIap { project, account, pam, .. } = &transport.kind;
-    let Some(pam) = pam else { return Err("This transport requires no grant.".into()) };
+    let Some(pam) = pam else { return Err("This host's route requires no grant.".into()) };
     let entitlement = match entitlement {
-        Some(chosen) => pam.entitlements.iter().find(|listed| *listed == chosen).ok_or("This transport does not list that entitlement.")?,
-        None => pam.entitlements.first().ok_or("This transport names no PAM entitlement.")?,
+        Some(chosen) => pam.entitlements.iter().find(|listed| *listed == chosen).ok_or("This host's route does not list that entitlement.")?,
+        None => pam.entitlements.first().ok_or("This host's route names no PAM entitlement.")?,
     };
     let place = pam::Entitlement { account: account.as_deref(), project, location: &pam.location, entitlement };
     // A failed memory write does not fail the request: the grant exists either way.
@@ -425,7 +425,7 @@ struct Probe {
 /// may supply and a connection dials. A host whose group settings need review has no effective port to trust, so the check, like the
 /// port check, declines.
 fn probe_target(records: &SyncStateV3, host_id: &str) -> Result<Probe, String> {
-    let TransportKind::GcpIap { project, zone, instance, interface, account, pam, .. } = transports::get(records, host_id).ok_or("This host has no transport.")?.kind;
+    let TransportKind::GcpIap { project, zone, instance, interface, account, pam, .. } = transports::get(records, host_id).ok_or("This host has no Google Cloud IAP route.")?.kind;
     let host = repo::get_host(records, host_id).map_err(|error| error.to_string())?;
     if host.group_error.is_some() {
         return Err("Review the host’s group settings before checking it through IAP.".into());
@@ -468,7 +468,7 @@ fn transport_of(app: &tauri::AppHandle, host_id: &str) -> Result<HostTransport, 
     let state = app.state::<AppState>();
     let core = state.sync.core.lock().unwrap();
     let records = core.records.as_ref().ok_or("The saved records are unavailable.")?;
-    transports::get(records, host_id).ok_or_else(|| "This host has no transport.".to_string())
+    transports::get(records, host_id).ok_or_else(|| "This host has no Google Cloud IAP route.".to_string())
 }
 
 /// What a check of `host_id`'s route needs, from the saved records (Records workspace only).
@@ -489,7 +489,7 @@ fn main_only(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.label() == "main" {
         Ok(())
     } else {
-        Err("Transport settings are available in the main window only.".into())
+        Err("Google Cloud settings are available in the main window only.".into())
     }
 }
 
@@ -892,7 +892,7 @@ mod tests {
         assert_eq!(remembered.lock().unwrap().len(), 2, "a request that ended denied was still a request, and is remembered");
         // A transport without a PAM check has nothing to request.
         let error = pam_request_with(&gcp, &remember, &iap(), "x", 1800, None, &|| false, Duration::from_millis(1), Duration::from_secs(5)).err();
-        assert_eq!(error, Some("This transport requires no grant.".to_string()));
+        assert_eq!(error, Some("This host's route requires no grant.".to_string()));
         assert_eq!(remembered.lock().unwrap().len(), 2, "nothing more was remembered");
     }
 
@@ -1066,13 +1066,13 @@ mod tests {
         for unlisted in ["other", "PROD-ADMIN", ""] {
             let untouched = FakeGcp::grants_at_once();
             let error = pam_request_with(&untouched, &remember, &route, "x", 1800, Some(unlisted), &|| false, Duration::ZERO, Duration::from_secs(1)).err();
-            assert_eq!(error, Some("This transport does not list that entitlement.".to_string()), "{unlisted:?}");
+            assert_eq!(error, Some("This host's route does not list that entitlement.".to_string()), "{unlisted:?}");
             assert!(untouched.searched().is_empty() && untouched.created().is_empty(), "{unlisted:?}");
         }
         assert_eq!(remembered.lock().unwrap().len(), 1, "a refused request remembers nothing");
         // A route that requires no grant has nothing to choose.
         let error = pam_request_with(&gcp, &remember, &iap(), "x", 1800, Some("prod-admin"), &|| false, Duration::ZERO, Duration::from_secs(1)).err();
-        assert_eq!(error, Some("This transport requires no grant.".to_string()));
+        assert_eq!(error, Some("This host's route requires no grant.".to_string()));
     }
 
     /// Design 2026-10-26 (Deleting a host): the page ignores a route whose host is gone, as the Catalog's tunnels tolerate orphans, so
@@ -1634,7 +1634,7 @@ mod tests {
     fn a_host_without_a_route_or_a_route_without_a_host_has_nothing_to_check() {
         let host: HostPayload = serde_json::from_value(json!({"schema": 2, "alias": "prod-jump", "hostname": "prod-jump.example.com", "auth": "password"})).unwrap();
         let plain = repo::create_host(&state(), HOST, HostScope::Local, host, 1).unwrap();
-        assert_eq!(probe_target(&plain, HOST).err(), Some("This host has no transport.".to_string()));
+        assert_eq!(probe_target(&plain, HOST).err(), Some("This host has no Google Cloud IAP route.".to_string()));
         let orphan = transports::set(&state(), HOST, None, Some(iap()), 1).unwrap();
         assert!(probe_target(&orphan, HOST).is_err());
     }

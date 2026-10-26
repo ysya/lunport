@@ -800,7 +800,7 @@ mod gcp_transport {
         let target = d.resolve(&gate()).unwrap();
         assert_eq!(
             denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err()),
-            "OS Login names frank@retower.io frank_retower_io on eng-dev-396409, but the host is saved with user frank; save that username into the host (Use OS Login username in the host's Google Cloud transport)."
+            "OS Login names frank@retower.io frank_retower_io on eng-dev-396409, but the host is saved with user frank; save that username into the host (Use OS Login username in the host editor)."
         );
     }
 
