@@ -483,6 +483,15 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                 RecordKind::Meta if crate::sync::tunnel_rules::is_id(&record.id) => {
                     if !crate::sync::tunnel_rules::valid(record) { return Err(state_invalid("tunnel", &record.id, "invalid tunnel metadata")); }
                 }
+                // A library's route, tombstones included, needs the version a Lunport that cannot publish it does not open.
+                RecordKind::Meta if crate::sync::transports::is_id(&record.id) => {
+                    if !crate::sync::transports::valid(record) {
+                        return Err(state_invalid("transport", &record.id, "invalid transport metadata"));
+                    }
+                    if state.version < crate::sync::transports::SYNC_STATE_VERSION {
+                        return Err(state_invalid("transport", "account", "invalid transport state version"));
+                    }
+                }
                 RecordKind::Meta if record.id == ACCOUNT_META_ID && !record.deleted => {
                     let meta: MetaPayload = serde_json::from_value(record.payload.clone())
                         .map_err(state_decode_error)?;

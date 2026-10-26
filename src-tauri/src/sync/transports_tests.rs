@@ -460,6 +460,27 @@ fn a_blocked_library_refuses_route_edits() {
     assert!(set(&blocked(chain_account_with_host(HOST)), HOST, None, Some(iap(HOST)), 1).is_ok(), "a route on this device obeys no library's block");
 }
 
+/// Design 2026-10-26 (Tests): version 10 is what a library's route rows need, as grant memory does, so a state holding one, tombstones
+/// included, below it is refused; and the state file's route rows are validated as its tunnel rows are.
+#[test]
+fn a_library_route_row_below_version_ten_or_failing_its_rules_is_refused() {
+    let synced = set(&central_with_host(HOST), HOST, None, Some(iap(HOST)), 1).unwrap();
+    assert_eq!(synced.version, SYNC_STATE_VERSION);
+    validate_state(&synced).unwrap();
+    let mut older = synced.clone();
+    older.version = records_v3::TRANSPORT_STATE_VERSION;
+    assert!(validate_state(&older).is_err());
+    assert!(decode_state(&serde_json::to_string(&older).unwrap()).is_err(), "an older Lunport's version does not open it either");
+    let mut removed = set(&synced, HOST, Some(&iap(HOST)), None, 2).unwrap();
+    validate_state(&removed).unwrap();
+    removed.version = records_v3::TRANSPORT_STATE_VERSION;
+    assert!(validate_state(&removed).is_err(), "a tombstone needs version 10 too");
+    let mut other_host = synced;
+    let row = other_host.account.as_mut().unwrap().records.get_mut(&record_key(RecordKind::Meta, &wire_id(HOST))).unwrap();
+    row.record.payload["transport"]["host_id"] = json!(OTHER);
+    assert!(validate_state(&other_host).is_err(), "a row whose payload names another host than its id");
+}
+
 /// R7: a library holds at most `MAX_ROUTES` routes. One more is refused with the room sentence rather than the Catalog's own refusal,
 /// and a library holding that many still takes an edit.
 #[test]
