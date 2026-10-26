@@ -12,6 +12,7 @@ use crate::gcp::pam;
 use crate::gcp::rest::GcpClient;
 use crate::state::AppState;
 use crate::sync::record_commands::RecordOverview;
+use crate::sync::records_v3;
 use crate::sync::transports::{self, HostTransport, TransportKind};
 
 /// What the editor's **Use OS Login username** button learns: the account asked, its POSIX username (none when the project has no OS
@@ -151,6 +152,15 @@ fn checked_request(justification: &str, duration_secs: u32) -> Result<String, St
     Ok(justification.to_string())
 }
 
+/// The host a grant command names: the bare id the panel sends (a transport's `host_id`, what `transport_of` looks up), not the record's
+/// `transport:` wire id.
+fn checked_host_id(host_id: &str) -> Result<(), String> {
+    if !records_v3::is_host_id(host_id) {
+        return Err("Invalid host identity.".into());
+    }
+    Ok(())
+}
+
 /// The saved transport of `host_id` (Records workspace only).
 fn transport_of(app: &tauri::AppHandle, host_id: &str) -> Result<HostTransport, String> {
     let state = app.state::<AppState>();
@@ -234,9 +244,7 @@ pub async fn transports_oslogin_profile(
 #[tauri::command]
 pub async fn transports_pam_status(app: tauri::AppHandle, window: tauri::WebviewWindow, host_id: String) -> Result<PamStatusView, String> {
     main_only(&window)?;
-    if !transports::is_id(&host_id) {
-        return Err("Invalid host identity.".into());
-    }
+    checked_host_id(&host_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let transport = transport_of(&app, &host_id)?;
         let gcp = app.state::<AppState>().gcp.clone();
@@ -249,9 +257,7 @@ pub async fn transports_pam_status(app: tauri::AppHandle, window: tauri::Webview
 #[tauri::command]
 pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::WebviewWindow, host_id: String, justification: String, duration_secs: u32) -> Result<PamStatusView, String> {
     main_only(&window)?;
-    if !transports::is_id(&host_id) {
-        return Err("Invalid host identity.".into());
-    }
+    checked_host_id(&host_id)?;
     let justification = checked_request(&justification, duration_secs)?;
     tauri::async_runtime::spawn_blocking(move || {
         let transport = transport_of(&app, &host_id)?;
@@ -480,6 +486,17 @@ mod tests {
         assert!(gcp.created.lock().unwrap().is_empty(), "nothing was requested");
         assert!(gcp.read.lock().unwrap().is_empty(), "nothing was read back");
         assert!(remembered.lock().unwrap().is_empty(), "nothing to remember");
+    }
+
+    /// The panel's grant line and Request grant name the host by a transport's `host_id`, the bare id `transport_of` looks up; checking it
+    /// as the record's `transport:` wire id refused every real host.
+    #[test]
+    fn the_grant_commands_take_the_bare_host_id_the_panel_sends() {
+        assert_eq!(checked_host_id(HOST), Ok(()));
+        assert_eq!(checked_host_id(&record_commands::new_host_id().unwrap()), Ok(()), "a host id as the library makes one");
+        for malformed in ["transport:0000000000000001", "", "000000000000001", "00000000000000001", "000000000000000F", "../../etc/passwd"] {
+            assert_eq!(checked_host_id(malformed), Err("Invalid host identity.".to_string()), "{malformed:?}");
+        }
     }
 
     #[test]
