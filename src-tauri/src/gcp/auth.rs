@@ -1,8 +1,8 @@
 //! Google access tokens from the files `gcloud auth login` leaves behind, without running gcloud: the config directory as gcloud finds it
 //! (`CLOUDSDK_CONFIG`, `~/.config/gcloud`, `%APPDATA%\gcloud`), `legacy_credentials/<account>/adc.json` for a named account, the active
 //! account's file and then the application default credentials otherwise, and the refresh-token grant against Google's token endpoint.
-//! Only `authorized_user` credentials are read; tokens are cached in memory and zeroed when dropped, and nothing here writes under
-//! gcloud's directory.
+//! `credentialed_accounts` lists the accounts that have such a file. Only `authorized_user` credentials are read; tokens are cached in
+//! memory and zeroed when dropped, and nothing here writes under gcloud's directory.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -152,13 +152,55 @@ fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
 /// `LegacyCredentialsDir`): colons dropped, and on Windows a dot in front of the device names it reserves.
 pub fn legacy_credentials_path(config_dir: &Path, account: &str) -> PathBuf {
     let mut name = if account.is_empty() { "default".to_string() } else { account.replace(':', "") };
-    if cfg!(windows) {
-        let upper = name.to_ascii_uppercase();
-        if ["CON.", "PRN.", "AUX.", "NUL."].iter().any(|device| upper.starts_with(device)) {
-            name.insert(0, '.');
-        }
+    if cfg!(windows) && starts_with_windows_device(&name) {
+        name.insert(0, '.');
     }
     config_dir.join("legacy_credentials").join(name).join("adc.json")
+}
+
+/// Whether `name` starts with one of the names Windows reserves for devices (`CON.`, `PRN.`, `AUX.`, `NUL.`, in any case), which
+/// gcloud's folder for such an account avoids with a dot in front.
+fn starts_with_windows_device(name: &str) -> bool {
+    const DEVICES: [&str; 4] = ["CON.", "PRN.", "AUX.", "NUL."];
+    let upper = name.to_ascii_uppercase();
+    DEVICES.iter().any(|device| upper.starts_with(device))
+}
+
+/// The account a `legacy_credentials` folder stands for: `legacy_credentials_path`'s spelling run backwards, so on Windows the dot it puts
+/// in front of a reserved device name is taken off again. Any other dot is the account's own, and where no dot was put on none is taken off.
+fn account_of_folder(folder: &str, windows: bool) -> &str {
+    match folder.strip_prefix('.') {
+        Some(rest) if windows && starts_with_windows_device(rest) => rest,
+        _ => folder,
+    }
+}
+
+/// The accounts gcloud holds `authorized_user` credentials for, in order of name: each `legacy_credentials/<folder>/adc.json` of that type,
+/// the account being the folder as `legacy_credentials_path` spells it. A folder with no such file (a service account, a file that cannot
+/// be read, a stray entry) is not listed, and a directory that is not there lists nothing: this is a look at what is on disk, never an
+/// error, and it writes nothing. Only each file's `type` is read.
+pub fn credentialed_accounts(config_dir: &Path) -> Vec<String> {
+    let Ok(folders) = std::fs::read_dir(config_dir.join("legacy_credentials")) else { return Vec::new() };
+    let mut accounts: Vec<String> = folders
+        .filter_map(Result::ok)
+        .filter_map(|folder| {
+            let name = folder.file_name().into_string().ok()?;
+            is_authorized_user(&folder.path().join("adc.json")).then(|| account_of_folder(&name, cfg!(windows)).to_string())
+        })
+        .collect();
+    accounts.sort();
+    accounts
+}
+
+/// Whether the file at `path` is an `authorized_user` credentials file. Its text, which holds the refresh token, is zeroed when this
+/// returns, and nothing but the `type` is taken out of it.
+fn is_authorized_user(path: &Path) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Kind {
+        r#type: Option<String>,
+    }
+    let Ok(text) = std::fs::read_to_string(path).map(Zeroizing::new) else { return false };
+    serde_json::from_str::<Kind>(&text).is_ok_and(|file| file.r#type.as_deref() == Some("authorized_user"))
 }
 
 /// The `User-Agent` Lunport sends to Google.
@@ -398,6 +440,67 @@ mod tests {
         write(dir.path(), "configurations/config_prod", "[core]\nproject = knowknow-prod\n[compute]\naccount = not-core@example.com\n");
         assert_eq!(active_account(dir.path()), None, "only [core] account counts");
         assert_eq!(legacy_credentials_path(dir.path(), "a:b@example.com"), dir.path().join("legacy_credentials").join("ab@example.com").join("adc.json"));
+    }
+
+    #[test]
+    fn credentialed_accounts_lists_user_folders_and_skips_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "r1"));
+        write(dir.path(), "legacy_credentials/ops@example.com/adc.json", &authorized_user("ops@example.com", "r2"));
+        write(dir.path(), "legacy_credentials/robot/adc.json", r#"{"type":"service_account"}"#);
+        assert_eq!(credentialed_accounts(dir.path()), ["frank@example.com", "ops@example.com"]);
+        let missing = dir.path().join("missing");
+        assert!(credentialed_accounts(&missing).is_empty()); // Review Focus 4: no gcloud directory is no accounts, not an error
+        assert!(!missing.exists(), "listing reads gcloud's directory and creates nothing");
+    }
+
+    /// A folder counts only for an `authorized_user` file it holds: a file that is not one, cannot be read, or is not there lists nothing
+    /// (never an error), and the application default credentials are not an account of `legacy_credentials`.
+    #[test]
+    fn credentialed_accounts_skips_every_folder_without_an_authorized_user_file_and_sorts() {
+        let dir = tempfile::tempdir().unwrap();
+        // Written out of order.
+        for account in ["zoe@example.com", "ann@example.com", "mia@example.com"] {
+            write(dir.path(), &format!("legacy_credentials/{account}/adc.json"), &authorized_user(account, "rt"));
+        }
+        write(dir.path(), "legacy_credentials/broken@example.com/adc.json", "{not json");
+        write(dir.path(), "legacy_credentials/empty@example.com/adc.json", "");
+        write(dir.path(), "legacy_credentials/typeless@example.com/adc.json", r#"{"account":"typeless@example.com","refresh_token":"rt"}"#);
+        write(dir.path(), "legacy_credentials/numeric@example.com/adc.json", r#"{"type":5}"#);
+        write(dir.path(), "legacy_credentials/other@example.com/adc.json", r#"{"type":"external_account"}"#);
+        write(dir.path(), "legacy_credentials/no-adc@example.com/.boto", "[Credentials]\n");
+        std::fs::create_dir_all(dir.path().join("legacy_credentials/adc-is-a-folder@example.com/adc.json")).unwrap();
+        write(dir.path(), "legacy_credentials/stray-file", "not a folder");
+        write(dir.path(), "application_default_credentials.json", &authorized_user("adc@example.com", "rt-adc"));
+        assert_eq!(credentialed_accounts(dir.path()), ["ann@example.com", "mia@example.com", "zoe@example.com"]);
+        // gcloud's directory with nothing signed in.
+        let bare = tempfile::tempdir().unwrap();
+        assert!(credentialed_accounts(bare.path()).is_empty());
+    }
+
+    /// `credentialed_accounts` is `legacy_credentials_path` read backwards: gcloud's Windows spelling of a reserved device name (a dot in
+    /// front) is the same account without the dot, and whatever this platform's `legacy_credentials_path` wrote is listed as the account.
+    #[test]
+    fn the_folder_of_a_reserved_windows_name_is_read_back_as_the_account() {
+        assert_eq!(account_of_folder(".con.x@example.com", true), "con.x@example.com");
+        assert_eq!(account_of_folder(".NUL.y@example.com", true), "NUL.y@example.com");
+        assert_eq!(account_of_folder(".prn.z@example.com", true), "prn.z@example.com");
+        assert_eq!(account_of_folder(".Aux.w@example.com", true), "Aux.w@example.com");
+        // Any other leading dot belongs to the account, and where no dot was put on, none is taken off.
+        assert_eq!(account_of_folder(".dotted@example.com", true), ".dotted@example.com");
+        assert_eq!(account_of_folder("frank@example.com", true), "frank@example.com");
+        assert_eq!(account_of_folder(".con.x@example.com", false), ".con.x@example.com");
+        // The rule both spellings share: a device name and its dot, in any case, at the start.
+        assert!(["con.x", "CON.x", "Prn.x", "aux.x", "NUL.x"].iter().all(|name| starts_with_windows_device(name)));
+        assert!(!["console@example.com", "con@example.com", "xcon.x", "nul", "com1.x"].iter().any(|name| starts_with_windows_device(name)));
+
+        let dir = tempfile::tempdir().unwrap();
+        for account in ["con.x@example.com", "frank@example.com", "nul.ops@example.com"] {
+            let path = legacy_credentials_path(dir.path(), account);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, authorized_user(account, "rt")).unwrap();
+        }
+        assert_eq!(credentialed_accounts(dir.path()), ["con.x@example.com", "frank@example.com", "nul.ops@example.com"]);
     }
 
     #[test]
