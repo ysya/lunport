@@ -424,6 +424,7 @@ fn run_app(host: bool, start_hidden: bool) {
             session::transports::transports_pam_status,
             session::transports::transports_pam_request,
             session::transports::gcp_accounts,
+            session::transports::gcp_pam_grants,
             session::embedded::terminal_write,
             session::embedded::terminal_resize,
             session::embedded::terminal_ack,

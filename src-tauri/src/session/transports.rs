@@ -2,8 +2,10 @@
 //! request the Privileged Access Manager grant a transport needs (design 2026-10-25, PAM grant requests). A route is saved, changed
 //! and removed with its host (`records_host_create`, `records_host_update`, `records_host_delete`; design 2026-10-26, Commands);
 //! connections read it through `RecordDirectory`. `gcp_accounts` lists the Google accounts gcloud holds credentials for on this computer
-//! and whether each sign-in works.
+//! and whether each sign-in works; `gcp_pam_grants` lists the grants the saved routes require, one row per entitlement, and
+//! `transports_pam_request` requests the entitlement the person chose.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,7 +17,8 @@ use crate::gcp::auth;
 use crate::gcp::pam;
 use crate::gcp::rest::GcpClient;
 use crate::state::AppState;
-use crate::sync::records_v3;
+use crate::sync::record_repository as repo;
+use crate::sync::records_v3::{self, SyncStateV3};
 use crate::sync::transports::{self, HostTransport, TransportKind};
 
 /// What the editor's **Use OS Login username** button learns: the account asked, its POSIX username (none when the project has no OS
@@ -63,6 +66,41 @@ fn epoch_ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
+/// What the grants found on one entitlement amount to at a moment: the end of the longest-lasting active one (`None` for an `ACTIVE`
+/// grant PAM did not date, which counts below every dated one; one whose time is up counts for nothing), else a grant on its way, else
+/// nothing. A route's status (`pam_status`) and each row of the Access grants section (`pam_grants`) both decide through this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Standing {
+    Active(Option<SystemTime>),
+    Activating,
+    Nothing,
+}
+
+impl Standing {
+    fn of(grants: &[pam::Grant], now: SystemTime) -> Standing {
+        let mut active: Option<Option<SystemTime>> = None;
+        let mut activating = false;
+        for grant in pam::in_flight(grants) {
+            if grant.state == "ACTIVE" {
+                let until = grant.until();
+                if until.is_some_and(|until| until <= now) {
+                    continue;
+                }
+                if active.is_none_or(|best| until > best) {
+                    active = Some(until);
+                }
+            } else {
+                activating = true;
+            }
+        }
+        match active {
+            Some(until) => Standing::Active(until),
+            None if activating => Standing::Activating,
+            None => Standing::Nothing,
+        }
+    }
+}
+
 /// The grant state of `transport`, over every entitlement it lists: a connection passes while any holds a grant, so the entitlement whose
 /// grant lasts longest is named, with its end; else one that is activating; else none, or the API's sentence when a search failed and
 /// no entitlement answered with a grant.
@@ -70,28 +108,23 @@ pub fn pam_status(gcp: &dyn GcpClient, transport: &HostTransport) -> PamStatusVi
     let TransportKind::GcpIap { project, account, pam, .. } = &transport.kind;
     let Some(pam) = pam else { return PamStatusView::none() };
     let now = SystemTime::now();
-    // The longest-lasting active grant (an ACTIVE grant PAM did not date counts, below every dated one), the first activating one, the
-    // first refusal.
+    // The longest-lasting active grant, the first activating one, the first refusal.
     let mut active: Option<(String, Option<SystemTime>)> = None;
     let mut activating: Option<String> = None;
     let mut refused: Option<String> = None;
     for entitlement in &pam.entitlements {
         match gcp.grants(account.as_deref(), project, &pam.location, entitlement) {
-            Ok(grants) => {
-                for grant in pam::in_flight(&grants) {
-                    if grant.state == "ACTIVE" {
-                        let until = grant.until();
-                        if until.is_some_and(|until| until <= now) {
-                            continue;
-                        }
-                        if active.as_ref().is_none_or(|(_, best)| until > *best) {
-                            active = Some((entitlement.clone(), until));
-                        }
-                    } else if activating.is_none() {
-                        activating = Some(entitlement.clone());
+            Ok(grants) => match Standing::of(&grants, now) {
+                Standing::Active(until) => {
+                    if active.as_ref().is_none_or(|(_, best)| until > *best) {
+                        active = Some((entitlement.clone(), until));
                     }
                 }
-            }
+                Standing::Activating => {
+                    activating.get_or_insert_with(|| entitlement.clone());
+                }
+                Standing::Nothing => {}
+            },
             Err(error) => {
                 refused.get_or_insert_with(|| error.to_string());
             }
@@ -109,10 +142,91 @@ pub fn pam_status(gcp: &dyn GcpClient, transport: &HostTransport) -> PamStatusVi
     PamStatusView::none()
 }
 
-/// Requests a grant on the first entitlement `transport` lists (as the connect does), remembers the request as the transport's defaults
-/// through `remember`, waits for the grant to become active and answers its state. `pam_request_with` takes the polling and the wait.
-pub fn pam_request(gcp: &dyn GcpClient, remember: &dyn Fn(&str, u32) -> Result<(), String>, transport: &HostTransport, justification: &str, duration_secs: u32) -> Result<PamStatusView, String> {
-    pam_request_with(gcp, remember, transport, justification, duration_secs, &|| false, Duration::from_secs(2), Duration::from_secs(60))
+/// One row of the Google Cloud page's Access grants section: an entitlement some route requires (the account, project, location and
+/// entitlement id together), the state of the grants on it for that account (`active` with its end, `activating`, `none`, or `error`
+/// with the API's sentence), and the hosts whose routes name it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct PamGrantView {
+    /// The Google account the grants are searched as: the one the routes name, or gcloud's active account for routes that name none; none
+    /// when a route names none and gcloud has no active account to resolve it to.
+    pub account: Option<String>,
+    pub project: String,
+    pub location: String,
+    pub entitlement: String,
+    pub state: String,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub active_until_ms: Option<u64>,
+    pub message: Option<String>,
+    /// The hosts whose routes name this entitlement, in the order of the routes.
+    pub host_ids: Vec<String>,
+}
+
+impl PamGrantView {
+    /// The row for `place`, with no host yet: one search of the account's grants on that entitlement, decided as `pam_status` decides.
+    fn read(gcp: &dyn GcpClient, place: &pam::Entitlement<'_>, now: SystemTime) -> PamGrantView {
+        let (state, active_until_ms, message) = match gcp.grants(place.account, place.project, place.location, place.entitlement) {
+            Ok(grants) => match Standing::of(&grants, now) {
+                Standing::Active(until) => ("active", until.map(epoch_ms), None),
+                Standing::Activating => ("activating", None, None),
+                Standing::Nothing => ("none", None, None),
+            },
+            Err(error) => ("error", None, Some(error.to_string())),
+        };
+        PamGrantView {
+            account: place.account.map(str::to_string),
+            project: place.project.to_string(),
+            location: place.location.to_string(),
+            entitlement: place.entitlement.to_string(),
+            state: state.to_string(),
+            active_until_ms,
+            message,
+            host_ids: Vec::new(),
+        }
+    }
+}
+
+/// The rows of the Access grants section for `transports` (design 2026-10-26, Commands): one per distinct account, project, location and
+/// entitlement id among the entitlements the routes require, in the order the routes list them, each searched once however many hosts
+/// name it, with the ids of those hosts. A route that names no account is `active`'s (gcloud's active account) and shares its rows with
+/// the routes that name that account; with no active account it stays accountless, and the client resolves it as it does for a
+/// connection. A route that requires no grant has no row. Blocks like the client does (a plain thread or `spawn_blocking`), one bounded
+/// call after another.
+pub fn pam_grants(gcp: &dyn GcpClient, active: Option<&str>, transports: &[HostTransport]) -> Vec<PamGrantView> {
+    let now = SystemTime::now();
+    let mut rows: Vec<PamGrantView> = Vec::new();
+    for transport in transports {
+        let TransportKind::GcpIap { project, account, pam, .. } = &transport.kind;
+        let Some(pam) = pam else { continue };
+        let account = account.as_deref().or(active);
+        for entitlement in &pam.entitlements {
+            let known = rows.iter().position(|row| row.account.as_deref() == account && row.project == *project && row.location == pam.location && row.entitlement == *entitlement);
+            let index = known.unwrap_or_else(|| {
+                rows.push(PamGrantView::read(gcp, &pam::Entitlement { account, project, location: &pam.location, entitlement }, now));
+                rows.len() - 1
+            });
+            if !rows[index].host_ids.contains(&transport.host_id) {
+                rows[index].host_ids.push(transport.host_id.clone());
+            }
+        }
+    }
+    rows
+}
+
+/// The routes of `records` whose host the library has, in host-id order. A route whose host is gone (deleted on another device, or in a
+/// space this computer does not keep) is ignored, as the Catalog's tunnels tolerate a host that is missing (design 2026-10-26, Deleting a
+/// host): the Access grants section names only hosts the person can see.
+fn live_routes(records: &SyncStateV3) -> Result<Vec<HostTransport>, String> {
+    let hosts: BTreeSet<String> = repo::list_hosts(records).map_err(|error| error.to_string())?.into_iter().map(|view| view.host.id).collect();
+    Ok(transports::view(records).into_iter().filter(|route| hosts.contains(&route.host_id)).collect())
+}
+
+/// Requests a grant on `entitlement` (one `transport` lists; the first it lists when none is named, as the connect does), remembers the
+/// request on this computer through `remember`, waits for the grant to become active and answers its state. `pam_request_with` takes the
+/// polling and the wait.
+pub fn pam_request(gcp: &dyn GcpClient, remember: &dyn Fn(&str, u32) -> Result<(), String>, transport: &HostTransport, justification: &str, duration_secs: u32, entitlement: Option<&str>) -> Result<PamStatusView, String> {
+    pam_request_with(gcp, remember, transport, justification, duration_secs, entitlement, &|| false, Duration::from_secs(2), Duration::from_secs(60))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,13 +236,17 @@ pub fn pam_request_with(
     transport: &HostTransport,
     justification: &str,
     duration_secs: u32,
+    entitlement: Option<&str>,
     cancelled: &dyn Fn() -> bool,
     poll_every: Duration,
     wait: Duration,
 ) -> Result<PamStatusView, String> {
     let TransportKind::GcpIap { project, account, pam, .. } = &transport.kind;
     let Some(pam) = pam else { return Err("This transport requires no grant.".into()) };
-    let Some(entitlement) = pam.entitlements.first() else { return Err("This transport names no PAM entitlement.".into()) };
+    let entitlement = match entitlement {
+        Some(chosen) => pam.entitlements.iter().find(|listed| *listed == chosen).ok_or("This transport does not list that entitlement.")?,
+        None => pam.entitlements.first().ok_or("This transport names no PAM entitlement.")?,
+    };
     let place = pam::Entitlement { account: account.as_deref(), project, location: &pam.location, entitlement };
     // A failed memory write does not fail the request: the grant exists either way.
     let remembered = || {
@@ -252,6 +370,13 @@ fn transport_of(app: &tauri::AppHandle, host_id: &str) -> Result<HostTransport, 
     transports::get(records, host_id).ok_or_else(|| "This host has no transport.".to_string())
 }
 
+/// The routes of the saved hosts (Records workspace only): what the Access grants section is made of.
+fn host_routes(app: &tauri::AppHandle) -> Result<Vec<HostTransport>, String> {
+    let state = app.state::<AppState>();
+    let core = state.sync.core.lock().unwrap();
+    live_routes(core.records.as_ref().ok_or("The saved records are unavailable.")?)
+}
+
 fn main_only(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.label() == "main" {
         Ok(())
@@ -319,8 +444,10 @@ pub async fn transports_pam_status(app: tauri::AppHandle, window: tauri::Webview
     .map_err(|error| error.to_string())?
 }
 
+/// Requests a grant for `host_id`'s route and waits for it: on `entitlement`, which the route must list, or on the first it lists when
+/// none is named (design 2026-10-26, Commands). The justification and length are remembered on this computer, never in the route.
 #[tauri::command]
-pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::WebviewWindow, host_id: String, justification: String, duration_secs: u32) -> Result<PamStatusView, String> {
+pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::WebviewWindow, host_id: String, justification: String, duration_secs: u32, entitlement: Option<String>) -> Result<PamStatusView, String> {
     main_only(&window)?;
     checked_host_id(&host_id)?;
     let justification = checked_request(&justification, duration_secs)?;
@@ -337,7 +464,7 @@ pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::Webvie
             .map(|_| ())
             .map_err(|error| error.to_string())
         };
-        pam_request(&*gcp, &remember, &transport, &justification, duration_secs)
+        pam_request(&*gcp, &remember, &transport, &justification, duration_secs, entitlement.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -353,6 +480,22 @@ pub async fn gcp_accounts(app: tauri::AppHandle, window: tauri::WebviewWindow) -
     gcloud_accounts(gcloud_config_dir(), tokens, ACCOUNTS_BOUND).await
 }
 
+/// The rows of the Google Cloud page's Access grants section (design 2026-10-26, Commands): one per entitlement the saved routes
+/// require, with the state of the grant on it, read now. Google is asked once for each, as the account its routes name or, for routes
+/// that name none, as gcloud's active account; every call is bounded by the client's own timeout and none asks the person for anything.
+#[tauri::command]
+pub async fn gcp_pam_grants(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<Vec<PamGrantView>, String> {
+    main_only(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let routes = host_routes(&app)?;
+        let gcp = app.state::<AppState>().gcp.clone();
+        let active = auth::active_account(&gcloud_config_dir());
+        Ok(pam_grants(&*gcp, active.as_deref(), &routes))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,7 +504,8 @@ mod tests {
     use crate::gcp::pam::{self, Grant};
     use crate::gcp::rest::{GcpClient, GcpError};
     use crate::sync::record_commands;
-    use crate::sync::records_v3::SyncStateV3;
+    use crate::sync::record_repository as repo;
+    use crate::sync::records_v3::{HostPayload, HostScope, SyncStateV3};
     use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
     use serde_json::json;
     use std::collections::{BTreeMap, VecDeque};
@@ -418,6 +562,24 @@ mod tests {
         *account = Some("frank@retower.io".into());
         *pam = Some(PamCheck { entitlements: entitlements.iter().map(|e| e.to_string()).collect(), location: "global".into(), duration_secs: 1800, justification: Some("restart app-api".into()) });
         transport
+    }
+
+    /// The route of `host_id` that names `account` (none: gcloud's active one) and requires a grant on `entitlements`, in project
+    /// `eng-dev-396409`, PAM location `global`.
+    fn pam_route(host_id: &str, account: Option<&str>, entitlements: &[&str]) -> HostTransport {
+        let mut route = with_pam(entitlements);
+        route.host_id = host_id.into();
+        let TransportKind::GcpIap { account: named, .. } = &mut route.kind;
+        *named = account.map(str::to_string);
+        route
+    }
+
+    /// `route` in another project and another PAM location.
+    fn placed(mut route: HostTransport, project: &str, location: &str) -> HostTransport {
+        let TransportKind::GcpIap { project: saved, pam, .. } = &mut route.kind;
+        *saved = project.into();
+        pam.as_mut().expect("a route that requires a grant").location = location.into();
+        route
     }
 
     fn grant(name: &str, state: &str, granted: Option<SystemTime>, secs: u32) -> Grant {
@@ -478,6 +640,70 @@ mod tests {
         }
     }
 
+    /// One call to PAM as it was made: account, project, location, entitlement.
+    type Call = (Option<String>, String, String, String);
+
+    fn call(account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Call {
+        (account.map(str::to_string), project.into(), location.into(), entitlement.into())
+    }
+
+    /// PAM for the Access grants rows and for requesting a chosen entitlement, which are not tied to one account, project or location as
+    /// `Pam` is: every search and every request is recorded as it was made, an entitlement's grants (or PAM's refusal) are what was set
+    /// for its id (none set: it holds none), and a grant requested is active at once, as when PAM approves on the spot.
+    #[derive(Default)]
+    struct FakeGcp {
+        answers: Mutex<BTreeMap<String, Result<Vec<Grant>, String>>>,
+        searched: Mutex<Vec<Call>>,
+        created: Mutex<Vec<(Call, u32, String)>>,
+    }
+
+    impl FakeGcp {
+        /// `entitlement` holds a grant that began a minute ago and lasts 30 minutes; the others hold none.
+        fn active_on(entitlement: &str) -> FakeGcp {
+            let gcp = FakeGcp::default();
+            gcp.answering(entitlement, Ok(vec![grant("g-active", "ACTIVE", Some(SystemTime::now() - Duration::from_secs(60)), 1800)]));
+            gcp
+        }
+        /// No entitlement holds a grant; one requested is active at once.
+        fn grants_at_once() -> FakeGcp {
+            FakeGcp::default()
+        }
+        fn answering(&self, entitlement: &str, grants: Result<Vec<Grant>, &str>) {
+            self.answers.lock().unwrap().insert(entitlement.into(), grants.map_err(str::to_string));
+        }
+        fn searched(&self) -> Vec<Call> {
+            self.searched.lock().unwrap().clone()
+        }
+        fn created(&self) -> Vec<(Call, u32, String)> {
+            self.created.lock().unwrap().clone()
+        }
+    }
+
+    impl GcpClient for FakeGcp {
+        fn login_profile(&self, _: Option<&str>, _: &str) -> Result<LoginProfile, GcpError> {
+            panic!("grants never read OS Login")
+        }
+        fn import_ssh_public_key(&self, _: Option<&str>, _: &str, _: &str) -> Result<LoginProfile, GcpError> {
+            panic!("grants never import a key")
+        }
+        fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
+            self.searched.lock().unwrap().push(call(account, project, location, entitlement));
+            match self.answers.lock().unwrap().get(entitlement) {
+                Some(Ok(grants)) => Ok(grants.clone()),
+                Some(Err(message)) => Err(Pam::refusal(message)),
+                None => Ok(Vec::new()),
+            }
+        }
+        fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+            self.created.lock().unwrap().push((call(account, project, location, entitlement), duration_secs, justification.into()));
+            let name = format!("projects/{project}/locations/{location}/entitlements/{entitlement}/grants/g1");
+            Ok(grant(&name, "ACTIVE", Some(SystemTime::now()), duration_secs))
+        }
+        fn get_grant(&self, _: Option<&str>, _: &str) -> Result<Grant, GcpError> {
+            panic!("a grant requested is active at once, so none is read back")
+        }
+    }
+
     /// Design 2026-10-25 (PAM grant requests): the panel names the entitlement whose grant lasts longest, since a connection passes
     /// while any of them holds, and when it ends.
     #[test]
@@ -527,7 +753,7 @@ mod tests {
             Ok(())
         };
         let before = SystemTime::now();
-        let view = pam_request_with(&gcp, &remember, &with_pam(&["prod-operate", "prod-admin"]), "restart app-api after the deploy", 2700, &|| false, Duration::from_millis(1), Duration::from_secs(5)).unwrap();
+        let view = pam_request_with(&gcp, &remember, &with_pam(&["prod-operate", "prod-admin"]), "restart app-api after the deploy", 2700, None, &|| false, Duration::from_millis(1), Duration::from_secs(5)).unwrap();
         assert_eq!((view.state.as_str(), view.entitlement.as_deref(), view.message), ("active", Some("prod-operate"), None));
         assert!(view.active_until_ms.is_some_and(|until| until >= ms(before + Duration::from_secs(2700)) - 1000), "{:?}", view.active_until_ms);
         assert_eq!(gcp.created.lock().unwrap().as_slice(), [("prod-operate".to_string(), 2700, "restart app-api after the deploy".to_string())]);
@@ -536,17 +762,17 @@ mod tests {
         // A grant that will not become active: its state, in the sentence the connect uses too.
         let denied = Pam::default();
         *denied.states.lock().unwrap() = ["DENIED"].into();
-        let error = pam_request_with(&denied, &remember, &with_pam(&["prod-operate"]), "x", 1800, &|| false, Duration::from_millis(1), Duration::from_secs(5)).err();
+        let error = pam_request_with(&denied, &remember, &with_pam(&["prod-operate"]), "x", 1800, None, &|| false, Duration::from_millis(1), Duration::from_secs(5)).err();
         assert_eq!(error, Some("The prod-operate grant did not become active (state: DENIED).".to_string()));
         assert_eq!(remembered.lock().unwrap().len(), 2, "a request that ended denied was still a request, and is remembered");
         // A transport without a PAM check has nothing to request.
-        let error = pam_request_with(&gcp, &remember, &iap(), "x", 1800, &|| false, Duration::from_millis(1), Duration::from_secs(5)).err();
+        let error = pam_request_with(&gcp, &remember, &iap(), "x", 1800, None, &|| false, Duration::from_millis(1), Duration::from_secs(5)).err();
         assert_eq!(error, Some("This transport requires no grant.".to_string()));
         assert_eq!(remembered.lock().unwrap().len(), 2, "nothing more was remembered");
     }
 
     /// A grant that is already in flight (requested by hand, or by a connection a moment ago) is used, not requested again, and the
-    /// request is not remembered as the transport's defaults: nothing was asked of PAM.
+    /// request is not remembered on this computer: nothing was asked of PAM.
     #[test]
     fn pam_request_takes_a_grant_already_in_flight_and_requests_nothing() {
         let now = SystemTime::now();
@@ -557,12 +783,186 @@ mod tests {
             remembered.lock().unwrap().push((justification.to_string(), duration_secs));
             Ok(())
         };
-        let view = pam_request_with(&gcp, &remember, &with_pam(&["prod-operate", "prod-admin"]), "restart app-api", 2700, &|| false, Duration::from_millis(1), Duration::from_secs(5)).unwrap();
+        let view = pam_request_with(&gcp, &remember, &with_pam(&["prod-operate", "prod-admin"]), "restart app-api", 2700, None, &|| false, Duration::from_millis(1), Duration::from_secs(5)).unwrap();
         assert_eq!((view.state.as_str(), view.entitlement.as_deref()), ("active", Some("prod-operate")));
         assert_eq!(view.active_until_ms, Some(ends(now - Duration::from_secs(60), 1800)), "the grant's own end, not the duration asked for");
         assert!(gcp.created.lock().unwrap().is_empty(), "nothing was requested");
         assert!(gcp.read.lock().unwrap().is_empty(), "nothing was read back");
         assert!(remembered.lock().unwrap().is_empty(), "nothing to remember");
+    }
+
+    /// Design 2026-10-26 (`gcp_pam_grants`): the Access grants section has one row per entitlement the routes name, whichever hosts name
+    /// it. An entitlement is the account, project, location and entitlement id together, and a route that names no account is gcloud's
+    /// active account's, so it shares its rows with the routes that name that account. Each row is read from Google once.
+    #[test]
+    fn grants_are_one_row_per_entitlement_across_routes() {
+        let routes = [pam_route("0000000000000001", None, &["prod-operate", "prod-admin"]), pam_route("0000000000000002", Some("frank@example.com"), &["prod-operate"])];
+        let gcp = FakeGcp::active_on("prod-operate");
+        let rows = pam_grants(&gcp, Some("frank@example.com"), &routes);
+        let operate = rows.iter().find(|r| r.entitlement == "prod-operate").unwrap();
+        assert_eq!(operate.host_ids, ["0000000000000001", "0000000000000002"]);
+        assert_eq!(operate.state, "active");
+        assert_eq!(rows.iter().filter(|r| r.entitlement == "prod-admin").count(), 1);
+        // Rows come in the order the routes list their entitlements; the route that names no account is searched as the account it
+        // resolves to, and each row is searched once.
+        assert_eq!(rows.iter().map(|r| r.entitlement.as_str()).collect::<Vec<_>>(), ["prod-operate", "prod-admin"]);
+        assert_eq!(
+            gcp.searched(),
+            [call(Some("frank@example.com"), "eng-dev-396409", "global", "prod-operate"), call(Some("frank@example.com"), "eng-dev-396409", "global", "prod-admin")]
+        );
+    }
+
+    /// What the page reads of a row: the account the grants were searched as, the entitlement's address, its state, and the hosts that
+    /// need it.
+    #[test]
+    fn a_row_carries_what_the_page_reads() {
+        let granted = SystemTime::now() - Duration::from_secs(300);
+        let gcp = FakeGcp::default();
+        gcp.answering("prod-operate", Ok(vec![grant("g", "ACTIVE", Some(granted), 1800)]));
+        gcp.answering("prod-admin", Err("quota exceeded"));
+        let rows = pam_grants(&gcp, Some("frank@example.com"), &[pam_route("0000000000000001", None, &["prod-operate", "prod-admin"])]);
+        assert_eq!(
+            serde_json::to_value(&rows).unwrap(),
+            json!([
+                {
+                    "account": "frank@example.com", "project": "eng-dev-396409", "location": "global", "entitlement": "prod-operate",
+                    "state": "active", "active_until_ms": ends(granted, 1800), "message": null, "host_ids": ["0000000000000001"],
+                },
+                {
+                    "account": "frank@example.com", "project": "eng-dev-396409", "location": "global", "entitlement": "prod-admin",
+                    "state": "error", "active_until_ms": null, "message": Pam::refusal("quota exceeded").to_string(), "host_ids": ["0000000000000001"],
+                },
+            ])
+        );
+    }
+
+    /// "As `pam_status` decides it": a row is what `pam_status` reports over a route that lists only that entitlement, for every kind of
+    /// answer: the longest of several active grants, an active one PAM did not date, one still on its way, none (an ended grant, and an
+    /// active one whose time is up, are no grant), and the API's own sentence when the search is refused.
+    #[test]
+    fn a_row_is_decided_as_pam_status_decides_it() {
+        let now = SystemTime::now();
+        let ago = |secs: u64| Some(now - Duration::from_secs(secs));
+        let gcp = FakeGcp::default();
+        gcp.answering("two-active", Ok(vec![grant("g-old", "ENDED", ago(7200), 1800), grant("g-short", "ACTIVE", ago(600), 1800), grant("g-long", "ACTIVE", ago(300), 3600)]));
+        gcp.answering("undated", Ok(vec![grant("g", "ACTIVE", None, 1800)]));
+        gcp.answering("activating", Ok(vec![grant("g", "ACTIVATING", None, 1800)]));
+        gcp.answering("scheduled", Ok(vec![grant("g", "SCHEDULED", None, 1800)]));
+        gcp.answering("nothing-live", Ok(vec![grant("g-end", "ENDED", ago(7200), 1800), grant("g-stale", "ACTIVE", ago(7200), 1800)]));
+        gcp.answering("refused", Err("quota exceeded"));
+        let names = ["two-active", "undated", "activating", "scheduled", "nothing-live", "refused", "no-grants-at-all"];
+        let rows = pam_grants(&gcp, Some("frank@example.com"), &[pam_route("0000000000000001", None, &names)]);
+        assert_eq!(rows.iter().map(|r| r.entitlement.as_str()).collect::<Vec<_>>(), names);
+        for row in &rows {
+            let alone = pam_status(&gcp, &pam_route("0000000000000001", Some("frank@example.com"), &[row.entitlement.as_str()]));
+            assert_eq!((row.state.as_str(), row.active_until_ms, row.message.as_deref()), (alone.state.as_str(), alone.active_until_ms, alone.message.as_deref()), "{}", row.entitlement);
+        }
+        // And what they are, so that the two cannot drift together.
+        let states: Vec<_> = rows.iter().map(|r| (r.state.as_str(), r.active_until_ms)).collect();
+        let long = Some(ends(now - Duration::from_secs(300), 3600));
+        assert_eq!(states, [("active", long), ("active", None), ("activating", None), ("activating", None), ("none", None), ("error", None), ("none", None)]);
+        assert_eq!(rows[5].message, Some(Pam::refusal("quota exceeded").to_string()));
+        assert!(rows.iter().enumerate().all(|(index, row)| (index == 5) == row.message.is_some()), "only the refused search carries a sentence");
+    }
+
+    /// An entitlement is its account, project, location and id together: the same id under another account, project or location is a
+    /// row of its own, searched on its own. A route that names no account while gcloud has no active one is searched as it is, no
+    /// account, which the client resolves as it does for a connection.
+    #[test]
+    fn rows_stay_apart_when_the_account_project_or_location_differ() {
+        let routes = [
+            pam_route("0000000000000001", None, &["prod-operate"]),
+            pam_route("0000000000000002", Some("ann@example.com"), &["prod-operate"]),
+            placed(pam_route("0000000000000003", Some("ann@example.com"), &["prod-operate"]), "other-project-123456", "global"),
+            placed(pam_route("0000000000000004", Some("ann@example.com"), &["prod-operate"]), "eng-dev-396409", "europe-west1"),
+        ];
+        let gcp = FakeGcp::default();
+        let rows = pam_grants(&gcp, None, &routes);
+        let places: Vec<_> = rows.iter().map(|r| (r.account.as_deref(), r.project.as_str(), r.location.as_str(), r.host_ids.clone())).collect();
+        assert_eq!(
+            places,
+            [
+                (None, "eng-dev-396409", "global", vec!["0000000000000001".to_string()]),
+                (Some("ann@example.com"), "eng-dev-396409", "global", vec!["0000000000000002".to_string()]),
+                (Some("ann@example.com"), "other-project-123456", "global", vec!["0000000000000003".to_string()]),
+                (Some("ann@example.com"), "eng-dev-396409", "europe-west1", vec!["0000000000000004".to_string()]),
+            ]
+        );
+        assert_eq!(
+            gcp.searched(),
+            [
+                call(None, "eng-dev-396409", "global", "prod-operate"),
+                call(Some("ann@example.com"), "eng-dev-396409", "global", "prod-operate"),
+                call(Some("ann@example.com"), "other-project-123456", "global", "prod-operate"),
+                call(Some("ann@example.com"), "eng-dev-396409", "europe-west1", "prod-operate"),
+            ]
+        );
+        // Once gcloud's active account is known, the first route is ann's and shares her row.
+        let gcp = FakeGcp::default();
+        let rows = pam_grants(&gcp, Some("ann@example.com"), &routes);
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[0].account.as_deref(), rows[0].host_ids.as_slice()), (Some("ann@example.com"), ["0000000000000001".to_string(), "0000000000000002".to_string()].as_slice()));
+        assert_eq!(gcp.searched().len(), 3);
+    }
+
+    /// A route that requires no grant has no row, and nothing is asked of Google for it; an entitlement a route lists twice is one row
+    /// that names the host once.
+    #[test]
+    fn a_route_without_a_grant_check_has_no_row_and_a_host_is_named_once() {
+        let gcp = FakeGcp::default();
+        assert!(pam_grants(&gcp, Some("frank@example.com"), &[]).is_empty());
+        assert!(pam_grants(&gcp, Some("frank@example.com"), &[iap()]).is_empty());
+        assert!(gcp.searched().is_empty(), "no grant is required, so nothing is searched");
+        let rows = pam_grants(&gcp, Some("frank@example.com"), &[iap(), pam_route("0000000000000002", None, &["prod-operate", "prod-operate"])]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].host_ids, ["0000000000000002"]);
+        assert_eq!(gcp.searched().len(), 1);
+    }
+
+    /// Design 2026-10-26 (`transports_pam_request`): a request is for the entitlement the person chose, which the route must list, and
+    /// the answer names it; left out, it is the first, as the connect asks (`pam_request_requests_the_first_entitlement_...`).
+    #[test]
+    fn a_request_asks_for_the_chosen_listed_entitlement() {
+        let route = pam_route("0000000000000001", None, &["prod-operate", "prod-admin"]);
+        let remembered = Mutex::new(Vec::new());
+        let remember = |justification: &str, duration_secs: u32| {
+            remembered.lock().unwrap().push((justification.to_string(), duration_secs));
+            Ok(())
+        };
+        let gcp = FakeGcp::grants_at_once();
+        let view = pam_request_with(&gcp, &remember, &route, "Deploy hotfix", 1800, Some("prod-admin"), &|| false, Duration::ZERO, Duration::from_secs(1)).unwrap();
+        assert_eq!((view.state.as_str(), view.entitlement.as_deref(), view.message), ("active", Some("prod-admin"), None));
+        assert!(view.active_until_ms.is_some());
+        // The entitlement chosen was the one searched and requested, with the form's words, and what was asked is remembered.
+        assert_eq!(gcp.searched(), [call(None, "eng-dev-396409", "global", "prod-admin")]);
+        assert_eq!(gcp.created(), [(call(None, "eng-dev-396409", "global", "prod-admin"), 1800, "Deploy hotfix".to_string())]);
+        assert_eq!(remembered.lock().unwrap().as_slice(), [("Deploy hotfix".to_string(), 1800)]);
+        // One the route does not list is refused before Google is asked anything, and nothing is remembered.
+        for unlisted in ["other", "PROD-ADMIN", ""] {
+            let untouched = FakeGcp::grants_at_once();
+            let error = pam_request_with(&untouched, &remember, &route, "x", 1800, Some(unlisted), &|| false, Duration::ZERO, Duration::from_secs(1)).err();
+            assert_eq!(error, Some("This transport does not list that entitlement.".to_string()), "{unlisted:?}");
+            assert!(untouched.searched().is_empty() && untouched.created().is_empty(), "{unlisted:?}");
+        }
+        assert_eq!(remembered.lock().unwrap().len(), 1, "a refused request remembers nothing");
+        // A route that requires no grant has nothing to choose.
+        let error = pam_request_with(&gcp, &remember, &iap(), "x", 1800, Some("prod-admin"), &|| false, Duration::ZERO, Duration::from_secs(1)).err();
+        assert_eq!(error, Some("This transport requires no grant.".to_string()));
+    }
+
+    /// Design 2026-10-26 (Deleting a host): the page ignores a route whose host is gone, as the Catalog's tunnels tolerate orphans, so
+    /// no row names a host the person cannot see.
+    #[test]
+    fn the_grants_page_ignores_a_route_whose_host_is_gone() {
+        let host: HostPayload = serde_json::from_value(json!({"schema": 2, "alias": "prod-jump", "hostname": "prod-jump.example.com", "auth": "password"})).unwrap();
+        let gone = "0000000000000002";
+        let saved = repo::create_host(&state(), HOST, HostScope::Local, host, 1).unwrap();
+        let saved = transports::set(&saved, HOST, None, Some(pam_route(HOST, None, &["prod-operate"])), 2).unwrap();
+        let saved = transports::set(&saved, gone, None, Some(pam_route(gone, None, &["prod-operate"])), 3).unwrap();
+        assert_eq!(transports::view(&saved).len(), 2, "the library holds both routes");
+        assert_eq!(live_routes(&saved).unwrap(), [pam_route(HOST, None, &["prod-operate"])]);
+        let rows = pam_grants(&FakeGcp::default(), Some("frank@example.com"), &live_routes(&saved).unwrap());
+        assert_eq!(rows.iter().map(|r| r.host_ids.clone()).collect::<Vec<_>>(), [vec![HOST.to_string()]]);
     }
 
     /// The panel's grant line and Request grant name the host by a transport's `host_id`, the bare id `transport_of` looks up; checking it
