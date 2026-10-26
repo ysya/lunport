@@ -78,7 +78,11 @@ impl fmt::Display for AuthError {
             AuthError::NoCredentials { account: None, config_dir } => {
                 write!(f, "No Google Cloud credentials were found under {}; run `gcloud auth login`.", config_dir.display())
             }
-            AuthError::NoAccount { path } => write!(f, "{} names no Google account; name the account in the host's transport.", path.display()),
+            AuthError::NoAccount { path } => write!(
+                f,
+                "{} names no Google account; sign in with `gcloud auth login`, or choose the Google account in the host editor.",
+                path.display()
+            ),
             AuthError::Unsupported { path, kind } => {
                 write!(f, "{} holds {kind} credentials, which Lunport does not use; sign in with `gcloud auth login`.", path.display())
             }
@@ -567,7 +571,10 @@ mod tests {
         let server = mockito::Server::new();
         let error = store(dir.path(), None, &server).access_token(None).unwrap_err();
         assert_eq!(error, AuthError::NoAccount { path: path.clone() });
-        assert_eq!(error.to_string(), format!("{} names no Google account; name the account in the host's transport.", path.display()));
+        assert_eq!(
+            error.to_string(),
+            format!("{} names no Google account; sign in with `gcloud auth login`, or choose the Google account in the host editor.", path.display())
+        );
         assert!(!error.is_retryable());
     }
 
