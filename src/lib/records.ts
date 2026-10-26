@@ -4,6 +4,9 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import type { GrantMemoryView } from "@/bindings/GrantMemoryView";
+import type { RouteChange } from "@/bindings/RouteChange";
+import type { TransportSyncView } from "@/bindings/TransportSyncView";
 export type HostScope = { kind: "local" } | { kind: "space"; space_id: string };
 export type RecordRevision = {
   version: string;
@@ -133,8 +136,12 @@ export type RecordOverview = {
   central_mode?: boolean;
   key_scope?: RecordKeyInvocation;
   conflicts?: RecordConflict[];
-  /** Device-local host transports (Google Cloud IAP); absent in older backend fixtures. */
+  /** Host routes (Google Cloud IAP), one per host at most: the library's when it holds one, else the one saved on this computer; absent in older backend fixtures. */
   transports?: import("@/bindings/HostTransport").HostTransport[];
+  /** For each route in `transports`, whether it syncs with its host or stays on this computer; absent in older backend fixtures. */
+  transport_sync?: TransportSyncView[];
+  /** What this computer's grant requests taught it, per host; absent in older backend fixtures. */
+  grant_memory?: GrantMemoryView[];
   /** Transient transport activity; absent in older backend fixtures. */
   syncing?: boolean;
   library_enabled: boolean;
@@ -252,15 +259,18 @@ export function applyRecordOverview(
     return acceptStatus(current, { ...current, overview });
   });
 }
+/** `route`, when given, is saved with the host in the same command; left out, the host's route is untouched. */
 export async function createRecordHost(
   scope: HostScope,
   payload: HostPayload,
   upgradeConfirmed?: boolean,
+  route?: RouteChange,
 ): Promise<RecordOverview> {
   return tauriInvoke("records_host_create", {
     scope,
     payload,
     ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
+    ...(route === undefined ? {} : { route }),
   });
 }
 export async function updateRecordHost(
@@ -268,12 +278,14 @@ export async function updateRecordHost(
   revision: RecordRevision,
   payload: HostPayload,
   upgradeConfirmed?: boolean,
+  route?: RouteChange,
 ): Promise<RecordOverview> {
   return tauriInvoke("records_host_update", {
     id,
     revision,
     payload,
     ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
+    ...(route === undefined ? {} : { route }),
   });
 }
 export async function deleteRecordHost(

@@ -1,3 +1,4 @@
+import type { RouteChange } from "@/bindings/RouteChange";
 import {
   createRecordHost,
   updateRecordHost,
@@ -151,14 +152,15 @@ export function editorProblem(state: EditorState): string | null {
 export async function submitEditor(
   state: EditorState,
   upgradeConfirmed?: boolean,
+  route?: RouteChange,
 ): Promise<RecordOverview> {
   const problem = editorProblem(state);
   if (problem) throw new Error(problem);
   const payload = buildEditorPayload(state);
   if (state.id === null)
-    return createRecordHost(state.scope, payload, upgradeConfirmed);
+    return createRecordHost(state.scope, payload, upgradeConfirmed, route);
   if (!state.revision) throw new Error("The saved revision is unavailable.");
-  return updateRecordHost(state.id, state.revision, payload, upgradeConfirmed);
+  return updateRecordHost(state.id, state.revision, payload, upgradeConfirmed, route);
 }
 export function selectHost(
   hosts: RecordHostView[],

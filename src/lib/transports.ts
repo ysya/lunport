@@ -5,7 +5,11 @@ import type { TransportKind } from "@/bindings/TransportKind";
 import type { PamCheck } from "@/bindings/PamCheck";
 import type { OsLoginProfileView } from "@/bindings/OsLoginProfileView";
 import type { PamStatusView } from "@/bindings/PamStatusView";
-export type { HostTransport, TransportKind, PamCheck, OsLoginProfileView, PamStatusView };
+import type { GcloudAccountsView } from "@/bindings/GcloudAccountsView";
+import type { GrantMemoryView } from "@/bindings/GrantMemoryView";
+import type { IapProbeView } from "@/bindings/IapProbeView";
+import type { PamGrantView } from "@/bindings/PamGrantView";
+export type { HostTransport, TransportKind, PamCheck, OsLoginProfileView, PamStatusView, GcloudAccountsView, GrantMemoryView, IapProbeView, PamGrantView };
 
 /** A placeholder for the PAM entitlements field, never a default: Lunport is a public product. */
 export const pamPlaceholder = "prod-operate, prod-admin";
@@ -16,8 +20,20 @@ export const deleteTransport = (expected: HostTransport) => tauriInvoke<RecordOv
 export const fetchOsLoginProfile = (account: string | null, project: string, keyId: string | null) =>
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
 export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
-export const requestPamGrant = (hostId: string, justification: string, durationSecs: number) =>
-  tauriInvoke<PamStatusView>("transports_pam_request", { hostId, justification, durationSecs });
+/** Requests a grant for the host's route and waits for it: on `entitlement`, which the route must list, else on the first it lists. */
+export const requestPamGrant = (hostId: string, justification: string, durationSecs: number, entitlement?: string) =>
+  tauriInvoke<PamStatusView>("transports_pam_request", {
+    hostId,
+    justification,
+    durationSecs,
+    ...(entitlement === undefined ? {} : { entitlement }),
+  });
+/** The Google accounts gcloud holds credentials for on this computer and whether each sign-in works. */
+export const listGcloudAccounts = () => tauriInvoke<GcloudAccountsView>("gcp_accounts");
+/** One row per entitlement the saved routes require, with the state of the grant on it, read now. */
+export const listPamGrants = () => tauriInvoke<PamGrantView[]>("gcp_pam_grants");
+/** Check through IAP: whether this computer reaches the host's instance through its route. It attempts no SSH. */
+export const probeIap = (hostId: string) => tauriInvoke<IapProbeView>("transports_iap_probe", { hostId });
 
 const hhmm = (ms: number) => {
   const at = new Date(ms);
@@ -38,6 +54,18 @@ export function pamStatusLine(view: PamStatusView): string {
   }
 }
 
+/** One line about a grant, as a row of the Google Cloud page or a host's details shows it. A grant in the `error` state shows its `message` instead; this line reads "No active grant" for it. */
+export function grantStateLine(grant: { state: string; active_until_ms: number | null }): string {
+  switch (grant.state) {
+    case "active":
+      return grant.active_until_ms === null ? "Active" : `Active until ${hhmm(grant.active_until_ms)}`;
+    case "activating":
+      return "Activating…";
+    default:
+      return "No active grant";
+  }
+}
+
 export function newIapTransport(hostId: string): HostTransport {
   return { host_id: hostId, kind: { type: "gcp_iap", project: "", zone: "", instance: "", interface: "nic0", account: null, os_login: true, pam: null } };
 }
@@ -45,6 +73,21 @@ export function newIapTransport(hostId: string): HostTransport {
 export function transportFor(overview: RecordOverview, hostId: string | null): HostTransport | null {
   if (!hostId) return null;
   return overview.transports?.find((transport) => transport.host_id === hostId) ?? null;
+}
+
+/**
+ * Whether the route of `hostId` syncs wherever the host does, or stays on this computer. A route says so itself (`transport_sync`); for a
+ * host with no route yet, a new host included, it is whether a route saved now would sync, which is where the library uses central sync.
+ */
+export function routeSynced(overview: RecordOverview, hostId: string | null): boolean {
+  const own = overview.transport_sync?.find((entry) => entry.host_id === hostId);
+  return own ? own.synced : overview.central_mode === true && Boolean(overview.account);
+}
+
+/** What this computer remembers of the host's last grant request, to offer again; `null` when it made none. */
+export function grantMemoryFor(overview: RecordOverview, hostId: string | null): GrantMemoryView | null {
+  if (!hostId) return null;
+  return overview.grant_memory?.find((memory) => memory.host_id === hostId) ?? null;
 }
 
 /** What the Use OS Login username button does with the profile it fetched: the username to save, a note about the key, or why not. */
@@ -78,6 +121,9 @@ export function transportLabel(transport: HostTransport): string {
   const kind = transport.kind;
   return `Google Cloud IAP · ${kind.project} / ${kind.zone} / ${kind.instance}`;
 }
+
+/** Where a route goes, as a card and the details pane name it: `project / instance`. */
+export const iapTarget = (kind: TransportKind): string => `${kind.project} / ${kind.instance}`;
 
 const resourceName = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const isResourceName = (value: string) => resourceName.test(value) && !value.endsWith("-");
