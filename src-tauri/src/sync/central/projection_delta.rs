@@ -13,6 +13,7 @@ use crate::{
     sync::{
         record::{record_key, LocalRecord, RecordKind},
         records_v3::{self, HostScope, LocalKeyMetadata, SpaceStateV3, SyncStateV3},
+        transports,
     },
     vault::store::ReadOnlyVault,
 };
@@ -163,6 +164,38 @@ fn catalog(
         );
     }
     state.local.tunnel_rules.clear();
+    // Routes take the tunnels' path, orphans included. The library's route for a host also replaces the one this device kept alone,
+    // whether a capture published that one or it differs; what grant requests taught this device stays (`transport_grants`).
+    let previous_routes: BTreeMap<_, _> = account
+        .records
+        .iter()
+        .filter(|(_, r)| r.record.kind == RecordKind::Meta && transports::is_id(&r.record.id))
+        .map(|(k, r)| (k.clone(), r.clone()))
+        .collect();
+    account
+        .records
+        .retain(|_, r| !(r.record.kind == RecordKind::Meta && transports::is_id(&r.record.id)));
+    for route in &value.transports {
+        let id = transports::wire_id(&route.host_id);
+        let key = record_key(RecordKind::Meta, &id);
+        account.records.insert(
+            key.clone(),
+            fresh(
+                previous_routes.get(&key),
+                RecordKind::Meta,
+                &id,
+                serde_json::json!({"schema":1,"transport":route}),
+                receipt,
+                observed,
+            )?,
+        );
+        state.local.transports.remove(&key);
+    }
+    // R19: the library's route rows need their version, which nothing else on a central publication's path raises (its save admits
+    // this raise, `record_runtime::save_active_with_authority`).
+    if !value.transports.is_empty() {
+        state.version = state.version.max(transports::SYNC_STATE_VERSION);
+    }
     state.local.group_order = value
         .group_orders
         .iter()
@@ -790,6 +823,214 @@ pub(super) mod tests {
         assert!(!serde_json::to_string(verified.candidate())
             .unwrap()
             .contains("private_key"));
+    }
+
+    // ---- Routes from the Catalog (design 2026-10-26, Inside Lunport, routes take tunnel rules' central path) ----
+
+    use crate::sync::transports::{
+        self,
+        tests::{iap, with_zone},
+        wire_id, HostTransport,
+    };
+
+    /// The host `initial`'s library holds, in this device's own scope and in a collection: no capture can tell which of the two a
+    /// route saved on this device names, so such a route stays on the device (R14).
+    const HOST: &str = "0000000000000001";
+    /// A host the library does not hold.
+    const OTHER: &str = "0000000000000002";
+
+    /// A projected central library and the keys its history is sealed with; it reads as its state.
+    struct Projected {
+        state: SyncStateV3,
+        keys: VaultKeys,
+    }
+    impl std::ops::Deref for Projected {
+        type Target = SyncStateV3;
+        fn deref(&self) -> &SyncStateV3 {
+            &self.state
+        }
+    }
+    /// `initial`'s projected library, which holds `host`.
+    fn cache_with_host(host: &str) -> Projected {
+        let (state, keys, _) = initial();
+        assert!(crate::sync::record_repository::list_hosts(&state)
+            .unwrap()
+            .iter()
+            .any(|view| view.host.id == host));
+        Projected { state, keys }
+    }
+    /// `library` with `route` saved on this device alone, as Lunport saved it before its library used central sync.
+    fn with_local_route(mut library: Projected, route: HostTransport) -> Projected {
+        library.state = transports::tests::saved_on_this_device(&library.state, &route);
+        library
+    }
+    /// `library`'s state once another device has published its Catalog holding the routes of `routes`, its collections, group orders
+    /// and tunnels unchanged: one more Catalog version in its history.
+    fn published(library: &Projected, routes: &Catalog) -> SyncStateV3 {
+        let mut catalog = library
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .catalog
+            .clone();
+        catalog.transports = routes.transports.clone();
+        let mut state = library.state.clone();
+        append(
+            &mut state,
+            &library.keys,
+            Identity {
+                kind: "meta".into(),
+                id: "catalog".into(),
+                scope: None,
+            },
+            payload::Data::Catalog(catalog),
+        );
+        state
+    }
+    /// The delta projection of that Catalog.
+    fn project_delta(library: &Projected, routes: &Catalog) -> Projected {
+        let verified =
+            empty_finish(Delta::prepare(&published(library, routes), &library.keys, 300).unwrap());
+        assert!(!verified.catalogue_deferred);
+        Projected {
+            state: verified.candidate().clone(),
+            keys: library.keys.duplicate(),
+        }
+    }
+    /// The initial projection of that Catalog: the library rebuilt from its history, as `initial_projection` installs a cache, at the
+    /// state version it gives the result, with the ledger it builds.
+    fn project_initial(library: &Projected, routes: &Catalog) -> Projected {
+        let mut state = published(library, routes);
+        let plan = Plan::current(state.local.central.clone().unwrap(), &library.keys).unwrap();
+        let cache =
+            super::super::projection_cache::Cache::initial(&plan, 300, &BTreeMap::new()).unwrap();
+        state.account = Some(cache.account);
+        state.spaces = cache.spaces;
+        state.local.hosts = cache.hosts;
+        state.local.groups = cache.groups;
+        state.local.group_order = cache.group_order;
+        state.version = super::super::initial_projection::candidate_version(&state);
+        state.local.central_projection = Some(
+            super::super::projection_state::Ledger::initial(&plan, &state, &library.keys).unwrap(),
+        );
+        records_v3::validate_state(&state).unwrap();
+        Projected {
+            state,
+            keys: library.keys.duplicate(),
+        }
+    }
+
+    #[test]
+    fn routes_round_trip_through_both_projections() {
+        let catalog = Catalog {
+            transports: vec![iap(HOST)],
+            ..Catalog::default()
+        };
+        for next in [
+            project_initial(&cache_with_host(HOST), &catalog),
+            project_delta(&cache_with_host(HOST), &catalog),
+        ] {
+            assert_eq!(transports::get(&next, HOST), Some(iap(HOST)));
+            assert!(
+                !next.account.as_ref().unwrap().records
+                    [&record_key(RecordKind::Meta, &wire_id(HOST))]
+                    .dirty
+            );
+            assert_eq!(
+                next.version,
+                transports::SYNC_STATE_VERSION,
+                "the library's route rows need version 10 (R19)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_catalog_without_routes_leaves_the_state_version_alone() {
+        let library = cache_with_host(HOST);
+        for next in [
+            project_initial(&library, &Catalog::default()),
+            project_delta(&library, &Catalog::default()),
+        ] {
+            assert!(transports::view(&next).is_empty());
+            assert_eq!(next.version, records_v3::CENTRAL_STATE_VERSION);
+        }
+    }
+
+    #[test]
+    fn a_route_removed_from_the_catalog_leaves_the_rows() {
+        let with = project_delta(
+            &cache_with_host(HOST),
+            &Catalog {
+                transports: vec![iap(HOST)],
+                ..Catalog::default()
+            },
+        );
+        assert_eq!(transports::get(&with, HOST), Some(iap(HOST)));
+        let without = project_delta(&with, &Catalog::default());
+        assert_eq!(transports::get(&without, HOST), None);
+        assert!(
+            !without
+                .account
+                .as_ref()
+                .unwrap()
+                .records
+                .contains_key(&record_key(RecordKind::Meta, &wire_id(HOST))),
+            "the row is gone, not a tombstone"
+        );
+    }
+
+    #[test]
+    fn the_librarys_route_replaces_a_different_local_route_for_the_same_host() {
+        let local = with_local_route(cache_with_host(HOST), with_zone(iap(HOST), "asia-east1-a"));
+        let next = project_delta(
+            &local,
+            &Catalog {
+                transports: vec![iap(HOST)],
+                ..Catalog::default()
+            },
+        );
+        assert_eq!(transports::get(&next, HOST), Some(iap(HOST)));
+        assert!(next.local.transports.is_empty());
+    }
+
+    #[test]
+    fn retiring_a_local_route_keeps_what_grant_requests_taught_this_device() {
+        let mut local =
+            with_local_route(cache_with_host(HOST), with_zone(iap(HOST), "asia-east1-a"));
+        let memory = transports::GrantMemory {
+            justification: "restart app-api".into(),
+            duration_secs: 1800,
+        };
+        local
+            .state
+            .local
+            .transport_grants
+            .insert(HOST.into(), memory.clone());
+        local.state.version = transports::SYNC_STATE_VERSION;
+        let next = project_delta(
+            &local,
+            &Catalog {
+                transports: vec![iap(HOST)],
+                ..Catalog::default()
+            },
+        );
+        assert!(next.local.transports.is_empty());
+        assert_eq!(transports::grant_memory(&next, HOST), Some(memory));
+    }
+
+    #[test]
+    fn an_orphan_route_in_the_catalog_does_not_fail_the_projection() {
+        let catalog = Catalog {
+            transports: vec![iap(OTHER)],
+            ..Catalog::default()
+        };
+        for next in [
+            project_initial(&cache_with_host(HOST), &catalog),
+            project_delta(&cache_with_host(HOST), &catalog),
+        ] {
+            assert_eq!(transports::get(&next, OTHER), Some(iap(OTHER)));
+        }
     }
 }
 

@@ -347,8 +347,12 @@ pub fn grant_memory(state: &SyncStateV3, host_id: &str) -> Option<GrantMemory> {
 /// Whether the state holds anything that needs `SYNC_STATE_VERSION`: grant memory, or a route of the library (a `transport:` row of
 /// the account), which a Lunport that does not know that version could not publish.
 pub fn needs_sync_version(state: &SyncStateV3) -> bool {
-    !state.local.transport_grants.is_empty()
-        || state.account.as_ref().is_some_and(|account| account.records.values().any(|row| row.record.kind == RecordKind::Meta && is_id(&row.record.id)))
+    !state.local.transport_grants.is_empty() || has_library_rows(state)
+}
+
+/// Whether the account holds rows of the library's routes (`transport:` rows, tombstones included).
+pub fn has_library_rows(state: &SyncStateV3) -> bool {
+    state.account.as_ref().is_some_and(|account| account.records.values().any(|row| row.record.kind == RecordKind::Meta && is_id(&row.record.id)))
 }
 
 /// What a grant request taught this device about the host (design 2026-10-26, Grant requests): the duration asked for and the

@@ -490,7 +490,23 @@ fn append(
     });
 }
 fn catalog_write(f: &Fixture, rows: &mut Vec<super::super::rekey::Version>, name: &str) {
-    use super::super::payload::{Collection, Data, Identity};
+    catalog_edit(f, rows, |catalog| {
+        if !name.is_empty() {
+            catalog.collections.retain(|c| c.id != "f".repeat(64));
+            catalog.collections.push(super::super::payload::Collection {
+                id: "f".repeat(64),
+                name: name.into(),
+            });
+        }
+    });
+}
+/// Appends the next version of the library's Catalog, the latest one after `edit`, as the first device writes it.
+fn catalog_edit(
+    f: &Fixture,
+    rows: &mut Vec<super::super::rekey::Version>,
+    edit: impl FnOnce(&mut super::super::payload::Catalog),
+) {
+    use super::super::payload::{Data, Identity};
     let owner = record_runtime::snapshot(&f.first.env())
         .unwrap()
         .0
@@ -533,13 +549,7 @@ fn catalog_write(f: &Fixture, rows: &mut Vec<super::super::rekey::Version>, name
         Data::Catalog(c) => c,
         _ => panic!("missing catalogue"),
     };
-    if !name.is_empty() {
-        catalog.collections.retain(|c| c.id != "f".repeat(64));
-        catalog.collections.push(Collection {
-            id: "f".repeat(64),
-            name: name.into(),
-        });
-    }
+    edit(&mut catalog);
     let data = Data::Catalog(catalog);
     let row = super::super::crypto::seal_record(
         &f.keys,
@@ -2275,5 +2285,29 @@ fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
         assert!(state.local.tunnel_rules.is_empty());
         assert!(state.local.transports.is_empty(), "device-local transports are cleared by the projection");
         assert!(crate::sync::records_v3::validate_state(&state).is_ok());
+    });
+}
+
+/// R13: adopting a library whose Catalog holds a route keeps the route, as the library's. The initial projection writes it into the
+/// account, from which its ledger rebuilds the Catalog; the ledger used to refuse such a library ("Initial projection ledger is
+/// invalid.").
+#[test]
+fn adopting_a_library_whose_catalog_holds_a_route_keeps_the_route() {
+    use crate::sync::transports;
+    let f = fixture(true);
+    let s = service(&f);
+    // The library holds no host for it: the Catalog tolerates such a route, as it tolerates such a tunnel.
+    let route: transports::HostTransport = serde_json::from_value(json!({"host_id":"c".repeat(16),"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| catalog.transports.push(route.clone()));
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let state = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert_eq!(transports::get(&state, &route.host_id), Some(route.clone()));
+        assert!(transports::synced(&state, &route.host_id));
+        assert_eq!(state.version, transports::SYNC_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&state).unwrap();
+        assert!(s.rows.lock().unwrap().len() > f.rows.len() + 1, "the device's own library was merged in too");
     });
 }

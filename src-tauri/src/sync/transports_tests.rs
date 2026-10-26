@@ -11,7 +11,7 @@ fn state() -> SyncStateV3 {
     serde_json::from_value(json!({"version":4,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap()
 }
 
-fn iap(host: &str) -> HostTransport {
+pub(crate) fn iap(host: &str) -> HostTransport {
     HostTransport {
         host_id: host.into(),
         kind: TransportKind::GcpIap {
@@ -26,7 +26,7 @@ fn iap(host: &str) -> HostTransport {
     }
 }
 
-fn with_zone(mut transport: HostTransport, new_zone: &str) -> HostTransport {
+pub(crate) fn with_zone(mut transport: HostTransport, new_zone: &str) -> HostTransport {
     let TransportKind::GcpIap { zone, .. } = &mut transport.kind;
     *zone = new_zone.into();
     transport

@@ -11,7 +11,10 @@ use super::{
 };
 use crate::{
     error::AppError,
-    sync::records_v3::{self, SyncStateV3},
+    sync::{
+        records_v3::{self, SyncStateV3},
+        transports,
+    },
 };
 use std::collections::BTreeMap;
 pub(in crate::sync) struct Candidate {
@@ -37,6 +40,15 @@ impl Prepared {
     }
     pub fn manifest(&self) -> &str {
         &self.manifest
+    }
+}
+/// The state version of an initial projection's candidate: central sync's, or, once the library's Catalog holds routes and the account
+/// keeps them as rows, the version those rows need (R19). The initial publication requires exactly this version.
+pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
+    if transports::has_library_rows(candidate) {
+        transports::SYNC_STATE_VERSION
+    } else {
+        records_v3::CENTRAL_STATE_VERSION
     }
 }
 impl Candidate {
@@ -150,6 +162,8 @@ impl Candidate {
         shadow.migration_gate = None;
         shadow.legacy_v1_backup = None;
         shadow.shared_writes_blocked = false;
+        // The library's routes are rows of the account now (R19).
+        shadow.version = candidate_version(&shadow);
         let ledger = Ledger::initial(&projected, &shadow, keys)
             .map_err(|_| AppError::Other("Initial projection ledger is invalid.".into()))?;
         if ledger.storage != cache.key_storage {
