@@ -6,12 +6,27 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buttonTag, buttonsIn, DISABLED, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { tauriInvoke } from "@/lib/ipc";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
-import { gcloudAccountsKey, listGcloudAccounts, type GcloudAccountsView, type HostTransport, type TransportKind } from "@/lib/transports";
+import {
+  gcloudAccountsKey,
+  listGcloudAccounts,
+  newPamCheck,
+  type GcloudAccountsView,
+  type HostTransport,
+  type TransportKind,
+} from "@/lib/transports";
 import { beginDuplicateEditor, beginEditor, saveEditor, type EditorState } from "./editor";
 import { hostPayload, hostView, recordOverview } from "./fixtures";
 import { RecordHostEditor } from "./HostEditor";
-import { applyOsLoginUsername, ConnectVia, connectViaDescription, OsLoginUsername } from "./IapRouteFields";
-import { beginRouteState, type RouteState, type Via } from "./route";
+import { applyOsLoginUsername, ConnectVia, connectViaDescription, IapRouteFields, OsLoginUsername, osLoginNoteStale } from "./IapRouteFields";
+import {
+  beginRouteState,
+  routeChangedElsewhere,
+  routeUnsaved,
+  routeWritesBlocked,
+  SYNC_PAUSED,
+  type RouteState,
+  type Via,
+} from "./route";
 
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
 // The editor's draft is its first state: a test sets it to draw the editor as a press left it (as markup.test.tsx does).
@@ -80,6 +95,25 @@ const renderEditor = (host: RecordHostView | null, options: EditorOptions = {}, 
     </QueryClientProvider>,
   );
 
+/** The editor drawn with `route` as its Connect via state, as an edit or another device left it: the one state that begins as a route. */
+function renderWithRoute(host: RecordHostView, route: RouteState, options: EditorOptions = {}): string {
+  const real = vi.mocked(useState).getMockImplementation() as typeof useState;
+  vi.mocked(useState).mockImplementation(((initial: unknown) => {
+    const begun = typeof initial === "function" ? (initial as () => unknown)() : initial;
+    return begun !== null && typeof begun === "object" && "draft" in begun && "saved" in begun ? [route, vi.fn()] : real(initial);
+  }) as typeof useState);
+  try {
+    return renderEditor(host, options);
+  } finally {
+    vi.mocked(useState).mockImplementation(real);
+  }
+}
+/** The label of the Connect via choice drawn checked. */
+const checkedVia = (html: string) =>
+  text(html.match(/<button\b[^>]*role="radio"[^>]*aria-checked="true"[^>]*>((?:(?!<\/button>)[\s\S])*)<\/button>/)![1]).trim();
+/** The opening tag of the input that follows the label `label`. */
+const inputAfter = (html: string, label: string) => html.split(`>${label}</label>`)[1].match(/<input\b[^>]*>/)![0];
+
 const accounts: GcloudAccountsView = {
   config_found: true,
   active: "frank@example.com",
@@ -88,10 +122,16 @@ const accounts: GcloudAccountsView = {
     { account: "old@example.com", state: "expired", message: null },
   ],
 };
+/** What `gcp_accounts` answers: gcloud's accounts on this computer, or the error reading them. */
+let gcloud: GcloudAccountsView | Error = accounts;
 beforeEach(() => {
+  gcloud = accounts;
   vi.mocked(tauriInvoke).mockReset();
   vi.mocked(tauriInvoke).mockImplementation(async (command: string) => {
-    if (command === "gcp_accounts") return accounts;
+    if (command === "gcp_accounts") {
+      if (gcloud instanceof Error) throw gcloud;
+      return gcloud;
+    }
     if (command === "transports_oslogin_profile") return { account: "frank@example.com", username: "frank_example_com", key_registered: true };
     if (command === "records_host_update" || command === "records_host_create") return libraryOf(null);
     throw new Error(`unexpected command ${command}`);
@@ -101,11 +141,15 @@ const invoked = (command: string) => vi.mocked(tauriInvoke).mock.calls.some(([na
 const lastInvoke = (command: string) =>
   vi.mocked(tauriInvoke).mock.calls.filter(([name]) => name === command).slice(-1)[0]?.[1] as Record<string, unknown>;
 
+/** The Google account field and what follows it, as the editor draws it once `gcp_accounts` answered (or failed). */
+async function accountField(host: RecordHostView): Promise<string> {
+  const client = new QueryClient();
+  await client.prefetchQuery({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts, retry: false });
+  return renderEditor(host, {}, client).split(">Google account</label>")[1];
+}
 /** The labels of the Google account select, as the editor draws it once gcloud's accounts are read. */
 async function accountOptions(host: RecordHostView): Promise<string[]> {
-  const client = new QueryClient();
-  await client.prefetchQuery({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts });
-  const select = renderEditor(host, {}, client).split(">Google account</label>")[1].match(/<select\b[\s\S]*?<\/select>/)![0];
+  const select = (await accountField(host)).match(/^<select\b[\s\S]*?<\/select>/)![0];
   return [...select.matchAll(/<option\b[^>]*>([\s\S]*?)<\/option>/g)].map((option) => text(option[1]).trim());
 }
 
@@ -135,19 +179,15 @@ function usernameField(): string {
   return html.split(">Username</label>")[1].match(/<input\b[^>]*\bvalue="([^"]*)"/)![1];
 }
 
+/** The Connect via block drawn for `route`, handing each change to `onDraft`. */
+const connectVia = (route: RouteState, onDraft: (draft: RouteState["draft"]) => void, locked = false) =>
+  ConnectVia({ draft: route.draft, onDraft, description: "", hostname: "", onHostname: () => {}, port: null, disabled: false, locked });
 /** Chooses `via` in the Connect via block drawn for `route`, and hands back the route it leaves. */
 function choose(route: RouteState, via: Via): RouteState {
   let next = route;
-  const block = ConnectVia({
-    draft: route.draft,
-    onDraft: (draft) => (next = { ...route, draft }),
-    description: "",
-    hostname: "",
-    onHostname: () => {},
-    port: null,
-    disabled: false,
-  });
-  const group = elementsOf(block, RadioGroup.Root)[0].props as unknown as { onValueChange: (value: string) => void };
+  const group = elementsOf(connectVia(route, (draft) => (next = { ...route, draft })), RadioGroup.Root)[0].props as unknown as {
+    onValueChange: (value: string) => void;
+  };
   group.onValueChange(via);
   return next;
 }
@@ -165,7 +205,7 @@ describe("Connect via in the host editor", () => {
     expect(html).not.toContain("Hostname or IP");
     expect(text(html)).toContain("Port");
     expect(html).toContain(SYNCED);
-    expect(html).toMatch(/<button[^>]*role="radio"[^>]*aria-checked="true"[^>]*>[\s\S]*?Google Cloud IAP<\/button>/);
+    expect(checkedVia(html)).toBe("Google Cloud IAP");
   });
 
   it("dials an address host at its hostname, as before", () => {
@@ -174,7 +214,7 @@ describe("Connect via in the host editor", () => {
     expect(html).toContain('value="server.example.com"');
     expect(html).not.toContain("Instance");
     expect(html).toContain("The hostname or IP address this host is dialed at.");
-    expect(html).toMatch(/<button[^>]*role="radio"[^>]*aria-checked="true"[^>]*>[\s\S]*?Address<\/button>/);
+    expect(checkedVia(html)).toBe("Address");
   });
 
   it("opens a new IAP host without a validation sentence", () => {
@@ -207,6 +247,17 @@ describe("Connect via in the host editor", () => {
       "old@example.com · sign-in expired",
       "ops@example.com · not signed in on this computer",
     ]);
+  });
+
+  it("lets the account be typed where gcloud has no folder on this computer, or cannot be read", async () => {
+    const host = hostWithAccount("ops@example.com");
+    gcloud = { config_found: false, active: null, accounts: [] };
+    expect(await accountField(host)).toMatch(/^<input\b[^>]*value="ops@example.com"/);
+    gcloud = new Error("Reading gcloud's folder took too long.");
+    expect(await accountField(host)).toMatch(/^<input\b[^>]*value="ops@example.com"/);
+    // A folder without accounts is still read: the select offers gcloud's active account and keeps the route's.
+    gcloud = { config_found: true, active: null, accounts: [] };
+    expect(await accountOptions(host)).toEqual(["gcloud's active account", "ops@example.com · not signed in on this computer"]);
   });
 
   it("fills the OS Login username without saving the host", async () => {
@@ -260,5 +311,91 @@ describe("Connect via in the host editor", () => {
     expect(connectViaDescription({ ...saved, draft: { ...saved.draft, via: "address" } }, libraryOf(iapHost), HOST)).toBe(
       "The hostname or IP address this host is dialed at.",
     );
+  });
+});
+
+describe("the route in the host editor's state", () => {
+  it("knows when the library's writes keep the route as it is", () => {
+    expect(routeWritesBlocked(libraryOf(iapHost, { shared_writes_blocked: true }))).toBe(true);
+    expect(routeWritesBlocked(libraryOf(iapHost))).toBe(false);
+    // Without central sync a route stays on this computer, and its writes are not the library's.
+    expect(routeWritesBlocked(libraryOf(iapHost, { shared_writes_blocked: true, central_mode: false }))).toBe(false);
+    expect(routeWritesBlocked(libraryOf(iapHost, { shared_writes_blocked: true, account: null }))).toBe(false);
+  });
+
+  it("turns off the route's controls while the library's writes are blocked, and leaves the host's own fields", () => {
+    const blocked = libraryOf(iapHost, { shared_writes_blocked: true });
+    const html = renderEditor(iapHost, { overview: blocked });
+    expect(text(html)).toContain(SYNC_PAUSED);
+    const radios = html.match(/<button\b[^>]*role="radio"[^>]*>/g)!;
+    expect(radios).toHaveLength(2);
+    for (const radio of radios) expect(radio).toContain(DISABLED);
+    expect(inputAfter(html, "Instance")).toContain(DISABLED);
+    expect(inputAfter(html, "Project")).toContain(DISABLED);
+    // A local host's port and username are its own record, which the library's review does not hold back.
+    expect(inputAfter(html, "Port")).not.toContain(DISABLED);
+    expect(inputAfter(html, "Username")).not.toContain(DISABLED);
+    const address = jumpbox();
+    expect(inputAfter(renderEditor(address, { overview: libraryOf(address, { shared_writes_blocked: true }) }), "Hostname or IP")).not.toContain(DISABLED);
+    // The block itself: the choice and the IAP fields go off together, the hostname stays.
+    const locked = connectVia(beginRouteState(blocked, HOST), () => {}, true);
+    expect((elementsOf(locked, RadioGroup.Root)[0].props as { disabled?: boolean }).disabled).toBe(true);
+    expect((elementsOf(locked, IapRouteFields)[0].props as { disabled?: boolean }).disabled).toBe(true);
+    // A duplicate cannot be created with the route it copied.
+    expect(buttonTag(renderEditor(null, { duplicateSource: iapHost, overview: blocked }), "Create host")).toContain(DISABLED);
+  });
+
+  it("refuses a route change on Save while the library's writes are blocked, and still saves the host alone", async () => {
+    const blocked = libraryOf(iapHost, { shared_writes_blocked: true });
+    await expect(saveEditor(beginEditor(iapHost), choose(beginRouteState(blocked, HOST), "address"), blocked)).rejects.toThrow(SYNC_PAUSED);
+    expect(invoked("records_host_update")).toBe(false);
+    const renamed: EditorState = { ...beginEditor(iapHost), payload: { ...iapHost.payload, alias: "jumpbox-2" }, dirty: true };
+    await saveEditor(renamed, beginRouteState(blocked, HOST), blocked);
+    expect(lastInvoke("records_host_update")).not.toHaveProperty("route");
+  });
+
+  it("counts a saved host switched to Google Cloud IAP as a change, and says what the route still needs", () => {
+    const host = jumpbox();
+    const begun = beginRouteState(libraryOf(host), HOST);
+    const switched: RouteState = { ...begun, draft: { ...begun.draft, via: "iap" } };
+    expect(routeUnsaved(switched, HOST)).toBe(true);
+    // For a new host the same untouched route is no edit yet.
+    expect(routeUnsaved(switched, null)).toBe(false);
+    expect(routeUnsaved(begun, HOST)).toBe(false);
+    const html = renderWithRoute(host, switched);
+    expect(checkedVia(html)).toBe("Google Cloud IAP");
+    expect(text(html)).toContain("Unsaved changes");
+    expect(text(html)).toContain("Enter the Google Cloud project id.");
+    expect(buttonTag(html, "Discard changes")).not.toContain(DISABLED);
+    expect(buttonTag(html, "Save changes")).toContain(DISABLED);
+  });
+
+  it("says when the route changed elsewhere, and keeps saving against the route the draft began from", async () => {
+    const before = libraryOf(iapHost);
+    const begun = beginRouteState(before, HOST);
+    const moved = libraryOf(null, { hosts: [iapHost], transports: [{ host_id: HOST, kind: iap({ zone: "asia-east1-c" }) }] });
+    expect(routeChangedElsewhere(begun, before, HOST)).toBe(false);
+    expect(routeChangedElsewhere(begun, structuredClone(before), HOST)).toBe(false);
+    expect(routeChangedElsewhere(begun, moved, HOST)).toBe(true);
+    expect(routeChangedElsewhere(begun, libraryOf(null, { hosts: [iapHost] }), HOST)).toBe(true);
+    expect(routeChangedElsewhere(beginRouteState(before, null, "iap"), moved, null)).toBe(false);
+    const html = renderWithRoute(iapHost, begun, { overview: moved });
+    expect(text(html)).toContain("This host changed or became unavailable.");
+    expect(buttonTag(html, "Reload saved settings")).not.toContain(DISABLED);
+    // The editor still shows, and saves against, the route it began from: reloading is the person's choice.
+    expect(html).toContain('value="asia-east1-b"');
+    const edited: RouteState = { ...begun, draft: { ...begun.draft, iap: { ...begun.draft.iap, instance: "jumpbox-2" } } };
+    await saveEditor(beginEditor(iapHost), edited, moved);
+    expect(lastInvoke("records_host_update").route).toEqual({ expected: savedRoute(iapHost), kind: edited.draft.iap });
+  });
+
+  it("forgets the OS Login note once it would speak of another account, project or OS Login setting", () => {
+    const kind = iap();
+    expect(osLoginNoteStale(kind, { ...kind, account: "ops@example.com" })).toBe(true);
+    expect(osLoginNoteStale(kind, { ...kind, account: null })).toBe(true);
+    expect(osLoginNoteStale(kind, { ...kind, project: "other-project-1" })).toBe(true);
+    expect(osLoginNoteStale(kind, { ...kind, os_login: false })).toBe(true);
+    // The instance, the zone and the grant settings change nothing OS Login said.
+    expect(osLoginNoteStale(kind, { ...kind, instance: "jumpbox-2", zone: "asia-east1-c", pam: newPamCheck() })).toBe(false);
   });
 });

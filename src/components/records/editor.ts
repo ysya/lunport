@@ -1,5 +1,5 @@
 import type { RouteChange } from "@/bindings/RouteChange";
-import { routeChange, withRouteHostname, type RouteState } from "./route";
+import { routeChange, routeWritesBlocked, SYNC_PAUSED, withRouteHostname, type RouteState } from "./route";
 import {
   createRecordHost,
   updateRecordHost,
@@ -166,7 +166,8 @@ export async function submitEditor(
 /**
  * What Save writes: the host and its route change in one command, the route saved against the one the draft began from
  * (`route.saved`) and the hostname a new IAP host lacks taken from the instance; nothing, and `overview` as it is, for a saved host
- * whose host fields and route are both as saved (a password change is saved apart).
+ * whose host fields and route are both as saved (a password change is saved apart). A route change is refused, and nothing sent,
+ * while the library's writes are blocked.
  */
 export async function saveEditor(
   state: EditorState,
@@ -176,6 +177,7 @@ export async function saveEditor(
 ): Promise<RecordOverview> {
   const change = routeChange(route.draft, route.saved);
   if (state.id !== null && !state.dirty && change === undefined) return overview;
+  if (change !== undefined && routeWritesBlocked(overview)) throw new Error(SYNC_PAUSED);
   return submitEditor({ ...state, payload: withRouteHostname(state.payload, route.draft) }, upgradeConfirmed, change);
 }
 export function selectHost(

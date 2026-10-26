@@ -89,3 +89,30 @@ export function routeChange(draft: RouteDraft, saved: HostTransport | null): Rou
 export function withRouteHostname(payload: HostPayload, draft: RouteDraft): HostPayload {
   return draft.via === "iap" && payload.hostname === "" ? { ...payload, hostname: draft.iap.instance } : payload;
 }
+
+/**
+ * Whether the route half is an unsaved change. For a saved host, any route that would save differently, a blank IAP route included: the
+ * person chose it, and Save needs it filled. For a new host, only a route with something typed: an untouched new IAP host is not an
+ * edit yet, as a new host's empty fields are not.
+ */
+export function routeUnsaved(route: RouteState, hostId: string | null): boolean {
+  return hostId === null ? routeEdited(route.draft, route.saved?.kind ?? null) : routeChange(route.draft, route.saved) !== undefined;
+}
+
+/**
+ * Whether the host's route is no longer the one the draft began from: another device, or MCP, changed or removed it. It is said, not
+ * followed: `saved` stays the save's `expected` until the person reloads, so a route edit made meanwhile is refused, not overwritten.
+ */
+export function routeChangedElsewhere(route: RouteState, overview: RecordOverview, hostId: string | null): boolean {
+  return hostId !== null && !sameValue(transportFor(overview, hostId)?.kind ?? null, route.saved?.kind ?? null);
+}
+
+/** What the backend says of a library whose writes are blocked (`transports::SYNC_PAUSED`), a refused route write included. */
+export const SYNC_PAUSED = "Sync changes are paused while account data is reviewed.";
+
+/**
+ * Whether no route can be written now: in a library that uses central sync every route is the library's, and its writes are blocked
+ * while account data is reviewed (the backend's `central_library && account_writes_blocked`). Elsewhere a route stays on this computer.
+ */
+export const routeWritesBlocked = (overview: RecordOverview): boolean =>
+  overview.shared_writes_blocked && overview.central_mode === true && Boolean(overview.account);

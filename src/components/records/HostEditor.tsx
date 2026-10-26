@@ -25,8 +25,18 @@ import {
   saveEditor,
   selectHost,
 } from "./editor";
-import { beginRouteState, routeEdited, routeProblem, withRouteHostname, type Via } from "./route";
-import { applyOsLoginUsername, ConnectVia, connectViaDescription, OsLoginUsername } from "./IapRouteFields";
+import {
+  beginRouteState,
+  routeChange,
+  routeChangedElsewhere,
+  routeProblem,
+  routeUnsaved,
+  routeWritesBlocked,
+  SYNC_PAUSED,
+  withRouteHostname,
+  type Via,
+} from "./route";
+import { applyOsLoginUsername, ConnectVia, connectViaDescription, OsLoginUsername, osLoginNoteStale } from "./IapRouteFields";
 import { connectSavedHost, scopeLabel } from "./operations";
 import { readinessLabel } from "./HostList";
 import { RecordField, selectClass } from "./form";
@@ -104,8 +114,13 @@ export function RecordHostEditor({
   // Connect via: the route draft, and the saved route it began from, the save's `expected` until the draft begins anew.
   const [route, setRoute] = useState(() => beginRouteState(overview, state.id, initialVia, duplicateSource?.id));
   const [osLoginNote, setOsLoginNote] = useState<string | null>(null);
-  const routeDirty = routeEdited(route.draft, route.saved?.kind ?? null);
+  const routeDirty = routeUnsaved(route, state.id);
   const dirty = state.dirty || passwordChange !== null || routeDirty;
+  // In a library that uses central sync every route is the library's: none is written while its writes are blocked.
+  const routesBlocked = routeWritesBlocked(overview);
+  const routeChangeBlocked = routesBlocked && routeChange(route.draft, route.saved) !== undefined;
+  // Said, never followed: the route stays the save's `expected` until the person reloads.
+  const routeConflict = routeChangedElsewhere(route, overview, state.id);
   // The record needs a hostname, which Connect via does not show for a route: a new host takes the instance's.
   const problem = routeProblem(route.draft) ?? editorProblem({ ...state, payload: withRouteHostname(state.payload, route.draft) });
   const currentHost = state.id ? selectHost(overview.hosts, state.id) : host;
@@ -179,6 +194,7 @@ export function RecordHostEditor({
         setState(beginEditor(saved));
         setRoute(beginRouteState(accepted, id));
       }
+      setOsLoginNote(null);
       setAskingUpgrade(false);
       if (passwordChange) {
         if (!id || !saved) {
@@ -307,7 +323,7 @@ export function RecordHostEditor({
             Group settings are resolved.
           </p>
         )}
-        {state.changedOnServer && (
+        {(state.changedOnServer || routeConflict) && (
           <div role="status" className="rounded-md border p-3 text-sm">
             This host changed or became unavailable. Your draft and saved revision
             are retained.
@@ -322,9 +338,9 @@ export function RecordHostEditor({
             </Button>
           </div>
         )}
-        {sharedBlocked && (
+        {(sharedBlocked || routesBlocked) && (
           <p role="status" className="text-sm text-destructive">
-            Sync changes are paused while account data is reviewed.
+            {SYNC_PAUSED}
           </p>
         )}
         {preview.error && (
@@ -403,11 +419,15 @@ export function RecordHostEditor({
             </div>
             <ConnectVia
               draft={route.draft}
-              onDraft={(draft) => setRoute((current) => ({ ...current, draft }))}
+              onDraft={(draft) => {
+                if (osLoginNoteStale(route.draft.iap, draft.iap)) setOsLoginNote(null);
+                setRoute((current) => ({ ...current, draft }));
+              }}
               description={connectViaDescription(route, overview, state.id)}
               hostname={state.payload.hostname}
               onHostname={(hostname) => patch({ hostname })}
               disabled={busy || state.unavailable || sharedBlocked}
+              locked={routesBlocked}
               port={
                 <RecordField label="Port">
                   <Input
@@ -724,6 +744,7 @@ export function RecordHostEditor({
             disabled={
               busy ||
               sharedBlocked ||
+              routeChangeBlocked ||
               (!dirty && state.id !== null) ||
               (passwordChange?.kind === "set" && passwordChange.value.length === 0) ||
               problem !== null

@@ -35,7 +35,9 @@ const choice =
 
 /**
  * The bordered Connect via block: what the choice means, the choice itself (a radio group), and the fields of the one chosen: the
- * hostname beside the port, or the IAP route with the instance in the hostname's place. No hooks: exported for the tests.
+ * hostname beside the port, or the IAP route with the instance in the hostname's place. `locked` turns off what would change the
+ * route, the choice and the IAP fields, while the library's writes are blocked; the hostname and the port stay host fields. No hooks:
+ * exported for the tests.
  */
 export function ConnectVia({
   draft,
@@ -45,6 +47,7 @@ export function ConnectVia({
   onHostname,
   port,
   disabled,
+  locked,
 }: {
   draft: RouteDraft;
   onDraft: (next: RouteDraft) => void;
@@ -53,6 +56,7 @@ export function ConnectVia({
   onHostname: (next: string) => void;
   port: ReactNode;
   disabled: boolean;
+  locked: boolean;
 }) {
   return (
     <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
@@ -64,7 +68,7 @@ export function ConnectVia({
         <RadioGroup.Root
           aria-label="Connect via"
           value={draft.via}
-          disabled={disabled}
+          disabled={disabled || locked}
           onValueChange={(via) => onDraft({ ...draft, via: via as Via })}
           className="flex w-full gap-0.5 rounded-lg bg-muted p-[3px]"
         >
@@ -78,7 +82,7 @@ export function ConnectVia({
         </RadioGroup.Root>
       </div>
       {draft.via === "iap" ? (
-        <IapRouteFields kind={draft.iap} onChange={(iap) => onDraft({ ...draft, iap })} disabled={disabled} port={port} />
+        <IapRouteFields kind={draft.iap} onChange={(iap) => onDraft({ ...draft, iap })} disabled={disabled || locked} port={port} />
       ) : (
         <div className={besidePort}>
           <RecordField label="Hostname or IP">
@@ -129,8 +133,8 @@ export function IapRouteFields({
 }) {
   const patch = (changes: Partial<TransportKind>) => onChange({ ...kind, ...changes });
   const patchPam = (changes: Partial<PamCheck>) => patch({ pam: { ...(kind.pam ?? newPamCheck()), ...changes } });
-  // When gcloud's accounts cannot be read (yet), the account is typed instead.
-  const accounts = useQuery({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts, retry: false }).data;
+  // Each read checks every sign-in with Google, so a minute-old answer is reused across mounts, switches and window focus.
+  const accounts = useQuery({ queryKey: gcloudAccountsKey, queryFn: listGcloudAccounts, retry: false, staleTime: 60_000 }).data;
   const summary = [
     kind.account ?? "gcloud's active account",
     kind.os_login ? "OS Login" : null,
@@ -161,7 +165,8 @@ export function IapRouteFields({
         </summary>
         <div className="mt-4 space-y-4 pb-1">
           <RecordField label="Google account">
-            {accounts ? (
+            {/* Where gcloud's accounts cannot be read, or gcloud has no folder on this computer, the account is typed instead. */}
+            {accounts?.config_found ? (
               <select className={selectClass} value={kind.account ?? ""} disabled={disabled} onChange={(e) => patch({ account: e.target.value || null })}>
                 <option value="">{accounts.active ? `gcloud's active account (${accounts.active})` : "gcloud's active account"}</option>
                 {accounts.accounts.map((entry) => (
@@ -297,3 +302,7 @@ export async function applyOsLoginUsername(
   update((current) => (current.payload.user === username ? current : changeEditor(current, { user: username })));
   return [`OS Login username: ${username}.`, outcome.note].filter(Boolean).join(" ");
 }
+
+/** Whether a route edit leaves the last Use OS Login username note stale: it spoke of this account, this project, and OS Login on. */
+export const osLoginNoteStale = (previous: TransportKind, next: TransportKind): boolean =>
+  previous.account !== next.account || previous.project !== next.project || previous.os_login !== next.os_login;
