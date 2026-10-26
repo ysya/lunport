@@ -122,7 +122,7 @@ else {
     overview = { ...overview,
       hosts: [...overview.hosts, jumpbox], account: { chain_id: "c".repeat(64), device_name: "Example laptop" }, central_mode: true,
       transports: [production, development],
-      transport_sync: [{ host_id: production.host_id, synced: true }, { host_id: development.host_id, synced: false }],
+      transport_sync: [{ host_id: production.host_id, synced: true, reason: null }, { host_id: development.host_id, synced: false, reason: "no_room" }],
       // What this computer's last request for the host asked: offered again, ahead of the route's own default length.
       grant_memory: [{ host_id: production.host_id, justification: "Deploy hotfix", duration_secs: 3600 } satisfies GrantMemoryView],
     };
@@ -157,7 +157,7 @@ else {
       transports: [...(overview.transports ?? []).filter((other) => other.host_id !== hostId), ...route],
       transport_sync: [
         ...(overview.transport_sync ?? []).filter((other) => other.host_id !== hostId),
-        ...route.map(() => ({ host_id: hostId, synced: overview.central_mode === true && Boolean(overview.account) })),
+        ...route.map(() => ({ host_id: hostId, synced: overview.central_mode === true && Boolean(overview.account), reason: null })),
       ],
       // Named only when the route goes: the patch is spread over the overview, so a key it names without a value would erase the memory.
       ...(change.kind === null ? { grant_memory: (overview.grant_memory ?? []).filter((memory) => memory.host_id !== hostId) } : {}),

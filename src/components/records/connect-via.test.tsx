@@ -68,7 +68,7 @@ function libraryOf(host: RecordHostView | null, patch: Partial<RecordOverview> =
   return recordOverview({
     hosts: host ? [host] : [],
     transports: route ? [route] : [],
-    transport_sync: route ? [{ host_id: route.host_id, synced: !local }] : [],
+    transport_sync: route ? [{ host_id: route.host_id, synced: !local, reason: null }] : [],
     central_mode: true,
     account: { chain_id: "c".repeat(64), device_name: "Laptop" },
     ...patch,

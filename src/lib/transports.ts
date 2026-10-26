@@ -10,7 +10,19 @@ import type { GcloudAccountsView } from "@/bindings/GcloudAccountsView";
 import type { GrantMemoryView } from "@/bindings/GrantMemoryView";
 import type { IapProbeView } from "@/bindings/IapProbeView";
 import type { PamGrantView } from "@/bindings/PamGrantView";
-export type { HostTransport, TransportKind, PamCheck, OsLoginProfileView, PamStatusView, GcloudAccountsView, GrantMemoryView, IapProbeView, PamGrantView };
+import type { TransportLocalReason } from "@/bindings/TransportLocalReason";
+export type {
+  HostTransport,
+  TransportKind,
+  PamCheck,
+  OsLoginProfileView,
+  PamStatusView,
+  GcloudAccountsView,
+  GrantMemoryView,
+  IapProbeView,
+  PamGrantView,
+  TransportLocalReason,
+};
 
 /** A placeholder for the PAM entitlements field, never a default: Lunport is a public product. */
 export const pamPlaceholder = "prod-operate, prod-admin";
@@ -161,6 +173,14 @@ export function transportFor(overview: RecordOverview, hostId: string | null): H
 export function routeSynced(overview: RecordOverview, hostId: string | null): boolean {
   const own = overview.transport_sync?.find((entry) => entry.host_id === hostId);
   return own ? own.synced : overview.central_mode === true && Boolean(overview.account);
+}
+
+/**
+ * Why the route of `hostId` stays on this computer, when that can be said: only that the library has no room for it (`no_room`). A route
+ * that syncs, or one waiting for anything else (the library's latest changes not read yet, a conflict, paused writes), gives none.
+ */
+export function routeLocalReason(overview: RecordOverview, hostId: string): TransportLocalReason | null {
+  return overview.transport_sync?.find((entry) => entry.host_id === hostId)?.reason ?? null;
 }
 
 /** What this computer remembers of the host's last grant request, to offer again; `null` when it made none. */

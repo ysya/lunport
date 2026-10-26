@@ -24,6 +24,7 @@ import {
   parseEntitlements,
   probeIap,
   requestPamGrant,
+  routeLocalReason,
   routeSynced,
   transportFor,
   transportProblem,
@@ -166,7 +167,7 @@ describe("transports", () => {
   it("tells whether a route syncs: its own flag, else whether a route saved now would", () => {
     const account = { chain_id: "a".repeat(64), device_name: "Synthetic" };
     const route = (synced: boolean, patch: Partial<RecordOverview> = {}) =>
-      recordOverview({ transports: [iap()], transport_sync: [{ host_id: HOST, synced }], ...patch });
+      recordOverview({ transports: [iap()], transport_sync: [{ host_id: HOST, synced, reason: null }], ...patch });
     expect(routeSynced(route(true), HOST)).toBe(true);
     expect(routeSynced(route(false), HOST)).toBe(false);
     // The route's own flag decides, even in a library that uses central sync: a route kept on this computer says so.
@@ -179,6 +180,14 @@ describe("transports", () => {
     expect(routeSynced(recordOverview({ central_mode: true }), HOST)).toBe(false);
     expect(routeSynced(recordOverview({ central_mode: true, account }), HOST)).toBe(true);
     expect(routeSynced(recordOverview({ central_mode: true, account }), null)).toBe(true);
+  });
+
+  it("tells why a route stays on this computer only when the library has no room for it", () => {
+    const overview = (reason: "no_room" | null) => recordOverview({ transports: [iap()], transport_sync: [{ host_id: HOST, synced: false, reason }] });
+    expect(routeLocalReason(overview("no_room"), HOST)).toBe("no_room");
+    expect(routeLocalReason(overview(null), HOST)).toBeNull();
+    expect(routeLocalReason(overview("no_room"), "0000000000000002")).toBeNull(); // another host's reason is its own
+    expect(routeLocalReason(recordOverview(), HOST)).toBeNull();
   });
 
   it("holds a grant that is active or activating, and nothing else", () => {

@@ -17,6 +17,7 @@ import {
   iapTarget,
   pamGrantsKey,
   pamGrantsQuery,
+  routeLocalReason,
   routeSynced,
   type GcloudAccountsView,
   type GrantMemoryView,
@@ -195,9 +196,14 @@ export type GoogleCloudPageViewProps = {
 /** The page, apart from its state and its reads: no hooks, so the tests call it and press what it draws. */
 export function GoogleCloudPageView({ overview, accounts, grants, requesting, onRequest, onCloseRequest, onRequested, createIapHost, editHost }: GoogleCloudPageViewProps) {
   const listed = listedRoutes(overview);
-  // In a central library a route the library has no room for stays on this computer and is said to; elsewhere every route does, by design.
+  // In a central library a route that stays on this computer is said to, after the others, with the reason when it is that the library
+  // has no room for it (R65); elsewhere every route stays on its computer, by design.
   const central = overview.central_mode === true && Boolean(overview.account);
   const apart = ({ route }: ListedRoute) => central && !routeSynced(overview, route.host_id);
+  const apartLine = ({ route }: ListedRoute) =>
+    routeLocalReason(overview, route.host_id) === "no_room"
+      ? "Saved on this computer only: the library has no room for this route"
+      : "Saved on this computer only";
   const hosts = new Map(overview.hosts.map((host) => [host.id, host]));
   const grantRows = (grants.data ?? []).filter((row) => row.host_ids.some((id) => hosts.has(id)));
 
@@ -247,7 +253,7 @@ export function GoogleCloudPageView({ overview, accounts, grants, requesting, on
           </button>
           <p className="wrap-anywhere text-xs text-muted-foreground">{revealHidden(`${iapTarget(route.kind)} · ${route.kind.zone}`)}</p>
           <p className="wrap-anywhere text-xs text-muted-foreground">{revealHidden(route.kind.account ?? "gcloud's active account")}</p>
-          {apart(entry) && <p className="text-xs text-warning">Saved on this computer only: the library has no room for this route</p>}
+          {apart(entry) && <p className="text-xs text-warning">{apartLine(entry)}</p>}
         </div>
       </li>
     );

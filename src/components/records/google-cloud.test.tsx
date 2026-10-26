@@ -7,6 +7,7 @@ import { buttonsIn, buttonTag, DISABLED, elementsOf, HIDDEN_CHARS, text, textIn 
 import { SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import { renderHook, stubBackend } from "@/lib/test-ipc";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
+import type { TransportSyncView } from "@/bindings/TransportSyncView";
 import {
   gcloudAccountsQuery,
   pamGrantsKey,
@@ -482,11 +483,11 @@ describe("Hosts through IAP", () => {
     expect(await renderPageText(overviewOf([web], [webRoute]))).not.toContain("No host connects through IAP yet.");
   });
 
-  it("sets apart the routes a central library has no room for, after the others", async () => {
-    const sync = [
-      { host_id: web.id, synced: true },
-      { host_id: ops.id, synced: false },
-      { host_id: ghost.id, synced: false },
+  it("sets apart the routes a central library keeps on this computer, after the others, with no room as their reason only when it is", async () => {
+    const sync: TransportSyncView[] = [
+      { host_id: web.id, synced: true, reason: null },
+      { host_id: ops.id, synced: false, reason: "no_room" },
+      { host_id: ghost.id, synced: false, reason: "no_room" },
     ];
     const view = await renderPage(overviewOf([web, ops], [webRoute, opsRoute, ghostRoute], { ...library, transport_sync: sync }));
     // ops-1 sorts before web-1, but sits after it: it is the one the library has no room for.
@@ -495,13 +496,19 @@ describe("Hosts through IAP", () => {
     expect(view.row("Hosts through IAP", "web-1")).not.toContain("Saved on this computer only");
     // ghost-1's host is not here, so its route is listed nowhere.
     expect(view.text).not.toContain("ghost-1");
+    // A route that stays for another reason (the library's latest changes not read yet, a conflict, paused writes) is set apart too, but
+    // the page names no reason it was not given.
+    const waiting = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { ...library, transport_sync: [sync[0], { host_id: ops.id, synced: false, reason: null }] }));
+    expect(waiting.rows("Hosts through IAP").map((line) => line.split(" ")[0])).toEqual(["web-1", "ops-1"]);
+    expect(waiting.row("Hosts through IAP", "ops-1")).toContain("Saved on this computer only");
+    expect(waiting.text).not.toContain("no room");
     // A route the library holds, and one it says nothing of, are not set apart.
-    const quiet = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { ...library, transport_sync: [{ host_id: web.id, synced: true }] }));
+    const quiet = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { ...library, transport_sync: [sync[0]] }));
     expect(quiet.text).not.toContain("Saved on this computer only");
   });
 
   it("does not set routes apart outside a central library, where every route stays on this computer by design", async () => {
-    const sync = [{ host_id: ops.id, synced: false }, { host_id: web.id, synced: false }];
+    const sync: TransportSyncView[] = [{ host_id: ops.id, synced: false, reason: null }, { host_id: web.id, synced: false, reason: null }];
     const alone = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { transport_sync: sync }));
     expect(alone.text).not.toContain("Saved on this computer only");
     expect(alone.rows("Hosts through IAP").map((line) => line.split(" ")[0])).toEqual(["ops-1", "web-1"]);

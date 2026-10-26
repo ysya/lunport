@@ -100,6 +100,15 @@ pub struct PendingAccountView {
     kind: crate::sync::record_account::PendingAccountKind,
     phase: crate::sync::record_account::PendingAccountPhase,
 }
+/// Why a route of a library that uses central sync stays on this computer, when the Google Cloud page can say it (R65): the library has
+/// no room for it, as the publish step's walk finds (`transports::local_routes`). A route held back for any other reason has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub enum TransportLocalReason {
+    NoRoom,
+}
 /// Whether the route a host has syncs wherever the host does (the library's) or stays on this computer; one per route in `transports`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -107,6 +116,9 @@ pub struct PendingAccountView {
 pub struct TransportSyncView {
     pub host_id: String,
     pub synced: bool,
+    /// Why a route stays on this computer, when that can be said: only that the library has no room for it. None for a synced route,
+    /// and for one waiting on anything else (the library's latest changes not read yet, a conflict, paused writes).
+    pub reason: Option<TransportLocalReason>,
 }
 /// What this device remembers of its last grant request for a host: the justification given and the length asked for, offered again
 /// next time. It never leaves this device.
@@ -291,6 +303,8 @@ pub fn overview_from(
         })
         .collect();
     let routes = crate::sync::transports::view(state);
+    // The walk the publish step takes; a Catalog that cannot be built gives no reason, as it moves nothing.
+    let no_room = crate::sync::transports::local_routes(state).map(|walk| walk.no_room).unwrap_or_default();
     Ok(RecordOverview {
         key_scope: crate::sync::record_import::central_local::invocation(state).map(|scope| scope.with_generation(generation)),
         central_mode: state.local.central.as_ref().is_some_and(|owner| owner.control.cutover),
@@ -302,7 +316,11 @@ pub fn overview_from(
         hosts,
         transport_sync: routes
             .iter()
-            .map(|route| TransportSyncView { host_id: route.host_id.clone(), synced: crate::sync::transports::synced(state, &route.host_id) })
+            .map(|route| TransportSyncView {
+                host_id: route.host_id.clone(),
+                synced: crate::sync::transports::synced(state, &route.host_id),
+                reason: no_room.contains(&route.host_id).then_some(TransportLocalReason::NoRoom),
+            })
             .collect(),
         transports: routes,
         grant_memory: state
@@ -1840,6 +1858,22 @@ mod tests {
         assert_eq!(error.to_string(), PAUSED);
     }
 
+    /// R65: the overview says why a route of a central library stays on this computer only when the library has no room for it, as the
+    /// publish step's walk finds. A route that waits for anything else, the step itself or paused writes, gives no reason.
+    #[test]
+    fn the_overview_gives_a_reason_only_for_a_route_the_library_has_no_room_for() {
+        let entry = |reason| vec![TransportSyncView { host_id: HOST.into(), synced: false, reason }];
+        let kept = fixtures::saved_on_this_device(&fixtures::central_with_host(HOST), &fixtures::iap(HOST));
+        assert_eq!(overview_from(&kept, 1, None).unwrap().transport_sync, entry(None), "it fits: the publish step takes it");
+        let mut paused = kept.clone();
+        paused.shared_writes_blocked = true;
+        assert_eq!(overview_from(&paused, 1, None).unwrap().transport_sync, entry(None));
+        let full = fixtures::filled_short_of(kept, |catalog| catalog.transports.push(fixtures::iap(HOST)));
+        let view = overview_from(&full, 1, None).unwrap();
+        assert_eq!(view.transport_sync, entry(Some(TransportLocalReason::NoRoom)));
+        assert_eq!(serde_json::to_value(&view).unwrap()["transport_sync"][0]["reason"], "no_room", "the shape the webview reads");
+    }
+
     #[test]
     fn the_overview_reports_route_sync_and_grant_memory() {
         // HOST's route is the library's. OTHER's stays on this device, as one saved before the library used central sync is.
@@ -1848,12 +1882,15 @@ mod tests {
         let state = transports::remember_grant_request(&state, HOST, "restart app-api", 1800, 2).unwrap();
         let view = overview_from(&state, 1, None).unwrap();
         assert_eq!(view.transports, vec![fixtures::with_pam(HOST), fixtures::iap(OTHER)]);
-        let entry = |host_id: &str, synced: bool| TransportSyncView { host_id: host_id.into(), synced };
+        let entry = |host_id: &str, synced: bool| TransportSyncView { host_id: host_id.into(), synced, reason: None };
         assert_eq!(view.transport_sync, vec![entry(HOST, true), entry(OTHER, false)]);
         assert_eq!(view.grant_memory, vec![GrantMemoryView { host_id: HOST.into(), justification: "restart app-api".into(), duration_secs: 1800 }]);
         // The shape the webview reads.
         let json = serde_json::to_value(&view).unwrap();
-        assert_eq!(json["transport_sync"], serde_json::json!([{"host_id": HOST, "synced": true}, {"host_id": OTHER, "synced": false}]));
+        assert_eq!(
+            json["transport_sync"],
+            serde_json::json!([{"host_id": HOST, "synced": true, "reason": null}, {"host_id": OTHER, "synced": false, "reason": null}])
+        );
         assert_eq!(json["grant_memory"], serde_json::json!([{"host_id": HOST, "justification": "restart app-api", "duration_secs": 1800}]));
         // Nothing saved, nothing reported.
         let none = overview_from(&bare_state(), 1, None).unwrap();
