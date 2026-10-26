@@ -185,8 +185,10 @@ pub fn account_state(tokens: &dyn auth::TokenSource, account: &str) -> GcloudAcc
 const ACCOUNTS_BOUND: Duration = Duration::from_secs(20);
 
 /// gcloud's directory `dir` as the page and the account picker see it: whether it is there, its active account, and each account that
-/// holds credentials with its sign-in checked through `tokens` (design 2026-10-26, Commands). Nothing is written under `dir`, and a
-/// directory that is not there is `config_found: false`, not an error.
+/// holds credentials with its sign-in checked through `tokens` (design 2026-10-26, Commands). Only an email address is an account here:
+/// a route can name nothing else (`is_email`, the rule the route editor applies) and the picker must never offer one the editor would
+/// then refuse, so a folder named otherwise, such as `default` (gcloud's folder for an empty account), is neither listed nor checked.
+/// Nothing is written under `dir`, and a directory that is not there is `config_found: false`, not an error.
 ///
 /// Everything blocking runs off the async runtime, and all of it within `bound`: the checks run at once, one thread each, and a check
 /// that has not come back when the bound is up is `unknown` with the token service's "timed out" sentence while the others keep their
@@ -194,10 +196,11 @@ const ACCOUNTS_BOUND: Duration = Duration::from_secs(20);
 pub async fn gcloud_accounts(dir: PathBuf, tokens: Arc<dyn auth::TokenSource>, bound: Duration) -> Result<GcloudAccountsView, String> {
     let deadline = tokio::time::Instant::now() + bound;
     let listing = tokio::task::spawn_blocking(move || (dir.is_dir(), auth::active_account(&dir), auth::credentialed_accounts(&dir)));
-    let (config_found, active, names) = tokio::time::timeout_at(deadline, listing)
+    let (config_found, active, mut names) = tokio::time::timeout_at(deadline, listing)
         .await
         .map_err(|_| "Reading gcloud's folder took too long.".to_string())?
         .map_err(|error| error.to_string())?;
+    names.retain(|name| transports::is_email(name));
     let checks: Vec<_> = names
         .iter()
         .map(|name| {
@@ -732,11 +735,18 @@ mod tests {
     }
 
     /// Design 2026-10-26 (`gcp_accounts`): each account gcloud holds credentials for, in order of name, with its sign-in checked through
-    /// the token source by name; the active account; a service account, and a folder that is no email address (R31: the picker offers
-    /// only accounts a route accepts), listed by nobody and asked about by nobody.
+    /// the token source by name; the active account; a service account, and folders that are no email address (R31: the picker offers
+    /// only accounts a route accepts, and R32: this layer is the one that knows what a route can name, while `credentialed_accounts` is
+    /// gcloud's own view), listed by nobody and asked about by nobody.
     #[tokio::test]
     async fn gcloud_accounts_lists_each_account_with_its_sign_in_state_and_the_active_one() {
-        let dir = gcloud_dir(&["ops@example.com", "frank@example.com", "late@example.com", "default"], Some("ops@example.com"));
+        let not_emails = ["default", "frank@localhost", "frank smith@example.com"];
+        let mut folders = vec!["ops@example.com", "frank@example.com", "late@example.com"];
+        folders.extend(not_emails);
+        let dir = gcloud_dir(&folders, Some("ops@example.com"));
+        // gcloud's own view has them (good `authorized_user` files all); only the command's filter keeps them out.
+        let gcloud_sees = auth::credentialed_accounts(dir.path());
+        assert!(not_emails.iter().all(|name| gcloud_sees.iter().any(|seen| seen == name)), "{gcloud_sees:?}");
         std::fs::create_dir_all(dir.path().join("legacy_credentials/robot")).unwrap();
         std::fs::write(dir.path().join("legacy_credentials/robot/adc.json"), r#"{"type":"service_account","client_email":"robot@example.com"}"#).unwrap();
         let answers = Arc::new(
