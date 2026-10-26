@@ -120,6 +120,13 @@ The Connection section reads, top to bottom: Group; Alias beside Username; then 
 
 The probe is bounded by 20 s, shares the port check's limit of four checks at once, never asks for a grant or a sign-in, and attempts no SSH (no host key, no login). The pane's description: "Check whether this computer reaches the instance's port through IAP with its Google sign-in. Login and server identity are verified separately."
 
+### Tunnels through a host that needs a grant (added 2026-10-26, Frank)
+
+Starting a saved tunnel already goes through the grant check a terminal connection uses (`session/tunnels.rs` `run` → `Connector::connect` → `prepare_granted`, `session/connect.rs:365-381`), so the "Request a grant" window appears when the tunnel's first hop needs a grant and none is active. Two additions make it visible:
+
+- **The grant on the row.** In the Tunnels panel, a tunnel whose first hop (the tunnel's host, or its first jump host when it has jump hosts: the only hop an IAP route applies to) has a route with a PAM check shows that grant's state on its row, read when the panel opens and every minute through `transports_pam_status` for the first hop: "<entitlement> · Active until HH:MM", "Activating…", "Needs a grant: <entitlements, comma-separated>" when none is active, or the API's sentence when the check fails.
+- **A clear stop reason.** When a running tunnel's SSH connection ends because IAP refused the first hop's account (the relay's 4033 "not authorized" close, or an HTTP 403 handshake refusal on reconnect) and that hop's route has a PAM check, the tunnel's error reads: "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one." Every other ending keeps today's text. The engine already records why an IAP hop ended (`ssh/russh_engine.rs`, `tunnel_ended`); the SSH session exposes it to the tunnel.
+
 ### The Google Cloud page
 
 The Library sidebar keeps **Google Cloud** (without a count). The page has a header ("Google sign-in and access grants on this computer. A host connects through IAP when its Connect via is set to Google Cloud IAP.") with **New IAP host**, and three sections:
@@ -176,3 +183,4 @@ Nothing on this page edits a route: the panel's editor dialog, its table and Rem
 11. The sidebar keeps "Google Cloud", without a count.
 12. Routes enter a library by one publish step after the device is on central (first publication, adoption and upgrade alike), not inside the migration, so the migration inventory, journal and rebase code stay as they are. For that moment the routes are still local, and still work on their device.
 13. A route that does not fit in the Catalog stays local and the Google Cloud page says why. Tunnel saves get the same size check, since they share the room.
+14. A tunnel shows the grant of its first hop. Its stop reason names the ended grant only for an IAP refusal on a route with a PAM check; an IAP refusal for another reason on such a route (access removed in Google Cloud) reads the same.

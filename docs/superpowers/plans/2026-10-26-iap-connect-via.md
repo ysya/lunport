@@ -939,3 +939,79 @@ git commit -m "docs: describe Connect via, route sync and the Google Cloud page"
 ```
 
 When release-please opens the release PR, add the older-release sentence from Step 3 to that release's changelog entry.
+
+---
+
+### Task 17: Grant status and stop reason for tunnels (added 2026-10-26)
+
+Spec section: "Tunnels through a host that needs a grant".
+
+**Files:**
+- Modify: `src-tauri/src/ssh/traits.rs:32-60` (`Session::tunnel_end`), `src-tauri/src/ssh/russh_engine.rs` (implement it from the first hop's `tunnel_ended`, :184-187), `src-tauri/src/ssh/fake.rs` (a settable end for tests)
+- Modify: `src-tauri/src/session/tunnels.rs:183-235` (`run`'s stop reason)
+- Modify: `src/components/records/TunnelsPanel.tsx` (the grant line)
+- Test: `src-tauri/src/session/tunnels.rs` tests, `src/components/records/TunnelsPanel.test.tsx`
+
+**Interfaces:**
+- Consumes: `transports::get`, `record_repository::resolve_host_chain` (the first hop of the tunnel's host), `fetchPamStatus`, `grantStateLine`, `transportFor` (Task 12).
+- Produces: `fn tunnel_end(&self) -> Option<crate::gcp::iap::IapError>` on `ssh::Session`, default `None` (only a session whose first hop is an IAP tunnel that the relay or the credentials ended answers `Some`); `pub(crate) const GRANT_ENDED: &str = "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one.";` and `pub(crate) fn stop_reason(end: Option<&IapError>, needs_grant: bool, fallback: String) -> String` in `session/tunnels.rs`. `run` computes `needs_grant` as "the first hop of the rule's host has a route with a PAM check" and, when the session dies, returns `stop_reason(session.tunnel_end().as_ref(), needs_grant, <today's fallback text>)`.
+
+Frontend: for each tunnel row, the first hop is `host.effective_payload.jump[0]` when the host has jump hosts, else the host; when `transportFor(overview, firstHop)?.kind.pam` is set, read `fetchPamStatus(firstHop)` when the panel opens and every minute (one read in flight per first hop) and show on the row: `<entitlement> · <grantStateLine>` when a grant is active or activating, "Needs a grant: <entitlements, comma-separated>" when none is active, or the status message on error.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[test]
+fn a_tunnel_stopped_by_an_ended_grant_says_so() {
+    let refused = IapError::Closed { code: 4033, reason: "not authorized".into() };
+    assert_eq!(stop_reason(Some(&refused), true, "fallback".into()), GRANT_ENDED);
+    assert_eq!(stop_reason(Some(&IapError::Refused { status: 403 }), true, "fallback".into()), GRANT_ENDED);
+    assert_eq!(stop_reason(Some(&refused), false, "fallback".into()), "fallback");
+    let backend = IapError::Closed { code: 4003, reason: "failed to connect to backend".into() };
+    assert_eq!(stop_reason(Some(&backend), true, "fallback".into()), "fallback");
+    assert_eq!(stop_reason(None, true, "fallback".into()), "fallback");
+}
+```
+
+```ts
+it("shows the grant a tunnel's first hop needs", async () => {
+  const text = await renderTunnelsText(overviewWithTunnelThrough(pamHost)); // transports_pam_status: prod-operate active until 10:00
+  expect(text).toContain("prod-operate · Active until 10:00");
+});
+it("says a grant is needed when none is active", async () => {
+  expect(await renderTunnelsText(overviewWithTunnelThrough(pamHost), { pamStatus: none })).toContain("Needs a grant: prod-operate, prod-admin");
+});
+it("reads the grant of the first jump host", async () => {
+  await renderTunnelsText(overviewWithTunnelBehind(internalHost, pamJump));
+  expect(lastInvoke("transports_pam_status").hostId).toBe(pamJump.id);
+});
+it("shows no grant line for a tunnel whose first hop needs none", async () => {
+  expect(await renderTunnelsText(overviewWithTunnelThrough(plainHost))).not.toContain("grant");
+});
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- a_tunnel_stopped_by_an_ended_grant_says_so --test-threads=2` and `pnpm test -- src/components/records/TunnelsPanel.test.tsx`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement** the session method, `stop_reason`, its use in `run`, and the row's grant line, as described.
+
+- [ ] **Step 4: Run every check** (Task 16's full check came before this task)
+
+```bash
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam
+pnpm test
+pnpm build
+git diff --check
+```
+Expected: every command passes; `git diff --check` prints nothing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src-tauri/src src/components/records
+git commit -m "feat(tunnels): show the grant a tunnel needs and say when it ended"
+```
+
+Also add one sentence to `docs/usage.md`'s IAP section: a tunnel through a host that needs a grant shows the grant on its row, asks for one when started, and says so when it stops because the grant ended.
