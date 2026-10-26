@@ -981,8 +981,9 @@ pub(super) mod tests {
             space.selected = false; // the route's host is then found once, in this device's own scope
         }
         let route: crate::sync::transports::HostTransport = serde_json::from_value(serde_json::json!({"host_id":"0000000000000001","kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
-        let state = crate::sync::transports::set(&state, &route.host_id, None, Some(route.clone()), 1).unwrap();
-        // The projection's owner has cut over, yet the route saved here is not the library's yet.
+        // A route this device saved before its library moved to central sync: the projection's owner has cut over, yet the route is
+        // not the library's yet.
+        let state = crate::sync::transports::tests::saved_on_this_device(&state, &route);
         assert!(records_v3::central_cutover(&state));
         assert_eq!(Ledger::initial(&plan, &state, &keys).unwrap(), ledger);
         let changes = ledger.public_changes(&state, &keys).unwrap();

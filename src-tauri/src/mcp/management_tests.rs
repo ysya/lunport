@@ -12,6 +12,10 @@ use crate::sync::{
 use std::sync::atomic::AtomicUsize;
 
 fn device() -> TestDevice {
+    device_with(|state| state)
+}
+/// A device whose fresh records `edit` changes before they are activated.
+fn device_with(edit: impl FnOnce(SyncStateV3) -> SyncStateV3) -> TestDevice {
     let d = TestDevice::new("management", &FakeRelay::new(), &TestClock::new());
     let record_runtime::StartupProbe::Records { mut state, .. } =
         record_runtime::probe_startup(&d.env().state_path, "management")
@@ -22,7 +26,7 @@ fn device() -> TestDevice {
     record_runtime::activate_probe(
         &mut d.runtime.core.lock().unwrap(),
         record_runtime::StartupProbe::Records {
-            state,
+            state: Box::new(edit(*state)),
             fresh: false,
         },
     )
@@ -736,6 +740,23 @@ fn a_transport_changed_meanwhile_is_refused() {
     .unwrap_err();
     assert_eq!(error, "The transport changed while the request was open; read it again and retry.");
     assert_eq!(kind_of(&transport_of(&d, &id).unwrap()).1, "asia-east1-c", "the other change stands");
+}
+
+/// A library that uses central sync holds its routes and tunnels in one record (design 2026-10-26, Room in the Catalog): a route that
+/// would not fit is refused with the sentence, before any window.
+#[test]
+fn set_transport_refuses_a_route_that_does_not_fit() {
+    use crate::sync::transports::{
+        tests::{filled_past_the_limit_with_tunnels, in_central_mode},
+        NO_ROOM,
+    };
+    let d = device_with(|state| filled_past_the_limit_with_tunnels(in_central_mode(state)));
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    let audited = r.recent.lock().unwrap().len();
+    assert_eq!(set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), NO_ROOM);
+    assert_eq!(r.recent.lock().unwrap().len(), audited, "nothing to audit: no window opened");
+    assert!(transport_of(&d, &id).is_none());
 }
 
 #[test]

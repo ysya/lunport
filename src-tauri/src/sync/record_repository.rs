@@ -78,6 +78,9 @@ pub enum RepositoryError {
     KeyNotFound(String),
     KeyInUse(String),
     OrderingOverflow(String),
+    /// A save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog). It reads
+    /// as `transports::NO_ROOM` wherever it is shown.
+    NoRoom,
 }
 impl From<RecordValidationError> for RepositoryError {
     fn from(error: RecordValidationError) -> Self {
@@ -86,7 +89,10 @@ impl From<RecordValidationError> for RepositoryError {
 }
 impl std::fmt::Display for RepositoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::NoRoom => f.write_str(super::transports::NO_ROOM),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for RepositoryError {}

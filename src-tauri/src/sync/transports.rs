@@ -1,7 +1,9 @@
-//! Device-local transports: how this device reaches a saved host when not over plain TCP (design 2026-10-25, Google Cloud IAP). One
-//! `Meta` record per host, `transport:<host-id>`, in the envelope tunnel rules use, so a later step can publish them; until then they live
-//! in `local.transports` only, so `set` consults neither the account nor opaque shadows, and an account join leaves them alone. Saving
-//! the first one raises the local state version to `STATE_VERSION`, which an older Lunport refuses to open.
+//! Transports: how a device reaches a saved host when not over plain TCP (design 2026-10-25, Google Cloud IAP). One `Meta` record per
+//! host, `transport:<host-id>`, in the envelope tunnel rules use. In a library that uses central sync a route is the library's (design
+//! 2026-10-26, Inside Lunport, routes take tunnel rules' central path): `set` writes the account's row, as `tunnel_rules::set` does, under
+//! the same write gate, and capture publishes it in the Catalog. Without central sync (no account, or the older chain-mode account)
+//! routes live in `local.transports` only, so `set` consults neither the account nor opaque shadows, and an account join leaves them
+//! alone. Saving the first local one raises the local state version to `STATE_VERSION`, which an older Lunport refuses to open.
 //!
 //! What a grant request taught this device about a host (the justification and the length) is not part of the route: it stays in
 //! `local.transport_grants` as a `GrantMemory`, under `SYNC_STATE_VERSION` (design 2026-10-26), so that requesting a grant never edits
@@ -11,6 +13,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::central::{
+    self,
+    payload::{catalog_fits, Catalog},
+};
 use super::record::{record_key, LocalRecord, Record, RecordKind};
 use super::record_repository::{self as repo, RepositoryError};
 use super::records_v3::{self, SyncStateV3};
@@ -22,6 +28,10 @@ pub const SYNC_STATE_VERSION: u32 = records_v3::TRANSPORT_SYNC_STATE_VERSION;
 const MAX_ENTITLEMENTS: usize = 8;
 /// The most routes one library holds, as many as it holds tunnels (design 2026-10-26, Room in the Catalog). The central Catalog enforces it.
 pub const MAX_ROUTES: usize = 256;
+/// The refusal of a save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog).
+pub const NO_ROOM: &str = "This library has no room for more routes or tunnels: together they would exceed what one sync record holds. Remove a route or a tunnel, then try again.";
+/// The refusal of a save whose displayed route is no longer the saved one: `set`'s compare-and-set.
+pub const ROUTE_CHANGED: &str = "The host's route changed while you were editing; reload and try again.";
 
 /// A host's transport: which host, and how this device reaches it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,14 +255,53 @@ pub fn valid(record: &Record) -> bool {
         && if record.deleted { record.payload.is_null() } else { decode(record).is_some() }
 }
 
-/// Every live transport on this device.
+/// Every live transport: for each host, the library's route when it holds one, else the one saved on this device; in host-id order.
 pub fn view(state: &SyncStateV3) -> Vec<HostTransport> {
-    state.local.transports.values().filter_map(|row| decode(&row.record)).collect()
+    let mut routes: BTreeMap<String, HostTransport> =
+        state.local.transports.values().filter_map(|row| decode(&row.record)).map(|route| (route.host_id.clone(), route)).collect();
+    if let Some(account) = &state.account {
+        for route in account.records.values().filter_map(|row| decode(&row.record)) {
+            routes.insert(route.host_id.clone(), route);
+        }
+    }
+    routes.into_values().collect()
 }
 
-/// The transport of one host, if it has one.
+/// The transport of one host, if it has one: the library's route when it holds one, else the one saved on this device.
 pub fn get(state: &SyncStateV3, host_id: &str) -> Option<HostTransport> {
-    state.local.transports.get(&record_key(RecordKind::Meta, &wire_id(host_id))).and_then(|row| decode(&row.record))
+    library_route(state, host_id)
+        .or_else(|| state.local.transports.get(&record_key(RecordKind::Meta, &wire_id(host_id))).and_then(|row| decode(&row.record)))
+}
+
+/// Whether the route `get` reads for `host_id` is the library's, so it syncs wherever the host does (design 2026-10-26, Where routes
+/// sync).
+pub fn synced(state: &SyncStateV3, host_id: &str) -> bool {
+    library_route(state, host_id).is_some()
+}
+
+/// The library's route for `host_id`: a live `transport:` row of the account.
+fn library_route(state: &SyncStateV3, host_id: &str) -> Option<HostTransport> {
+    state.account.as_ref()?.records.get(&record_key(RecordKind::Meta, &wire_id(host_id))).and_then(|row| decode(&row.record))
+}
+
+/// Whether routes and tunnels are the library's here: it uses central sync (this device's central owner has cut over) and this device
+/// keeps the library's rows in its account. Otherwise, with no account or the older chain-mode one, routes stay on this device (design
+/// 2026-10-26, Where routes sync) and nothing publishes a Catalog.
+pub(crate) fn central_library(state: &SyncStateV3) -> bool {
+    records_v3::central_cutover(state) && state.account.is_some()
+}
+
+/// The room check of a save in a library that uses central sync (design 2026-10-26, Room in the Catalog): the Catalog `next` would
+/// publish must fit in one sync record, else `RepositoryError::NoRoom`. Only what the library must publish counts, not the routes saved
+/// on this device alone, which simply stay there while there is no room. A Catalog that cannot be built refuses the save with its own
+/// sentence, under `field` and `id`. Removing a route or a tunnel is never checked.
+pub(crate) fn ensure_room(next: &SyncStateV3, field: &'static str, id: &str) -> Result<(), RepositoryError> {
+    let catalog = central::catalog_of(next, &Catalog::default(), false).map_err(|error| repo::invalid(field, id, &error.to_string()))?;
+    if catalog_fits(&catalog) {
+        Ok(())
+    } else {
+        Err(RepositoryError::NoRoom)
+    }
 }
 
 /// Whether the map holds anything, tombstones included: they too need the state version.
@@ -260,14 +309,21 @@ pub fn has_data(state: &SyncStateV3) -> bool {
     !state.local.transports.is_empty()
 }
 
-/// Saves (`Some`) or removes (`None`) the transport of `host_id`, provided `expected` is what is stored now: the compare-and-set the
-/// editor relies on. The result is the next state; the version is raised to `STATE_VERSION`.
+/// Saves (`Some`) or removes (`None`) the transport of `host_id`, provided `expected` is what `get` reads now: the compare-and-set the
+/// editor relies on, refused with `ROUTE_CHANGED`. In a library that uses central sync the route is the library's: a library whose
+/// writes are blocked refuses it, and the account's row is written (`write_library`), so a save must leave the Catalog room (`NO_ROOM`).
+/// Otherwise the route is saved on this device and the version raised to `STATE_VERSION`. A removal also forgets what grant requests
+/// taught this device about the host (`grant_memory`).
 pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
     if !records_v3::is_host_id(host_id) {
         return Err(repo::invalid("transport", host_id, "Invalid host identity."));
     }
+    let library = central_library(state);
+    if library && records_v3::account_writes_blocked(state) {
+        return Err(RepositoryError::ReadOnlyAccount);
+    }
     if get(state, host_id).as_ref() != expected {
-        return Err(repo::invalid("transport", host_id, "This host's transport changed meanwhile. Refresh and try again."));
+        return Err(repo::invalid("transport", host_id, ROUTE_CHANGED));
     }
     if let Some(transport) = &transport {
         transport.validate().map_err(|reason| repo::invalid("transport", host_id, &reason))?;
@@ -275,7 +331,12 @@ pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>,
             return Err(repo::invalid("transport", host_id, "The transport names another host."));
         }
     }
-    write(state, host_id, transport, now)
+    let removal = transport.is_none();
+    let mut next = if library { write_library(state, host_id, transport, now)? } else { write(state, host_id, transport, now)? };
+    if removal {
+        next.local.transport_grants.remove(host_id);
+    }
+    Ok(next)
 }
 
 /// What this device remembers of its last grant request for `host_id`, if it made one (design 2026-10-26, Grant requests).
@@ -308,16 +369,20 @@ pub fn remember_grant_request(state: &SyncStateV3, host_id: &str, justification:
     Ok(next)
 }
 
+/// A route's record payload, or a tombstone's `null`.
+fn payload_of(transport: Option<&HostTransport>) -> serde_json::Value {
+    match transport {
+        Some(transport) => serde_json::to_value(Payload { schema: 1, transport: transport.clone() }).expect("a transport serializes"),
+        None => serde_json::Value::Null,
+    }
+}
+
 fn write(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
     let wire = wire_id(host_id);
     let key = record_key(RecordKind::Meta, &wire);
     let previous = state.local.transports.get(&key);
-    let payload = match &transport {
-        Some(transport) => serde_json::to_value(Payload { schema: 1, transport: transport.clone() }).expect("a transport serializes"),
-        None => serde_json::Value::Null,
-    };
     let earlier: Vec<&Record> = previous.map(|row| &row.record).into_iter().collect();
-    let mut record = repo::ordered_record(state, &wire, payload, transport.is_none(), now, &earlier)?;
+    let mut record = repo::ordered_record(state, &wire, payload_of(transport.as_ref()), transport.is_none(), now, &earlier)?;
     record.kind = RecordKind::Meta;
     let mut next = state.clone();
     next.local.transports.insert(key, LocalRecord { record, seq: previous.map_or(0, |row| row.seq), dirty: false });
@@ -325,9 +390,36 @@ fn write(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, n
     Ok(next)
 }
 
-/// Transports are device-local whatever the host's scope: leaving an account keeps the transport of every host that stays on this device
-/// (a live record in `next.local.hosts`), under the new local id the leave plan gave a space host (`host_ids`: old → new), and drops the
-/// transports of the hosts that go. `next`'s map starts empty.
+/// Writes the library's row for `host_id` (`central_library`), dirty so that the next capture publishes it, as `tunnel_rules::set`
+/// writes a rule's. The copy this device kept before the library held the route goes: the row supersedes it, and a tombstone would
+/// otherwise let it come back. A save must leave the Catalog room: at most `MAX_ROUTES` routes, counted first because the Catalog would
+/// refuse a longer list with a sentence of its own, and an encoding that fits in one record (`ensure_room`). The version is raised to
+/// `SYNC_STATE_VERSION`, which the library's rows need.
+fn write_library(state: &SyncStateV3, host_id: &str, transport: Option<HostTransport>, now: u64) -> Result<SyncStateV3, RepositoryError> {
+    let wire = wire_id(host_id);
+    let key = record_key(RecordKind::Meta, &wire);
+    let mut next = state.clone();
+    next.local.transports.remove(&key);
+    next.version = next.version.max(SYNC_STATE_VERSION);
+    let records = &mut next.account.as_mut().expect("a library that uses central sync keeps its rows in the account").records;
+    let previous = records.get(&key);
+    let earlier: Vec<&Record> = previous.map(|row| &row.record).into_iter().collect();
+    let mut record = repo::ordered_record(state, &wire, payload_of(transport.as_ref()), transport.is_none(), now, &earlier)?;
+    record.kind = RecordKind::Meta;
+    let seq = previous.map_or(0, |row| row.seq);
+    records.insert(key, LocalRecord { record, seq, dirty: true });
+    if transport.is_some() {
+        if records.values().filter(|row| decode(&row.record).is_some()).count() > MAX_ROUTES {
+            return Err(RepositoryError::NoRoom);
+        }
+        ensure_room(&next, "transport", host_id)?;
+    }
+    Ok(next)
+}
+
+/// Leaving an account keeps the transport of every host that stays on this device (a live record in `next.local.hosts`), the library's
+/// routes included, as one saved on this device, under the new local id the leave plan gave a space host (`host_ids`: old → new), and
+/// drops the transports of the hosts that go. `next`'s map starts empty.
 pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
     next.local.transports.clear();
     for mut transport in view(before) {
@@ -346,4 +438,4 @@ pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids:
 
 #[cfg(test)]
 #[path = "transports_tests.rs"]
-mod tests;
+pub(crate) mod tests;

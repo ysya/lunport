@@ -133,7 +133,9 @@ fn is_group_order(row: &LocalRecord) -> bool {
 /// and then new ones by id. Its routes are the account's `transport:` rows, always; then, if `local_routes` is set and this device has
 /// cut over to central sync, the routes saved on this device that the library does not hold yet, in host-id order, while they fit: one
 /// whose host the library lacks stays on the device, and so does every later one once one does not fit or the Catalog holds
-/// `transports::MAX_ROUTES` (design 2026-10-26, Room in the Catalog). No route keeps a justification.
+/// `transports::MAX_ROUTES` (design 2026-10-26, Room in the Catalog). No route keeps a justification. Account rows the Catalog does
+/// not carry are skipped, those it does not know included: `public_rows` is what refuses an unknown row, so a caller of `catalog_of`
+/// alone (the room check of route and tunnel saves, `transports::ensure_room`) learns the Catalog, not whether the state can be captured.
 pub(crate) fn catalog_of(
     state: &SyncStateV3,
     original: &Catalog,
@@ -386,7 +388,7 @@ mod tests {
         insert(&mut state.account.as_mut().unwrap().records, row(RecordKind::Meta, &transports::wire_id(host_id), payload));
     }
     fn with_local_route_only(state: SyncStateV3, host_id: &str) -> SyncStateV3 {
-        transports::set(&state, host_id, None, Some(route(host_id)), 1).unwrap()
+        transports::tests::saved_on_this_device(&state, &route(host_id))
     }
     fn with_host_and_local_route(mut state: SyncStateV3, host_id: &str) -> SyncStateV3 {
         let host = json!({"schema":2,"alias":format!("host-{host_id}"),"hostname":"fixture.invalid","auth":"password"});

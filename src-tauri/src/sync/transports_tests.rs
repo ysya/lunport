@@ -54,9 +54,9 @@ fn a_saved_transport_is_read_back_by_host_and_raises_the_state_version() {
 #[test]
 fn saving_requires_the_displayed_value() {
     let one = set(&state(), A, None, Some(iap(A)), 1).unwrap();
-    assert!(set(&one, A, None, Some(iap(A)), 2).is_err(), "somebody saved first");
+    assert_eq!(reason(set(&one, A, None, Some(iap(A)), 2).unwrap_err()), ROUTE_CHANGED, "somebody saved first");
     let changed = with_zone(iap(A), "asia-east1-c");
-    assert!(set(&one, A, Some(&changed), Some(iap(A)), 2).is_err(), "the displayed value is stale");
+    assert_eq!(reason(set(&one, A, Some(&changed), Some(iap(A)), 2).unwrap_err()), ROUTE_CHANGED, "the displayed value is stale");
     let two = set(&one, A, Some(&iap(A)), Some(changed.clone()), 2).unwrap();
     assert_eq!(get(&two, A), Some(changed));
     assert!(set(&two, A, Some(&iap(A)), Some(iap(B)), 3).is_err(), "a transport names its own host");
@@ -364,4 +364,154 @@ fn leaving_an_account_keeps_the_transports_of_the_hosts_that_stay_and_drops_the_
     preserve_on_leave(&before, &mut nothing, &BTreeMap::new(), 4).unwrap();
     assert!(view(&nothing).is_empty(), "no host stays, no transport stays");
     assert_eq!(nothing.version, 4, "no transport, no version bump");
+}
+
+// ---- Routes in a library that uses central sync (design 2026-10-26, Inside Lunport, routes take tunnel rules' central path) ----
+
+const HOST: &str = A;
+const OTHER: &str = B;
+
+/// `state` in a library that uses central sync: its central owner has cut over, and its account keeps the library's rows.
+pub(crate) fn in_central_mode(mut state: SyncStateV3) -> SyncStateV3 {
+    let mut central = crate::sync::central::workspace::tests::enrolled();
+    central.control.cutover = true;
+    state.version = state.version.max(CENTRAL_STATE_VERSION);
+    state.local.central = Some(central);
+    state.account = Some(crate::sync::state_v2::AccountState::new(&"a".repeat(64)));
+    state
+}
+
+/// A library that uses central sync, holding `host`.
+pub(crate) fn central_with_host(host: &str) -> SyncStateV3 {
+    in_central_mode(with_local_host(state(), host))
+}
+
+/// A library on the older chain-mode sync, holding `host`: an account, no central sync.
+fn chain_account_with_host(host: &str) -> SyncStateV3 {
+    let mut state = with_local_host(state(), host);
+    state.account = Some(crate::sync::state_v2::AccountState::new(&"a".repeat(64)));
+    state
+}
+
+/// `state` with library tunnels, names at their longest, added until the Catalog it publishes no longer fits in one record.
+pub(crate) fn filled_past_the_limit_with_tunnels(mut state: SyncStateV3) -> SyncStateV3 {
+    use crate::sync::central::payload::{catalog_fits, Catalog};
+    for n in 0..256 {
+        let rule: crate::sync::tunnel_rules::TunnelRule = serde_json::from_value(json!({"id":format!("{:016x}", 0x1000 + n),"name":"t".repeat(128),"host_id":HOST,
+            "forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"db.internal","target_port":5432}})).unwrap();
+        let id = crate::sync::tunnel_rules::wire_id(&rule.id);
+        let record = Record { kind: RecordKind::Meta, id: id.clone(), version: 1, updated_at_ms: 1, device_id: state.device_id.clone(), deleted: false, payload: json!({"schema":1,"rule":rule}) };
+        state.account.as_mut().unwrap().records.insert(record_key(RecordKind::Meta, &id), LocalRecord { record, seq: 0, dirty: false });
+        if !catalog_fits(&crate::sync::central::catalog_of(&state, &Catalog::default(), false).unwrap()) {
+            return state;
+        }
+    }
+    panic!("256 tunnels still fit in one record");
+}
+
+/// `state` with `route` saved on this device alone, as Lunport saved it before its library used central sync, whatever the library
+/// uses now.
+pub(crate) fn saved_on_this_device(state: &SyncStateV3, route: &HostTransport) -> SyncStateV3 {
+    write(state, &route.host_id, Some(route.clone()), 1).unwrap()
+}
+
+/// `state` with the library's writes blocked, as while an account operation is pending.
+fn blocked(mut state: SyncStateV3) -> SyncStateV3 {
+    state.shared_writes_blocked = true;
+    state
+}
+
+#[test]
+fn in_central_mode_a_route_is_a_dirty_account_row_and_reads_back_from_there() {
+    let state = central_with_host(HOST);
+    let next = set(&state, HOST, None, Some(iap(HOST)), 1).unwrap();
+    assert!(next.local.transports.is_empty());
+    let row = &next.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &wire_id(HOST))];
+    assert!(row.dirty);
+    assert_eq!(get(&next, HOST), Some(iap(HOST)));
+    assert!(synced(&next, HOST));
+    assert_eq!(view(&next), vec![iap(HOST)]);
+    assert_eq!(next.version, SYNC_STATE_VERSION, "a route of the library needs version 10");
+    validate_state(&next).unwrap();
+}
+
+#[test]
+fn a_chain_mode_account_keeps_routes_on_this_device() {
+    let next = set(&chain_account_with_host(HOST), HOST, None, Some(iap(HOST)), 1).unwrap();
+    assert!(next.local.transports.contains_key(&record_key(RecordKind::Meta, &wire_id(HOST))));
+    assert!(!synced(&next, HOST));
+    assert!(next.account.as_ref().unwrap().records.is_empty(), "the chain-mode account is left alone");
+    assert_eq!(next.version, STATE_VERSION);
+}
+
+#[test]
+fn a_full_catalog_refuses_one_more_route_but_always_allows_removal() {
+    let state = set(&central_with_host(HOST), HOST, None, Some(iap(HOST)), 1).unwrap();
+    let full = filled_past_the_limit_with_tunnels(central_with_host(OTHER));
+    assert_eq!(set(&full, OTHER, None, Some(iap(OTHER)), 2).unwrap_err().to_string(), NO_ROOM);
+    let crowded = filled_past_the_limit_with_tunnels(state);
+    assert!(set(&crowded, HOST, Some(&iap(HOST)), None, 3).is_ok(), "removal never fails the check");
+}
+
+#[test]
+fn a_blocked_library_refuses_route_edits() {
+    let state = blocked(central_with_host(HOST));
+    assert!(matches!(set(&state, HOST, None, Some(iap(HOST)), 1), Err(RepositoryError::ReadOnlyAccount)));
+    assert!(set(&blocked(chain_account_with_host(HOST)), HOST, None, Some(iap(HOST)), 1).is_ok(), "a route on this device obeys no library's block");
+}
+
+/// R7: a library holds at most `MAX_ROUTES` routes. One more is refused with the room sentence rather than the Catalog's own refusal,
+/// and a library holding that many still takes an edit.
+#[test]
+fn a_library_holding_the_most_routes_refuses_another_but_takes_an_edit() {
+    let hosts: Vec<String> = (0..MAX_ROUTES).map(|n| format!("{:016x}", 0x1000 + n)).collect();
+    let full = hosts.iter().fold(central_with_host(HOST), |state, host| set(&state, host, None, Some(iap(host)), 1).unwrap());
+    assert_eq!(view(&full).len(), MAX_ROUTES);
+    assert_eq!(set(&full, HOST, None, Some(iap(HOST)), 2).unwrap_err().to_string(), NO_ROOM);
+    let first = hosts[0].as_str();
+    assert!(set(&full, first, Some(&iap(first)), Some(with_zone(iap(first), "asia-east1-c")), 2).is_ok());
+}
+
+/// R7: a Catalog that cannot be built refuses the save with its own sentence.
+#[test]
+fn a_library_whose_catalog_cannot_be_built_refuses_a_route_with_that_reason() {
+    let mut state = central_with_host(HOST);
+    // A collection row for a collection this device does not hold.
+    let id = "b".repeat(64);
+    let record = Record { kind: RecordKind::Space, id: id.clone(), version: 1, updated_at_ms: 1, device_id: state.device_id.clone(), deleted: false, payload: json!({"schema":1,"name":"Work"}) };
+    state.account.as_mut().unwrap().records.insert(record_key(RecordKind::Space, &id), LocalRecord { record, seq: 0, dirty: false });
+    assert_eq!(reason(set(&state, HOST, None, Some(iap(HOST)), 1).unwrap_err()), "Invalid central sync protocol data.");
+}
+
+/// A route saved on this device before its library moved to central sync is read until the library holds one. A save or a removal
+/// writes the library's row and drops this device's copy, which could otherwise come back once the library's row is a tombstone.
+#[test]
+fn a_route_saved_on_this_device_gives_way_to_the_librarys_row() {
+    let state = in_central_mode(set(&with_local_host(state(), HOST), HOST, None, Some(iap(HOST)), 1).unwrap());
+    assert_eq!(get(&state, HOST), Some(iap(HOST)));
+    assert!(!synced(&state, HOST), "saved on this computer only, until the library holds it");
+    let changed = with_zone(iap(HOST), "asia-east1-c");
+    let saved = set(&state, HOST, Some(&iap(HOST)), Some(changed.clone()), 2).unwrap();
+    assert!(saved.local.transports.is_empty());
+    assert_eq!((get(&saved, HOST), synced(&saved, HOST)), (Some(changed), true));
+    let removed = set(&state, HOST, Some(&iap(HOST)), None, 2).unwrap();
+    assert_eq!(get(&removed, HOST), None, "this device's copy does not come back");
+    assert!(view(&removed).is_empty() && !synced(&removed, HOST));
+    let row = &removed.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &wire_id(HOST))];
+    assert!(row.dirty && row.record.deleted, "a tombstone for the next capture to publish");
+}
+
+/// R10: removing a route forgets what grant requests taught this device about its host, whether the route was this device's or the
+/// library's. An edit keeps it.
+#[test]
+fn removing_a_route_forgets_the_grant_memory_of_its_host() {
+    for base in [state(), central_with_host(A)] {
+        let both = set(&set(&base, A, None, Some(with_pam(A)), 1).unwrap(), B, None, Some(with_pam(B)), 2).unwrap();
+        let remembered = remember_grant_request(&remember_grant_request(&both, A, "restart app-api", 1800, 3).unwrap(), B, "rotate certs", 600, 4).unwrap();
+        let removed = set(&remembered, A, Some(&with_pam(A)), None, 5).unwrap();
+        assert_eq!(grant_memory(&removed, A), None);
+        assert_eq!(grant_memory(&removed, B), Some(GrantMemory { justification: "rotate certs".into(), duration_secs: 600 }), "another host's memory stays");
+        let edited = set(&remembered, A, Some(&with_pam(A)), Some(with_zone(with_pam(A), "asia-east1-c")), 5).unwrap();
+        assert!(grant_memory(&edited, A).is_some(), "an edit keeps it");
+    }
 }

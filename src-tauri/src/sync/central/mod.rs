@@ -58,6 +58,7 @@ mod projection;
 mod projection_cache;
 pub mod projection_state;
 mod projection_local;
+pub(super) use projection_local::catalog_of;
 mod projection_capture;
 pub(super) use projection_capture::public_candidate as capture_public;
 mod projection_delta;

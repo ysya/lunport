@@ -739,7 +739,7 @@ const REMOVE_WORDS: TransportWords = TransportWords {
 };
 
 /// Shows a transport change (`after`, or its removal when `None`) in the window and saves it on consent against the transport as it
-/// was (`before`): the shape `set_transport` and `remove_transport` share.
+/// was (`before`, read from `state`): the shape `set_transport` and `remove_transport` share.
 #[allow(clippy::too_many_arguments)]
 fn transport_change(
     env: &SyncEnv,
@@ -749,6 +749,7 @@ fn transport_change(
     cancel: &CancelToken,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
     alias: String,
+    state: &SyncStateV3,
     host: &repo::HostView,
     before: Option<crate::sync::transports::HostTransport>,
     after: Option<crate::sync::transports::HostTransport>,
@@ -760,6 +761,9 @@ fn transport_change(
     if rows.is_empty() {
         return Err("Nothing would change.".into());
     }
+    // What the save would refuse is refused before the window: a library whose writes are blocked, or one whose Catalog has no room
+    // for the route (design 2026-10-26, Room in the Catalog).
+    crate::sync::transports::set(state, &id, before.as_ref(), after.clone(), env.now()).map_err(|e| e.to_string())?;
     let proposal = McpHostProposal { kind: kind.into(), settings: rows };
     let _active = active(runtime, &mut context, &id, cancel)?;
     live(runtime, policy.approval_mode, cancel)?;
@@ -839,7 +843,7 @@ pub(super) fn set_transport(
     }
     let before = crate::sync::transports::get(&state, &host.host.id);
     let after = changes.merged(&host.host.id, before.as_ref())?;
-    transport_change(env, runtime, policy, context, cancel, approve, changes.alias, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
+    transport_change(env, runtime, policy, context, cancel, approve, changes.alias, &state, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
 }
 
 #[derive(Deserialize)]
@@ -872,7 +876,7 @@ pub(super) fn remove_transport(
     if before.is_none() {
         return Err("This host has no transport.".into());
     }
-    transport_change(env, runtime, policy, context, cancel, approve, alias, &host, before, None, proposal_kinds::REMOVE_TRANSPORT, &REMOVE_WORDS)
+    transport_change(env, runtime, policy, context, cancel, approve, alias, &state, &host, before, None, proposal_kinds::REMOVE_TRANSPORT, &REMOVE_WORDS)
 }
 
 pub(super) fn verify(
