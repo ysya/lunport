@@ -1,6 +1,6 @@
 import type { RouteChange } from "@/bindings/RouteChange";
-import type { HostPayload } from "@/lib/records";
-import { newIapTransport, transportProblem, type HostTransport, type TransportKind } from "@/lib/transports";
+import type { HostPayload, RecordOverview } from "@/lib/records";
+import { newIapTransport, transportFor, transportProblem, type HostTransport, type TransportKind } from "@/lib/transports";
 
 /** How the host editor's Connect via reaches the host: at its address, or through a Google Cloud IAP route. */
 export type Via = "address" | "iap";
@@ -35,6 +35,23 @@ const blankRoute = (): TransportKind => newIapTransport("").kind;
  */
 export function beginRoute(saved: TransportKind | null, initialVia: Via = "address"): RouteDraft {
   return saved ? { via: "iap", iap: structuredClone(saved) } : { via: initialVia, iap: blankRoute() };
+}
+
+/**
+ * The route half of the host editor: the draft, and the saved route it began from. `saved` is the `expected` of the save, so it is
+ * taken when the draft begins and again only when it begins anew (a save, Discard changes, Reload saved settings), never re-read from
+ * the overview, which refetches while the person types: a route another device changed meanwhile is then refused, not overwritten.
+ */
+export type RouteState = { draft: RouteDraft; saved: HostTransport | null };
+
+/**
+ * The route half as a draft begins: from the host's saved route; for a duplicate (`duplicateOf`, the source host's id), from a copy of
+ * its source's route, which the new host saves as its own; else on Address, or on `initialVia`.
+ */
+export function beginRouteState(overview: RecordOverview, hostId: string | null, initialVia?: Via, duplicateOf?: string): RouteState {
+  const saved = transportFor(overview, hostId);
+  const copied = duplicateOf ? transportFor(overview, duplicateOf) : null;
+  return { draft: beginRoute((saved ?? copied)?.kind ?? null, initialVia), saved };
 }
 
 /** The route the draft would save: none for Address. */

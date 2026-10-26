@@ -22,9 +22,11 @@ import {
   changeEditor,
   editorProblem,
   refreshEditor,
-  submitEditor,
+  saveEditor,
   selectHost,
 } from "./editor";
+import { beginRouteState, routeEdited, routeProblem, withRouteHostname, type Via } from "./route";
+import { applyOsLoginUsername, ConnectVia, connectViaDescription, OsLoginUsername } from "./IapRouteFields";
 import { connectSavedHost, scopeLabel } from "./operations";
 import { readinessLabel } from "./HostList";
 import { RecordField, selectClass } from "./form";
@@ -58,6 +60,7 @@ export function RecordHostEditor({
   initialGroupId = null,
   duplicateSource,
   onDuplicate,
+  initialVia,
 }: {
   host: RecordHostView | null;
   hostId: string | null;
@@ -75,6 +78,8 @@ export function RecordHostEditor({
   initialGroupId?: string | null;
   duplicateSource?: RecordHostView;
   onDuplicate?: () => void;
+  /** How a new host is reached at first: Google Cloud IAP for the Google Cloud page's New IAP host. */
+  initialVia?: Via;
 }) {
   const [state, setState] = useState(() =>
     hostId && !host
@@ -96,7 +101,13 @@ export function RecordHostEditor({
   );
   const [busy, setBusy] = useState(false);
   const [passwordChange, setPasswordChange] = useState<PasswordChange>(null);
-  const dirty = state.dirty || passwordChange !== null;
+  // Connect via: the route draft, and the saved route it began from, the save's `expected` until the draft begins anew.
+  const [route, setRoute] = useState(() => beginRouteState(overview, state.id, initialVia, duplicateSource?.id));
+  const [osLoginNote, setOsLoginNote] = useState<string | null>(null);
+  const routeDirty = routeEdited(route.draft, route.saved?.kind ?? null);
+  const dirty = state.dirty || passwordChange !== null || routeDirty;
+  // The record needs a hostname, which Connect via does not show for a route: a new host takes the instance's.
+  const problem = routeProblem(route.draft) ?? editorProblem({ ...state, payload: withRouteHostname(state.payload, route.draft) });
   const currentHost = state.id ? selectHost(overview.hosts, state.id) : host;
   const [askingUpgrade, setAskingUpgrade] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
@@ -113,6 +124,12 @@ export function RecordHostEditor({
   }, [dirty, onDirty]);
   const patch = (values: Partial<HostPayload>) =>
     setState((current) => changeEditor(current, values));
+  const discard = () => {
+    setState(beginEditor(currentHost));
+    setPasswordChange(null);
+    setRoute(beginRouteState(overview, state.id));
+    setOsLoginNote(null);
+  };
   const sharedBlocked =
     overview.shared_writes_blocked && state.scope.kind === "space";
   const run = async (operation: () => Promise<void>) => {
@@ -138,7 +155,7 @@ export function RecordHostEditor({
   };
   const save = (confirmed?: boolean) => {
     if (
-      (state.dirty || state.id === null) &&
+      (state.dirty || state.id === null || routeDirty) &&
       (state.payload.group_id || state.payload.inherit?.length) &&
       requiresFormatUpgrade(overview, state.scope) &&
       confirmed !== true
@@ -147,7 +164,7 @@ export function RecordHostEditor({
       return;
     }
     return run(async () => {
-      const result = state.id && !state.dirty ? overview : await submitEditor(state, confirmed);
+      const result = await saveEditor(state, route, overview, confirmed);
       const accepted = accept(result);
       const oldIds = new Set(overview.hosts.map((value) => value.id));
       const created = result.hosts.filter(
@@ -158,7 +175,10 @@ export function RecordHostEditor({
       );
       const id = state.id ?? (created.length === 1 ? created[0].id : null);
       const saved = id ? selectHost(accepted.hosts, id) : null;
-      if (saved) setState(beginEditor(saved));
+      if (saved) {
+        setState(beginEditor(saved));
+        setRoute(beginRouteState(accepted, id));
+      }
       setAskingUpgrade(false);
       if (passwordChange) {
         if (!id || !saved) {
@@ -267,9 +287,9 @@ export function RecordHostEditor({
             {preview.payload.auth === "password" && " Enter a password again when connecting or save one below."}
           </p>
         )}
-        {state.dirty && editorProblem(state) && (
+        {(state.dirty || routeDirty) && problem && (
           <p role="status" className="text-sm text-muted-foreground">
-            {editorProblem(state)}
+            {problem}
           </p>
         )}
         {host && host.readiness.kind !== "ready" && (
@@ -296,7 +316,7 @@ export function RecordHostEditor({
               size="sm"
               className="ml-3"
               disabled={busy || !host}
-              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); }}
+              onClick={discard}
             >
               Reload saved settings
             </Button>
@@ -316,7 +336,7 @@ export function RecordHostEditor({
           disabled={busy || state.unavailable || sharedBlocked}
           className="host-editor-fields disabled:opacity-60"
         >
-          <FormSection title="Connection" description="Name this host and set its address. Inherited values follow the selected group.">
+          <FormSection title="Connection" description="Name this host and choose how to reach it. Inherited values follow the selected group.">
             <RecordField label="Group">
               <select
                 className={selectClass}
@@ -354,25 +374,6 @@ export function RecordHostEditor({
                   onChange={(e) => patch({ alias: e.target.value })}
                 />
               </RecordField>
-              <RecordField label="Hostname or IP">
-                <Input
-                  autoComplete="off"
-                  placeholder="e.g. server.example.com"
-                  value={state.payload.hostname}
-                  onChange={(e) => patch({ hostname: e.target.value })}
-                />
-              </RecordField>
-              <RecordField label="Port">
-                <Input
-                  type="number"
-                  min={1}
-                  max={65535}
-                  disabled={inherits("port")}
-                  value={inherits("port") && preview.error ? "" : visible.port}
-                  onChange={(e) => patch({ port: Number(e.target.value) })}
-                />
-                {inheritedControl("port")}
-              </RecordField>
               <RecordField label="Username">
                 <Input
                   disabled={inherits("user")}
@@ -385,8 +386,42 @@ export function RecordHostEditor({
                   onChange={(e) => patch({ user: e.target.value })}
                 />
                 {inheritedControl("user")}
+                {route.draft.via === "iap" && route.draft.iap.os_login && (
+                  <OsLoginUsername
+                    disabled={!route.draft.iap.project}
+                    inherited={inherits("user")}
+                    note={osLoginNote}
+                    onUse={() =>
+                      run(async () => {
+                        setOsLoginNote(null);
+                        setOsLoginNote(await applyOsLoginUsername(route.draft.iap, visible.key_id, setState));
+                      })
+                    }
+                  />
+                )}
               </RecordField>
             </div>
+            <ConnectVia
+              draft={route.draft}
+              onDraft={(draft) => setRoute((current) => ({ ...current, draft }))}
+              description={connectViaDescription(route, overview, state.id)}
+              hostname={state.payload.hostname}
+              onHostname={(hostname) => patch({ hostname })}
+              disabled={busy || state.unavailable || sharedBlocked}
+              port={
+                <RecordField label="Port">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    disabled={inherits("port")}
+                    value={inherits("port") && preview.error ? "" : visible.port}
+                    onChange={(e) => patch({ port: Number(e.target.value) })}
+                  />
+                  {inheritedControl("port")}
+                </RecordField>
+              }
+            />
           </FormSection>
           <FormSection title="Authentication" description="Choose how this device signs in to the server.">
             <RecordField label="Authentication">
@@ -604,7 +639,7 @@ export function RecordHostEditor({
               <p className="select-text break-all font-mono">{revealHidden(state.payload.host_key.fingerprint)}</p>
             ) : <p className="text-muted-foreground">No server key has been verified yet.</p>}
             <p className="text-muted-foreground">Compare the server fingerprint in Lunport before login. No remote command is run. Changing the hostname or port clears the saved pin.</p>
-            <Button size="sm" variant="outline" disabled={busy || state.dirty || state.unavailable || sharedBlocked || !!preview.error} onClick={() => run(async () => {
+            <Button size="sm" variant="outline" disabled={busy || state.dirty || routeDirty || state.unavailable || sharedBlocked || !!preview.error} onClick={() => run(async () => {
               const result = await verifyRecordHostKey(state.id!);
               accept(result.overview);
             })}>Verify server fingerprint</Button>
@@ -675,7 +710,7 @@ export function RecordHostEditor({
             <Button
               variant="ghost"
               disabled={busy || !currentHost}
-              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); }}
+              onClick={discard}
             >
               Discard changes
             </Button>
@@ -691,7 +726,7 @@ export function RecordHostEditor({
               sharedBlocked ||
               (!dirty && state.id !== null) ||
               (passwordChange?.kind === "set" && passwordChange.value.length === 0) ||
-              editorProblem(state) !== null
+              problem !== null
             }
             onClick={() => save()}
           >

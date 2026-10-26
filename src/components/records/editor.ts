@@ -1,4 +1,5 @@
 import type { RouteChange } from "@/bindings/RouteChange";
+import { routeChange, withRouteHostname, type RouteState } from "./route";
 import {
   createRecordHost,
   updateRecordHost,
@@ -161,6 +162,21 @@ export async function submitEditor(
     return createRecordHost(state.scope, payload, upgradeConfirmed, route);
   if (!state.revision) throw new Error("The saved revision is unavailable.");
   return updateRecordHost(state.id, state.revision, payload, upgradeConfirmed, route);
+}
+/**
+ * What Save writes: the host and its route change in one command, the route saved against the one the draft began from
+ * (`route.saved`) and the hostname a new IAP host lacks taken from the instance; nothing, and `overview` as it is, for a saved host
+ * whose host fields and route are both as saved (a password change is saved apart).
+ */
+export async function saveEditor(
+  state: EditorState,
+  route: RouteState,
+  overview: RecordOverview,
+  upgradeConfirmed?: boolean,
+): Promise<RecordOverview> {
+  const change = routeChange(route.draft, route.saved);
+  if (state.id !== null && !state.dirty && change === undefined) return overview;
+  return submitEditor({ ...state, payload: withRouteHostname(state.payload, route.draft) }, upgradeConfirmed, change);
 }
 export function selectHost(
   hosts: RecordHostView[],

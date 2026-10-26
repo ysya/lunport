@@ -30,6 +30,8 @@ export const requestPamGrant = (hostId: string, justification: string, durationS
   });
 /** The Google accounts gcloud holds credentials for on this computer and whether each sign-in works. */
 export const listGcloudAccounts = () => tauriInvoke<GcloudAccountsView>("gcp_accounts");
+/** The query key of `listGcloudAccounts`, shared by every view of gcloud's accounts. */
+export const gcloudAccountsKey = ["gcp", "accounts"] as const;
 /** One row per entitlement the saved routes require, with the state of the grant on it, read now. */
 export const listPamGrants = () => tauriInvoke<PamGrantView[]>("gcp_pam_grants");
 /** Check through IAP: whether this computer reaches the host's instance through its route. It attempts no SSH. */
