@@ -379,6 +379,14 @@ pub(crate) fn publish_local(state: &SyncStateV3, now: u64) -> Result<Option<Sync
     Ok(Some(next))
 }
 
+/// Saves `route` on this device alone (`local.transports`), as a route is saved outside a central library: the Catalog merge leaves
+/// there a route this device added that the merged Catalog has no room for (design 2026-10-27, When it does not fit), and the publish
+/// step moves it in once there is room.
+pub(crate) fn keep_on_this_device(state: &SyncStateV3, route: HostTransport, now: u64) -> Result<SyncStateV3, RepositoryError> {
+    let host_id = route.host_id.clone();
+    write(state, &host_id, Some(route), now)
+}
+
 /// Whether the map holds anything, tombstones included: they too need the state version.
 pub fn has_data(state: &SyncStateV3) -> bool {
     !state.local.transports.is_empty()

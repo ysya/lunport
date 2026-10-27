@@ -57,7 +57,7 @@ fn token(state: &SyncStateV3, generation: u64, id: &str) -> Result<String, AppEr
         .map_err(|_| invalid())?,
     ))
 }
-fn open(
+pub(super) fn open(
     state: &SyncStateV3,
     keys: &VaultKeys,
     envelope: &super::crypto::RecordEnvelope,
@@ -85,7 +85,7 @@ fn public(value: &Data) -> Result<Option<serde_json::Value>, AppError> {
         Data::Deleted | Data::Key(_) | Data::Password(_) => None,
     })
 }
-fn settled(replica: &super::replica::Replica, id: &str) -> Result<bool, AppError> {
+pub(super) fn settled(replica: &super::replica::Replica, id: &str) -> Result<bool, AppError> {
     let Some(pending) = replica.pending.get(id) else {
         return Ok(false);
     };
@@ -269,13 +269,28 @@ fn candidate(
         }
         Choice::Local => {}
     }
+    let draft = (!matches!(choice, Choice::Remote)).then_some((&local.identity, &local.data));
+    retire_conflict(next, keys, signer, id, draft, remote)
+}
+/// Retires the conflict of record `id` in `state`: this device's pending draft is replaced by `draft` (the version kept, written
+/// against the synced version `remote`, which becomes its confirmed basis), or dropped (`None`: the synced version kept), and the
+/// capture runs. Shared by the review's choices and the Catalog merge (`catalog_conflict::apply`).
+pub(super) fn retire_conflict(
+    mut next: SyncStateV3,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+    id: &str,
+    draft: Option<(&payload::Identity, &Data)>,
+    remote: &super::replica::Base,
+) -> Result<SyncStateV3, AppError> {
     let owner = next.local.central.as_mut().ok_or_else(invalid)?;
     let chain = owner.control.verified_chain()?;
     let replica = owner.replica.as_mut().ok_or_else(invalid)?;
+    let pending = replica.pending.get(id).ok_or_else(invalid)?.clone();
     replica.conflicts.remove(id);
     replica.pending.remove(id);
-    if !matches!(choice, Choice::Remote) {
-        let bytes = payload::encode(&local.identity, &local.data)?;
+    if let Some((identity, data)) = draft {
+        let bytes = payload::encode(identity, data)?;
         let mut header = pending.latest.envelope.header.clone();
         header.author = owner.control.device.id.clone();
         header.membership_head = chain.current().head().into();

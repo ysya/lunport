@@ -69,7 +69,24 @@ fn fresh(
     }
     Ok(next)
 }
-fn catalog(
+/// Whether dropping collection `space_id` would lose something this device still holds of it: rows not removed or not yet captured,
+/// rows it cannot read, or a host or group of it with a change pending or in conflict.
+pub(super) fn holds_local(
+    state: &SyncStateV3,
+    ledger: &super::projection_state::Ledger,
+    replica: &super::replica::Replica,
+    space_id: &str,
+) -> bool {
+    state.spaces.get(space_id).is_some_and(|space| {
+        space.missing || !space.sealed.is_empty() || space.records.values().any(|r| !r.record.deleted || r.dirty)
+    }) || ledger.bases.iter().any(|(opaque, basis)| {
+        matches!(&basis.remote.scope, Some(HostScope::Space { space_id: id }) if id == space_id)
+            && (replica.pending.contains_key(opaque) || replica.conflicts.contains_key(opaque))
+    })
+}
+/// Reads Catalog `value` into `state`'s rows: collections, tunnel rows, route rows and the Local group order. The delta projection
+/// reads the library's Catalog with it, and the Catalog merge the merged one (`catalog_conflict::apply`).
+pub(super) fn catalog(
     state: &mut SyncStateV3,
     value: &Catalog,
     receipt: &Receipt,
@@ -263,8 +280,7 @@ impl Delta {
                     })
                     .cloned()
                     .collect();
-                let loses_local_or_live=removed.iter().any(|id|state.spaces.get(id).is_some_and(|space|space.missing || !space.sealed.is_empty() || space.records.values().any(|r|!r.record.deleted || r.dirty)))
-                    || ledger.bases.iter().any(|(opaque,basis)|matches!(&basis.remote.scope,Some(HostScope::Space{space_id}) if removed.contains(space_id)) && (replica.pending.contains_key(opaque) || replica.conflicts.contains_key(opaque)));
+                let loses_local_or_live = removed.iter().any(|id| holds_local(state, ledger, replica, id));
                 if loses_local_or_live {
                     catalogue_deferred = true;
                 } else {

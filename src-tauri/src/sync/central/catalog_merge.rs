@@ -235,7 +235,7 @@ pub fn fit(merged: Merged) -> Result<Fitted, Over> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     const A: &str = "000000000000000a";
@@ -253,10 +253,10 @@ mod tests {
     const G3: &str = "00000000000000a3";
 
     /// A local forward named after its id, through host `0000000000000001`.
-    fn tunnel(id: &str, port: u16) -> TunnelRule {
+    pub(in crate::sync::central) fn tunnel(id: &str, port: u16) -> TunnelRule {
         serde_json::from_value(serde_json::json!({"id":id,"name":format!("tunnel-{id}"),"host_id":"0000000000000001","forward":{"kind":"local","bind_address":"127.0.0.1","port":port,"target_host":"db.invalid","target_port":5432}})).unwrap()
     }
-    fn route(host: &str, zone: &str) -> HostTransport {
+    pub(in crate::sync::central) fn route(host: &str, zone: &str) -> HostTransport {
         serde_json::from_value(serde_json::json!({"host_id":host,"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":zone,"instance":"jumpbox"}})).unwrap()
     }
     fn collection(id: &str, name: &str) -> Collection {
@@ -443,7 +443,7 @@ mod tests {
     }
 
     /// The largest route: every name at its maximum length, and the most entitlements.
-    fn long_route(host_id: &str) -> HostTransport {
+    pub(in crate::sync::central) fn long_route(host_id: &str) -> HostTransport {
         serde_json::from_value(serde_json::json!({"host_id":host_id,"kind":{"type":"gcp_iap",
             "project":format!("p{}", "x".repeat(29)),"zone":format!("z{}", "x".repeat(62)),"instance":format!("i{}", "x".repeat(62)),
             "interface":"nic7","account":format!("{}@{}.example.com", "a".repeat(64), "b".repeat(63)),"os_login":true,
