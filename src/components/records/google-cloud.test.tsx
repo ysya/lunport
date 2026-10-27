@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement, ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Dialog } from "@/components/ui/dialog";
+import { AlertDialogAction } from "@/components/ui/alert-dialog";
 import { buttonsIn, buttonTag, DISABLED, elementsOf, HIDDEN_CHARS, text, textIn } from "@/components/keychain/test-markup";
 import { SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import { renderHook, stubBackend } from "@/lib/test-ipc";
@@ -10,30 +11,36 @@ import type { RecordHostView, RecordOverview } from "@/lib/records";
 import type { TransportSyncView } from "@/bindings/TransportSyncView";
 import {
   gcloudAccountsQuery,
-  pamGrantsKey,
-  pamGrantsQuery,
+  gcloudCliQuery,
+  pamOverviewKey,
+  pamOverviewQuery,
   type GcloudAccountsView,
+  type GcloudCliView,
   type HostTransport,
-  type PamGrantView,
+  type PamEntitlementView,
+  type PamOverview,
+  type PamScopeView,
   type PamStatusView,
 } from "@/lib/transports";
-import { PageHeader } from "@/components/app/PageHeader";
 import { FormSection } from "@/components/app/Workflow";
+import { PageHeader } from "@/components/app/PageHeader";
 import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
-import { GoogleCloudPageView, GoogleCloudPanel, type GoogleCloudPageViewProps, type GrantAsk } from "./GoogleCloudPanel";
-import { GrantRequestCardView, GrantRequestDialog, type GrantRequestCardViewProps } from "./GrantRequestDialog";
+import { GoogleCloudPageView, IapHostsTab, type GoogleCloudTab } from "./GoogleCloudPanel";
+import { AccountsTabView, confirmation, GoogleAccountsTab, runningLine, type AccountsTabViewProps, type Confirming, type Running } from "./GoogleAccountsTab";
+import { AccessTabView, PamAccessTab, ScopeDialog, newScopeDraft, scopeLine, type AccessTabViewProps, type ScopeDraft } from "./PamAccessTab";
+import { AWAITING_APPROVER, EntitlementGrantDialog, GrantRequestCardView, type GrantRequestCardViewProps } from "./GrantRequestDialog";
 
 afterEach(() => vi.unstubAllGlobals());
 
 /*
- * There is no DOM here, so the page is drawn two ways: as static markup (its words), and as the element tree of the hook-free
- * `GoogleCloudPageView`, whose callbacks the tests press. The view's one state, the grant being requested, is kept by the helper the
- * way the panel keeps it.
+ * There is no DOM here, so each tab is drawn two ways: as static markup (its words), and as the element tree of its hook-free view,
+ * whose callbacks the tests press. The views' own state (a confirmation, a running action, a request, a scope draft) is kept by the
+ * helper the way the tab keeps it.
  */
 
 const AT = new Date(2026, 9, 27, 10, 0).getTime(); // 10:00 on this computer's clock
 const LATER = new Date(2026, 9, 27, 11, 30).getTime();
-const grant = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null };
+const grant = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 2700, justification: null };
 
 const host = (n: number, alias: string): RecordHostView => hostView({ id: String(n).padStart(16, "0"), payload: hostPayload({ alias, hostname: `10.0.0.${n}` }) });
 const web = host(1, "web-1");
@@ -60,488 +67,496 @@ const accounts: GcloudAccountsView = {
     { account: "old@example.com", state: "expired", message: null },
   ],
 };
-const row = (patch: Partial<PamGrantView>): PamGrantView => ({
+const found: GcloudCliView = { path: "/opt/homebrew/bin/gcloud" };
+const missing: GcloudCliView = { path: null };
+
+const OPERATE = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
+const ADMIN = "projects/acme-prod-123456/locations/global/entitlements/prod-admin";
+const GLASS = "folders/123456789012/locations/global/entitlements/break-glass";
+const entitlement = (patch: Partial<PamEntitlementView>): PamEntitlementView => ({
   account: "frank@example.com",
-  project: "acme-prod-123456",
+  name: OPERATE,
+  parent: "projects/acme-prod-123456",
   location: "global",
   entitlement: "prod-operate",
+  max_duration_secs: 3600,
+  needs_approval: false,
+  roles: [{ role: "roles/compute.osAdminLogin", resource: "projects/acme-prod-123456" }],
   state: "none",
   active_until_ms: null,
   message: null,
-  host_ids: [db.id],
+  host_ids: [db.id, db2.id],
+  memory: null,
+  default_duration_secs: 2700,
   ...patch,
 });
-const operate = row({ state: "active", active_until_ms: AT, host_ids: [db.id, db2.id] });
-const admin = row({ entitlement: "prod-admin", host_ids: [db.id, db2.id] });
+const operate = entitlement({ state: "active", active_until_ms: AT });
+const admin = entitlement({ name: ADMIN, entitlement: "prod-admin", max_duration_secs: null, roles: [] });
+const glass = entitlement({
+  account: "ops@example.com",
+  name: GLASS,
+  parent: "folders/123456789012",
+  entitlement: "break-glass",
+  needs_approval: true,
+  max_duration_secs: 7200,
+  roles: [{ role: "roles/owner", resource: "folders/123456789012" }],
+  host_ids: [],
+  default_duration_secs: 1800,
+});
+const routeScope: PamScopeView = { id: null, parent: "projects/acme-prod-123456", location: "global", account: "frank@example.com", from_routes: true, host_ids: [db.id, db2.id], message: null };
+const addedScope: PamScopeView = { id: "00000000000000a1", parent: "folders/123456789012", location: "global", account: "ops@example.com", from_routes: false, host_ids: [], message: null };
+const pamOverview: PamOverview = { scopes: [routeScope, addedScope], entitlements: [operate, admin, glass] };
 
-type Answers = { accounts?: GcloudAccountsView | Error; grants?: PamGrantView[] | Error; request?: PamStatusView };
-type PageProps = Parameters<typeof GoogleCloudPanel>[0];
+type Answers = { accounts?: GcloudAccountsView | Error; cli?: GcloudCliView | Error; pam?: PamOverview | Error; reply?: (command: string, args: unknown) => unknown };
 
-/** The page as the person sees it once the backend has answered (or, with `settled: false`, while it has not). */
-async function renderPage(overview: RecordOverview, options: { answers?: Answers; settled?: boolean; props?: Partial<PageProps> } = {}) {
-  const answers = options.answers ?? {};
-  const calls = stubBackend(async (command) => {
-    const answer = { gcp_accounts: answers.accounts ?? accounts, gcp_pam_grants: answers.grants ?? [operate, admin], transports_pam_request: answers.request }[command];
+/** The page's backend, answered as `answers` says, and a client that has read it (or, with `settled: false`, has not yet). */
+async function backend(answers: Answers = {}, settled = true) {
+  const calls = stubBackend(async (command, args) => {
+    const answer = answers.reply?.(command, args) ?? { gcp_accounts: answers.accounts ?? accounts, gcp_cli_status: answers.cli ?? found, gcp_pam_overview: answers.pam ?? pamOverview }[command];
     if (answer instanceof Error) throw answer;
     return answer;
   });
-  // A mounting pane reads again whatever the last read found; this one draws what the read left, even a failure.
   const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
-  if (options.settled !== false) {
+  if (settled) {
     await client.prefetchQuery(gcloudAccountsQuery);
-    await client.prefetchQuery(pamGrantsQuery);
+    await client.prefetchQuery(gcloudCliQuery);
+    await client.prefetchQuery(pamOverviewQuery);
   }
   calls.length = 0;
-  const props: PageProps = { overview, createIapHost: vi.fn(), editHost: vi.fn(), ...options.props };
-  const panel = () => renderHook(client, () => GoogleCloudPanel(props)) as ReactElement<GoogleCloudPageViewProps>;
-  let requesting: GrantAsk | null = null;
-  /** The element tree of the page, with the grant being requested kept here instead of in the panel's state. */
-  const tree = () =>
-    GoogleCloudPageView({
-      ...panel().props,
-      requesting,
-      onRequest: (ask) => { requesting = ask; },
-      onCloseRequest: () => { requesting = null; },
-    });
-  const html = () =>
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <GoogleCloudPanel {...props} />
-      </QueryClientProvider>,
-    );
-  const section = (title: string) => {
-    const found = elementsOf(tree(), FormSection).find((element) => (element.props as unknown as { title: string }).title === title);
-    if (!found) throw new Error(`no ${title} section`);
-    return found;
-  };
-  const rowsOf = (title: string) => elementsOf(section(title), "li");
-  const rowTextOf = (element: ReactElement) => pageText(renderToStaticMarkup(element));
-  const rowFor = (title: string, label: string) => {
-    const found = rowsOf(title).find((element) => textIn(element).includes(label));
-    if (!found) throw new Error(`no ${label} row in ${title}`);
-    return found;
-  };
-  /** The button labelled `label`, in the row that names `row` when given; else on the page, its header's actions included. */
-  const buttonFor = (label: string, scope?: { row: string; in?: string }) => {
-    const within = scope ? rowFor(scope.in ?? "Access grants", scope.row) : tree();
-    const header = scope ? [] : elementsOf(within, PageHeader).flatMap((element) => buttonsIn((element.props as unknown as { actions?: ReactNode }).actions));
-    const button = [...buttonsIn(within), ...header].find((element) => textIn(element).trim() === label);
-    if (!button) throw new Error(`no ${label} button`);
-    return button;
-  };
-  return {
-    calls,
-    client,
-    props,
-    get html() {
-      return html();
-    },
-    get text() {
-      return pageText(html());
-    },
-    rows: (title: string) => rowsOf(title).map(rowTextOf),
-    row: (title: string, label: string) => rowTextOf(rowFor(title, label)),
-    sectionTitles: () => elementsOf(tree(), FormSection).map((element) => (element.props as unknown as { title: string }).title),
-    click: (label: string, scope?: { row: string; in?: string }) => buttonFor(label, scope).props.onClick!(),
-    /** Whether the button is off in the markup the person gets, not only in the props it was given. */
-    disabled: (label: string, scope: { row: string; in?: string }) => buttonTag(renderToStaticMarkup(rowFor(scope.in ?? "Access grants", scope.row)), label).includes(DISABLED),
-    /** The request dialog the page has open, if any: what it was given, and what it says. */
-    get dialog() {
-      const open = elementsOf(tree(), GrantRequestDialog)[0];
-      if (!open) return null;
-      const given = open.props as unknown as Parameters<typeof GrantRequestDialog>[0];
-      const card = elementsOf(renderHook(new QueryClient(), () => GrantRequestDialog(given)), GrantRequestCardView)[0].props as unknown as GrantRequestCardViewProps;
-      return { given, card, key: open.key, text: pageText(renderToStaticMarkup(<Dialog open><GrantRequestCardView {...card} /></Dialog>)) };
-    },
-  };
+  return { calls, client };
 }
 
-/** The words of the page's markup. A command is code, which sits inline in its sentence and so adds no space of its own. */
+/** The words of the markup. A command is code, which sits inline in its sentence and so adds no space of its own. */
 const pageText = (html: string) => text(html.replace(/<\/?code[^>]*>/g, "")).trim();
-const renderPageText = async (overview: RecordOverview, options?: Parameters<typeof renderPage>[1]) => (await renderPage(overview, options)).text;
+
+/** The page on `tab` as markup, its props, and what pressing the tab bar does. */
+async function renderPage(overview: RecordOverview, tab: GoogleCloudTab, answers: Answers = {}, settled = true) {
+  const { calls, client } = await backend(answers, settled);
+  const props = { overview, tab, onTab: vi.fn(), accept: vi.fn(), createIapHost: vi.fn(), editHost: vi.fn() };
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <GoogleCloudPageView {...props} />
+    </QueryClientProvider>,
+  );
+  return { calls, client, props, html, text: pageText(html), tree: GoogleCloudPageView(props) };
+}
+
+const last = <T,>(items: T[]): T | undefined => items[items.length - 1];
+
+/** The sections of a tree, by title. */
+const sectionOf = (tree: ReactNode, title: string) => {
+  const found = elementsOf(tree, FormSection).find((element) => (element.props as unknown as { title: string }).title === title);
+  if (!found) throw new Error(`no ${title} section`);
+  return found;
+};
+const rowsOf = (tree: ReactNode, title: string) => elementsOf(sectionOf(tree, title), "li");
+const rowText = (element: ReactElement) => pageText(renderToStaticMarkup(element));
+const rowFor = (tree: ReactNode, title: string, label: string) => {
+  const found = rowsOf(tree, title).find((element) => textIn(element).includes(label));
+  if (!found) throw new Error(`no ${label} row in ${title}`);
+  return found;
+};
+const buttonIn = (node: ReactNode, label: string) => {
+  const button = buttonsIn(node).find((element) => textIn(element).trim() === label);
+  if (!button) throw new Error(`no ${label} button`);
+  return button;
+};
+const actionsOf = (tree: ReactNode, title: string) => (sectionOf(tree, title).props as unknown as { actions?: ReactNode }).actions;
 
 describe("the Google Cloud page", () => {
   it("sits in the workspace's page frame like the Tunnels panel, so its content is inset and never clipped", async () => {
-    // The workspace main pads nothing; each tool panel brings its own inset (`.tunnels-panel`, `.transports-panel`).
-    expect((await renderPage(overviewOf([web], [webRoute]))).html).toMatch(/^<div class="transports-panel /);
+    expect((await renderPage(overviewOf([web], [webRoute]), "hosts")).html).toMatch(/^<div class="transports-panel /);
   });
 
-  it("says what the page is for and offers New IAP host", async () => {
-    const view = await renderPage(overviewOf([], []));
-    expect(view.text).toContain("Google sign-in and access grants on this computer. A host connects through IAP when its Connect via is set to Google Cloud IAP.");
-    expect(view.text).not.toContain("transport");
-    view.click("New IAP host");
+  it("says what the page is for and offers New IAP host whatever the tab", async () => {
+    const view = await renderPage(overviewOf([], []), "access");
+    expect(view.text).toContain("Google accounts, access grants and IAP hosts on this computer.");
+    const header = elementsOf(view.tree, PageHeader)[0];
+    buttonIn((header.props as unknown as { actions: ReactNode }).actions, "New IAP host").props.onClick!();
     expect(view.props.createIapHost).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps New IAP host available in a library whose writes are blocked: the editor says what it cannot save", async () => {
-    // Cmd/Ctrl+N opens the same editor, which locks Connect via and gives its reason; the page does not decide for it.
-    const view = await renderPage(overviewOf([web], [webRoute], { ...library, shared_writes_blocked: true }));
-    expect(buttonTag(view.html, "New IAP host")).not.toContain(DISABLED);
-    view.click("New IAP host");
-    expect(view.props.createIapHost).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows the sections its routes call for", async () => {
-    expect((await renderPage(overviewOf([web], [webRoute]))).sectionTitles()).toEqual(["Google sign-in", "Hosts through IAP"]);
-    expect((await renderPage(overviewOf([web, db], [webRoute, dbRoute]))).sectionTitles()).toEqual(["Google sign-in", "Access grants", "Hosts through IAP"]);
+  it("has three tabs, and draws only the open one", async () => {
+    const accountsTab = await renderPage(overviewOf([web], [webRoute]), "accounts");
+    expect(accountsTab.text).toContain("Accounts");
+    expect(accountsTab.text).toContain("Access");
+    expect(accountsTab.text).toContain("IAP hosts");
+    expect(accountsTab.text).toContain("Google accounts");
+    expect(accountsTab.text).not.toContain("Hosts through IAP");
+    expect(accountsTab.calls.map(([command]) => command)).not.toContain("gcp_pam_overview");
+    const hostsTab = await renderPage(overviewOf([web], [webRoute]), "hosts");
+    expect(hostsTab.text).toContain("Hosts through IAP");
+    expect(hostsTab.text).not.toContain("Accounts come from gcloud");
   });
 });
 
-describe("Google sign-in", () => {
+/** The Accounts tab's view, with the state the tab would keep, kept here. */
+async function accountsTab(overview: RecordOverview, answers: Answers = {}, settled = true) {
+  const { calls, client } = await backend(answers, settled);
+  const routes = (overview.transports ?? []).filter((route) => overview.hosts.some((host) => host.id === route.host_id));
+  const wrapped = () => (renderHook(client, () => GoogleAccountsTab({ overview, routes })) as ReactElement<AccountsTabViewProps>).props;
+  let confirming: Confirming | null = null;
+  let running: Running | null = null;
+  const asked: Confirming[] = [];
+  const confirmed: Confirming[] = [];
+  const tree = () =>
+    AccountsTabView({
+      ...wrapped(),
+      confirming,
+      running,
+      onAsk: (ask) => {
+        asked.push(ask);
+        confirming = ask;
+      },
+      onConfirm: (ask) => confirmed.push(ask),
+      onCloseConfirm: () => {
+        confirming = null;
+      },
+    });
+  return {
+    calls,
+    wrapped,
+    tree,
+    asked,
+    confirmed,
+    setRunning: (next: Running | null) => {
+      running = next;
+    },
+    rows: () => rowsOf(tree(), "Google accounts").map(rowText),
+    row: (label: string) => rowText(rowFor(tree(), "Google accounts", label)),
+    press: (label: string, row?: string) => buttonIn(row ? rowFor(tree(), "Google accounts", row) : tree(), label).props.onClick!(),
+    disabled: (label: string, row: string) => buttonTag(renderToStaticMarkup(rowFor(tree(), "Google accounts", row)), label).includes(DISABLED),
+    text: () => pageText(renderToStaticMarkup(<QueryClientProvider client={client}>{tree()}</QueryClientProvider>)),
+  };
+}
+
+describe("the Accounts tab", () => {
   const routes = [webRoute, opsRoute, dbRoute];
+  const overview = overviewOf([web, ops, db], routes);
 
-  it("lists this computer's gcloud accounts with their state", async () => {
-    const view = await renderPage(overviewOf([web, ops, db], routes)); // gcp_accounts: frank@ active and signed in, old@ expired
-    expect(view.text).toContain("Accounts come from gcloud on this computer. Sign-ins are per computer and are not synced.");
-    expect(view.text).toContain("gcloud active");
-    expect(view.text).toContain("gcloud auth login old@example.com");
-    expect(view.text).toContain("Not signed in on this computer"); // ops@ is named by a route only: this computer has no sign-in for it
-    expect(view.text).toContain("gcloud auth login ops@example.com");
-    expect(view.rows("Google sign-in").map((line) => line.split(" ")[0])).toEqual(["frank@example.com", "late@example.com", "old@example.com", "ops@example.com"]);
+  it("lists this computer's gcloud accounts with their state, the active badge and the routes that use each", async () => {
+    const view = await accountsTab(overview);
+    expect(view.text()).toContain("Accounts come from gcloud on this computer and are not synced. Changes here change gcloud for every tool on this computer.");
+    expect(view.rows().map((line) => line.split(" ")[0])).toEqual(["frank@example.com", "late@example.com", "old@example.com", "ops@example.com"]);
+    expect(view.row("frank@example.com")).toContain("Signed in · 2 routes");
+    expect(view.row("frank@example.com")).toContain("gcloud active");
+    expect(view.row("old@example.com")).toContain("Sign-in expired · No routes");
+    expect(view.row("late@example.com")).toContain("Google's token service could not be reached: offline.");
+    expect(view.row("ops@example.com")).toContain("Not signed in on this computer · 1 route");
   });
 
-  it("gives each state its dot and its words", async () => {
-    const view = await renderPage(overviewOf([web, ops, db], routes));
-    const signedIn = view.row("Google sign-in", "frank@example.com");
-    expect(signedIn).toContain("Signed in");
-    expect(signedIn).not.toContain("gcloud auth login");
-    expect(view.row("Google sign-in", "old@example.com")).toContain("Sign-in expired");
-    // The service gave no sentence for an expired sign-in: the page words it, and shows the command that fixes it.
-    expect(view.row("Google sign-in", "old@example.com")).toContain("gcloud auth login old@example.com");
-    const unknown = view.row("Google sign-in", "late@example.com");
-    expect(unknown).toContain("Could not be checked");
-    expect(unknown).toContain("Google's token service could not be reached: offline.");
-    expect(unknown).not.toContain("gcloud auth login");
-    expect(view.row("Google sign-in", "ops@example.com")).toContain("Not signed in on this computer");
-    const dots = [...view.html.matchAll(/data-sign-in="([a-z_]+)"/g)].map((match) => match[1]);
-    expect(dots).toEqual(["signed_in", "unknown", "expired", "missing"]);
+  it("says where gcloud is, and offers the actions in place of the commands", async () => {
+    const view = await accountsTab(overview);
+    expect(view.text()).toContain("gcloud found at /opt/homebrew/bin/gcloud");
+    expect(view.row("old@example.com")).not.toContain("gcloud auth login");
+    // Every account can sign in again; the active one is not offered to become active; an account only a route names cannot be removed.
+    expect(view.row("frank@example.com")).toContain("Sign in again");
+    expect(view.row("frank@example.com")).not.toContain("Make active");
+    expect(view.row("old@example.com")).toContain("Make active");
+    expect(view.row("old@example.com")).toContain("Remove…");
+    expect(view.row("ops@example.com")).not.toContain("Remove…");
+    expect(view.disabled("Sign in again", "old@example.com")).toBe(false);
   });
 
-  it("marks the active account, and counts the routes that use each (a route without an account counts for the active one)", async () => {
-    const view = await renderPage(overviewOf([web, ops, db], routes));
-    // web-1 names no account and db-1 names frank@: both are frank@'s.
-    expect(view.row("Google sign-in", "frank@example.com")).toContain("gcloud active");
-    expect(view.row("Google sign-in", "frank@example.com")).toContain("2 routes");
-    expect(view.row("Google sign-in", "old@example.com")).toContain("No routes");
-    expect(view.row("Google sign-in", "old@example.com")).not.toContain("gcloud active");
-    expect(view.row("Google sign-in", "ops@example.com")).toContain("1 route");
-    expect(view.row("Google sign-in", "ops@example.com")).not.toContain("1 routes");
+  it("without gcloud, says how to get it, keeps the commands and turns the actions off", async () => {
+    const view = await accountsTab(overview, { cli: missing });
+    // The install link sits inside the sentence (the markup's words are spaced at each element).
+    expect(view.text()).toContain("Lunport could not find gcloud on this computer. Install the Google Cloud CLI , then press Check again.");
+    expect(view.row("old@example.com")).toContain("gcloud auth login old@example.com");
+    expect(view.row("ops@example.com")).toContain("gcloud auth login ops@example.com");
+    expect(view.disabled("Sign in again", "old@example.com")).toBe(true);
+    expect(view.disabled("Remove…", "old@example.com")).toBe(true);
+    expect(buttonTag(renderToStaticMarkup(<>{actionsOf(view.tree(), "Google accounts")}</>), "Add account")).toContain(DISABLED);
   });
 
-  it("counts only the routes the page lists, and an account-less route only for the active account", async () => {
-    // ghost-1's route names old@, but its host is gone: it is listed nowhere and counts for nobody.
-    const view = await renderPage(overviewOf([web], [webRoute, ghostRoute]));
-    expect(view.row("Google sign-in", "old@example.com")).toContain("No routes");
-    expect(view.row("Google sign-in", "frank@example.com")).toContain("1 route");
-    // With no active account, a route that names none counts for no one.
-    const idle = await renderPage(overviewOf([web], [webRoute]), { answers: { accounts: { ...accounts, active: null } } });
-    expect(idle.row("Google sign-in", "frank@example.com")).toContain("No routes");
-    expect(idle.text).not.toContain("gcloud active");
-    // A route names an account gcloud lacks only when it names one at all.
-    expect(idle.text).not.toContain("Not signed in on this computer");
+  it("signs in again at once, and confirms every other change first, in words that say what it changes", async () => {
+    const view = await accountsTab(overview);
+    view.press("Sign in again", "old@example.com");
+    expect(last(view.asked)).toEqual({ action: { kind: "sign_in", account: "old@example.com" }, routes: 0, active: false });
+    expect(confirmation(last(view.asked)!)).toBeNull();
+    view.press("Remove…", "frank@example.com");
+    const removal = confirmation(last(view.asked)!)!;
+    expect(removal.title).toBe("Remove frank@example.com from gcloud on this computer?");
+    expect(removal.body).toEqual([
+      "gcloud revokes this sign-in at Google and deletes its credentials here. Every tool on this computer that uses gcloud loses this account, and the routes that use it (2) cannot connect until you sign in again. Google may also end this account's gcloud sign-in on your other computers.",
+      "gcloud will have no active account until you choose one.",
+    ]);
+    expect([removal.button, removal.destructive]).toEqual(["Remove account", true]);
+    // The confirmation's button confirms that very action.
+    elementsOf(view.tree(), AlertDialogAction)[0].props.onClick!();
+    expect(view.confirmed).toEqual([last(view.asked)]);
+    view.press("Make active", "old@example.com");
+    expect(confirmation(last(view.asked)!)).toMatchObject({
+      title: "Make old@example.com gcloud's active account?",
+      body: ["gcloud, kubectl, Terraform and every other tool on this computer that uses gcloud's active account will use old@example.com. Routes that name no account connect as it too."],
+      button: "Make active",
+      destructive: false,
+    });
+    expect(confirmation({ action: { kind: "remove", account: "old@example.com" }, routes: 0, active: false })!.body).toEqual([
+      "gcloud revokes this sign-in at Google and deletes its credentials here. Every tool on this computer that uses gcloud loses this account. Google may also end this account's gcloud sign-in on your other computers.",
+    ]);
   });
 
-  it("adds a row for each account only routes name, once, in the order of their names", async () => {
-    // The hosts' aliases order them db-1, ops-1, web-1: the accounts they name come out in their own order, not the hosts'.
-    const twice = hostTransport({ instance: "web-1", account: "ops@example.com" }, web.id);
-    const later = hostTransport({ instance: "db-1", account: "zed@example.com" }, db.id);
-    const view = await renderPage(overviewOf([ops, db, web], [later, opsRoute, twice]));
-    const lacking = view.rows("Google sign-in").filter((line) => line.includes("Not signed in on this computer"));
-    expect(lacking.map((line) => line.split(" ")[0])).toEqual(["ops@example.com", "zed@example.com"]);
-    expect(lacking[0]).toContain("2 routes");
-    expect(lacking[1]).toContain("1 route");
+  it("adds an account without a confirmation", async () => {
+    const view = await accountsTab(overview);
+    buttonIn(actionsOf(view.tree(), "Google accounts"), "Add account").props.onClick!();
+    expect(last(view.asked)?.action).toEqual({ kind: "add" });
+    expect(confirmation(last(view.asked)!)).toBeNull();
+  });
+
+  it("runs an action through gcloud as the tab asks for it", async () => {
+    const view = await accountsTab(overview, { reply: (command) => (command === "gcp_account_action" ? { account: "old@example.com", message: "Signed in as old@example.com." } : undefined) });
+    view.wrapped().onAsk({ action: { kind: "sign_in", account: "old@example.com" }, routes: 0, active: false });
+    await vi.waitFor(() => expect(view.calls).toContainEqual(["gcp_account_action", { action: { kind: "sign_in", account: "old@example.com" } }]));
+    // A removal waits for its confirmation: asking makes no call.
+    view.calls.length = 0;
+    view.wrapped().onAsk({ action: { kind: "remove", account: "old@example.com" }, routes: 0, active: false });
+    expect(view.calls).toEqual([]);
+  });
+
+  it("while gcloud waits for the browser, says so, offers the sign-in page and a way to stop", async () => {
+    const view = await accountsTab(overview);
+    view.setRunning({ action: { kind: "sign_in", account: "old@example.com" }, url: null, done: null, error: null });
+    expect(textIn(view.tree())).toContain("Finish signing in to old@example.com in your browser.");
+    expect(textIn(view.tree())).not.toContain("Open the sign-in page");
+    const url = "https://accounts.google.com/o/oauth2/auth?state=1";
+    view.setRunning({ action: { kind: "sign_in", account: "old@example.com" }, url, done: null, error: null });
+    const opened = vi.fn();
+    AccountsTabView({ ...view.wrapped(), running: { action: { kind: "sign_in", account: "old@example.com" }, url, done: null, error: null }, onOpenUrl: opened, confirming: null });
+    buttonIn(view.tree(), "Open the sign-in page");
+    expect(textIn(view.tree())).toContain("Browser did not open?");
+    buttonIn(view.tree(), "Cancel");
+    // Every account action is off while one runs.
+    expect(view.disabled("Sign in again", "frank@example.com")).toBe(true);
+    view.setRunning({ action: { kind: "add" }, url: null, done: { account: "new@example.com", message: "Signed in as new@example.com." }, error: null });
+    expect(textIn(view.tree())).toContain("Signed in as new@example.com.");
+    buttonIn(view.tree(), "Close");
+    expect(runningLine({ kind: "add" })).toBe("Finish signing in to the new account in your browser.");
+    expect(runningLine({ kind: "remove", account: "old@example.com" })).toBe("Removing old@example.com from gcloud…");
+  });
+
+  it("says why there are no accounts, and waits for the first answer", async () => {
+    const empty = await accountsTab(overviewOf([web], [webRoute]), { accounts: { config_found: false, active: null, accounts: [] } });
+    expect(empty.text()).toContain("gcloud has no Google account on this computer yet.");
+    expect(empty.rows()).toEqual([]);
+    const without = await accountsTab(overviewOf([web], [webRoute]), { accounts: { config_found: false, active: null, accounts: [] }, cli: missing });
+    expect(without.text()).toContain("gcloud has no signed-in Google account on this computer. Run gcloud auth login to sign in.");
+    const waiting = await accountsTab(overview, {}, false);
+    expect(waiting.text()).toContain("Checking Google sign-ins…");
+    expect(waiting.text()).toContain("Looking for gcloud…");
+    const failed = await accountsTab(overview, { accounts: new Error(`Reading gcloud's folder took too long ${SPOOFED_NAME}`) });
+    expect(failed.text()).toContain(`Reading gcloud's folder took too long ${SPOOFED_NAME_SHOWN}`);
   });
 
   it("reads a state this release does not know as one that could not be checked", async () => {
     const mystery = { ...accounts, accounts: [{ account: "new@example.com", state: "something-new", message: "A state from a later release." }] };
-    const view = await renderPage(overviewOf([web], [webRoute]), { answers: { accounts: mystery } });
-    expect(view.row("Google sign-in", "new@example.com")).toContain("Could not be checked");
-    expect(view.row("Google sign-in", "new@example.com")).toContain("A state from a later release.");
-    expect(view.html).toContain('data-sign-in="unknown"');
-  });
-
-  it("says when gcloud is missing, in place of the accounts", async () => {
-    const view = await renderPage(overviewOf([web, ops], [webRoute, opsRoute]), { answers: { accounts: { config_found: false, active: null, accounts: [] } } });
-    expect(view.text).toContain("gcloud was not found on this computer. Install the Google Cloud CLI, then run gcloud auth login.");
-    expect(view.rows("Google sign-in")).toEqual([]);
-    expect(view.text).not.toContain("Not signed in on this computer");
-    // The command in that sentence is code.
-    expect(view.html).toContain("<code");
-  });
-
-  it("says when gcloud holds no sign-in", async () => {
-    const empty = { config_found: true, active: null, accounts: [] };
-    expect(await renderPageText(overviewOf([web], [webRoute]), { answers: { accounts: empty } })).toContain("gcloud has no signed-in Google account on this computer. Run gcloud auth login to sign in.");
-    // The account a route names is still offered a sign-in, and that is then what the section has to say.
-    const view = await renderPage(overviewOf([ops], [opsRoute]), { answers: { accounts: empty } });
-    expect(view.row("Google sign-in", "ops@example.com")).toContain("Not signed in on this computer");
-    expect(view.text).not.toContain("gcloud has no signed-in Google account");
-  });
-
-  it("waits for the answer, and says why there is none", async () => {
-    const waiting = await renderPage(overviewOf([web], [webRoute]), { settled: false });
-    expect(waiting.text).toContain("Checking Google sign-ins…");
-    expect(waiting.text).not.toContain("gcloud was not found");
-    const failed = await renderPage(overviewOf([web], [webRoute]), { answers: { accounts: new Error("Reading gcloud's folder took too long.") } });
-    expect(failed.text).toContain("Reading gcloud's folder took too long.");
-    expect(failed.html).toContain('role="alert"');
-    expect(failed.text).not.toContain("gcloud was not found");
+    const view = await accountsTab(overviewOf([web], [webRoute]), { accounts: mystery });
+    expect(view.row("new@example.com")).toContain("Could not be checked");
   });
 });
 
-describe("Access grants", () => {
+/** The Access tab's view, with the state the tab would keep, kept here. */
+async function accessTab(overview: RecordOverview, answers: Answers = {}, settled = true) {
+  const { calls, client } = await backend(answers, settled);
+  const accept = vi.fn();
+  const wrapped = () => (renderHook(client, () => PamAccessTab({ overview, accept })) as ReactElement<AccessTabViewProps>).props;
+  let requesting: PamEntitlementView | null = null;
+  let draft: ScopeDraft | null = null;
+  const tree = () =>
+    AccessTabView({
+      ...wrapped(),
+      requesting,
+      draft,
+      onRequest: (row) => {
+        requesting = row;
+      },
+      onCloseRequest: () => {
+        requesting = null;
+      },
+      onOpenScope: () => {
+        draft = newScopeDraft();
+      },
+    });
+  return {
+    calls,
+    client,
+    accept,
+    wrapped,
+    tree,
+    rows: (title: string) => rowsOf(tree(), title).map(rowText),
+    row: (title: string, label: string) => rowText(rowFor(tree(), title, label)),
+    press: (label: string, scope?: { title: string; row: string }) => buttonIn(scope ? rowFor(tree(), scope.title, scope.row) : tree(), label).props.onClick!(),
+    disabled: (label: string, title: string, row: string) => buttonTag(renderToStaticMarkup(rowFor(tree(), title, row)), label).includes(DISABLED),
+    text: () => pageText(renderToStaticMarkup(<QueryClientProvider client={client}>{tree()}</QueryClientProvider>)),
+    get dialog() {
+      return elementsOf(tree(), EntitlementGrantDialog)[0] ?? null;
+    },
+    get scopeDialog() {
+      return elementsOf(tree(), ScopeDialog)[0] ?? null;
+    },
+  };
+}
+
+describe("the Access tab", () => {
   const overview = overviewOf([web, db, db2], [webRoute, dbRoute, db2Route]);
-  const memory = { host_id: db.id, justification: "Deploy hotfix", duration_secs: 2700 };
 
-  it("lists grants per entitlement and requests the one clicked", async () => {
-    const view = await renderPage(overview); // gcp_pam_grants: prod-operate active, prod-admin none
-    expect(view.text).toContain("Privileged Access Manager grants your hosts require. A grant ends on its own; Lunport never revokes one.");
-    expect(view.row("Access grants", "prod-operate")).toContain("Active until 10:00");
-    expect(view.row("Access grants", "prod-admin")).toContain("No active grant");
-    expect(view.dialog).toBeNull();
-    view.click("Request grant", { row: "prod-admin" });
-    expect(view.dialog?.text).toContain("prod-admin");
-    expect(view.dialog?.text).not.toContain("prod-operate");
+  it("lists every entitlement with where it lives, what it gives, its limits and the hosts that need it", async () => {
+    const view = await accessTab(overview);
+    expect(view.text()).toContain("Privileged Access Manager grants for your Google accounts. A grant gives its roles to every tool that uses the account until it ends; Lunport never ends one early.");
+    const line = view.row("Entitlements", "prod-operate");
+    expect(line).toContain("project acme-prod-123456 · global · frank@example.com");
+    expect(line).toContain("roles/compute.osAdminLogin on projects/acme-prod-123456");
+    expect(line).toContain("Up to 1 hour · Used by db-1, db-2");
+    expect(line).toContain("Active until 10:00");
+    const glassLine = view.row("Entitlements", "break-glass");
+    expect(glassLine).toContain("folder 123456789012 · global · ops@example.com");
+    expect(glassLine).toContain("Up to 2 hours · Needs approval");
+    expect(glassLine).not.toContain("Used by");
+    expect(view.row("Entitlements", "prod-admin")).toContain("No active grant");
   });
 
-  it("shows where each entitlement lives, who it is for, and the hosts that require it", async () => {
-    const view = await renderPage(overview);
-    const line = view.row("Access grants", "prod-operate");
-    expect(line).toContain("acme-prod-123456 · global");
-    expect(line).toContain("frank@example.com");
-    expect(line).toContain("Required by db-1, db-2");
-    // The same entitlement id for another project or account is another row, told apart by what it says.
-    const other = row({ project: "acme-dev-654321", account: "ops@example.com", host_ids: [db2.id] });
-    const several = await renderPage(overview, { answers: { grants: [operate, other] } });
-    expect(several.rows("Access grants")).toHaveLength(2);
-    expect(several.rows("Access grants")[1]).toContain("acme-dev-654321 · global");
-    expect(several.rows("Access grants")[1]).toContain("ops@example.com");
-    expect(several.rows("Access grants")[1]).toContain("Required by db-2");
+  it("keeps Request grant off while a grant is active, activating or waiting for its approver", async () => {
+    const view = await accessTab(overview, {
+      pam: { scopes: [], entitlements: [operate, entitlement({ name: ADMIN, entitlement: "prod-admin", state: "activating" }), { ...glass, state: "approval_awaited" }, entitlement({ name: `${OPERATE}-2`, entitlement: "prod-deploy" })] },
+    });
+    expect(view.disabled("Request grant", "Entitlements", "prod-operate")).toBe(true);
+    expect(view.disabled("Request grant", "Entitlements", "prod-admin")).toBe(true);
+    expect(view.disabled("Request grant", "Entitlements", "break-glass")).toBe(true);
+    expect(view.row("Entitlements", "break-glass")).toContain("Awaiting approval");
+    expect(view.disabled("Request grant", "Entitlements", "prod-deploy")).toBe(false);
   });
 
-  it("requests through the row's first host: its route, its alias, what this computer remembers of it, and the entitlement clicked", async () => {
+  it("requests on the entitlement clicked, as its account, from its memory and within its maximum, and takes the answer into its row", async () => {
+    const remembered = { ...admin, memory: { name: ADMIN, justification: "Deploy hotfix", duration_secs: 5400 }, max_duration_secs: 3600 };
     const granted: PamStatusView = { entitlement: "prod-admin", state: "active", active_until_ms: LATER, message: null };
-    const view = await renderPage({ ...overview, grant_memory: [memory, { host_id: db2.id, justification: "Rotate keys", duration_secs: 900 }] }, { answers: { request: granted } });
-    view.click("Request grant", { row: "prod-admin" });
-    expect(view.dialog?.given).toMatchObject({ transport: dbRoute, entitlement: "prod-admin", memory, alias: "db-1" });
-    expect(view.dialog?.card).toMatchObject({ entitlement: "prod-admin", justification: "Deploy hotfix", minutes: "45" });
-    // The request itself goes through that host's id, for that entitlement; the row then shows the grant it got.
-    view.dialog!.card.onRequest();
-    await vi.waitFor(() => expect(view.row("Access grants", "prod-admin")).toContain("Active until 11:30"));
-    expect(view.calls).toEqual([["transports_pam_request", { hostId: db.id, justification: "Deploy hotfix", durationSecs: 2700, entitlement: "prod-admin" }]]);
+    const view = await accessTab(overview, { pam: { scopes: [], entitlements: [operate, remembered] }, reply: (command) => (command === "gcp_pam_request" ? granted : undefined) });
+    view.press("Request grant", { title: "Entitlements", row: "prod-admin" });
+    const row = (view.dialog!.props as unknown as { row: PamEntitlementView }).row;
+    expect(row.name).toBe(ADMIN);
+    const card = elementsOf(renderHook(new QueryClient(), () => EntitlementGrantDialog({ row, onClose: () => {}, onRequested: () => {} })), GrantRequestCardView)[0].props as unknown as GrantRequestCardViewProps;
+    expect(card).toMatchObject({ entitlement: "prod-admin", justification: "Deploy hotfix", minutes: "60", maxMinutes: 60, subject: { parent: "projects/acme-prod-123456", account: "frank@example.com" } });
+    card.onRequest();
+    await vi.waitFor(() => expect(view.calls).toEqual([["gcp_pam_request", { account: "frank@example.com", name: ADMIN, justification: "Deploy hotfix", durationSecs: 3600 }]]));
+    view.wrapped().onRequested(row, granted);
+    expect(view.row("Entitlements", "prod-admin")).toContain("Active until 11:30");
+    expect(view.row("Entitlements", "prod-operate")).toContain("Active until 10:00");
+    expect(view.client.getQueryData<PamOverview>(pamOverviewKey)?.entitlements[1].state).toBe("active");
   });
 
-  it("keys the request dialog by the row it is for, so a request for another row starts it afresh", async () => {
-    const other = row({ entitlement: "prod-deploy", host_ids: [db2.id] });
-    const view = await renderPage(overview, { answers: { grants: [admin, other] } });
-    view.click("Request grant", { row: "prod-admin" });
-    const keyed = view.dialog!.key;
-    expect(keyed).not.toBeNull();
-    view.click("Request grant", { row: "prod-deploy" });
-    expect(view.dialog!.key).not.toBe(keyed);
+  it("starts a request without a memory from the entitlement's default length, and says when it waits for an approver", async () => {
+    const card = (row: PamEntitlementView) =>
+      elementsOf(renderHook(new QueryClient(), () => EntitlementGrantDialog({ row, onClose: () => {}, onRequested: () => {} })), GrantRequestCardView)[0].props as unknown as GrantRequestCardViewProps;
+    expect(card(glass)).toMatchObject({ justification: "", minutes: "30", maxMinutes: 120 });
+    expect(card(admin)).toMatchObject({ minutes: "45", maxMinutes: 480 });
+    const waiting = pageText(
+      renderToStaticMarkup(
+        <Dialog open>
+          <GrantRequestCardView {...card(glass)} result={{ entitlement: "break-glass", state: "approval_awaited", active_until_ms: null, message: null }} />
+        </Dialog>,
+      ),
+    );
+    expect(waiting).toContain(AWAITING_APPROVER);
+    expect(waiting).toContain("A Privileged Access Manager grant on break-glass (folder 123456789012), requested as ops@example.com.");
   });
 
-  it("starts a request from the route's default length when this computer remembers none", async () => {
-    const view = await renderPage(overview);
-    view.click("Request grant", { row: "prod-admin" });
-    expect(view.dialog?.given.memory).toBeNull();
-    expect(view.dialog?.card).toMatchObject({ justification: "", minutes: "30" });
+  it("lists where it looks: the routes' projects with their hosts, and the scopes added, which can be removed", async () => {
+    const view = await accessTab(overview, { reply: (command) => (command === "gcp_pam_scope_remove" ? recordOverview({ pam_scopes: [] }) : undefined) });
+    expect(view.rows("Where Lunport looks")).toEqual([
+      "project acme-prod-123456 · global · frank@example.com From routes Used by db-1, db-2",
+      "folder 123456789012 · global · ops@example.com Remove",
+    ]);
+    view.press("Remove", { title: "Where Lunport looks", row: "folder 123456789012" });
+    await vi.waitFor(() => expect(view.accept).toHaveBeenCalled());
+    expect(view.calls).toContainEqual(["gcp_pam_scope_remove", { id: "00000000000000a1" }]);
+    expect(scopeLine({ parent: "projects/acme-dev-654321", location: "global", account: null })).toBe("project acme-dev-654321 · global · gcloud's active account");
   });
 
-  it("keeps Request grant off while a grant is active or activating", async () => {
-    const view = await renderPage(overview, { answers: { grants: [operate, admin, row({ entitlement: "prod-deploy", state: "activating" })] } });
-    expect(view.disabled("Request grant", { row: "prod-operate" })).toBe(true);
-    expect(view.disabled("Request grant", { row: "prod-deploy" })).toBe(true);
-    expect(view.disabled("Request grant", { row: "prod-admin" })).toBe(false);
-    expect(view.row("Access grants", "prod-deploy")).toContain("Activating…");
+  it("says a scope's search failed on its row", async () => {
+    const view = await accessTab(overview, { pam: { scopes: [{ ...addedScope, message: `ops@example.com may not call the Privileged Access Manager API (HTTP 403) ${SPOOFED_NAME}` }], entitlements: [] } });
+    expect(view.row("Where Lunport looks", "folder")).toContain(`(HTTP 403) ${SPOOFED_NAME_SHOWN}`);
   });
 
-  it("asks nothing for a row whose first host has no route here (yet)", async () => {
-    const bare = overviewOf([web, db], [dbRoute]);
-    const view = await renderPage(bare, { answers: { grants: [row({ entitlement: "prod-gone", host_ids: [web.id, db.id] })] } });
-    expect(view.disabled("Request grant", { row: "prod-gone" })).toBe(true);
-    view.click("Request grant", { row: "prod-gone" });
-    expect(view.dialog).toBeNull();
-  });
-
-  it("says why a grant could not be read instead of saying there is none", async () => {
-    const refused = "Privileged Access Manager refused the request: quota exceeded.";
-    const view = await renderPage(overview, { answers: { grants: [row({ entitlement: "prod-admin", state: "error", message: refused })] } });
-    expect(view.row("Access grants", "prod-admin")).toContain(refused);
-    expect(view.row("Access grants", "prod-admin")).not.toContain("No active grant");
-    expect(view.disabled("Request grant", { row: "prod-admin" })).toBe(false);
-  });
-
-  it("lists a grant row with no account without a stray separator, and still requests it and takes its answer", async () => {
-    // A route that names no account, while gcloud has no active account to resolve it to: the service gives the row no account.
-    const webPam = hostTransport({ instance: "web-1", pam: grant }, web.id);
-    const nobody = row({ entitlement: "prod-admin", account: null, host_ids: [web.id] });
-    const named = row({ entitlement: "prod-admin", host_ids: [db.id] }); // the same project, location and entitlement, for frank@
-    const view = await renderPage(overviewOf([web, db], [webPam, dbRoute]), { answers: { grants: [nobody, named] } });
-    const [first, second] = view.rows("Access grants");
-    expect(first).toContain("prod-admin acme-prod-123456 · global Required by web-1");
-    expect(second).toContain("prod-admin acme-prod-123456 · global · frank@example.com Required by db-1");
-    // Its request goes through its first host's route, which names no account either: it is made as gcloud's active account.
-    view.click("Request grant", { row: "Required by web-1" });
-    expect(view.dialog?.given).toMatchObject({ transport: webPam, entitlement: "prod-admin", alias: "web-1" });
-    expect(view.dialog?.text).toContain("requested as gcloud's active account");
-    // Its answer lands in it and not in the row for the same entitlement under an account: the key holds the missing account.
-    view.dialog!.given.onRequested({ entitlement: "prod-admin", state: "active", active_until_ms: LATER, message: null });
-    expect(view.row("Access grants", "Required by web-1")).toContain("Active until 11:30");
-    expect(view.row("Access grants", "Required by db-1")).toContain("No active grant");
-    expect(view.client.getQueryData(pamGrantsKey)).toEqual([{ ...nobody, state: "active", active_until_ms: LATER }, named]);
-  });
-
-  it("takes the answer of a request into its row at once, and into no other", async () => {
-    // The same entitlement id in another project is another row.
-    const other = row({ entitlement: "prod-admin", project: "acme-dev-654321", host_ids: [db2.id], state: "active", active_until_ms: AT });
-    const view = await renderPage(overview, { answers: { grants: [admin, other] } });
-    view.click("Request grant", { row: "acme-prod-123456" });
-    expect(view.dialog?.given.entitlement).toBe("prod-admin");
-    view.dialog!.given.onRequested({ entitlement: "prod-admin", state: "active", active_until_ms: LATER, message: null });
-    expect(view.row("Access grants", "acme-prod-123456")).toContain("Active until 11:30");
-    expect(view.disabled("Request grant", { row: "acme-prod-123456" })).toBe(true);
-    expect(view.row("Access grants", "acme-dev-654321")).toContain("Active until 10:00");
-    expect(view.client.getQueryData(pamGrantsKey)).toEqual([{ ...admin, state: "active", active_until_ms: LATER }, other]);
-  });
-
-  it("closes the request dialog when asked", async () => {
-    const view = await renderPage(overview);
-    view.click("Request grant", { row: "prod-admin" });
-    expect(view.dialog).not.toBeNull();
-    view.dialog!.given.onClose();
-    expect(view.dialog).toBeNull();
-  });
-
-  it("is shown when a listed route requires a grant, and not otherwise", async () => {
-    expect((await renderPage(overviewOf([web], [webRoute]))).sectionTitles()).not.toContain("Access grants");
-    // db-2's route requires a grant but its host is gone: it is listed nowhere.
-    expect((await renderPage(overviewOf([web], [webRoute, db2Route]))).sectionTitles()).not.toContain("Access grants");
-    expect((await renderPage(overview)).sectionTitles()).toContain("Access grants");
-  });
-
-  it("leaves out a grant whose hosts are all gone, and names only the hosts that are here", async () => {
-    const gone = row({ entitlement: "prod-gone", host_ids: [ghost.id] });
-    const view = await renderPage(overview, { answers: { grants: [gone, row({ host_ids: [ghost.id, db2.id] })] } });
-    expect(view.rows("Access grants")).toHaveLength(1);
-    expect(view.rows("Access grants")[0]).toContain("Required by db-2");
-    expect(view.text).not.toContain(ghost.id);
-    expect(view.text).not.toContain("prod-gone");
+  it("adds a scope from the dialog, checked as the backend checks it", async () => {
+    const view = await accessTab(overview, { reply: (command) => (command === "gcp_pam_scope_save" ? recordOverview() : undefined) });
+    buttonIn(actionsOf(view.tree(), "Where Lunport looks"), "Add scope").props.onClick!();
+    expect(view.scopeDialog).not.toBeNull();
+    const dialog = (draft: ScopeDraft) => renderHook(new QueryClient(), () => ScopeDialog({ draft, error: null, busy: false, accounts, onDraft: () => {}, onSave: () => {}, onClose: () => {} }));
+    const words = (draft: ScopeDraft) => textIn(dialog(draft));
+    expect(words({ ...newScopeDraft(), id: "acme" })).toContain("Enter a project ID, or a folder or organization number.");
+    expect(words({ ...newScopeDraft(), kind: "folders", id: "123456789012", location: "Global" })).toContain("Enter the PAM location, such as global.");
+    expect(words({ ...newScopeDraft(), kind: "folders", id: "123456789012" })).not.toContain("Enter");
+    view.wrapped().onSaveScope({ kind: "folders", id: " 123456789012 ", location: "global", account: "ops@example.com" });
+    await vi.waitFor(() => expect(view.calls).toContainEqual(["gcp_pam_scope_save", { parent: "folders/123456789012", location: "global", account: "ops@example.com" }]));
+    view.calls.length = 0;
+    view.wrapped().onSaveScope({ kind: "projects", id: "Acme", location: "global", account: "" });
+    expect(view.calls).toEqual([]);
   });
 
   it("waits for the first answer, says why there is none, and says when there is nothing to show", async () => {
-    expect((await renderPage(overview, { settled: false })).text).toContain("Checking grants…");
-    const failed = await renderPage(overview, { answers: { grants: new Error("Privileged Access Manager could not be reached.") } });
-    expect(failed.text).toContain("Privileged Access Manager could not be reached.");
-    expect(failed.rows("Access grants")).toEqual([]);
-    expect((await renderPage(overview, { answers: { grants: [] } })).text).toContain("No grants to show.");
+    expect((await accessTab(overview, {}, false)).text()).toContain("Looking for entitlements…");
+    const failed = await accessTab(overview, { pam: new Error(`Google said ${SPOOFED_NAME}`) });
+    expect(failed.text()).toContain(`Google said ${SPOOFED_NAME_SHOWN}`);
+    expect(failed.text()).not.toMatch(HIDDEN_CHARS);
+    const none = await accessTab(overview, { pam: { scopes: [], entitlements: [] } });
+    expect(none.text()).toContain("No entitlement found. Add a scope where your Google account can request a grant, or require a grant in a host's Google Cloud options.");
+    expect(none.text()).toContain("Lunport looks nowhere yet.");
   });
 
-  it("reads the grants only while a listed route requires one", async () => {
-    const enabled = (shown: RecordOverview) => {
-      const client = new QueryClient();
-      renderHook(client, () => GoogleCloudPanel({ overview: shown, createIapHost: vi.fn(), editHost: vi.fn() }));
-      // The query is built with the options of the page that first asked for it, `enabled` among them (the type of `options` leaves it out).
-      return (client.getQueryCache().find({ queryKey: pamGrantsKey })?.options as { enabled?: boolean } | undefined)?.enabled;
-    };
-    expect(enabled(overviewOf([web], [webRoute]))).toBe(false);
-    expect(enabled(overviewOf([web], [webRoute, db2Route]))).toBe(false); // the route that requires a grant has no host here
-    expect(enabled(overview)).toBe(true);
+  it("shows hidden and direction-changing characters in aliases and Google's sentences as visible escapes", async () => {
+    const odd = hostView({ id: db.id, payload: hostPayload({ alias: SPOOFED_NAME }) });
+    const failing = entitlement({ state: "error", message: `quota exceeded for ${SPOOFED_NAME}`, host_ids: [odd.id] });
+    const view = await accessTab(overviewOf([odd], [{ ...dbRoute, host_id: odd.id }]), { pam: { scopes: [], entitlements: [failing] } });
+    expect(view.row("Entitlements", "prod-operate")).toContain(`Used by ${SPOOFED_NAME_SHOWN}`);
+    expect(view.row("Entitlements", "prod-operate")).toContain(`quota exceeded for ${SPOOFED_NAME_SHOWN}`);
+    expect(view.text()).not.toMatch(HIDDEN_CHARS);
   });
 });
 
-describe("Hosts through IAP", () => {
-  it("opens a host from the list, creates a new IAP host, and skips orphans", async () => {
-    const view = await renderPage(overviewOf([web, ops], [webRoute, ghostRoute])); // ghost-1's route has no host here: an orphan
-    expect(view.text).not.toContain(ghostRoute.host_id);
+describe("the IAP hosts tab", () => {
+  const hostsTab = (overview: RecordOverview) => {
+    const editHost = vi.fn();
+    const tree = IapHostsTab({ overview, editHost });
+    return { editHost, rows: () => rowsOf(tree, "Hosts through IAP").map(rowText), row: (label: string) => rowText(rowFor(tree, "Hosts through IAP", label)), tree, text: pageText(renderToStaticMarkup(tree)) };
+  };
+
+  it("opens a host from the list and skips orphans", () => {
+    const view = hostsTab(overviewOf([web, ops], [webRoute, ghostRoute]));
     expect(view.text).not.toContain("ghost-1");
-    view.click("web-1", { row: "web-1", in: "Hosts through IAP" });
-    expect(view.props.editHost).toHaveBeenCalledWith(web.id);
-    view.click("New IAP host");
-    expect(view.props.createIapHost).toHaveBeenCalled();
-    expect(view.props.editHost).toHaveBeenCalledTimes(1);
-    expect(view.rows("Hosts through IAP")).toHaveLength(1); // ops-1 has no route
+    buttonIn(rowFor(view.tree, "Hosts through IAP", "web-1"), "web-1").props.onClick!();
+    expect(view.editHost).toHaveBeenCalledWith(web.id);
+    expect(view.rows()).toHaveLength(1);
   });
 
-  it("shows each host's target, zone and account, by alias", async () => {
-    const view = await renderPage(overviewOf([web, ops, db], [webRoute, opsRoute, dbRoute].reverse()));
-    expect(view.rows("Hosts through IAP")).toEqual([
+  it("shows each host's target, zone and account, by alias", () => {
+    expect(hostsTab(overviewOf([web, ops, db], [webRoute, opsRoute, dbRoute].reverse())).rows()).toEqual([
       "db-1 acme-prod-123456 / db-1 · asia-east1-b frank@example.com",
       "ops-1 acme-prod-123456 / ops-1 · asia-east1-c ops@example.com",
       "web-1 acme-prod-123456 / web-1 · asia-east1-b gcloud's active account",
     ]);
   });
 
-  it("says when no host connects through IAP", async () => {
-    expect(await renderPageText(overviewOf([web], []))).toContain(
-      "No host connects through IAP yet. Open a host and choose Google Cloud IAP under Connect via, or create one with New IAP host.",
-    );
-    // Neither does an overview that lists no routes at all, nor one whose only route has lost its host.
-    expect(await renderPageText(overviewOf([web], [ghostRoute]))).toContain("No host connects through IAP yet.");
-    expect(await renderPageText(recordOverview({ hosts: [web], transports: undefined }))).toContain("No host connects through IAP yet.");
-    expect(await renderPageText(overviewOf([web], [webRoute]))).not.toContain("No host connects through IAP yet.");
+  it("says when no host connects through IAP", () => {
+    expect(hostsTab(overviewOf([web], [])).text).toContain("No host connects through IAP yet. Open a host and choose Google Cloud IAP under Connect via, or create one with New IAP host.");
+    expect(hostsTab(overviewOf([web], [ghostRoute])).text).toContain("No host connects through IAP yet.");
+    expect(hostsTab(recordOverview({ hosts: [web], transports: undefined })).text).toContain("No host connects through IAP yet.");
   });
 
-  it("sets apart the routes a central library keeps on this computer, after the others, with no room as their reason only when it is", async () => {
+  it("sets apart the routes a central library keeps on this computer, after the others, with no room as their reason only when it is", () => {
     const sync: TransportSyncView[] = [
       { host_id: web.id, synced: true, reason: null },
       { host_id: ops.id, synced: false, reason: "no_room" },
-      { host_id: ghost.id, synced: false, reason: "no_room" },
     ];
-    const view = await renderPage(overviewOf([web, ops], [webRoute, opsRoute, ghostRoute], { ...library, transport_sync: sync }));
-    // ops-1 sorts before web-1, but sits after it: it is the one the library has no room for.
-    expect(view.rows("Hosts through IAP").map((line) => line.split(" ")[0])).toEqual(["web-1", "ops-1"]);
-    expect(view.row("Hosts through IAP", "ops-1")).toContain("Saved on this computer only: the library has no room for this route");
-    expect(view.row("Hosts through IAP", "web-1")).not.toContain("Saved on this computer only");
-    // ghost-1's host is not here, so its route is listed nowhere.
-    expect(view.text).not.toContain("ghost-1");
-    // A route that stays for another reason (the library's latest changes not read yet, a conflict, paused writes) is set apart too, but
-    // the page names no reason it was not given.
-    const waiting = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { ...library, transport_sync: [sync[0], { host_id: ops.id, synced: false, reason: null }] }));
-    expect(waiting.rows("Hosts through IAP").map((line) => line.split(" ")[0])).toEqual(["web-1", "ops-1"]);
-    expect(waiting.row("Hosts through IAP", "ops-1")).toContain("Saved on this computer only");
-    expect(waiting.text).not.toContain("no room");
-    // A route the library holds, and one it says nothing of, are not set apart.
-    const quiet = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { ...library, transport_sync: [sync[0]] }));
-    expect(quiet.text).not.toContain("Saved on this computer only");
-  });
-
-  it("does not set routes apart outside a central library, where every route stays on this computer by design", async () => {
-    const sync: TransportSyncView[] = [{ host_id: ops.id, synced: false, reason: null }, { host_id: web.id, synced: false, reason: null }];
-    const alone = await renderPage(overviewOf([web, ops], [webRoute, opsRoute], { transport_sync: sync }));
+    const view = hostsTab(overviewOf([web, ops], [webRoute, opsRoute], { ...library, transport_sync: sync }));
+    expect(view.rows().map((line) => line.split(" ")[0])).toEqual(["web-1", "ops-1"]);
+    expect(view.row("ops-1")).toContain("Saved on this computer only: the library has no room for this route");
+    const alone = hostsTab(overviewOf([web, ops], [webRoute, opsRoute], { transport_sync: sync }));
     expect(alone.text).not.toContain("Saved on this computer only");
-    expect(alone.rows("Hosts through IAP").map((line) => line.split(" ")[0])).toEqual(["ops-1", "web-1"]);
-    const chain = await renderPage(overviewOf([web], [webRoute], { account: library.account, transport_sync: sync }));
-    expect(chain.text).not.toContain("Saved on this computer only");
-    // Central sync is the library's own mode, which an account alone does not make and which needs an account to hold anything.
-    const accountless = await renderPage(overviewOf([web], [webRoute], { central_mode: true, transport_sync: sync }));
-    expect(accountless.text).not.toContain("Saved on this computer only");
   });
-});
 
-describe("words that come from outside", () => {
-  it("shows hidden and direction-changing characters in aliases and Google's sentences as visible escapes", async () => {
+  it("shows a spoofed alias as visible escapes", () => {
     const odd = hostView({ id: db.id, payload: hostPayload({ alias: SPOOFED_NAME }) });
-    const failing = row({ entitlement: "prod-admin", state: "error", message: `quota exceeded for ${SPOOFED_NAME}`, host_ids: [odd.id] });
-    const unknown = { ...accounts, accounts: [{ account: "late@example.com", state: "unknown", message: `offline ${SPOOFED_NAME}` }] };
-    const view = await renderPage(overviewOf([odd], [{ ...dbRoute, host_id: odd.id }]), { answers: { grants: [failing], accounts: unknown } });
-    expect(view.row("Hosts through IAP", SPOOFED_NAME_SHOWN)).toContain(SPOOFED_NAME_SHOWN);
-    expect(view.row("Access grants", "prod-admin")).toContain(`Required by ${SPOOFED_NAME_SHOWN}`);
-    expect(view.row("Access grants", "prod-admin")).toContain(`quota exceeded for ${SPOOFED_NAME_SHOWN}`);
-    expect(view.row("Google sign-in", "late@example.com")).toContain(`offline ${SPOOFED_NAME_SHOWN}`);
-    expect(view.html).not.toMatch(HIDDEN_CHARS);
-    view.click("Request grant", { row: "prod-admin" });
-    expect(view.dialog?.text).toContain(SPOOFED_NAME_SHOWN);
-    expect(view.dialog?.text).not.toMatch(HIDDEN_CHARS);
-  });
-
-  it("shows them in the sentence of a read that failed, too", async () => {
-    const failed = await renderPage(overviewOf([db], [dbRoute]), {
-      answers: { accounts: new Error(`gcloud said ${SPOOFED_NAME}`), grants: new Error(`Google said ${SPOOFED_NAME}`) },
-    });
-    expect(failed.text).toContain(`gcloud said ${SPOOFED_NAME_SHOWN}`);
-    expect(failed.text).toContain(`Google said ${SPOOFED_NAME_SHOWN}`);
-    expect(failed.html).not.toMatch(HIDDEN_CHARS);
+    const view = hostsTab(overviewOf([odd], [{ ...dbRoute, host_id: odd.id }]));
+    expect(view.text).toContain(SPOOFED_NAME_SHOWN);
+    expect(view.text).not.toMatch(HIDDEN_CHARS);
   });
 });

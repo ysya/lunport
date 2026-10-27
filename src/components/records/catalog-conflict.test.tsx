@@ -49,6 +49,14 @@ describe("a Catalog conflict", () => {
     ]) expect(words).toContain(expected);
   });
 
+  it("names a search scope both devices changed, and its two versions", () => {
+    const scope = { id: "00000000000000a1", parent: "folders/123456789012", location: "global", account: null };
+    const words = shown(review({ items: [{ kind: "pam_scope", id: scope.id, local: { ...scope, account: "ops@example.com" }, remote: null }] }));
+    expect(words).toContain("Search scope folder 123456789012 · global");
+    expect(words).toContain("folder 123456789012 · global · ops@example.com");
+    expect(words).toContain("Removed");
+  });
+
   it("names a tunnel's two names only when they differ", () => {
     const renamed = shown(review({ items: [{ kind: "tunnel", id: "000000000000000b", local: rule(15432, "Postgres"), remote: rule(15432) }] }));
     expect(renamed).toContain("Tunnel “Postgres”");

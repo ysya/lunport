@@ -2,7 +2,7 @@ import { Button } from "@/components/ui/button";
 import type { CatalogCollision, CatalogReview } from "@/lib/central-sync";
 import type { RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
-import { iapTarget } from "@/lib/transports";
+import { iapTarget, parentLabel } from "@/lib/transports";
 import { tunnelRoute } from "@/lib/tunnels";
 
 /* The shared Catalog's row in Central conflicts (design 2026-10-27, Collisions: the review): the items both devices changed, in plain
@@ -29,6 +29,10 @@ export function collisionLabel(item: CatalogCollision, overview?: RecordOverview
     case "route": return `Google Cloud route of ${quoted(hostName(item.host_id, overview))}`;
     case "collection": return `Name of collection ${quoted(item.local ?? item.remote ?? collectionName(item.id, overview))}`;
     case "group_order": return item.scope.kind === "space" ? `Group order in ${quoted(collectionName(item.scope.space_id, overview))}` : "Group order";
+    case "pam_scope": {
+      const scope = item.local ?? item.remote;
+      return scope ? `Search scope ${revealHidden(`${parentLabel(scope.parent)} · ${scope.location}`)}` : "Search scope";
+    }
   }
 }
 
@@ -59,6 +63,10 @@ export function collisionValue(item: CatalogCollision, side: "local" | "remote",
     case "group_order": {
       const ids = item[side];
       return ids === null ? "Removed" : ids.map((id) => revealHidden(groupName(id, overview))).join(", ");
+    }
+    case "pam_scope": {
+      const scope = item[side];
+      return scope === null ? "Removed" : revealHidden(`${parentLabel(scope.parent)} · ${scope.location} · ${scope.account ?? "gcloud's active account"}`);
     }
   }
 }

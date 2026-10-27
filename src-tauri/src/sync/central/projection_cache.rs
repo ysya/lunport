@@ -142,6 +142,10 @@ impl Cache {
                 ),
             );
         }
+        // Search scopes and grant memory take the tunnels' path too.
+        for (id, payload) in crate::sync::pam_records::catalog_rows(&catalogue) {
+            cache.account.records.insert(record_key(RecordKind::Meta, &id), row(RecordKind::Meta, &id, payload, catalogue_receipt, observed));
+        }
         for order in &catalogue.group_orders {
             match &order.scope {
                 HostScope::Local => cache.group_order = order.ids.clone(),
@@ -268,7 +272,7 @@ mod tests {
         let host = |name: &str| {
             Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":name,"hostname":"fixture.invalid","auth":"password"})).unwrap())
         };
-        let catalogue = Catalog {
+        let catalogue = Catalog { pam_scopes: vec![], pam_requests: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![Collection {

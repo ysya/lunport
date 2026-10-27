@@ -140,8 +140,12 @@ export type RecordOverview = {
   transports?: import("@/bindings/HostTransport").HostTransport[];
   /** For each route in `transports`, whether it syncs with its host or stays on this computer; absent in older backend fixtures. */
   transport_sync?: TransportSyncView[];
-  /** What this computer's grant requests taught it, per host; absent in older backend fixtures. */
+  /** What this computer's grant requests taught it, per host, as an earlier release remembered it; absent in older backend fixtures. */
   grant_memory?: GrantMemoryView[];
+  /** The Privileged Access Manager search scopes the person added (design 2026-10-27); absent in older backend fixtures. */
+  pam_scopes?: import("@/bindings/PamScope").PamScope[];
+  /** The grant memory, one per entitlement, most recently written first; absent in older backend fixtures. */
+  pam_requests?: import("@/bindings/GrantRequestMemory").GrantRequestMemory[];
   /** Transient transport activity; absent in older backend fixtures. */
   syncing?: boolean;
   library_enabled: boolean;

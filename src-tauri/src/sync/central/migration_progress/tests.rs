@@ -148,7 +148,7 @@ fn resumed_ciphertext_batches_can_start_mid_page_without_changing_any_envelope()
                 id: "catalog".into(),
                 scope: None,
             },
-            Data::Catalog(Catalog {
+            Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections: vec![],

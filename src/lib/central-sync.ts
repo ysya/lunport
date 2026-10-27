@@ -143,7 +143,8 @@ export type CatalogCollision =
   | { kind: "tunnel"; id: string; local: TunnelRule | null; remote: TunnelRule | null }
   | { kind: "route"; host_id: string; local: HostTransport | null; remote: HostTransport | null }
   | { kind: "collection"; id: string; local: string | null; remote: string | null }
-  | { kind: "group_order"; scope: HostScope; local: string[] | null; remote: string[] | null };
+  | { kind: "group_order"; scope: HostScope; local: string[] | null; remote: string[] | null }
+  | { kind: "pam_scope"; id: string; local: import("@/bindings/PamScope").PamScope | null; remote: import("@/bindings/PamScope").PamScope | null };
 /** The Catalog's review: its colliding items, which choice fits, and why none does (`over`). Without items the merge waits for the next sync. */
 export type CatalogReview = { items: CatalogCollision[]; over: string | null; can_local: boolean; can_remote: boolean };
 export type CentralConflict = { id: string; token: string; kind: string; name: string; local: Record<string, unknown> | null; remote: Record<string, unknown> | null; local_deleted: boolean; remote_deleted: boolean; remote_revision: string; can_resolve: boolean; can_remote: boolean; can_copy: boolean; catalog: CatalogReview | null };

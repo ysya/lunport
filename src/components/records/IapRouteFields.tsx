@@ -17,6 +17,8 @@ import {
   routeSynced,
   type PamCheck,
   type TransportKind,
+  isProjectId,
+  pamSuggestionsQuery,
 } from "@/lib/transports";
 import { changeEditor, type EditorState } from "./editor";
 import { RecordField, selectClass } from "./form";
@@ -213,6 +215,7 @@ export function IapRouteFields({
               <div className="sm:col-span-2">
                 <RecordField label="Entitlements">
                   <EntitlementsInput value={kind.pam.entitlements} disabled={disabled} onChange={(entitlements) => patchPam({ entitlements })} />
+                  <EntitlementSuggestions kind={kind} disabled={disabled} onAdd={(id) => patchPam({ entitlements: [...(kind.pam?.entitlements ?? []), id] })} />
                 </RecordField>
               </div>
               <RecordField label="Location">
@@ -261,6 +264,35 @@ function EntitlementsInput({ id, value, onChange, disabled }: { id?: string; val
         onChange(parseEntitlements(e.target.value));
       }}
     />
+  );
+}
+
+/**
+ * The entitlements the route's account may request in its project's PAM location (design 2026-10-27), offered under the field: one
+ * press adds one. Read once the project reads as one; nothing is shown while Google has none to offer or cannot say.
+ */
+function EntitlementSuggestions({ kind, disabled, onAdd }: { kind: TransportKind; disabled: boolean; onAdd: (id: string) => void }) {
+  const location = kind.pam?.location ?? "";
+  const ready = kind.pam !== null && isProjectId(kind.project) && /^[a-z][a-z0-9-]*$/.test(location);
+  const found = useQuery({ ...pamSuggestionsQuery(kind.account, kind.project, location), enabled: ready }).data ?? [];
+  return <EntitlementSuggestionsView offered={suggestionsToOffer(found, kind.pam?.entitlements ?? [])} disabled={disabled} onAdd={onAdd} />;
+}
+
+/** The suggestions not already listed, while the route can list more (eight at most). */
+export const suggestionsToOffer = (found: string[], listed: string[]) => (listed.length >= 8 ? [] : found.filter((id) => !listed.includes(id)));
+
+/** The suggestions as they are drawn. No hooks: exported for the tests. */
+export function EntitlementSuggestionsView({ offered, disabled, onAdd }: { offered: string[]; disabled: boolean; onAdd: (id: string) => void }) {
+  if (offered.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs text-muted-foreground">
+      <span>You may request:</span>
+      {offered.map((id) => (
+        <Button key={id} type="button" size="xs" variant="outline" aria-label={`Add ${id}`} disabled={disabled} onClick={() => onAdd(id)}>
+          {id}
+        </Button>
+      ))}
+    </div>
   );
 }
 

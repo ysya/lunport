@@ -158,11 +158,11 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         },
     ))
     .with_gcp(gcp)
-    // A grant the person requested from a connection: its justification and duration are remembered on this computer (the device-local
-    // grant memory) and offered next time.
-    .with_grant_memory(Box::new(move |host, justification, duration_secs| crate::sync::engine::with_env(&for_grant, |env| {
+    // A grant the person requested from a connection: its justification and duration are remembered for its entitlement (the library's
+    // grant memory, design 2026-10-27) and offered next time; what an earlier release remembered for the host goes.
+    .with_grant_memory(Box::new(move |host, name, justification, duration_secs| crate::sync::engine::with_env(&for_grant, |env| {
         let now = env.now();
-        crate::sync::record_runtime::mutate_records(env, |s| crate::sync::transports::remember_grant_request(s, host.as_str(), justification, duration_secs, now).map_err(|e| AppError::Other(e.to_string())))?;
+        crate::sync::record_runtime::mutate_records(env, |s| Ok(crate::sync::pam_records::remember(s, name, justification, duration_secs, Some(host.as_str()), now).unwrap_or_else(|| s.clone())))?;
         env.events.wake();
         Ok::<_, AppError>(())
     }).map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))))

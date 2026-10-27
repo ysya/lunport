@@ -44,6 +44,9 @@ fn partition(
 ) -> Catalog {
     c.tunnels.retain(|r| owned_tunnels.contains(&r.id));
     c.transports.clear();
+    // Search scopes and grant memory are not the adoption's either (design 2026-10-27): they stay this device's until the publish step.
+    c.pam_scopes.clear();
+    c.pam_requests.clear();
     c.collections.retain(|v| owned.contains(&v.id));
     c.group_orders
         .retain(|v| matches!(&v.scope,HostScope::Space{space_id} if owned.contains(space_id)));
@@ -114,12 +117,7 @@ impl merge::Plan {
                     _ => return Err(invalid()),
                 }
             }
-            None => Catalog {
-                tunnels: vec![],
-                transports: vec![],
-                collections: vec![],
-                group_orders: vec![],
-            },
+            None => Catalog::default(),
         };
         if current != previous {
             return Err(AppError::Other("Imported collection names or ordering changed on another device. The merge is paused with all source data retained.".into()));

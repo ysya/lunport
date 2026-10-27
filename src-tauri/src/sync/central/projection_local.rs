@@ -102,6 +102,7 @@ pub fn public_rows(
             }
             RecordKind::Meta if crate::sync::tunnel_rules::is_id(&row.record.id) => {}
             RecordKind::Meta if transports::is_id(&row.record.id) => {}
+            RecordKind::Meta if crate::sync::pam_records::is_id(&row.record.id) => {}
             RecordKind::Meta if row.record.id == crate::sync::record::ACCOUNT_META_ID => {}
             RecordKind::Meta if row.record.id == crate::sync::group_order::RECORD_ID => {}
             _ => return Err(invalid()),
@@ -253,11 +254,14 @@ pub(crate) fn catalog_of(state: &SyncStateV3, original: &Catalog) -> Result<Cata
             routes.insert(route.host_id.clone(), transports::without_justification(route));
         }
     }
+    let (pam_scopes, pam_requests) = crate::sync::pam_records::catalog_lists(state, original).map_err(|_| invalid())?;
     let mut catalog = Catalog {
         tunnels: next_tunnels,
         transports: vec![],
         collections: next_collections,
         group_orders: next_orders,
+        pam_scopes,
+        pam_requests,
     };
     for old in &original.transports {
         if let Some(route) = routes.remove(&old.host_id) {

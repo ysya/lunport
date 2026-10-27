@@ -173,6 +173,12 @@ pub struct Catalog {
     /// without routes, so a library without any stays readable by every release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transports: Vec<HostTransport>,
+    /// The search scopes the person added for Privileged Access Manager, and the grant memory, one per entitlement (design 2026-10-27).
+    /// Neither field is written while empty, so a library without them stays readable by every release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pam_scopes: Vec<crate::sync::pam_records::PamScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pam_requests: Vec<crate::sync::pam_records::GrantRequestMemory>,
 }
 /// The most collections, tunnel rules and group orders a Catalog holds, and the most groups its orders name together.
 pub const MAX_COLLECTIONS: usize = 256;
@@ -220,6 +226,9 @@ impl Catalog {
                 .iter()
                 .any(|r| !is_catalog_route(r) || !route_hosts.insert(&r.host_id))
         {
+            return Err(invalid());
+        }
+        if !crate::sync::pam_records::valid_catalog(self) {
             return Err(invalid());
         }
         let mut groups = 0;
@@ -592,14 +601,14 @@ mod tests {
             id: "f".repeat(64),
             name: "Work".into(),
         };
-        let catalog = Catalog {
+        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![c.clone(), c],
             group_orders: vec![],
         };
         assert!(catalog.validate().is_err());
-        let catalog = Catalog {
+        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![],
@@ -708,7 +717,7 @@ mod tests {
     }
     #[test]
     fn a_catalog_without_routes_serializes_as_before() {
-        let catalog = Catalog {
+        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![],
             collections: vec![],
             group_orders: vec![],
             tunnels: vec![],

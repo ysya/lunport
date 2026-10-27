@@ -137,7 +137,7 @@ fn large_staged_history_still_emits_no_more_than_thirty_two_existing_envelopes()
                 id: "catalog".into(),
                 scope: None,
             },
-            Data::Catalog(Catalog {
+            Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections: vec![],

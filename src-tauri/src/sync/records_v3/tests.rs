@@ -427,25 +427,27 @@ fn v3_state_decodes_local_hosts_public_metadata_and_tombstones() {
     ));
 }
 
-/// Design 2026-10-26: state version 10 is known to every place that lists the versions a state may carry (the decoder, the validator and
-/// the repository's header check), and the version after it is not.
+/// Design 2026-10-26 and 2026-10-27: state versions 10 and 11 are known to every place that lists the versions a state may carry (the
+/// decoder, the validator and the repository's header check), and the version after them is not.
 #[test]
-fn state_version_ten_is_known_everywhere_and_the_next_one_is_not() {
+fn state_versions_ten_and_eleven_are_known_everywhere_and_the_next_one_is_not() {
     assert_eq!(TRANSPORT_SYNC_STATE_VERSION, TRANSPORT_STATE_VERSION + 1);
-    assert_eq!(TRANSPORT_SYNC_STATE_VERSION, 10);
+    assert_eq!((TRANSPORT_SYNC_STATE_VERSION, PAM_STATE_VERSION), (10, 11));
     let mut s = state();
-    s.version = TRANSPORT_SYNC_STATE_VERSION;
-    assert!(validate_state(&s).is_ok());
-    assert!(matches!(decode_state(&serde_json::to_string(&s).unwrap()), Ok(DecodedState::V3(got)) if *got == s));
-    assert!(crate::sync::record_repository::snapshot(&s).is_ok());
-    s.version = TRANSPORT_SYNC_STATE_VERSION + 1;
+    for known in [TRANSPORT_SYNC_STATE_VERSION, PAM_STATE_VERSION] {
+        s.version = known;
+        assert!(validate_state(&s).is_ok());
+        assert!(matches!(decode_state(&serde_json::to_string(&s).unwrap()), Ok(DecodedState::V3(got)) if *got == s));
+        assert!(crate::sync::record_repository::snapshot(&s).is_ok());
+    }
+    s.version = PAM_STATE_VERSION + 1;
     assert!(matches!(
         validate_state(&s),
-        Err(RecordValidationError::UnsupportedSchema { kind: "state", found: 11 })
+        Err(RecordValidationError::UnsupportedSchema { kind: "state", found: 12 })
     ));
     assert!(matches!(
         decode_state(&serde_json::to_string(&s).unwrap()),
-        Err(RecordValidationError::UnsupportedSchema { kind: "state", found: 11 })
+        Err(RecordValidationError::UnsupportedSchema { kind: "state", found: 12 })
     ));
     assert!(crate::sync::record_repository::snapshot(&s).is_err());
 }

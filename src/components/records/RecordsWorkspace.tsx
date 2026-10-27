@@ -514,7 +514,7 @@ export function RecordsWorkspace({
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
-              {panel === "transports" && <GoogleCloudPanel overview={overview} createIapHost={createIapHost} editHost={editHost} />}
+              {panel === "transports" && <GoogleCloudPanel overview={overview} accept={accept} createIapHost={createIapHost} editHost={editHost} />}
               {panel === "account" && (
                 <RecordsAccountPanel
                   onOpenImport={() => setPanel("import")}

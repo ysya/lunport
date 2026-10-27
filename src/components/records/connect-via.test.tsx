@@ -17,7 +17,7 @@ import {
 import { beginDuplicateEditor, beginEditor, saveEditor, type EditorState } from "./editor";
 import { hostPayload, hostView, recordOverview } from "./fixtures";
 import { RecordHostEditor } from "./HostEditor";
-import { applyOsLoginUsername, ConnectVia, connectViaDescription, IapRouteFields, OsLoginUsername, osLoginNoteStale } from "./IapRouteFields";
+import { applyOsLoginUsername, ConnectVia, connectViaDescription, EntitlementSuggestionsView, IapRouteFields, OsLoginUsername, osLoginNoteStale, suggestionsToOffer } from "./IapRouteFields";
 import {
   beginRouteState,
   routeChangedElsewhere,
@@ -411,5 +411,18 @@ describe("the route in the host editor's state", () => {
     expect(osLoginNoteStale(kind, { ...kind, os_login: false })).toBe(true);
     // The instance, the zone and the grant settings change nothing OS Login said.
     expect(osLoginNoteStale(kind, { ...kind, instance: "jumpbox-2", zone: "asia-east1-c", pam: newPamCheck() })).toBe(false);
+  });
+});
+
+describe("entitlement suggestions in the host editor", () => {
+  it("offers the entitlements the account may request that the route does not list yet, while it can list more", () => {
+    expect(suggestionsToOffer(["prod-admin", "prod-operate"], ["prod-operate"])).toEqual(["prod-admin"]);
+    expect(suggestionsToOffer(["x"], ["a", "b", "c", "d", "e", "f", "g", "h"])).toEqual([]);
+    const add = vi.fn();
+    const tree = EntitlementSuggestionsView({ offered: ["prod-admin"], disabled: false, onAdd: add });
+    expect(textIn(tree)).toContain("You may request:");
+    buttonsIn(tree)[0].props.onClick!();
+    expect(add).toHaveBeenCalledWith("prod-admin");
+    expect(EntitlementSuggestionsView({ offered: [], disabled: false, onAdd: add })).toBeNull();
   });
 });

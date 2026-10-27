@@ -306,7 +306,7 @@ pub(super) mod tests {
     fn catalog() -> (Identity, Data) {
         (
             identity("meta", "catalog"),
-            Data::Catalog(Catalog {
+            Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections: vec![],
