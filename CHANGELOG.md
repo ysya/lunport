@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.14.0](https://github.com/ysya/lunport/compare/v1.13.0...v1.14.0) (2026-10-27)
+
+
+### Features
+
+* Settings now fills the window, with category search and Back navigation. Returning preserves the workspace and terminal sessions; unapplied SSH configuration drafts still require confirmation. ([#98](https://github.com/ysya/lunport/pull/98))
+* Recent and Needs attention move into the host page title menu. A compact alert count appears only when hosts need attention.
+* AI activity shows readable results, command summaries and compact timestamps. Expand Details for full timestamps, IDs, exit information and requester attribution. Permission to run alone never indicates command success.
+
 ## [1.13.0](https://github.com/ysya/lunport/compare/v1.12.1...v1.13.0) (2026-10-27)
 
 
