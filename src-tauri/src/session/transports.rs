@@ -118,7 +118,7 @@ pub fn pam_status(gcp: &dyn GcpClient, transport: &HostTransport) -> PamStatusVi
     let mut activating: Option<String> = None;
     let mut refused: Option<String> = None;
     for entitlement in &pam.entitlements {
-        match gcp.grants(account.as_deref(), project, &pam.location, entitlement) {
+        match gcp.grants(account.as_deref(), &pam::EntitlementName::in_project(project, &pam.location, entitlement).full()) {
             Ok(grants) => match Standing::of(&grants, now) {
                 Standing::Active(until) => {
                     if active.as_ref().is_none_or(|(_, best)| until > *best) {
@@ -170,8 +170,8 @@ pub struct PamGrantView {
 
 impl PamGrantView {
     /// The row for `place`, with no host yet: one search of the account's grants on that entitlement, decided as `pam_status` decides.
-    fn read(gcp: &dyn GcpClient, place: &pam::Entitlement<'_>, now: SystemTime) -> PamGrantView {
-        let (state, active_until_ms, message) = match gcp.grants(place.account, place.project, place.location, place.entitlement) {
+    fn read(gcp: &dyn GcpClient, account: Option<&str>, place: &pam::EntitlementName, now: SystemTime) -> PamGrantView {
+        let (state, active_until_ms, message) = match gcp.grants(account, &place.full()) {
             Ok(grants) => match Standing::of(&grants, now) {
                 Standing::Active(until) => ("active", until.map(epoch_ms), None),
                 Standing::Activating => ("activating", None, None),
@@ -180,10 +180,10 @@ impl PamGrantView {
             Err(error) => ("error", None, Some(error.to_string())),
         };
         PamGrantView {
-            account: place.account.map(str::to_string),
-            project: place.project.to_string(),
+            account: account.map(str::to_string),
+            project: place.parent.strip_prefix("projects/").unwrap_or(&place.parent).to_string(),
             location: place.location.to_string(),
-            entitlement: place.entitlement.to_string(),
+            entitlement: place.id.to_string(),
             state: state.to_string(),
             active_until_ms,
             message,
@@ -208,7 +208,7 @@ pub fn pam_grants(gcp: &dyn GcpClient, active: Option<&str>, transports: &[HostT
         for entitlement in &pam.entitlements {
             let known = rows.iter().position(|row| row.account.as_deref() == account && row.project == *project && row.location == pam.location && row.entitlement == *entitlement);
             let index = known.unwrap_or_else(|| {
-                rows.push(PamGrantView::read(gcp, &pam::Entitlement { account, project, location: &pam.location, entitlement }, now));
+                rows.push(PamGrantView::read(gcp, account, &pam::EntitlementName::in_project(project, &pam.location, entitlement), now));
                 rows.len() - 1
             });
             if !rows[index].host_ids.contains(&transport.host_id) {
@@ -252,12 +252,13 @@ pub fn pam_request_with(
         Some(chosen) => pam.entitlements.iter().find(|listed| *listed == chosen).ok_or("This host's route does not list that entitlement.")?,
         None => pam.entitlements.first().ok_or("This host's route names no PAM entitlement.")?,
     };
-    let place = pam::Entitlement { account: account.as_deref(), project, location: &pam.location, entitlement };
+    let name = pam::EntitlementName::in_project(project, &pam.location, entitlement).full();
+    let place = pam::Entitlement { account: account.as_deref(), name: &name };
     // A failed memory write does not fail the request: the grant exists either way.
     let remembered = || {
         let _ = remember(justification, duration_secs);
     };
-    let grant = pam::request_and_wait(gcp, &place, justification, duration_secs, &remembered, poll_every, wait, cancelled).map_err(|error| error.sentence(entitlement))?;
+    let grant = pam::request_and_wait(gcp, &place, justification, duration_secs, &remembered, poll_every, wait, cancelled, false).map_err(|error| error.sentence(entitlement))?;
     let (_, active_until) = pam::active_span(&grant, SystemTime::now(), duration_secs);
     Ok(PamStatusView { entitlement: Some(entitlement.clone()), state: "active".into(), active_until_ms: Some(epoch_ms(active_until)), message: None })
 }
@@ -669,10 +670,10 @@ mod tests {
         fn import_ssh_public_key(&self, _: Option<&str>, _: &str, _: &str) -> Result<LoginProfile, GcpError> {
             panic!("the editor's lookup never imports")
         }
-        fn grants(&self, _: Option<&str>, _: &str, _: &str, _: &str) -> Result<Vec<Grant>, GcpError> {
+        fn grants(&self, _: Option<&str>, _: &str) -> Result<Vec<Grant>, GcpError> {
             panic!("the editor's lookup never searches grants")
         }
-        fn create_grant(&self, _: Option<&str>, _: &str, _: &str, _: &str, _: u32, _: &str) -> Result<Grant, GcpError> {
+        fn create_grant(&self, _: Option<&str>, _: &str, _: u32, _: &str) -> Result<Grant, GcpError> {
             panic!("the editor's lookup never requests grants")
         }
         fn get_grant(&self, _: Option<&str>, _: &str) -> Result<Grant, GcpError> {
@@ -746,23 +747,32 @@ mod tests {
         fn import_ssh_public_key(&self, _: Option<&str>, _: &str, _: &str) -> Result<LoginProfile, GcpError> {
             panic!("the panel never imports a key")
         }
-        fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
-            assert_eq!((account, project, location), (Some("frank@example.com"), "acme-dev-654321", "global"));
+        fn grants(&self, account: Option<&str>, name: &str) -> Result<Vec<Grant>, GcpError> {
+            let (project, location, entitlement) = parts(name);
+            assert_eq!((account, project.as_str(), location.as_str()), (Some("frank@example.com"), "acme-dev-654321", "global"));
+            let entitlement = entitlement.as_str();
             match self.grants.lock().unwrap().get(entitlement) {
                 Some(Ok(grants)) => Ok(grants.clone()),
                 Some(Err(message)) => Err(Pam::refusal(message)),
                 None => Ok(Vec::new()),
             }
         }
-        fn create_grant(&self, _: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
-            self.created.lock().unwrap().push((entitlement.into(), duration_secs, justification.into()));
-            Ok(grant(&format!("projects/{project}/locations/{location}/entitlements/{entitlement}/grants/g1"), "ACTIVATING", None, duration_secs))
+        fn create_grant(&self, _: Option<&str>, name: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+            let (_, _, entitlement) = parts(name);
+            self.created.lock().unwrap().push((entitlement, duration_secs, justification.into()));
+            Ok(grant(&format!("{name}/grants/g1"), "ACTIVATING", None, duration_secs))
         }
         fn get_grant(&self, _: Option<&str>, name: &str) -> Result<Grant, GcpError> {
             self.read.lock().unwrap().push(name.into());
             let state = self.states.lock().unwrap().pop_front().expect("a state to read");
             Ok(grant(name, state, (state == "ACTIVE").then(SystemTime::now), 2700))
         }
+    }
+
+    /// A project entitlement's name in parts: the project, the location and the entitlement id.
+    fn parts(name: &str) -> (String, String, String) {
+        let name = pam::EntitlementName::parse(name).expect("a well-formed entitlement name");
+        (name.parent.strip_prefix("projects/").expect("a project's entitlement").to_string(), name.location, name.id)
     }
 
     /// One call to PAM as it was made: account, project, location, entitlement.
@@ -811,18 +821,19 @@ mod tests {
         fn import_ssh_public_key(&self, _: Option<&str>, _: &str, _: &str) -> Result<LoginProfile, GcpError> {
             panic!("grants never import a key")
         }
-        fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
-            self.searched.lock().unwrap().push(call(account, project, location, entitlement));
-            match self.answers.lock().unwrap().get(entitlement) {
+        fn grants(&self, account: Option<&str>, name: &str) -> Result<Vec<Grant>, GcpError> {
+            let (project, location, entitlement) = parts(name);
+            self.searched.lock().unwrap().push(call(account, &project, &location, &entitlement));
+            match self.answers.lock().unwrap().get(&entitlement) {
                 Some(Ok(grants)) => Ok(grants.clone()),
                 Some(Err(message)) => Err(Pam::refusal(message)),
                 None => Ok(Vec::new()),
             }
         }
-        fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
-            self.created.lock().unwrap().push((call(account, project, location, entitlement), duration_secs, justification.into()));
-            let name = format!("projects/{project}/locations/{location}/entitlements/{entitlement}/grants/g1");
-            Ok(grant(&name, "ACTIVE", Some(SystemTime::now()), duration_secs))
+        fn create_grant(&self, account: Option<&str>, name: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+            let (project, location, entitlement) = parts(name);
+            self.created.lock().unwrap().push((call(account, &project, &location, &entitlement), duration_secs, justification.into()));
+            Ok(grant(&format!("{name}/grants/g1"), "ACTIVE", Some(SystemTime::now()), duration_secs))
         }
         fn get_grant(&self, _: Option<&str>, _: &str) -> Result<Grant, GcpError> {
             panic!("a grant requested is active at once, so none is read back")

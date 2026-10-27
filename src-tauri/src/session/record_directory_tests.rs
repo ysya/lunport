@@ -583,6 +583,12 @@ mod gcp_transport {
 
     struct Handle(Arc<FakeGcp>);
 
+    /// A project entitlement's name in parts: the project, the location and the entitlement id.
+    fn parts(name: &str) -> (String, String, String) {
+        let name = crate::gcp::pam::EntitlementName::parse(name).expect("a well-formed entitlement name");
+        (name.parent.strip_prefix("projects/").expect("a project's entitlement").to_string(), name.location, name.id)
+    }
+
     impl GcpClient for Handle {
         fn login_profile(&self, account: Option<&str>, project: &str) -> Result<LoginProfile, GcpError> {
             self.0.calls.lock().unwrap().push(format!("profile {} {project}", account.unwrap_or("-")));
@@ -593,11 +599,13 @@ mod gcp_transport {
             let after = self.0.after_import.lock().unwrap().clone();
             Ok(after.unwrap_or_else(|| self.0.profile.lock().unwrap().clone()))
         }
-        fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
+        fn grants(&self, account: Option<&str>, name: &str) -> Result<Vec<Grant>, GcpError> {
+            let (project, location, entitlement) = parts(name);
             self.0.calls.lock().unwrap().push(format!("grants {} {project} {location} {entitlement}", account.unwrap_or("-")));
             Ok(self.0.grants.lock().unwrap().clone())
         }
-        fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+        fn create_grant(&self, account: Option<&str>, name: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+            let (project, location, entitlement) = parts(name);
             self.0.calls.lock().unwrap().push(format!("create {} {project} {location} {entitlement} {duration_secs} {justification}", account.unwrap_or("-")));
             Ok(Grant {
                 name: GRANT_NAME.into(),

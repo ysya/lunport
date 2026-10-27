@@ -119,14 +119,15 @@ impl RecordDirectory {
         wait: Duration,
     ) -> Result<GrantReceipt, DirectoryError> {
         let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
-        let place = crate::gcp::pam::Entitlement { account: need.account.as_deref(), project: &need.project, location: &need.location, entitlement: &need.entitlement };
+        let name = crate::gcp::pam::EntitlementName::in_project(&need.project, &need.location, &need.entitlement).full();
+        let place = crate::gcp::pam::Entitlement { account: need.account.as_deref(), name: &name };
         // A failed memory write does not fail the request: the grant exists either way.
         let remember = || {
             if let Some(remember) = &self.grant_memory {
                 let _ = remember(&need.host, justification, duration_secs);
             }
         };
-        let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled()).map_err(|error| match error {
+        let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled(), false).map_err(|error| match error {
             crate::gcp::pam::RequestError::Cancelled => DirectoryError::Failed(error.sentence(&need.entitlement)),
             other => DirectoryError::Denied(other.sentence(&need.entitlement)),
         })?;
@@ -336,7 +337,8 @@ impl HostDirectory for RecordDirectory {
         if let Some(pam) = &pam {
             let mut in_flight = false;
             for entitlement in &pam.entitlements {
-                let grants = gcp.grants(account.as_deref(), &project, &pam.location, entitlement).map_err(denied)?;
+                let name = crate::gcp::pam::EntitlementName::in_project(&project, &pam.location, entitlement).full();
+                let grants = gcp.grants(account.as_deref(), &name).map_err(denied)?;
                 let current = crate::gcp::pam::in_flight(&grants);
                 if !current.is_empty() {
                     in_flight = true;

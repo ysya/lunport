@@ -111,12 +111,117 @@ pub fn active_span(grant: &Grant, now: SystemTime, duration_secs: u32) -> (Syste
     (began, began + length)
 }
 
-/// Where a grant lives: the caller's account (or gcloud's active one) and the entitlement's full address.
+/// Where a grant lives: the caller's account (or gcloud's active one) and the entitlement's full name
+/// (`EntitlementName::full`).
 pub struct Entitlement<'a> {
     pub account: Option<&'a str>,
-    pub project: &'a str,
-    pub location: &'a str,
-    pub entitlement: &'a str,
+    pub name: &'a str,
+}
+
+/// An entitlement's full name, in parts: its parent (`projects/<id>`, `folders/<number>` or `organizations/<number>`), its location and
+/// its id. Entitlements live on any of the three (design 2026-10-27, The Access tab); a route's always on its project.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntitlementName {
+    pub parent: String,
+    pub location: String,
+    pub id: String,
+}
+
+/// A resource id as Google spells locations and entitlement ids: a lower-case letter, then lower-case letters, digits and hyphens, at
+/// most 63 characters, not ending in a hyphen.
+pub fn is_resource_id(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !text.ends_with('-')
+}
+
+/// A project id (6–30 lower-case letters, digits and hyphens, starting with a letter, not ending with a hyphen), optionally after a
+/// `domain.example:` prefix as older Google Workspace projects have it, or a project number.
+pub fn is_project_id(text: &str) -> bool {
+    let id = match text.rsplit_once(':') {
+        Some((domain, id)) if !domain.is_empty() && domain.split('.').all(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')) => id,
+        Some(_) => return false,
+        None => text,
+    };
+    let numeric = (6..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit());
+    numeric || ((6..=30).contains(&id.len()) && is_resource_id(id))
+}
+
+/// A parent PAM entitlements live on: `projects/<project id>`, `folders/<number>` or `organizations/<number>`.
+pub fn is_parent(text: &str) -> bool {
+    let number = |id: &str| (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit());
+    match text.split_once('/') {
+        Some(("projects", id)) => is_project_id(id),
+        Some(("folders" | "organizations", id)) => number(id),
+        _ => false,
+    }
+}
+
+impl EntitlementName {
+    /// The entitlement `id` in `location` of `project`, as a route names it.
+    pub fn in_project(project: &str, location: &str, id: &str) -> EntitlementName {
+        EntitlementName { parent: format!("projects/{project}"), location: location.to_string(), id: id.to_string() }
+    }
+
+    /// `<parent>/locations/<location>/entitlements/<id>` read back into its parts, when every part is well-formed.
+    pub fn parse(name: &str) -> Option<EntitlementName> {
+        let (scope, id) = name.rsplit_once("/entitlements/")?;
+        let (parent, location) = scope.rsplit_once("/locations/")?;
+        (is_parent(parent) && is_resource_id(location) && is_resource_id(id)).then(|| EntitlementName { parent: parent.into(), location: location.into(), id: id.into() })
+    }
+
+    /// `<parent>/locations/<location>/entitlements/<id>`: what PAM calls the entitlement, and the parent of its grants.
+    pub fn full(&self) -> String {
+        format!("{}/locations/{}/entitlements/{}", self.parent, self.location, self.id)
+    }
+
+    /// `<parent>/locations/<location>`: where the entitlement is searched for.
+    pub fn scope(&self) -> String {
+        format!("{}/locations/{}", self.parent, self.location)
+    }
+}
+
+/// What an entitlement search learns of one entitlement the caller may request (design 2026-10-27, The Access tab).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntitlementInfo {
+    /// The full name (`EntitlementName::full`).
+    pub name: String,
+    /// The most a request may ask for, when the entitlement says.
+    pub max_duration_secs: Option<u32>,
+    /// Whether a request waits for an approver (the entitlement has an approval workflow).
+    pub needs_approval: bool,
+    /// What a grant gives: each role, with the resource it is granted on.
+    pub roles: Vec<(String, String)>,
+}
+
+impl From<google_cloud_privilegedaccessmanager_v1::model::Entitlement> for EntitlementInfo {
+    fn from(entitlement: google_cloud_privilegedaccessmanager_v1::model::Entitlement) -> EntitlementInfo {
+        let max_duration_secs = entitlement.max_request_duration.as_ref().and_then(|duration| u32::try_from(duration.seconds()).ok()).filter(|secs| *secs > 0);
+        let roles = entitlement
+            .privileged_access
+            .as_ref()
+            .and_then(|access| access.gcp_iam_access())
+            .map(|iam| iam.role_bindings.iter().map(|binding| (binding.role.clone(), short_resource(&iam.resource))).collect())
+            .unwrap_or_default();
+        EntitlementInfo { name: entitlement.name.clone(), max_duration_secs, needs_approval: entitlement.approval_workflow.as_ref().is_some_and(|workflow| workflow.approval_workflow.is_some()), roles }
+    }
+}
+
+/// A resource as IAM names it (`//cloudresourcemanager.googleapis.com/projects/acme-prod-123456`), without the service:
+/// `projects/acme-prod-123456`.
+pub fn short_resource(resource: &str) -> String {
+    match resource.strip_prefix("//").and_then(|rest| rest.split_once('/')) {
+        Some((service, path)) if service.ends_with(".googleapis.com") => path.to_string(),
+        _ => resource.to_string(),
+    }
+}
+
+/// The grants waiting for an approver: `APPROVAL_AWAITED`. Such a grant gives no access, but PAM refuses another request on the same
+/// entitlement while it waits, so the Access tab's Request grant is off for it.
+pub fn pending(grants: &[Grant]) -> Vec<&Grant> {
+    grants.iter().filter(|grant| grant.state == "APPROVAL_AWAITED").collect()
 }
 
 /// How a grant request ended short of an active grant.
@@ -150,6 +255,10 @@ impl RequestError {
 /// Requests a grant on `place` for `duration_secs` with `justification` (or takes the one already in flight there, the most recent),
 /// tells `remember` once a request was made, and reads the grant back every `poll_every` until it is `ACTIVE`, for at most `wait`.
 /// `cancelled` is looked at between steps. The connect and the Google Cloud panel both request through here (design 2026-10-25).
+///
+/// With `approver` set (the Access tab, design 2026-10-27), a grant that waits for an approver is the answer, not a failure: a request
+/// that lands in `APPROVAL_AWAITED`, or one already waiting there, is returned at once, since nothing more happens without the
+/// approver. The connect never sets it: it does not wait for an approver.
 #[allow(clippy::too_many_arguments)]
 pub fn request_and_wait(
     gcp: &dyn GcpClient,
@@ -160,16 +269,19 @@ pub fn request_and_wait(
     poll_every: Duration,
     wait: Duration,
     cancelled: &dyn Fn() -> bool,
+    approver: bool,
 ) -> Result<Grant, RequestError> {
     if cancelled() {
         return Err(RequestError::Cancelled);
     }
-    let found = gcp.grants(place.account, place.project, place.location, place.entitlement).map_err(RequestError::Api)?;
+    let found = gcp.grants(place.account, place.name).map_err(RequestError::Api)?;
     let now = SystemTime::now();
+    let waiting = if approver { pending(&found).into_iter().next().cloned() } else { None };
     let mut grant = match in_flight(&found).into_iter().max_by_key(|grant| granted_at(grant, now).unwrap_or(UNIX_EPOCH)) {
         Some(existing) => existing.clone(),
+        None if waiting.is_some() => return Ok(waiting.expect("checked")),
         None => {
-            let created = gcp.create_grant(place.account, place.project, place.location, place.entitlement, duration_secs, justification).map_err(RequestError::Api)?;
+            let created = gcp.create_grant(place.account, place.name, duration_secs, justification).map_err(RequestError::Api)?;
             remember();
             created
         }
@@ -179,7 +291,7 @@ pub fn request_and_wait(
         if cancelled() {
             return Err(RequestError::Cancelled);
         }
-        if grant.state == "ACTIVE" {
+        if grant.state == "ACTIVE" || approver && grant.state == "APPROVAL_AWAITED" {
             return Ok(grant);
         }
         if grant.is_final() {
@@ -258,6 +370,39 @@ mod tests {
 
     fn grant(state: &str, granted: Option<&str>) -> Grant {
         Grant { name: format!("projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: granted.map(str::to_string), justification: None }
+    }
+
+    #[test]
+    fn entitlement_names_are_read_back_into_their_parts_on_any_parent() {
+        let name = EntitlementName::in_project("acme-prod-123456", "global", "prod-operate");
+        assert_eq!(name.full(), "projects/acme-prod-123456/locations/global/entitlements/prod-operate");
+        assert_eq!(EntitlementName::parse(&name.full()), Some(name.clone()));
+        assert_eq!(name.scope(), "projects/acme-prod-123456/locations/global");
+        for good in [
+            "folders/123456789012/locations/global/entitlements/break-glass",
+            "organizations/987654321098/locations/asia-east1/entitlements/org-admin",
+            "projects/example.com:acme-dev-654321/locations/global/entitlements/dev",
+        ] {
+            assert_eq!(EntitlementName::parse(good).map(|name| name.full()).as_deref(), Some(good));
+        }
+        for bad in [
+            "projects/acme/locations/global/entitlements/x",
+            "folders/abc/locations/global/entitlements/x",
+            "projects/acme-dev-654321/locations/Global/entitlements/x",
+            "projects/acme-dev-654321/locations/global/entitlements/",
+            "projects/acme-dev-654321/locations/global",
+            "billingAccounts/1/locations/global/entitlements/x",
+        ] {
+            assert_eq!(EntitlementName::parse(bad), None, "{bad}");
+        }
+        assert!(is_parent("projects/123456789") && !is_parent("projects/") && !is_parent("folders/"));
+    }
+
+    #[test]
+    fn a_grant_waiting_for_an_approver_is_pending_and_never_in_flight() {
+        let grants: Vec<Grant> = ["APPROVAL_AWAITED", "ACTIVE", "DENIED"].iter().map(|state| grant(state, None)).collect();
+        assert_eq!(pending(&grants).iter().map(|grant| grant.state.as_str()).collect::<Vec<_>>(), ["APPROVAL_AWAITED"]);
+        assert_eq!(in_flight(&grants).iter().map(|grant| grant.state.as_str()).collect::<Vec<_>>(), ["ACTIVE"]);
     }
 
     #[test]
