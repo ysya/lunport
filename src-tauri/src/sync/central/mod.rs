@@ -36,6 +36,7 @@ pub(in crate::sync) use initial_transaction::verify_saved as verify_initial_save
 pub(in crate::sync) use initial_publication::Prepared as InitialPreparation;
 mod initial_projection;
 pub(super) use initial_projection::Candidate as InitialProjection;
+pub(in crate::sync) use initial_projection::candidate_version as initial_candidate_version;
 #[cfg(test)]
 pub(super) use initial_projection::fixture_for_stage as initial_projection_for_test;
 #[cfg(test)]
@@ -58,6 +59,7 @@ mod projection;
 mod projection_cache;
 pub mod projection_state;
 mod projection_local;
+pub(super) use projection_local::catalog_of;
 mod projection_capture;
 pub(super) use projection_capture::public_candidate as capture_public;
 mod projection_delta;

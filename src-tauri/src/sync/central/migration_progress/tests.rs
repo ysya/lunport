@@ -150,6 +150,7 @@ fn resumed_ciphertext_batches_can_start_mid_page_without_changing_any_envelope()
             },
             Data::Catalog(Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),

@@ -249,6 +249,48 @@ fn future_opaque_rules_and_stale_edits_are_preserved() {
     assert!(blocked_by_opaque(&blocked, Some(&keys), &wire_id(A)));
     assert!(!blocked_by_opaque(&blocked, Some(&keys), &wire_id(B)));
 }
+/// Tunnels share the Catalog's room with routes in a library that uses central sync (design 2026-10-26, Room in the Catalog).
+#[test]
+fn a_full_catalog_refuses_one_more_tunnel_in_central_mode() {
+    use crate::sync::transports::{
+        tests::{central_with_host, filled_past_the_limit_with_tunnels},
+        NO_ROOM,
+    };
+    let full = filled_past_the_limit_with_tunnels(central_with_host(A));
+    assert_eq!(
+        set(&full, None, B, None, Some(rule(B)), 10)
+            .unwrap_err()
+            .to_string(),
+        NO_ROOM
+    );
+    let saved = view(&full).remove(0).rule;
+    assert!(
+        set(&full, None, &saved.id, Some(&saved), None, 11).is_ok(),
+        "removal never fails the check"
+    );
+    let mut chain = full;
+    chain.local.central = None;
+    assert!(
+        set(&chain, None, B, None, Some(rule(B)), 12).is_ok(),
+        "without central sync there is no Catalog to fit"
+    );
+}
+/// A tunnel's save is refused when the Catalog would not fit after it, though it fits before: the room check measures the state the
+/// save makes, not the one it starts from (final review, deferred Task 5 test).
+#[test]
+fn a_tunnel_that_would_push_the_catalog_past_one_record_is_refused_though_it_fits_before() {
+    use crate::sync::transports::{
+        tests::{central_with_host, filled_short_of},
+        NO_ROOM,
+    };
+    let brink = filled_short_of(central_with_host(A), |catalog| catalog.tunnels.push(rule(B)));
+    assert_eq!(
+        set(&brink, None, B, None, Some(rule(B)), 10)
+            .unwrap_err()
+            .to_string(),
+        NO_ROOM
+    );
+}
 #[test]
 fn local_rules_publish_once_when_joining_sync_and_wrong_keys_do_not_promote() {
     let original = rule(A);

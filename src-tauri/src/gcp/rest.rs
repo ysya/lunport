@@ -111,6 +111,12 @@ impl RestClient {
         }
     }
 
+    /// The token source this client signs its calls with, for a caller that checks a sign-in itself (the Google Cloud page's account
+    /// list): one source means one token cache, so a check warms the calls that follow and a call warms the next check.
+    pub fn tokens(&self) -> Arc<dyn TokenSource> {
+        Arc::clone(&self.tokens)
+    }
+
     /// The account the token source resolves `account` to (the active gcloud account when none is named), for the sentences; a
     /// credentials problem ends here, before the library is asked for anything.
     fn pam_account(&self, account: Option<&str>) -> Result<String, GcpError> {
@@ -469,6 +475,14 @@ mod tests {
         assert_eq!(grant.state, "ACTIVE");
         assert_eq!(grant.access_grant_time.as_deref(), Some("2027-01-15T08:00:00Z"));
         assert_eq!(grant.until(), Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000 + 1800)));
+    }
+
+    #[test]
+    fn the_client_hands_out_the_token_source_it_signs_with() {
+        let tokens: Arc<dyn TokenSource> = Arc::new(StaticToken("t0k".into()));
+        let client = RestClient::with_bases(Arc::clone(&tokens), "http://127.0.0.1", "http://127.0.0.1");
+        assert!(Arc::ptr_eq(&client.tokens(), &tokens), "the same source, so the same token cache");
+        assert_eq!(client.tokens().access_token(Some(ACCOUNT)).unwrap().account, ACCOUNT);
     }
 
     #[test]

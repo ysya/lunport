@@ -86,7 +86,8 @@ pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryErro
         pinned_at_ms: pin.pinned_at_ms,
     })
 }
-/// Writes what a grant request taught a host's transport: `(host, justification, duration_secs)` (design 2026-10-25, PAM grant requests).
+/// Writes what a grant request taught this computer about a host: `(host, justification, duration_secs)` (design 2026-10-26, Grant
+/// requests).
 pub type GrantMemory = dyn Fn(&HostId, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
 
 impl RecordDirectory {
@@ -106,7 +107,8 @@ impl RecordDirectory {
 
     /// `HostDirectory::request_grant` with the pacing given (the trait method uses the design's 2 s and 60 s; tests hurry). A grant that
     /// appeared since `prepare` looked (another connection, the panel) is used instead of requested: PAM refuses a second request with
-    /// the same scope. What the person gave is remembered on the transport for next time, whether or not the memory can be written.
+    /// the same scope. What the person gave is remembered on this computer for next time (the device-local grant memory), and a memory
+    /// that cannot be written does not fail the request.
     pub(crate) fn request_grant_with(
         &self,
         need: &GrantNeed,
@@ -348,6 +350,10 @@ impl HostDirectory for RecordDirectory {
                 }
             }
             if !in_flight {
+                // The question starts from what this computer last asked for on the host (the justification and the length, kept in the
+                // device-local grant memory, never in the synced route); a host it never asked a grant for gets the route's own default
+                // length and nothing to prefill (design 2026-10-26, Grant requests).
+                let memory = transports::grant_memory(&state, hop.id.as_str());
                 return Err(DirectoryError::GrantNeeded(Box::new(GrantNeed {
                     host: hop.id.clone(),
                     account: account.clone(),
@@ -355,8 +361,8 @@ impl HostDirectory for RecordDirectory {
                     location: pam.location.clone(),
                     entitlement: pam.entitlements[0].clone(),
                     entitlements: pam.entitlements.clone(),
-                    duration_secs: pam.duration_secs,
-                    justification: pam.justification.clone(),
+                    duration_secs: memory.as_ref().map_or(pam.duration_secs, |memory| memory.duration_secs),
+                    justification: memory.map(|memory| memory.justification),
                 })));
             }
             if cancel.is_cancelled() {
@@ -381,7 +387,7 @@ impl HostDirectory for RecordDirectory {
                 }
                 Some(name) if name != hop.user => {
                     return Err(DirectoryError::Denied(format!(
-                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; save that username into the host (Use OS Login username in the host's Google Cloud transport).",
+                        "OS Login names {who} {name} on {project}, but the host is saved with user {}; save that username into the host (Use OS Login username in the host editor).",
                         hop.user
                     )));
                 }

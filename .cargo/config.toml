@@ -1,0 +1,5 @@
+# Threads started without a stack size of their own, every test thread among them, get the stack the app gives its sync thread
+# (`SYNC_THREAD_STACK` in src-tauri/src/sync/engine.rs): tests run central sync on the test thread itself, and its first publication
+# needs about 2 MiB in a debug build, more on Windows, which is a default thread's whole stack.
+[env]
+RUST_MIN_STACK = "8388608"

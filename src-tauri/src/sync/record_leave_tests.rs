@@ -797,3 +797,63 @@ fn group_unreadable_selected_source_refuses_detach_without_credential_copies() {
     assert!(state(&d).account.is_some());
     assert_eq!(state(&d).local, before.local);
 }
+
+/// Design 2026-10-26 (Leaving sync) and R8: leaving keeps each route this device saved, and what its grant requests taught it, with a
+/// host that stays, under the host's new id when it gets one, and drops both for a host that goes.
+#[test]
+fn leaving_moves_routes_and_grant_memory_with_the_hosts_that_stay() {
+    use crate::sync::transports::{self, tests::with_pam, GrantMemory, HostTransport};
+    /// A host id nothing holds: its host does not stay.
+    const GONE: &str = "00000000000000aa";
+    let (d, _, _) = fixture();
+    record_runtime::mutate_records(&d.env(), |s| {
+        let mut next = s.clone();
+        for host in [A, LOCAL, GONE] {
+            next = transports::set(&next, host, None, Some(with_pam(host)), 200).unwrap();
+            next = transports::remember_grant_request(&next, host, "restart app-api", 1800, 201)
+                .unwrap();
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let result = leave_account(&d.env()).unwrap();
+    assert!(result.complete, "{:?}", result.pending_error);
+    let after = state(&d);
+    assert!(after.account.is_none());
+    let moved = &result
+        .mappings
+        .iter()
+        .find(|m| m.source_host_id == A)
+        .unwrap()
+        .local_host_id;
+    let memory = GrantMemory {
+        justification: "restart app-api".into(),
+        duration_secs: 1800,
+    };
+    for host in [moved.as_str(), LOCAL] {
+        assert_eq!(
+            transports::get(&after, host),
+            Some(HostTransport {
+                host_id: host.into(),
+                ..with_pam(A)
+            }),
+            "{host}"
+        );
+        assert_eq!(
+            transports::grant_memory(&after, host),
+            Some(memory.clone()),
+            "{host}"
+        );
+    }
+    for host in [A, GONE] {
+        assert_eq!(
+            (
+                transports::get(&after, host),
+                transports::grant_memory(&after, host)
+            ),
+            (None, None),
+            "{host}"
+        );
+    }
+    records_v3::validate_state(&after).unwrap();
+}

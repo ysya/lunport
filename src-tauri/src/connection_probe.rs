@@ -12,7 +12,10 @@ use std::{
 use tauri::AppHandle;
 use tokio::{net::TcpStream, sync::Semaphore, task::JoinSet, time::timeout};
 
-static CHECKS: Semaphore = Semaphore::const_new(4);
+/// The places for connection checks at once, shared by the port check and the check through Google Cloud IAP.
+pub(crate) static CHECKS: Semaphore = Semaphore::const_new(4);
+/// What a check answers when `CHECKS` has no place free.
+pub(crate) const BUSY: &str = "Four connection checks are already running. Try again shortly.";
 const DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,9 +115,9 @@ async fn probe(hostname: &str, port: u16) -> (ProbeStatus, Option<u64>) {
 
 #[tauri::command]
 pub async fn records_host_probe(app: AppHandle, host_id: String) -> Result<ProbeResult, AppError> {
-    let _permit = CHECKS.try_acquire().map_err(|_| {
-        AppError::Other("Four connection checks are already running. Try again shortly.".into())
-    })?;
+    let _permit = CHECKS
+        .try_acquire()
+        .map_err(|_| AppError::Other(BUSY.into()))?;
     let before = target(&app, &host_id)?;
     let start = Instant::now();
     let (mut status, mut latency_ms) = if before.jump.is_empty() {

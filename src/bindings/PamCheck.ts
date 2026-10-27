@@ -5,11 +5,12 @@
  */
 export type PamCheck = { entitlements: Array<string>, location: string,
 /**
- * How long a grant requested from Lunport asks for: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design 2026-10-25,
- * PAM grant requests).
+ * How long a grant requested from Lunport asks for by default: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design
+ * 2026-10-25, PAM grant requests). The length last asked for stays on the device that asked (`GrantMemory`), not here.
  */
 duration_secs: number,
 /**
- * The justification last sent with a request, offered again next time.
+ * The justification last sent with a request, as earlier releases kept it here. It is remembered on the device now (`GrantMemory`);
+ * no request writes this field any more.
  */
 justification: string | null, };

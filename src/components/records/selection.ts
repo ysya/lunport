@@ -6,6 +6,8 @@ export type HostSelection =
       groupId?: string;
       scope?: import("@/lib/records").HostScope;
       duplicateSource?: import("@/lib/records").RecordHostView;
+      /** How the new host is reached at first: Google Cloud IAP for the Google Cloud page's New IAP host. */
+      via?: "iap";
     }
   | {
       kind: "new_group";

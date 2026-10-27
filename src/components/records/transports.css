@@ -1,9 +1,3 @@
-/* The Google Cloud panel's page frame, the Tunnels panel's twin: the workspace main pads nothing, each tool panel brings its own inset,
-   and `min-width: 0` lets the table shrink instead of pushing the header's button past the window's edge. */
+/* The Google Cloud page's frame, the Tunnels panel's twin: the workspace main pads nothing, each tool panel brings its own inset,
+   and `min-width: 0` lets the page shrink instead of pushing the header's button past the window's edge. */
 .transports-panel { container-type: inline-size; min-width: 0; padding: 1.4rem var(--page-inset) 2rem; }
-.transport-compact { display: none; }
-@container (max-width: 720px) {
-  .transport-wide { display: none; }
-  .transport-compact { display: block; }
-  .transports-panel td, .transports-panel th { padding-left: .65rem; padding-right: .65rem; }
-}

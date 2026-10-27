@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "@/lib/test-ipc";
+import type { RouteChange } from "@/bindings/RouteChange";
 import {
   hostPayload,
   hostView,
@@ -209,6 +210,29 @@ describe("record editor", () => {
         { scope: { kind: "local" }, payload: hostPayload() },
       ],
     ]);
+  });
+  it("saves a route change with the host it was edited with", async () => {
+    const route: RouteChange = {
+      expected: null,
+      kind: { type: "gcp_iap", project: "acme-dev-654321", zone: "asia-east1-b", instance: "jumpbox", interface: "nic0", account: null, os_login: true, pam: null },
+    };
+    const calls = stubBackend(async () => recordOverview());
+    await submitEditor(changeEditor(beginEditor(null), hostPayload()), undefined, route);
+    const edited = changeEditor(beginEditor(hostView()), { alias: "edited" });
+    await submitEditor(edited, true, route);
+    await submitEditor(edited);
+    expect(calls).toEqual([
+      ["records_host_create", { scope: { kind: "local" }, payload: hostPayload(), route }],
+      ["records_host_update", { id: edited.id, revision: hostView().revision, payload: hostPayload({ alias: "edited" }), upgradeConfirmed: true, route }],
+      ["records_host_update", { id: edited.id, revision: hostView().revision, payload: hostPayload({ alias: "edited" }) }],
+    ]);
+    expect(Object.keys(calls[2][1] as object)).not.toContain("route");
+  });
+  it("sends no route of a host it refuses", async () => {
+    const route: RouteChange = { expected: null, kind: null };
+    const calls = stubBackend(async () => recordOverview());
+    await expect(submitEditor(beginEditor(null), undefined, route)).rejects.toThrow("Enter a valid alias without spaces.");
+    expect(calls).toEqual([]);
   });
   it("refuses arbitrary selection of duplicate global IDs", () => {
     const host = hostView();

@@ -7,8 +7,11 @@ use super::{
 };
 use crate::{
     error::AppError,
-    sync::records_v3::{
-        self, GroupPayload, GroupRecord, HostPayload, HostRecord, HostScope, KeySlotPayload,
+    sync::{
+        records_v3::{
+            self, GroupPayload, GroupRecord, HostPayload, HostRecord, HostScope, KeySlotPayload,
+        },
+        transports::{self, HostTransport, TransportKind},
     },
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -159,13 +162,24 @@ pub struct GroupOrder {
     pub scope: HostScope,
     pub ids: Vec<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalog {
     pub collections: Vec<Collection>,
     pub group_orders: Vec<GroupOrder>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tunnels: Vec<crate::sync::tunnel_rules::TunnelRule>,
+    /// Host routes, at most one per host (design 2026-10-26, Connect via). The field is not written
+    /// without routes, so a library without any stays readable by every release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transports: Vec<HostTransport>,
+}
+/// A route as the Catalog may hold it: one `HostTransport::validate` accepts, without the
+/// justification a grant request left in it. That is remembered on the device that asked
+/// (`GrantMemory`) and never syncs, so a Catalog that carries one is refused when built and read.
+fn is_catalog_route(route: &HostTransport) -> bool {
+    let TransportKind::GcpIap { pam, .. } = &route.kind;
+    route.validate().is_ok() && pam.as_ref().is_none_or(|pam| pam.justification.is_none())
 }
 impl Catalog {
     pub fn validate(&self) -> Result<(), AppError> {
@@ -191,6 +205,15 @@ impl Catalog {
                 .tunnels
                 .iter()
                 .any(|r| r.validate().is_err() || !tunnel_ids.insert(&r.id))
+        {
+            return Err(invalid());
+        }
+        let mut route_hosts = BTreeSet::new();
+        if self.transports.len() > transports::MAX_ROUTES
+            || self
+                .transports
+                .iter()
+                .any(|r| !is_catalog_route(r) || !route_hosts.insert(&r.host_id))
         {
             return Err(invalid());
         }
@@ -367,12 +390,25 @@ pub fn encode(identity: &Identity, data: &Data) -> Result<Zeroizing<Vec<u8>>, Ap
         }
     }
 }
+/// Whether the Catalog, encoded as capture encodes it, stays within one record's plaintext
+/// (`MAX_PLAINTEXT_BYTES`). A Catalog that does not fit fails the whole capture, and with it
+/// everything the library syncs, so a write that changes the Catalog checks its candidate here.
+/// It is `encode`'s verdict, so it is also false for a Catalog that `validate` refuses.
+pub fn catalog_fits(catalog: &Catalog) -> bool {
+    let identity = Identity {
+        kind: "meta".into(),
+        id: "catalog".into(),
+        scope: None,
+    };
+    encode(&identity, &Data::Catalog(catalog.clone())).is_ok()
+}
 
 #[cfg(test)]
 mod tests {
     use super::super::crypto::{self, DeviceKeys};
     use super::*;
     use crate::sync::slot_rules::test_keys;
+    use crate::sync::transports::PamCheck;
     use serde_json::json;
     fn identity(kind: &str) -> Identity {
         Identity {
@@ -553,12 +589,14 @@ mod tests {
         };
         let catalog = Catalog {
             tunnels: vec![],
+            transports: vec![],
             collections: vec![c.clone(), c],
             group_orders: vec![],
         };
         assert!(catalog.validate().is_err());
         let catalog = Catalog {
             tunnels: vec![],
+            transports: vec![],
             collections: vec![],
             group_orders: vec![GroupOrder {
                 scope: HostScope::Space {
@@ -598,5 +636,164 @@ mod tests {
         catalog.tunnels[0].forward.bind_address = "public.invalid".into();
         assert!(catalog.validate().is_err());
     }
-
+    const HOST: &str = "0000000000000001";
+    fn empty_catalog() -> Catalog {
+        Catalog::default()
+    }
+    fn route(host_id: &str) -> HostTransport {
+        HostTransport {
+            host_id: host_id.into(),
+            kind: TransportKind::GcpIap {
+                project: "synthetic-project".into(),
+                zone: "asia-east1-b".into(),
+                instance: "jumpbox".into(),
+                interface: "nic0".into(),
+                account: Some("person@example.com".into()),
+                os_login: true,
+                pam: None,
+            },
+        }
+    }
+    fn route_with_pam(host_id: &str) -> HostTransport {
+        let mut route = route(host_id);
+        let TransportKind::GcpIap { pam, .. } = &mut route.kind;
+        *pam = Some(PamCheck {
+            entitlements: vec!["prod-operate".into()],
+            location: "global".into(),
+            duration_secs: 30 * 60,
+            justification: None,
+        });
+        route
+    }
+    /// The largest route: every name at its maximum length, and the most entitlements.
+    fn long_route(n: usize) -> HostTransport {
+        HostTransport {
+            host_id: format!("{n:016x}"),
+            kind: TransportKind::GcpIap {
+                project: format!("p{}", "x".repeat(29)),
+                zone: format!("z{}", "x".repeat(62)),
+                instance: format!("i{}", "x".repeat(62)),
+                interface: "nic7".into(),
+                account: Some(format!("{}@{}.example.com", "a".repeat(64), "b".repeat(63))),
+                os_login: true,
+                pam: Some(PamCheck {
+                    entitlements: (0..8).map(|e| format!("{}{e}", "e".repeat(62))).collect(),
+                    location: format!("l{}", "x".repeat(62)),
+                    duration_secs: 480 * 60,
+                    justification: None,
+                }),
+            },
+        }
+    }
+    /// A tunnel rule with its name at the maximum length.
+    fn long_tunnel(n: usize) -> crate::sync::tunnel_rules::TunnelRule {
+        serde_json::from_value(json!({
+            "id": format!("{n:016x}"),
+            "name": "t".repeat(128),
+            "host_id": HOST,
+            "forward": {
+                "kind": "local",
+                "bind_address": "127.0.0.1",
+                "port": 15432,
+                "target_host": "db.internal",
+                "target_port": 5432
+            }
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn a_catalog_without_routes_serializes_as_before() {
+        let catalog = Catalog {
+            collections: vec![],
+            group_orders: vec![],
+            tunnels: vec![],
+            transports: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&catalog).unwrap(),
+            r#"{"collections":[],"group_orders":[]}"#
+        );
+    }
+    #[test]
+    fn catalog_routes_are_capped_unique_validated_and_carry_no_justification() {
+        let mut catalog = empty_catalog();
+        catalog.transports = (0..256).map(|n| route(&format!("{n:016x}"))).collect();
+        assert!(catalog.validate().is_ok(), "256 routes");
+        catalog.transports = (0..257).map(|n| route(&format!("{n:016x}"))).collect();
+        assert!(catalog.validate().is_err(), "257 routes");
+        catalog.transports = vec![route(HOST)];
+        assert!(catalog.validate().is_ok(), "one route for a host");
+        catalog.transports = vec![route(HOST), route(HOST)];
+        assert!(catalog.validate().is_err(), "two routes for one host");
+        let mut unusable = route(HOST);
+        let TransportKind::GcpIap { zone, .. } = &mut unusable.kind;
+        *zone = "Not A Zone".into();
+        catalog.transports = vec![unusable];
+        assert!(
+            catalog.validate().is_err(),
+            "a route HostTransport::validate refuses"
+        );
+        catalog.transports = vec![route_with_pam(HOST)];
+        assert!(catalog.validate().is_ok(), "a grant requirement alone");
+        let mut remembered = route_with_pam(HOST);
+        if let TransportKind::GcpIap { pam: Some(pam), .. } = &mut remembered.kind {
+            pam.justification = Some("x".into())
+        }
+        catalog.transports = vec![remembered];
+        assert!(
+            catalog.validate().is_err(),
+            "a justification inside the Catalog"
+        );
+    }
+    #[test]
+    fn catalog_routes_cross_the_wire_and_a_justification_is_refused_on_reading() {
+        let keys = VaultKeys::generate().unwrap();
+        let id = identity("meta");
+        let mut catalog = empty_catalog();
+        catalog.transports = vec![route(HOST), route_with_pam("0000000000000002")];
+        let bytes = encode(&id, &Data::Catalog(catalog.clone())).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            text.contains(
+                r#""transports":[{"host_id":"0000000000000001","kind":{"type":"gcp_iap","#
+            ),
+            "{text}"
+        );
+        let Data::Catalog(restored) = admit(&keys, &header(&id, &keys), &bytes).unwrap().data
+        else {
+            panic!("expected a catalog")
+        };
+        assert_eq!(restored, catalog);
+        let tampered = text.replace(r#""justification":null"#, r#""justification":"x""#);
+        assert_ne!(tampered, text);
+        assert!(admit(&keys, &header(&id, &keys), tampered.as_bytes()).is_err());
+    }
+    #[test]
+    fn catalog_fits_follows_the_plaintext_limit() {
+        let mut catalog = empty_catalog();
+        assert!(catalog_fits(&catalog));
+        catalog.tunnels = (0..256).map(long_tunnel).collect(); // names at their maximum length
+        catalog.transports = (0..256).map(long_route).collect(); // 8 entitlements of 63 characters
+        assert!(
+            catalog.validate().is_ok(),
+            "every entry is valid; only the size is wrong"
+        );
+        assert!(!catalog_fits(&catalog));
+        // The edge is the plaintext limit itself, not a count: the most routes that fit leave no
+        // room for one more.
+        let with_routes = |n| Catalog {
+            transports: (0..n).map(long_route).collect(),
+            ..Catalog::default()
+        };
+        let size = |n| {
+            encode(&identity("meta"), &Data::Catalog(with_routes(n)))
+                .unwrap()
+                .len()
+        };
+        let step = size(2) - size(1);
+        let most = 1 + (MAX_PLAINTEXT_BYTES - size(1)) / step;
+        assert!(most < transports::MAX_ROUTES, "{most} routes");
+        assert!(catalog_fits(&with_routes(most)));
+        assert!(!catalog_fits(&with_routes(most + 1)));
+    }
 }

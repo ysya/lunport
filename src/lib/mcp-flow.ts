@@ -55,7 +55,7 @@ export function grantAnswerReady(answer: string): boolean {
   return whole >= 1 && whole <= MAX_GRANT_MINUTES && justificationAcceptable(justification);
 }
 
-/** A grant form starts from the transport's stored duration and last justification; every other question starts empty. */
+/** A grant form starts from what this computer last asked for on the host (else the route's default length and no justification); every other question starts empty. */
 function initialAnswer(request: AuthRequest): string {
   return request.kind === "grant" && request.grant
     ? encodeGrantAnswer(String(request.grant.minutes), request.grant.justification ?? "")

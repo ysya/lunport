@@ -465,6 +465,7 @@ mod tests {
             },
             Data::Catalog(payload::Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections: vec![],
                 group_orders: vec![],
             }),

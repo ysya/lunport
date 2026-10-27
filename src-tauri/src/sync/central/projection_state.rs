@@ -81,7 +81,11 @@ impl Ledger {
             })
             .collect();
         let mut local = BTreeMap::new();
-        for (identity, data) in super::projection_local::public_rows(state, &catalog, &storage)? {
+        // The ledger records the library as published, though its owner has cut over: the routes saved on this device are not in it,
+        // and no capture takes them; the publish step moves them into the library (R64a).
+        for (identity, data) in
+            super::projection_local::public_rows(state, &catalog, &storage)?
+        {
             let opaque = identity.opaque(keys)?;
             let hash = crypto::hash(&payload::encode(&identity, &data)?);
             let accepted = plan.receipts().get(&opaque).ok_or_else(invalid)?;
@@ -793,6 +797,7 @@ pub(super) mod tests {
             },
             Data::Catalog(Catalog {
                 tunnels: vec![],
+                transports: vec![],
                 collections,
                 group_orders: vec![
                     payload::GroupOrder {
@@ -847,7 +852,7 @@ pub(super) mod tests {
             }),
         };
         let (ws, keys) = fixture(vec![
-            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { tunnels: vec![], collections: vec![], group_orders: vec![] })),
+            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { tunnels: vec![], transports: vec![], collections: vec![], group_orders: vec![] })),
             (Identity { kind: "host".into(), id: id.into(), scope: Some(HostScope::Local) }, Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":"local-preserved","hostname":"fixture.invalid","auth":"password"})).unwrap())),
             (deleted.clone(), Data::Deleted),
         ]);
@@ -968,6 +973,29 @@ pub(super) mod tests {
             .iter()
             .any(|(_, data)| matches!(data,Data::Catalog(c) if c==&ledger.catalog)));
     }
+    /// R64a: the initial ledger records the library as published, though its owner has cut over, and no capture takes the routes this
+    /// device saved alone: the publish step makes them the library's rows first, and the capture publishes those.
+    #[test]
+    fn the_initial_ledger_records_the_library_as_published_and_a_capture_leaves_this_devices_routes_to_the_publish_step() {
+        let (mut state, keys, ledger) = initial();
+        let plan = Plan::current(state.local.central.clone().unwrap(), &keys).unwrap();
+        for space in state.spaces.values_mut() {
+            space.selected = false; // the route's host is then found once, in this device's own scope
+        }
+        let route: crate::sync::transports::HostTransport = serde_json::from_value(serde_json::json!({"host_id":"0000000000000001","kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+        // A route this device saved before its library moved to central sync: the projection's owner has cut over, yet the route is
+        // not the library's yet.
+        let state = crate::sync::transports::tests::saved_on_this_device(&state, &route);
+        assert!(records_v3::central_cutover(&state));
+        assert_eq!(Ledger::initial(&plan, &state, &keys).unwrap(), ledger);
+        assert!(
+            !ledger.public_changes(&state, &keys).unwrap().iter().any(|change| matches!(change.data, Data::Catalog(_))),
+            "a capture leaves the Catalog as it is"
+        );
+        let moved = crate::sync::transports::publish_local(&state, 200).unwrap().expect("the publish step takes it: the library has its host");
+        let changes = ledger.public_changes(&moved, &keys).unwrap();
+        assert!(changes.iter().any(|change| matches!(&change.data, Data::Catalog(catalog) if catalog.transports == [route.clone()])));
+    }
     #[test]
     fn physical_deletion_and_new_records_are_changes_and_unselected_rows_are_included() {
         let (mut state, keys, ledger) = initial();
@@ -1022,6 +1050,7 @@ pub(super) mod tests {
                 },
                 Data::Catalog(Catalog {
                     tunnels: vec![],
+                    transports: vec![],
                     collections: vec![],
                     group_orders: vec![],
                 }),

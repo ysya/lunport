@@ -158,7 +158,8 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         },
     ))
     .with_gcp(gcp)
-    // A grant the person requested from a connection: its justification and duration are the transport's defaults next time.
+    // A grant the person requested from a connection: its justification and duration are remembered on this computer (the device-local
+    // grant memory) and offered next time.
     .with_grant_memory(Box::new(move |host, justification, duration_secs| crate::sync::engine::with_env(&for_grant, |env| {
         let now = env.now();
         crate::sync::record_runtime::mutate_records(env, |s| crate::sync::transports::remember_grant_request(s, host.as_str(), justification, duration_secs, now).map_err(|e| AppError::Other(e.to_string())))?;

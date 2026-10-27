@@ -78,7 +78,7 @@ import { connectSavedHost } from "./operations";
 import { TerminalWorkspace } from "./TerminalWorkspace";
 import { useTerminalStore } from "@/stores/terminals";
 import { TunnelsPanel } from "./TunnelsPanel";
-import { TransportsPanel } from "./TransportsPanel";
+import { GoogleCloudPanel } from "./GoogleCloudPanel";
 
 export function RecordsWorkspace({
   overview,
@@ -186,13 +186,16 @@ export function RecordsWorkspace({
       : null;
   const creationScope: HostScope = groupContext?.scope ??
     overview.library_scope ?? { kind: "local" };
-  const createHost = () =>
-    requestSelection({
-      kind: "new",
-      nonce: ++nonce.current,
-      groupId: groupContext?.id,
-      scope: creationScope,
-    });
+  const newHost = (via?: "iap"): HostSelection => ({
+    kind: "new",
+    nonce: ++nonce.current,
+    groupId: groupContext?.id,
+    scope: creationScope,
+    via,
+  });
+  const createHost = () => requestSelection(newHost());
+  // The editor is a dialog over any panel, so the Google Cloud page's New IAP host needs no panel switch.
+  const createIapHost = () => requestSelection(newHost("iap"));
   const createGroup = () =>
     requestSelection({
       kind: "new_group",
@@ -243,7 +246,7 @@ export function RecordsWorkspace({
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
         if (panel === "tunnels") document.getElementById("new-tunnel-button")?.click();
-        else if (panel === "transports") document.getElementById("new-transport-button")?.click();
+        else if (panel === "transports") createIapHost();
         else if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
         else createHost();
       } else if (event.key.toLowerCase() === "f") {
@@ -511,7 +514,7 @@ export function RecordsWorkspace({
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
-              {panel === "transports" && <TransportsPanel overview={overview} accept={accept} />}
+              {panel === "transports" && <GoogleCloudPanel overview={overview} createIapHost={createIapHost} editHost={editHost} />}
               {panel === "account" && (
                 <RecordsAccountPanel
                   onOpenImport={() => setPanel("import")}
@@ -678,6 +681,7 @@ export function RecordsWorkspace({
                   initialGroupId={
                     selection.kind === "new" ? selection.groupId : undefined
                   }
+                  initialVia={selection.kind === "new" ? selection.via : undefined}
                   duplicateSource={selection.kind === "new" ? selection.duplicateSource : undefined}
                   onDuplicate={selectedId ? () => duplicateHost(selectedId) : undefined}
                   host={selected}

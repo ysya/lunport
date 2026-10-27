@@ -9,9 +9,18 @@ import { RecordsWorkspace } from "@/components/records/RecordsWorkspace";
 import { HostKeyCard } from "@/components/HostKeyWindow";
 import { ApprovalCard } from "@/components/AgentApprovalWindow";
 import { AuthenticationCardView } from "@/components/AuthenticationWindow";
-import { groupView, hostPayload, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
+import { groupView, hostPayload, hostTransport, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
 import type { CentralStatus } from "@/lib/central-sync";
 import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
+import type { GcloudAccountsView } from "@/bindings/GcloudAccountsView";
+import type { GrantMemoryView } from "@/bindings/GrantMemoryView";
+import type { HostTransport } from "@/bindings/HostTransport";
+import type { IapProbeView } from "@/bindings/IapProbeView";
+import type { OsLoginProfileView } from "@/bindings/OsLoginProfileView";
+import type { PamGrantView } from "@/bindings/PamGrantView";
+import type { PamStatusView } from "@/bindings/PamStatusView";
+import type { RouteChange } from "@/bindings/RouteChange";
+import type { TransportKind } from "@/bindings/TransportKind";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
 import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
 import { useTerminalStore } from "@/stores/terminals";
@@ -47,7 +56,8 @@ else {
   // Disposable in-memory credentials only; no OS store or remote SSH is used here.
   const passwords = new Map<string, string>();
   let passwordSaveFailed = false;
-  if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
+  // Aliases without spaces, which the host editor accepts on save.
+  if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate" || scenario === "iap") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
   let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
   if (scenario === "mcp-audit") {
     const entry: McpAuditEntry = {
@@ -79,6 +89,79 @@ else {
       }),
       groups: overview.groups.map((group) => ({ ...group, scope })),
     });
+  };
+  // The `iap` scenario (design 2026-10-26, Connect via): a central library whose hosts connect through Google Cloud IAP, with fakes of the
+  // commands the host editor, the details pane and the Google Cloud page call, in the shapes of src/bindings. Nothing reaches Google or a
+  // gcloud directory, and every grant, route and request lives in memory.
+  const gcloud = {
+    config_found: true,
+    active: "frank@example.com",
+    accounts: [
+      { account: "frank@acme.dev", state: "expired", message: null },
+      { account: "frank@example.com", state: "signed_in", message: null },
+    ],
+  } satisfies GcloudAccountsView;
+  // The end of each active grant, by what makes an entitlement one: the account, project, location and entitlement id together.
+  const grants = new Map<string, number>();
+  const grantKey = (kind: TransportKind, entitlement: string) =>
+    JSON.stringify([kind.account ?? gcloud.active, kind.project, kind.pam?.location ?? null, entitlement]);
+  const grantEnd = (kind: TransportKind, entitlement: string): number | null => {
+    const until = grants.get(grantKey(kind, entitlement));
+    return until !== undefined && until > Date.now() ? until : null;
+  };
+  if (scenario === "iap") {
+    // Two hosts connect through IAP: the fixture library's first host and a fourth one. The other hosts are reached at their addresses.
+    const jumpbox = hostView({ id: "0000000000000004", payload: hostPayload({ alias: "dev-jumpbox", hostname: "jumpbox", user: "frank", auth: "key", key_id: keyId }) });
+    // Saved with its host, so it syncs. It needs a grant on prod-operate or prod-admin, and prod-operate holds one (prod-admin does not).
+    const production = hostTransport(
+      { account: "frank@example.com", pam: { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null } },
+      overview.hosts[0].id,
+    );
+    // The library had no room for this one, so it stays on this computer (the Google Cloud page says so). It uses gcloud's active account.
+    const development = hostTransport({ project: "acme-dev-654321", instance: "jumpbox", os_login: false }, jumpbox.id);
+    overview = { ...overview,
+      hosts: [...overview.hosts, jumpbox], account: { chain_id: "c".repeat(64), device_name: "Example laptop" }, central_mode: true,
+      transports: [production, development],
+      transport_sync: [{ host_id: production.host_id, synced: true, reason: null }, { host_id: development.host_id, synced: false, reason: "no_room" }],
+      // What this computer's last request for the host asked: offered again, ahead of the route's own default length.
+      grant_memory: [{ host_id: production.host_id, justification: "Deploy hotfix", duration_secs: 3600 } satisfies GrantMemoryView],
+    };
+    includeFixtureLibrary();
+    grants.set(grantKey(production.kind, "prod-operate"), Date.now() + 25 * 60_000);
+  }
+  const routeOf = (hostId: unknown) => overview.transports?.find((route) => route.host_id === hostId);
+  /** The route a command is about, as the backend finds it; a host without one is an error there too, in the backend's words. */
+  const routeOrFail = (hostId: unknown): HostTransport => {
+    const route = routeOf(hostId);
+    if (!route) throw new Error("This host has no Google Cloud IAP route.");
+    return route;
+  };
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value) ? value.map(canonical)
+      : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, inner]) => [key, canonical(inner)]))
+        : value;
+  const sameData = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+  /**
+   * The route half of records_host_create / records_host_update (`RouteChange`), as a patch of the overview: a `kind` saves or replaces
+   * the host's route, `null` removes it (and with it what this computer's grant requests taught it about the host), and an absent
+   * `route` leaves it alone. `expected` is checked against the saved route as the backend checks it, and a route saved in a central
+   * library syncs with its host.
+   */
+  const routePatch = (hostId: string, change: RouteChange | undefined): Pick<RecordOverview, "transports" | "transport_sync" | "grant_memory"> => {
+    if (change === undefined) return {};
+    const saved = routeOf(hostId) ?? null;
+    if (!sameData(change.expected, saved)) throw new Error("The host's route changed while you were editing; reload and try again.");
+    if (sameData(change.kind, saved?.kind ?? null)) return {};
+    const route: HostTransport[] = change.kind === null ? [] : [{ host_id: hostId, kind: change.kind }];
+    return {
+      transports: [...(overview.transports ?? []).filter((other) => other.host_id !== hostId), ...route],
+      transport_sync: [
+        ...(overview.transport_sync ?? []).filter((other) => other.host_id !== hostId),
+        ...route.map(() => ({ host_id: hostId, synced: overview.central_mode === true && Boolean(overview.account), reason: null })),
+      ],
+      // Named only when the route goes: the patch is spread over the overview, so a key it names without a value would erase the memory.
+      ...(change.kind === null ? { grant_memory: (overview.grant_memory ?? []).filter((memory) => memory.host_id !== hostId) } : {}),
+    };
   };
   let reviewedImport: ImportPreviewResult | null = null;
   let previewSequence = 0;
@@ -117,9 +200,71 @@ else {
         if (command === "secrets_delete") { passwords.delete(String(args.alias)); return; }
         if (command === "records_host_create") {
           const id = String(overview.hosts.length + 1).padStart(16, "0");
-          return updateOverview({ hosts: [...overview.hosts, hostView({ id, scope: args.scope as RecordOverview["hosts"][number]["scope"], payload: args.payload as RecordOverview["hosts"][number]["payload"] })] });
+          // The route takes the new host's id; a route that is refused refuses the host with it, so it is worked out first.
+          const route = routePatch(id, args.route as RouteChange | undefined);
+          return updateOverview({ hosts: [...overview.hosts, hostView({ id, scope: args.scope as RecordOverview["hosts"][number]["scope"], payload: args.payload as RecordOverview["hosts"][number]["payload"] })], ...route });
         }
-        if (command === "records_host_update") return updateOverview({ hosts: overview.hosts.map(host => host.id !== args.id ? host : hostView({ ...host, payload: args.payload as typeof host.payload, revision: { ...host.revision, version: String(BigInt(host.revision.version) + 1n) } })) });
+        if (command === "records_host_update") {
+          const route = routePatch(String(args.id), args.route as RouteChange | undefined);
+          return updateOverview({ hosts: overview.hosts.map(host => host.id !== args.id ? host : hostView({ ...host, payload: args.payload as typeof host.payload, effective_payload: args.payload as typeof host.payload, revision: { ...host.revision, version: String(BigInt(host.revision.version) + 1n) } })), ...route });
+        }
+        if (command === "transports_oslogin_profile") {
+          const account = String(args.account ?? gcloud.active);
+          return { account, username: account.replace(/[@.]/g, "_"), key_registered: args.keyId == null ? null : false } satisfies OsLoginProfileView;
+        }
+        if (command === "gcp_accounts") return gcloud;
+        if (command === "gcp_pam_grants") {
+          const rows: PamGrantView[] = [];
+          // The routes whose host the library has; a grant row is one entitlement however many routes name it.
+          for (const route of overview.transports ?? []) {
+            const { kind } = route;
+            const { pam } = kind;
+            if (!pam || !overview.hosts.some((host) => host.id === route.host_id)) continue;
+            for (const entitlement of pam.entitlements) {
+              const account = kind.account ?? gcloud.active;
+              let row = rows.find((other) => other.account === account && other.project === kind.project && other.location === pam.location && other.entitlement === entitlement);
+              if (!row) {
+                const until = grantEnd(kind, entitlement);
+                row = { account, project: kind.project, location: pam.location, entitlement, state: until ? "active" : "none", active_until_ms: until, message: null, host_ids: [] };
+                rows.push(row);
+              }
+              if (!row.host_ids.includes(route.host_id)) row.host_ids.push(route.host_id);
+            }
+          }
+          return rows;
+        }
+        if (command === "transports_pam_status") {
+          // The entitlement whose grant lasts longest, as the backend names it.
+          const { kind } = routeOrFail(args.hostId);
+          const held = (kind.pam?.entitlements ?? []).flatMap((entitlement) => { const until = grantEnd(kind, entitlement); return until ? [{ entitlement, until }] : []; }).sort((a, b) => b.until - a.until)[0];
+          return (held ? { entitlement: held.entitlement, state: "active", active_until_ms: held.until, message: null } : { entitlement: null, state: "none", active_until_ms: null, message: null }) satisfies PamStatusView;
+        }
+        if (command === "transports_pam_request") {
+          // The grant is asked for on the entitlement named, which the route must list, else on the first it lists; and the answer names it.
+          const { kind } = routeOrFail(args.hostId);
+          if (!kind.pam) throw new Error("This host's route requires no grant.");
+          const entitlement = args.entitlement === undefined ? kind.pam.entitlements[0] : kind.pam.entitlements.find((listed) => listed === args.entitlement);
+          if (entitlement === undefined) throw new Error("This host's route does not list that entitlement.");
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          const until = Date.now() + Number(args.durationSecs) * 1000;
+          grants.set(grantKey(kind, entitlement), until);
+          // What it asked is remembered on this computer, never in the route.
+          updateOverview({ grant_memory: [...(overview.grant_memory ?? []).filter((memory) => memory.host_id !== args.hostId), { host_id: String(args.hostId), justification: String(args.justification), duration_secs: Number(args.durationSecs) }] });
+          return { entitlement, state: "active", active_until_ms: until, message: null } satisfies PamStatusView;
+        }
+        if (command === "transports_iap_probe") {
+          // Never asks for a grant or a sign-in: it says which of them is missing.
+          const { kind } = routeOrFail(args.hostId);
+          const account = kind.account ?? gcloud.active;
+          const started = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          const answer = (message: string | null) => ({ status: message === null ? "reachable" : "denied", latency_ms: message === null ? 182 : null, elapsed_ms: Date.now() - started, checked_at_ms: Date.now(), message }) satisfies IapProbeView;
+          if (gcloud.accounts.some((entry) => entry.account === account && entry.state === "expired"))
+            return answer(`Google sign-in for ${account} has expired or was revoked; run \`gcloud auth login ${account}\` and connect again.`);
+          if (kind.pam && !kind.pam.entitlements.some((entitlement) => grantEnd(kind, entitlement)))
+            return answer("IAP refused this Google account. Request a grant, then check again.");
+          return answer(null);
+        }
         if (command === "records_key_rename") return updateOverview({ keys: overview.keys.map(key => key.id === args.keyId && key.public ? { ...key, public: { ...key.public, name: String(args.name) } } : key) });
         if (command === "config_load" && args.path === "/fixture/slow-config") await new Promise((resolve) => setTimeout(resolve, 1500));
         const fixture = legacyPreviewRead(command, args);
@@ -135,7 +280,7 @@ else {
         ];
         if (command === "records_hosts_export") return {path:"/fixture/lunport-hosts.json",hosts:21,groups:4};
         if (command === "central_server_capabilities") return {passkey:true,oidc:false};
-        if (["central_status","central_automatic_status","central_conflict_resolve"].includes(command) && ["sync-layout","sync-active","sync-conflicts","sync-cooldown","sync-revoked","sync-reconnect","sync-reconnecting","sync-failure"].includes(scenario ?? "")) {
+        if (["central_status","central_automatic_status","central_conflict_resolve"].includes(command) && ["sync-layout","sync-active","sync-conflicts","sync-cooldown","sync-revoked","sync-reconnect","sync-reconnecting","sync-failure","iap"].includes(scenario ?? "")) {
           if (command === "central_conflict_resolve") conflictResolved = true;
           const active = scenario !== "sync-layout";
           const status={

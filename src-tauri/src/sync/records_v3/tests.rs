@@ -427,6 +427,29 @@ fn v3_state_decodes_local_hosts_public_metadata_and_tombstones() {
     ));
 }
 
+/// Design 2026-10-26: state version 10 is known to every place that lists the versions a state may carry (the decoder, the validator and
+/// the repository's header check), and the version after it is not.
+#[test]
+fn state_version_ten_is_known_everywhere_and_the_next_one_is_not() {
+    assert_eq!(TRANSPORT_SYNC_STATE_VERSION, TRANSPORT_STATE_VERSION + 1);
+    assert_eq!(TRANSPORT_SYNC_STATE_VERSION, 10);
+    let mut s = state();
+    s.version = TRANSPORT_SYNC_STATE_VERSION;
+    assert!(validate_state(&s).is_ok());
+    assert!(matches!(decode_state(&serde_json::to_string(&s).unwrap()), Ok(DecodedState::V3(got)) if *got == s));
+    assert!(crate::sync::record_repository::snapshot(&s).is_ok());
+    s.version = TRANSPORT_SYNC_STATE_VERSION + 1;
+    assert!(matches!(
+        validate_state(&s),
+        Err(RecordValidationError::UnsupportedSchema { kind: "state", found: 11 })
+    ));
+    assert!(matches!(
+        decode_state(&serde_json::to_string(&s).unwrap()),
+        Err(RecordValidationError::UnsupportedSchema { kind: "state", found: 11 })
+    ));
+    assert!(crate::sync::record_repository::snapshot(&s).is_err());
+}
+
 #[test]
 fn legacy_state_decoding_retains_sources_and_never_runs_the_upgrade() {
     let legacy = r#"{"version":1,"chain_id":null,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"legacy","relay_url":"http://127.0.0.1:8787","cursor_seq":9,"password_sync":false,"records":{},"last_sync_ms":null,"last_error":null}"#;

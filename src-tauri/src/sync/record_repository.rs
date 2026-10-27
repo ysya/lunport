@@ -78,6 +78,11 @@ pub enum RepositoryError {
     KeyNotFound(String),
     KeyInUse(String),
     OrderingOverflow(String),
+    /// A save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog). It reads
+    /// as `transports::NO_ROOM` wherever it is shown.
+    NoRoom,
+    /// A route save whose displayed route is no longer the saved one. It reads as `transports::ROUTE_CHANGED` wherever it is shown.
+    RouteChanged,
 }
 impl From<RecordValidationError> for RepositoryError {
     fn from(error: RecordValidationError) -> Self {
@@ -86,7 +91,11 @@ impl From<RecordValidationError> for RepositoryError {
 }
 impl std::fmt::Display for RepositoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::NoRoom => f.write_str(super::transports::NO_ROOM),
+            Self::RouteChanged => f.write_str(super::transports::ROUTE_CHANGED),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for RepositoryError {}
@@ -103,7 +112,7 @@ fn validate_header(state: &SyncStateV3) -> Result<(), RepositoryError> {
     if !matches!(
         state.version,
         STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
-            | TRANSPORT_STATE_VERSION
+            | TRANSPORT_STATE_VERSION | TRANSPORT_SYNC_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -727,7 +736,9 @@ fn ensure_host_authority(state: &SyncStateV3, host: &HostRecord) -> Result<(), R
     }
     Ok(())
 }
-fn checked_host(
+/// The host `id` as an edit of it finds it: at the revision the editor read (else `RepositoryError::RevisionConflict`), in a scope this
+/// device may write, with no opaque version shadowing it.
+pub(crate) fn checked_host(
     state: &SyncStateV3,
     id: &str,
     expected: &RecordRevision,

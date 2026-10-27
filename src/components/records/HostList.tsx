@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import {
   Check,
+  Cloud,
   Download,
   Folder,
   FolderPlus,
@@ -29,6 +30,7 @@ import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 import { useSettingsStore } from "@/stores/settings";
 import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
+import { iapTarget, transportFor } from "@/lib/transports";
 import { cn } from "@/lib/utils";
 import { CollectionActions } from "./CollectionActions";
 import { HostContextMenu } from "./HostContextMenu";
@@ -366,7 +368,11 @@ export function RecordHostList({
                 ? `[${target}]`
                 : target;
               const port = host.effective_payload.port;
-              const connection = user ? `SSH · ${user}` : "SSH";
+              const route = transportFor(overview, host.id);
+              const connection = `${route ? "IAP" : "SSH"}${user ? ` · ${user}` : ""}`;
+              const connectionTitle = route
+                ? `Google Cloud IAP · ${revealHidden(iapTarget(route.kind))}`
+                : `${connection}${user ? "" : " · OS username"} · ${endpointHost}:${port}`;
               const warningLabel = ambiguous
                 ? "Conflicting host ID"
                 : host.group_error
@@ -435,7 +441,10 @@ export function RecordHostList({
                         <strong title={name}>{name}</strong>
                       </span>
                       <span className="library-host-secondary">
-                        <span className="library-host-connection" title={`${connection}${user ? "" : " · OS username"} · ${endpointHost}:${port}`}>{connection}</span>
+                        <span className="library-host-connection" title={connectionTitle}>
+                          {route && <Cloud className="mr-1 inline size-3 align-[-1px]" aria-hidden="true" />}
+                          {connection}
+                        </span>
                         {blocked && (
                           <span className="library-host-warning" title={warningLabel} aria-label={warningLabel}>
                             <TriangleAlert className="size-3 shrink-0" aria-hidden="true" />
