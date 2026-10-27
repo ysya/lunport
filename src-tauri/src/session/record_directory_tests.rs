@@ -701,7 +701,7 @@ mod gcp_transport {
     fn directory_with_memory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> (RecordDirectory, Remembered) {
         let remembered = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&remembered);
-        let d = directory(s, gcp).with_grant_memory(Box::new(move |host, justification, duration| {
+        let d = directory(s, gcp).with_grant_memory(Box::new(move |host, _name, justification, duration| {
             sink.lock().unwrap().push((host.to_string(), justification.to_string(), duration));
             Ok(())
         }));
@@ -910,6 +910,21 @@ mod gcp_transport {
         // The route itself keeps the default (1800 s): the memory is not part of it.
         let TransportKind::GcpIap { pam, .. } = transports::get(&routed, GATE).unwrap().kind;
         assert_eq!(pam.map(|pam| pam.duration_secs), Some(1800));
+    }
+
+    /// Design 2026-10-27: the library's memory of the entitlement the question requests comes before what this computer remembered for
+    /// the host, whichever host asked for it, on whichever computer.
+    #[test]
+    fn the_grant_question_offers_the_entitlements_memory_first() {
+        let routed = gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam())));
+        let by_host = transports::remember_grant_request(&routed, GATE, "restart app-api", 2700, 2).unwrap();
+        let name = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
+        let both = crate::sync::pam_records::remember(&by_host, name, "deploy hotfix", 3600, None, 3).unwrap();
+        let need = grant_needed(both);
+        assert_eq!((need.duration_secs, need.justification.as_deref()), (3600, Some("deploy hotfix")));
+        let other = crate::sync::pam_records::remember(&by_host, "projects/acme-prod-123456/locations/global/entitlements/prod-admin", "audit", 600, None, 3).unwrap();
+        let need = grant_needed(other);
+        assert_eq!(need.justification.as_deref(), Some("restart app-api"), "another entitlement's memory is that entitlement's");
     }
 
     /// A host this computer never asked a grant for is offered the route's own default length and nothing to prefill: a justification

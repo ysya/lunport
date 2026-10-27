@@ -40,6 +40,7 @@ pub struct SessionRuntime {
 
 pub mod app;
 pub mod gcloud;
+pub mod pam;
 pub mod transports;
 pub mod tunnels;
 pub mod embedded;

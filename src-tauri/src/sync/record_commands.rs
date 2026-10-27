@@ -159,8 +159,11 @@ pub struct RecordOverview {
     transports: Vec<crate::sync::transports::HostTransport>,
     /// For each route in `transports`, whether it syncs with its host.
     transport_sync: Vec<TransportSyncView>,
-    /// What grant requests taught this device, per host.
+    /// What grant requests taught this device, per host, as an earlier release remembered it.
     grant_memory: Vec<GrantMemoryView>,
+    /// The Privileged Access Manager search scopes the person added, and the grant memory per entitlement (design 2026-10-27).
+    pam_scopes: Vec<crate::sync::pam_records::PamScope>,
+    pam_requests: Vec<crate::sync::pam_records::GrantRequestMemory>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupOrderView {
@@ -329,6 +332,8 @@ pub fn overview_from(
             .iter()
             .map(|(host_id, memory)| GrantMemoryView { host_id: host_id.clone(), justification: memory.justification.clone(), duration_secs: memory.duration_secs })
             .collect(),
+        pam_scopes: crate::sync::pam_records::scopes(state),
+        pam_requests: crate::sync::pam_records::memories(state),
         groups: snapshot
             .groups
             .into_iter()

@@ -88,7 +88,8 @@ pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryErro
 }
 /// Writes what a grant request taught this computer about a host: `(host, justification, duration_secs)` (design 2026-10-26, Grant
 /// requests).
-pub type GrantMemory = dyn Fn(&HostId, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
+/// Remembers a grant request a connection made: the host it was for, the entitlement's full name, the justification and the length.
+pub type GrantMemory = dyn Fn(&HostId, &str, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
 
 impl RecordDirectory {
     pub fn new(sources: RecordSources) -> Self {
@@ -124,7 +125,7 @@ impl RecordDirectory {
         // A failed memory write does not fail the request: the grant exists either way.
         let remember = || {
             if let Some(remember) = &self.grant_memory {
-                let _ = remember(&need.host, justification, duration_secs);
+                let _ = remember(&need.host, &name, justification, duration_secs);
             }
         };
         let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled(), false).map_err(|error| match error {
@@ -352,10 +353,13 @@ impl HostDirectory for RecordDirectory {
                 }
             }
             if !in_flight {
-                // The question starts from what this computer last asked for on the host (the justification and the length, kept in the
-                // device-local grant memory, never in the synced route); a host it never asked a grant for gets the route's own default
-                // length and nothing to prefill (design 2026-10-26, Grant requests).
-                let memory = transports::grant_memory(&state, hop.id.as_str());
+                // The question starts from what was last asked for on the entitlement it requests (the justification and the length,
+                // the library's grant memory, design 2026-10-27), else from what this computer last asked for on the host, as an earlier
+                // release remembered it; an entitlement never asked for gets the route's own default length and nothing to prefill.
+                let first = crate::gcp::pam::EntitlementName::in_project(&project, &pam.location, &pam.entitlements[0]).full();
+                let memory = crate::sync::pam_records::memory(&state, &first)
+                    .map(|memory| crate::sync::transports::GrantMemory { justification: memory.justification, duration_secs: memory.duration_secs })
+                    .or_else(|| transports::grant_memory(&state, hop.id.as_str()));
                 return Err(DirectoryError::GrantNeeded(Box::new(GrantNeed {
                     host: hop.id.clone(),
                     account: account.clone(),
