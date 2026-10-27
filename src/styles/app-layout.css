@@ -58,6 +58,8 @@
 .app-notice { padding: 1rem; border: 1px solid var(--border); border-radius: 0.6rem; background: color-mix(in oklab, var(--muted) 35%, var(--card)); font-size: 0.85rem; line-height: 1.6; overflow-wrap: anywhere; }
 .app-notice h2 { font-size: 0.95rem; font-weight: 600; }
 .app-review-list { border-block: 1px solid var(--border); }
+/* The next section draws its own top border across the gap, so a list that ends its section leaves its bottom one to it: one line between sections. */
+.app-form-section:has(+ .app-form-section) > .app-review-list:last-child { border-bottom-width: 0; }
 .app-review-row { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem 1rem; padding-block: 0.85rem; }
 .app-review-row + .app-review-row { border-top: 1px solid var(--border); }
 .app-editor-header { display: flex; flex-shrink: 0; align-items: center; gap: 0.85rem; padding: 1.35rem 1.5rem 1.15rem; }
