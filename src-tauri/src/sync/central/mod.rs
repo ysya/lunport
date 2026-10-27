@@ -62,6 +62,8 @@ mod projection_local;
 pub(super) use projection_local::catalog_of;
 mod projection_capture;
 pub(super) use projection_capture::public_candidate as capture_public;
+mod catalog_merge;
+mod catalog_conflict;
 mod projection_delta;
 pub(super) use projection_delta::Delta as LibraryDelta;
 mod unlock_envelope;
