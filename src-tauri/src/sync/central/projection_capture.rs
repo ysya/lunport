@@ -15,7 +15,7 @@ use crate::{
 /// The basis a capture holds a change of the public record `opaque` against: the remote version a pending change of it was last
 /// confirmed on, else the one this device last read into its rows (the ledger's). A change captured while the replica's current version
 /// is another becomes a conflict (`public_candidate`).
-fn basis_of<'a>(replica: &'a Replica, ledger: &'a Ledger, opaque: &str) -> Option<&'a Base> {
+pub(super) fn basis_of<'a>(replica: &'a Replica, ledger: &'a Ledger, opaque: &str) -> Option<&'a Base> {
     replica
         .pending
         .get(opaque)
