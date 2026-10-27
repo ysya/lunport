@@ -908,3 +908,122 @@ fn a_device_upgraded_with_routes_of_its_own_keeps_the_librarys_and_publishes_the
     assert!(transports::synced(&second, y) && second.local.transports.is_empty());
     assert_eq!(second.version, transports::SYNC_STATE_VERSION);
 }
+
+/// Design 2026-10-27 (Catalog conflicts keep both devices' changes): helpers for the Catalog merge rounds.
+mod catalog_merge_rounds {
+    use super::*;
+    use crate::sync::{
+        central::catalog_merge::tests::tunnel,
+        records_v3::SyncStateV3,
+        transports,
+        tunnel_rules::{self, TunnelRule},
+    };
+
+    fn save_tunnel(f: &Fixture, rule: TunnelRule) {
+        let id = rule.id.clone();
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            tunnel_rules::set(state, None, &id, None, Some(rule), 900).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    }
+    fn remove_tunnel(f: &Fixture, rule: &TunnelRule) {
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            tunnel_rules::set(state, None, &rule.id, Some(rule), None, 950).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    }
+    fn catalog_id(f: &Fixture) -> String {
+        Identity { kind: "meta".into(), id: "catalog".into(), scope: None }.opaque(&f.keys).unwrap()
+    }
+    fn in_conflict(f: &Fixture, state: &SyncStateV3) -> bool {
+        state.local.central.as_ref().unwrap().replica.as_ref().unwrap().conflicts.contains_key(&catalog_id(f))
+    }
+    fn tunnel_ids(state: &SyncStateV3) -> Vec<String> {
+        let mut ids: Vec<_> = tunnel_rules::view(state).into_iter().map(|row| row.rule.id).collect();
+        ids.sort();
+        ids
+    }
+    fn library_tunnels(state: &SyncStateV3) -> Vec<String> {
+        let mut ids: Vec<_> = state.local.central_projection.as_ref().unwrap().catalog.tunnels.iter().map(|t| t.id.clone()).collect();
+        ids.sort();
+        ids
+    }
+    const B: &str = "000000000000000b";
+    const C: &str = "000000000000000c";
+
+    /// A tunnel saved while another device's Catalog change arrives is merged with it in the round that reads it: both reach this
+    /// device's rows and the library, with no review and no error.
+    #[test]
+    fn a_tunnel_saved_while_another_device_changed_the_catalog_merges_in_one_round() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        remote_catalog(&f, |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert_eq!(tunnel_ids(&after), [B, C]);
+        assert!(!in_conflict(&f, &after));
+        assert!(!after.local.central.as_ref().unwrap().replica.as_ref().unwrap().pending.contains_key(&catalog_id(&f)));
+        assert_eq!(library_tunnels(&after), [B, C], "the library holds both");
+        assert!(controller::status(&f.d.env()).unwrap().error.is_none());
+    }
+
+    /// Review Focus 1: the first route reaching a device through a merge raises its state to the version route rows need.
+    #[test]
+    fn the_first_route_a_merge_brings_raises_the_state_version() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        assert_eq!(state(&f.d).version, CENTRAL_STATE_VERSION);
+        let host = "0000000000000009";
+        save_tunnel(&f, tunnel(B, 15433));
+        remote_catalog(&f, |catalog| catalog.transports.push(iap_route(host)));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert!(!in_conflict(&f, &after));
+        assert_eq!(transports::get(&after, host), Some(iap_route(host)));
+        assert!(transports::synced(&after, host));
+        assert_eq!(after.version, transports::SYNC_STATE_VERSION);
+    }
+
+    /// Review Focus 4: a library that takes no edit takes no merge either; the conflict waits and the rows stay as they are.
+    #[test]
+    fn a_library_whose_writes_are_blocked_keeps_its_catalog_conflict() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        remote_catalog(&f, |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            let mut next = state.clone();
+            next.shared_writes_blocked = true;
+            Ok(next)
+        })
+        .unwrap();
+        let _ = round::sync_once(&f.d.env());
+        let after = state(&f.d);
+        assert!(in_conflict(&f, &after));
+        assert_eq!(tunnel_ids(&after), [B], "the other device's tunnel is not read in");
+    }
+
+    /// Together the two devices' tunnels exceed what a library holds: the conflict waits, and once this device removes some of its
+    /// own the next round merges.
+    #[test]
+    fn a_catalog_over_its_room_merges_once_this_device_removes_a_tunnel() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        let mine: Vec<_> = (0..10).map(|n| tunnel(&format!("{:016x}", 0x1000 + n), 15432)).collect();
+        for rule in &mine {
+            save_tunnel(&f, rule.clone());
+        }
+        remote_catalog(&f, |catalog| catalog.tunnels.extend((0..250).map(|n| tunnel(&format!("{n:016x}"), 15432))));
+        round::sync_once(&f.d.env()).unwrap();
+        assert!(in_conflict(&f, &state(&f.d)), "260 tunnels do not fit");
+        assert_eq!(controller::status(&f.d.env()).unwrap().conflicts, 1);
+        for rule in &mine[..4] {
+            remove_tunnel(&f, rule);
+        }
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert!(!in_conflict(&f, &after));
+        assert_eq!(library_tunnels(&after).len(), 256);
+    }
+}

@@ -2,7 +2,7 @@
 use super::{
     api::{Api, DeviceState, Reply},
     controller::Session,
-    crypto::{RecordEnvelope, VaultKeys},
+    crypto::{DeviceKeys, RecordEnvelope, VaultKeys},
     outbox::{self, claims::PushReply},
     wire::invalid,
 };
@@ -297,6 +297,24 @@ fn publish_local_routes(env: &SyncEnv, state: &SyncStateV3, keys: &VaultKeys) ->
     })?;
     Ok(true)
 }
+/// The automatic merge (design 2026-10-27, Catalog conflicts keep both devices' changes): a Catalog conflict whose two versions change
+/// different items is merged into this device's rows and draft by an ordinary save of its own, as the publish step saves, so that the
+/// capture after it publishes the merged Catalog (`catalog_conflict::merge_automatically`). Under the publish step's gates: a library
+/// frozen for an encrypted migration, or whose writes are blocked, takes none, and the conflict waits. Whether it saved.
+fn merge_catalog(env: &SyncEnv, state: &SyncStateV3, keys: &VaultKeys, signer: &DeviceKeys) -> Result<bool, AppError> {
+    let now = env.now();
+    if super::catalog_conflict::merge_automatically(state, keys, signer, now)?.is_none() {
+        return Ok(false);
+    }
+    super::migration_flow::refresh_edit_gate(env)?;
+    if env.runtime.core.lock().unwrap().central_migration_frozen {
+        return Ok(false);
+    }
+    record_runtime::mutate_records(env, |latest| {
+        Ok(super::catalog_conflict::merge_automatically(latest, keys, signer, now)?.map_or_else(|| latest.clone(), |next| *next))
+    })?;
+    Ok(true)
+}
 pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppError> {
     super::controller::require_enabled()?;
     let _life = env.runtime.lifecycle.lock().unwrap();
@@ -313,6 +331,13 @@ pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppEr
     if context.session().is_none_or(|s| !Arc::ptr_eq(s, &session)) {
         return Err(crate::sync::runtime::superseded());
     }
+    let (before, generation) = if merge_catalog(env, &before, context.keys(), context.signer())? {
+        let (before, generation) = record_runtime::snapshot(env)?;
+        fresh(&session, &before)?;
+        (before, generation)
+    } else {
+        (before, generation)
+    };
     let (before, generation) = if publish_local_routes(env, &before, context.keys())? {
         let (before, generation) = record_runtime::snapshot(env)?;
         fresh(&session, &before)?;
