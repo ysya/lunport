@@ -1,6 +1,9 @@
 import { useRef, useState } from "react";
 import {
+  AlertCircle,
   Check,
+  ChevronDown,
+  Clock3,
   Cloud,
   Download,
   Folder,
@@ -23,6 +26,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { isImeKey } from "@/lib/ime";
@@ -103,6 +109,7 @@ export function RecordHostList({
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const hosts = libraryHosts(overview, filter, search, recent);
+  const attention = libraryHosts(overview, { kind: "attention" }, "", {}).length;
   const roots = buildRecordTree(overview);
   const allNodes = roots.flatMap((root) => root.groups);
   const findNode = (
@@ -160,7 +167,29 @@ export function RecordHostList({
     counts.get(host.id) === 1;
   return (
     <div className="library-catalog flex h-full min-h-0 flex-col">
-      <PageHeader className="library-page-header" title={revealHidden(title)} count={hosts.length}
+      <PageHeader className="library-page-header" title={changeFilter ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="library-view-trigger" aria-label={`Host views: ${revealHidden(title)}`}>
+              <span>{revealHidden(title)}</span>
+              <ChevronDown className="size-4" aria-hidden="true" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuLabel>Host views</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={filter.kind} onValueChange={(kind) => {
+              if (kind === "all" || kind === "recent" || kind === "attention") changeFilter({ kind });
+            }}>
+              <DropdownMenuRadioItem value="all"><Server />All hosts</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="recent"><Clock3 />Recent</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="attention">
+                <AlertCircle />Needs attention
+                <span className="library-view-menu-count">{attention}</span>
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : revealHidden(title)} count={hosts.length}
         breadcrumb={filter.kind === "group" || filter.kind === "tag" ? <div className="library-breadcrumb">
             <button
               type="button"
@@ -173,6 +202,14 @@ export function RecordHostList({
           </div> : undefined}
         description={filter.kind === "attention" ? "Review connection settings and keys before connecting." : currentGroup ? revealHidden(groupPath(overview, currentGroup.id, currentGroup.scope)) : undefined}
         actions={<>
+          {changeFilter && attention > 0 && filter.kind !== "attention" && (
+            <Button variant="ghost" size="sm" className="library-attention-shortcut"
+              aria-label={`Needs attention (${attention})`} title={`Needs attention (${attention})`}
+              onClick={() => changeFilter({ kind: "attention" })}>
+              <AlertCircle className="size-3.5" aria-hidden="true" />
+              <span>{attention}</span>
+            </Button>
+          )}
           {currentGroup && selectGroup && (
             <Button
               variant="outline"

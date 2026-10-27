@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type PointerEvent } from "react";
 import {
-  Clock3, Folder, FolderOpen, Hash, KeyRound, Plus,
-  AlertCircle, Server, ChevronRight, ArrowUp, ArrowDown, ArrowDownAZ, MoreHorizontal, ArrowLeftRight, Cloud,
+  Folder, FolderOpen, Hash, KeyRound, Plus,
+  Server, ChevronRight, ArrowUp, ArrowDown, ArrowDownAZ, MoreHorizontal, ArrowLeftRight, Cloud,
 } from "lucide-react";
 import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
@@ -11,7 +11,7 @@ import { CLOUD_PROVIDERS } from "@/lib/cloud";
 import { Disclosure } from "@/components/app/Disclosure";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { buildRecordTree, affectedRecords, scopeKey, type GroupNode } from "./group-tree";
-import { libraryHosts, type LibraryFilter } from "./library-view";
+import type { LibraryFilter } from "./library-view";
 import { groupComparator, moveGroup } from "./group-order";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
@@ -53,7 +53,6 @@ function NavigationItem({ label, icon, active, action, count, collapsed = false 
           {count !== undefined && <span className="library-nav-count">
             {count}
           </span>}
-          {collapsed && !!count && label === "Needs attention" && <span className="library-nav-attention" aria-hidden="true" />}
         </button>
       </TooltipTrigger>
       <TooltipContent side="right" sideOffset={8}>
@@ -218,7 +217,6 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
     },
   };
   const tags = [...new Set(overview.hosts.flatMap((h) => h.payload.tags))].sort();
-  const attention = libraryHosts(overview, { kind: "attention" }, "", {}).length;
   const row = (label: string, icon: ReactNode, active: boolean, action: () => void, count?: number) => (
     <NavigationItem
       label={label}
@@ -239,9 +237,7 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
       >
         <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Library</div>
         <nav aria-label="Workspace sections" className="space-y-1">
-          {row("All hosts", <Server className="size-4" />, panel === "hosts" && (filter.kind === "all" || collapsed && ["group", "tag", "ungrouped"].includes(filter.kind)), () => choose({ kind: "all" }), overview.hosts.length)}
-          {row("Recent", <Clock3 className="size-4" />, panel === "hosts" && filter.kind === "recent", () => choose({ kind: "recent" }))}
-          {row("Needs attention", <AlertCircle className="size-4" />, panel === "hosts" && filter.kind === "attention", () => choose({ kind: "attention" }), attention || undefined)}
+          {row("All hosts", <Server className="size-4" />, panel === "hosts" && (collapsed || ["all", "recent", "attention"].includes(filter.kind)), () => choose({ kind: "all" }), overview.hosts.length)}
           {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.filter((key) => key.status !== "deleted").length)}
           {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
         </nav>

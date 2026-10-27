@@ -33,6 +33,7 @@ export function useAppShortcuts(): void {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || useUiStore.getState().settingsOpen) return;
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       const key = e.key.toLowerCase();
 
