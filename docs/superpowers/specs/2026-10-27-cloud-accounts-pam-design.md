@@ -218,3 +218,13 @@ The tab component's details; the names of new types; how the sign-in dialog stre
 5. The host's old memory is a fallback, emptied as you request, not migrated up front.
 6. The Access tab lists an entitlement routes name even when Google's search does not return it.
 7. MCP gets none of this.
+
+## Changes made while building
+
+- The Access tab shows **Entitlements** first and **Where Lunport looks** under it (the entitlements are what the tab is for), always expanded.
+- The Accounts tab has its own **gcloud** section above **Google accounts**, with where gcloud is and **Check again**; every row shows **Sign in again**, **Make active** (not on the active account) and **Remove…** (not on an account only a route names) as buttons rather than a menu.
+- The login shell is asked as `$SHELL -i -l -c` (interactive too), since gcloud's installer adds itself to `PATH` in `.zshrc` or `.bashrc`.
+- "Least recently written" memories are by each row's local write time (`updated_at_ms`); rows read from the library count as written when read. A merge that does not fit drops memories in the Catalog's order.
+- The records module is `sync/pam_records.rs` (the plan called it `pam_library`); the Access commands live in `session/pam.rs`, the account actions in `session/gcloud.rs`.
+- A host's own Request grant (host details) also accepts an entitlement that needs an approver, and says so, as the Access tab does; the connect-time question still does not wait for one.
+- Two scopes from two devices that look in the same place merge to the synced one.

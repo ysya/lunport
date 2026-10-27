@@ -14,6 +14,7 @@ import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
+  grantBusy,
   grantHeld,
   grantLine,
   grantMemoryFor,
@@ -52,7 +53,7 @@ function AccessGrant({ transport, alias, memory }: { transport: HostTransport; a
         {revealHidden(status ? grantLine(status) : read.isError ? errorMessage(read.error) : "Checking the grant…")}
       </p>
       <p className="mt-1 text-xs text-muted-foreground">Required: {revealHidden(transport.kind.pam?.entitlements.join(", ") ?? "")}</p>
-      <Button variant="outline" size="sm" className="mt-3" disabled={held} onClick={() => setRequesting(true)}>
+      <Button variant="outline" size="sm" className="mt-3" disabled={grantBusy(status)} onClick={() => setRequesting(true)}>
         Request grant…
       </Button>
       {requesting && (

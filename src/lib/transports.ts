@@ -248,7 +248,7 @@ export function grantLine(status: PamStatusView): string {
  * route's PAM check, any of which can hold one.
  */
 export function tunnelGrantLine(status: PamStatusView, pam: PamCheck): string {
-  return grantHeld(status) || status.state === "error" ? grantLine(status) : `Needs a grant: ${pam.entitlements.join(", ")}`;
+  return grantBusy(status) || status.state === "error" ? grantLine(status) : `Needs a grant: ${pam.entitlements.join(", ")}`;
 }
 
 export function newIapTransport(hostId: string): HostTransport {

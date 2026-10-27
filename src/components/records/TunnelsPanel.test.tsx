@@ -177,6 +177,8 @@ describe("the grant a tunnel's first hop needs", () => {
     expect(tunnelGrantLine(active, pam)).toBe("prod-operate · Active until 10:00");
     expect(tunnelGrantLine({ ...active, active_until_ms: null }, pam)).toBe("prod-operate · Active");
     expect(tunnelGrantLine(activating, pam)).toBe("prod-admin · Activating…");
+    // A grant waiting for its approver is said as such, not as a missing one (design 2026-10-27).
+    expect(tunnelGrantLine({ ...activating, state: "approval_awaited" }, pam)).toBe("prod-admin · Awaiting approval");
     expect(tunnelGrantLine(none, pam)).toBe("Needs a grant: prod-operate, prod-admin");
     expect(tunnelGrantLine(none, { ...pam, entitlements: ["prod-deploy"] })).toBe("Needs a grant: prod-deploy");
     expect(tunnelGrantLine(unchecked, pam)).toBe(refused);
