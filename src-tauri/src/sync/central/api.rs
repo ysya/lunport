@@ -32,6 +32,15 @@ impl Reply {
         serde_json::from_slice(&self.body)
             .map_err(|_| AppError::Other("The account service returned invalid data.".into()))
     }
+    /// The relay refused the batch because a record's expected revision is no longer current (409 `revision_conflict`,
+    /// `relay/src/v2/store.ts`): nothing of it was written, and a pull reads what changed.
+    pub fn refused_revision(&self) -> bool {
+        #[derive(Deserialize)]
+        struct Refusal {
+            error: String,
+        }
+        self.status == 409 && self.decode::<Refusal>().is_ok_and(|refusal| refusal.error == "revision_conflict")
+    }
     pub fn success(&self) -> Result<(), AppError> {
         if (200..300).contains(&self.status) {
             return Ok(());
@@ -816,6 +825,13 @@ mod tests {
     use crate::sync::env::Keychain;
     use serde_json::json;
     use std::{collections::BTreeMap, sync::Mutex};
+    #[test]
+    fn only_a_revision_conflict_is_a_refused_revision() {
+        assert!(Reply::for_test(409, &json!({"error":"revision_conflict","conflicts":[]})).refused_revision());
+        assert!(!Reply::for_test(409, &json!({"error":"retry"})).refused_revision());
+        assert!(!Reply::for_test(409, &json!({"error":"operation_reused"})).refused_revision());
+        assert!(!Reply::for_test(200, &json!({"error":"revision_conflict"})).refused_revision());
+    }
     #[derive(Default)]
     struct Memory(Mutex<BTreeMap<String, String>>);
     impl Keychain for Memory {
