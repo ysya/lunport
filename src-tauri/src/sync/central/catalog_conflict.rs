@@ -9,6 +9,7 @@ use super::{
     wire::{invalid, number},
 };
 use crate::{error::AppError, sync::records_v3::SyncStateV3};
+use serde::Serialize;
 use std::collections::BTreeSet;
 
 pub(super) fn catalog_identity() -> Identity {
@@ -118,6 +119,38 @@ pub(super) fn apply(
     let draft = Data::Catalog(super::catalog_of(&next, &ledger.catalog)?);
     let next = super::conflicts::retire_conflict(*next, keys, signer, &versions.opaque, Some((&catalog_identity(), &draft)), &versions.remote_base)?;
     Ok(Outcome::Merged(Box::new(next)))
+}
+
+/// What Central conflicts shows for the Catalog in conflict (design 2026-10-27, Collisions: the review): the items both devices
+/// changed differently, and which choice fits. With no items the merge waits for the next round, or `over` says why it cannot.
+#[derive(Serialize)]
+pub struct CatalogReview {
+    pub items: Vec<Collision>,
+    /// The room sentence: when there are no items and the merge does not fit, or when neither choice does.
+    pub over: Option<String>,
+    /// "Keep this device's versions" of the items fits.
+    pub can_local: bool,
+    /// "Use the synced versions" of the items fits.
+    pub can_remote: bool,
+}
+
+/// The review of the Catalog in conflict, or `None` when it is not.
+pub(super) fn review(state: &SyncStateV3, keys: &VaultKeys) -> Result<Option<CatalogReview>, AppError> {
+    let Some(versions) = versions(state, keys)? else {
+        return Ok(None);
+    };
+    let merged = |side| merge(versions.common.as_ref(), &versions.local, &versions.remote, &versions.keep, side);
+    let open = merged(None);
+    if open.collisions.is_empty() {
+        let over = fit(open).err().map(|over| over.sentence());
+        return Ok(Some(CatalogReview { items: vec![], over, can_local: false, can_remote: false }));
+    }
+    let (local, remote) = (fit(merged(Some(Side::Local))), fit(merged(Some(Side::Remote))));
+    let over = match (&local, &remote) {
+        (Err(over), Err(_)) => Some(over.sentence()),
+        _ => None,
+    };
+    Ok(Some(CatalogReview { items: open.collisions, over, can_local: local.is_ok(), can_remote: remote.is_ok() }))
 }
 
 /// The automatic merge (design 2026-10-27, The automatic merge): `state` captured, with its Catalog conflict merged, when the capture
