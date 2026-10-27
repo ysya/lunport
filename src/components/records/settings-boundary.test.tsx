@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { recordOverview } from "./fixtures";
-import { SettingsCategoryPane } from "@/components/SettingsDialog";
+import { SettingsCategoryPane } from "@/components/SettingsPage";
 import { mcpStatusKey } from "@/lib/mcp";
 import { text } from "@/components/keychain/test-markup";
 

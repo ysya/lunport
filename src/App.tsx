@@ -40,7 +40,7 @@ import { KnownHostsDialog } from "@/components/KnownHostsDialog";
 import { DeployKeyDialog } from "@/components/DeployKeyDialog";
 import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
 import { UpdateIndicator } from "@/components/UpdatesPane";
-import { SettingsDialog } from "@/components/SettingsDialog";
+import { SettingsPage } from "@/components/SettingsPage";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { McpApprovalDialog } from "@/components/McpApprovalDialog";
@@ -97,6 +97,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
       },
     });
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
+  const settingsOpen = useUiStore((s) => s.settingsOpen);
   const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
   const mcpStatus = useMcpStatus(2_000);
   const pendingMcp = mcpStatus.data?.pending.length ?? 0;
@@ -122,6 +123,8 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
          * still register.
          */}
         <header
+          inert={settingsOpen}
+          aria-hidden={settingsOpen || undefined}
           data-tauri-drag-region
           className={cn(
             "app-toolbar relative z-20 flex min-h-[3.2rem] shrink-0 items-center gap-3 border-b pr-2.5",
@@ -231,7 +234,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
         </header>
 
         {/* Content row: flex-1 + min-h-0 so children get a bounded height. */}
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1" inert={settingsOpen} aria-hidden={settingsOpen || undefined}>
           {/* Resizable by its edge (SidebarResizeHandle); half the window at most, so the editor keeps room. */}
           <aside
             onClickCapture={() => useTerminalStore.getState().activate(null)}
@@ -287,7 +290,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
         </div>
 
         <CommandPalette />
-        <SettingsDialog />
+        <SettingsPage />
         <DeployKeyDialog />
         <NewConfigFileDialog />
         <McpApprovalDialog />

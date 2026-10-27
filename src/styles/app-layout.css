@@ -137,11 +137,12 @@
   .app-page-actions { gap: 0.4rem; }
 }
 
-/* Settings is one bounded window; only its content and navigation scroll. */
-[data-slot="dialog-content"].settings-dialog { display: flex; flex-direction: column; width: calc(100% - 2rem); max-width: 62rem; height: min(45rem, calc(100dvh - 3rem)); max-height: calc(100dvh - 2rem); gap: 0; overflow: hidden; padding: 0; }
-.settings-window-header { flex-shrink: 0; padding: 1.15rem 3rem 1rem 1.4rem; border-bottom: 1px solid var(--border); }
-.settings-window-header [data-slot="dialog-title"] { font-size: 1.15rem; font-weight: 600; line-height: 1.4; }
-.settings-window-header [data-slot="dialog-description"] { margin-top: 0.3rem; font-size: 0.75rem; }
+/* A full-window page; workspace components stay mounted behind it. */
+.settings-page { position: fixed; inset: 0; z-index: 30; display: flex; min-width: 0; flex-direction: column; overflow: hidden; background: var(--background); }
+.settings-page-header { display: flex; min-height: 3.5rem; flex-shrink: 0; align-items: center; gap: 1rem; padding: 0.6rem 1.25rem; border-bottom: 1px solid var(--border); }
+.settings-page.is-macos .settings-page-header { padding-left: 5rem; }
+.settings-page-header h1 { font-size: 1rem; font-weight: 600; }
+.settings-page-header p { margin-left: auto; color: var(--muted-foreground); font-size: 0.75rem; }
 .settings-layout { display: flex; min-height: 0; flex: 1; }
 .settings-navigation { display: flex; width: 12.75rem; flex-shrink: 0; flex-direction: column; gap: 0.9rem; border-right: 1px solid var(--border); padding: 0.9rem 0.65rem; background: var(--sidebar); }
 .settings-search { position: relative; color: var(--muted-foreground); }
@@ -159,6 +160,7 @@
 .settings-category-header h2 { font-size: 1.15rem; font-weight: 600; line-height: 1.4; outline: none; }
 .settings-category-header p { margin-top: 0.3rem; color: var(--muted-foreground); font-size: 0.8rem; line-height: 1.5; }
 .settings-content { min-height: 0; flex: 1; overflow-y: auto; padding: 1.3rem 1.5rem 1.5rem; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.settings-content > *, .settings-category-header > * { width: 100%; max-width: 68rem; margin-inline: auto; }
 .settings-pane > * + * { margin-top: 1.6rem; }
 .settings-section { min-width: 0; scroll-margin-top: 0.25rem; border-top: 1px solid var(--border); padding-top: 1.1rem; outline: none; }
 .settings-section:first-child { border-top: 0; padding-top: 0; }

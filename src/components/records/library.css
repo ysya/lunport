@@ -131,7 +131,6 @@
 .library-group-disclosure svg[data-expanded="true"] { transform: rotate(90deg); }
 .library-group-children { padding-left: 0.65rem; }
 .library-group-navigation-row .library-nav-item { padding-left: 0.3rem; }
-.library-nav-attention { position: absolute; top: 0.35rem; right: 0.35rem; width: 0.3rem; height: 0.3rem; border-radius: 50%; background: var(--warning); }
 .library-brand {
   display: flex;
   align-items: center;
@@ -217,6 +216,33 @@
 }
 .library-page-header {
   padding: 1.1rem var(--page-inset) 0.85rem;
+}
+.library-view-trigger {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 0.35rem;
+  text-align: left;
+}
+.library-view-trigger > svg { flex-shrink: 0; color: var(--library-dim); }
+.library-view-trigger:hover,
+.library-view-trigger[data-state="open"] { color: var(--primary); }
+.library-view-menu-count {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.library-attention-shortcut {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.library-attention-shortcut:hover {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
 }
 .library-breadcrumb {
   display: flex;

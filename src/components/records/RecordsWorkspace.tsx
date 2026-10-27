@@ -18,7 +18,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
-import { SettingsDialog } from "@/components/SettingsDialog";
+import { SettingsPage } from "@/components/SettingsPage";
 import { useUiStore } from "@/stores/ui";
 import { useGlobalHotkey } from "@/lib/global-hotkey";
 import { isTypingContext, SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
@@ -92,6 +92,7 @@ export function RecordsWorkspace({
   const [transferOpen, setTransferOpen] = useState(false);
   useGlobalHotkey();
   const setSettingsOpen = useUiStore((state) => state.setSettingsOpen);
+  const settingsOpen = useUiStore((state) => state.settingsOpen);
   const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
   const setPaletteOpen = useUiStore((state) => state.setPaletteOpen);
   const sidebarCollapsed = useUiStore((state) => state.librarySidebarCollapsed);
@@ -234,7 +235,7 @@ export function RecordsWorkspace({
   };
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (activeTerminal) return;
+      if (activeTerminal || useUiStore.getState().settingsOpen) return;
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
         return;
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
@@ -314,7 +315,7 @@ export function RecordsWorkspace({
   return (
     <div className={cn("app-shell library-shell flex h-screen overflow-hidden", platform.data === "macos" && "is-macos")}
       data-sidebar-collapsed={sidebarCollapsed}>
-      <div className="library-sidebar">
+      <div className="library-sidebar" inert={settingsOpen} aria-hidden={settingsOpen || undefined}>
         <header className="library-sidebar-header" data-tauri-drag-region>
           <span className="library-app-name">
             <BrandMark className="size-5" />
@@ -346,7 +347,7 @@ export function RecordsWorkspace({
           }}
         />
       </div>
-      <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col" inert={settingsOpen} aria-hidden={settingsOpen || undefined}>
         <TerminalWorkspace openKeys={() => {
           setActiveTerminal(null);
           setPanel("keys");
@@ -749,7 +750,7 @@ export function RecordsWorkspace({
         create={createHost}
       />
       <WorkspaceTransfer open={transferOpen} onOpenChange={setTransferOpen} onImport={() => { setTransferOpen(false); setPanel("import"); }} />
-      <SettingsDialog
+      <SettingsPage
         recordOverview={overview}
         onOpenDataTools={() => { setSettingsOpen(false); setTransferOpen(true); }}
         onOpenImport={() => {

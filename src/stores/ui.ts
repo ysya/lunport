@@ -113,7 +113,7 @@ interface UiState {
   /** New-config-file dialog: open while non-null; says how to continue after. */
   newFileIntent: NewFileIntent | null;
   setNewFileIntent: (intent: NewFileIntent | null) => void;
-  /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
+  /** Whether the Settings page is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
   /** Settings category selected by toolbar shortcuts; session-only. */
