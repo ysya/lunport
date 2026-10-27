@@ -1,4 +1,7 @@
 import { tauriInvoke } from "@/lib/ipc";
+import type { HostTransport } from "@/bindings/HostTransport";
+import type { TunnelRule } from "@/bindings/TunnelRule";
+import type { HostScope } from "@/lib/records";
 export type CentralStatus = {
   observation?: string;
   available: boolean;
@@ -135,7 +138,15 @@ export const centralAutomaticStep = () => tauriInvoke<AutomaticSyncProgress>("ce
 // Password stays in the form/call only; never put it in a Query or mutation cache.
 export const centralUnlockPassword = (password: string) => tauriInvoke<AutomaticSyncProgress>("central_unlock_password", { password });
 
-export type CentralConflict = { id: string; token: string; kind: string; name: string; local: Record<string, unknown> | null; remote: Record<string, unknown> | null; local_deleted: boolean; remote_deleted: boolean; remote_revision: string; can_resolve: boolean; can_remote: boolean; can_copy: boolean };
+/** An item of the shared Catalog that this device and another changed differently (design 2026-10-27); `null` where that side removed it or never had it. */
+export type CatalogCollision =
+  | { kind: "tunnel"; id: string; local: TunnelRule | null; remote: TunnelRule | null }
+  | { kind: "route"; host_id: string; local: HostTransport | null; remote: HostTransport | null }
+  | { kind: "collection"; id: string; local: string | null; remote: string | null }
+  | { kind: "group_order"; scope: HostScope; local: string[] | null; remote: string[] | null };
+/** The Catalog's review: its colliding items, which choice fits, and why none does (`over`). Without items the merge waits for the next sync. */
+export type CatalogReview = { items: CatalogCollision[]; over: string | null; can_local: boolean; can_remote: boolean };
+export type CentralConflict = { id: string; token: string; kind: string; name: string; local: Record<string, unknown> | null; remote: Record<string, unknown> | null; local_deleted: boolean; remote_deleted: boolean; remote_revision: string; can_resolve: boolean; can_remote: boolean; can_copy: boolean; catalog: CatalogReview | null };
 export const centralConflicts = () => tauriInvoke<CentralConflict[]>("central_conflicts");
 export const centralResolveConflict = (row: CentralConflict, choice: "local" | "remote" | "copy_remote", copyAlias?: string) =>
   tauriInvoke<CentralStatus>("central_conflict_resolve", { id: row.id, token: row.token, choice, copyAlias: copyAlias ?? null });

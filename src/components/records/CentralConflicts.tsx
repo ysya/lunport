@@ -6,6 +6,27 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { centralConflicts, centralResolveConflict, type CentralConflict, type CentralStatus } from "@/lib/central-sync";
 import type { RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
+import { CATALOG_CHOICE_NOTE, CATALOG_TITLE, CatalogConflictView, catalogChoiceTitle } from "./CatalogConflict";
+
+type Option = "local" | "remote" | "copy_remote";
+
+/** One record in conflict: the Catalog as its colliding items (design 2026-10-27), any other record as its two versions. */
+export function ConflictRow({row, overview, disabled, busy, pick}: {row:CentralConflict; overview?:RecordOverview; disabled:boolean; busy:boolean; pick:(row:CentralConflict, option:Option)=>void}) {
+  const pending=!row.can_resolve&&<p className="text-sm text-muted-foreground">Sync must verify the pending write receipt before this conflict can be resolved.</p>;
+  if(row.catalog) return <div className="space-y-2 rounded-md border p-3">
+    <h4 className="text-sm font-medium">{CATALOG_TITLE}</h4>
+    {pending}
+    <CatalogConflictView review={row.catalog} overview={overview} disabled={disabled||busy||!row.can_resolve} choose={option=>pick(row,option)} />
+  </div>;
+  return <div className="space-y-2 rounded-md border p-3">
+    <h4 className="text-sm font-medium break-all">{revealHidden(row.name)} · {row.kind === "password" ? "SSH password" : row.kind}</h4>
+    {row.local_deleted&&<p className="text-sm">Deleted on this device</p>}{row.remote_deleted&&<p className="text-sm">Deleted on another device</p>}
+    <ConflictComparison row={row} overview={overview} />
+    {pending}
+    {!row.can_remote&&row.can_resolve&&<p className="text-sm text-muted-foreground">This record contains key material or library structure. You can retain this device’s version; previous encrypted versions remain in history. Private keys are never displayed here.</p>}
+    <div className="flex flex-wrap gap-2">{(["local","remote","copy_remote"] as const).filter(option=>option==="local"||option==="remote"?option==="local"||row.can_remote:row.can_copy).map(option=><Button key={option} size="sm" variant="outline" disabled={disabled||busy||!row.can_resolve} onClick={()=>pick(row,option)}>{option==="local"?"Keep this device’s version…":option==="remote"?"Use synced version…":"Keep both hosts…"}</Button>)}</div>
+  </div>;
+}
 
 export function CentralConflicts({status, disabled, update, onBusyChange, overview}: {overview?:RecordOverview; status:CentralStatus; disabled:boolean; update:(status:CentralStatus)=>void; onBusyChange:(busy:boolean)=>void}) {
   const client=useQueryClient();
@@ -27,17 +48,10 @@ export function CentralConflicts({status, disabled, update, onBusyChange, overvi
     <h3 className="font-medium">Review sync conflicts</h3><p className="text-sm text-muted-foreground">Choose the version to use, or keep a host copy. Before applying your choice, Lunport keeps an encrypted local recovery snapshot. Unrelated records continue syncing.</p>
     {query.isPending&&<p role="status">Loading verified versions…</p>}
     {query.isError&&<p role="alert" className="app-error">Could not load conflict review. Refresh the account or retry loading.</p>}
-    {query.data?.map(row=><div className="space-y-2 rounded-md border p-3" key={row.id}>
-      <h4 className="text-sm font-medium break-all">{revealHidden(row.name)} · {row.kind === "password" ? "SSH password" : row.kind}</h4>
-      {row.local_deleted&&<p className="text-sm">Deleted on this device</p>}{row.remote_deleted&&<p className="text-sm">Deleted on another device</p>}
-      <ConflictComparison row={row} overview={overview} />
-      {!row.can_resolve&&<p className="text-sm text-muted-foreground">Sync must verify the pending write receipt before this conflict can be resolved.</p>}
-      {!row.can_remote&&row.can_resolve&&<p className="text-sm text-muted-foreground">This record contains key material or library structure. You can retain this device’s version; previous encrypted versions remain in history. Private keys are never displayed here.</p>}
-      <div className="flex flex-wrap gap-2">{(["local","remote","copy_remote"] as const).filter(option=>option==="local"||option==="remote"?option==="local"||row.can_remote:row.can_copy).map(option=><Button key={option} size="sm" variant="outline" disabled={disabled||busy||!row.can_resolve} onClick={()=>{setChoice(option);setSelection(row);setAlias(`${row.name}-copy`);setError(null);}}>{option==="local"?"Keep this device’s version…":option==="remote"?"Use synced version…":"Keep both hosts…"}</Button>)}</div>
-    </div>)}
+    {query.data?.map(row=><ConflictRow key={row.id} row={row} overview={overview} disabled={disabled} busy={busy} pick={(row,option)=>{setChoice(option);setSelection(row);setAlias(`${row.name}-copy`);setError(null);}} />)}
     <Button variant="ghost" size="sm" disabled={disabled||busy||query.isFetching} onClick={()=>void query.refetch()}>Refresh conflicts</Button>
-    <Dialog open={!!selection} onOpenChange={open=>{if(!open&&!busy)setSelection(null);}}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"><DialogHeader><DialogTitle>{choice==="copy_remote"?"Keep both host versions?":"Use this version?"}</DialogTitle><DialogDescription>{choice==="local"?"Your current device’s version will replace the synced version for this record.":choice==="remote"?"The reviewed synced version will replace this device’s current record.":"Keep this device’s host and create a separate host using the synced settings. Assign and verify its authentication before connecting."} Previous versions are kept in an encrypted local recovery snapshot on this device.</DialogDescription></DialogHeader>
-      <p className="text-sm break-all">{selection&&revealHidden(selection.name)}</p>
+    <Dialog open={!!selection} onOpenChange={open=>{if(!open&&!busy)setSelection(null);}}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">{selection?.catalog&&choice!=="copy_remote"?<DialogHeader><DialogTitle>{catalogChoiceTitle(choice)}</DialogTitle><DialogDescription>{CATALOG_CHOICE_NOTE}</DialogDescription></DialogHeader>:<DialogHeader><DialogTitle>{choice==="copy_remote"?"Keep both host versions?":"Use this version?"}</DialogTitle><DialogDescription>{choice==="local"?"Your current device’s version will replace the synced version for this record.":choice==="remote"?"The reviewed synced version will replace this device’s current record.":"Keep this device’s host and create a separate host using the synced settings. Assign and verify its authentication before connecting."} Previous versions are kept in an encrypted local recovery snapshot on this device.</DialogDescription></DialogHeader>}
+      <p className="text-sm break-all">{selection&&(selection.catalog?CATALOG_TITLE:revealHidden(selection.name))}</p>
       {choice==="copy_remote"&&<label className="text-sm">New host name<Input value={alias} onChange={event=>setAlias(event.target.value)} disabled={busy} maxLength={128}/></label>}
       {error&&<div className="space-y-2"><p role="alert" className="app-error whitespace-pre-wrap">{revealHidden(error)}</p><Button variant="outline" disabled={busy} onClick={() => void query.refetch().then(result => { const current=result.data?.find(row=>row.id===selection?.id); if(current){setSelection(current);setError(null);}else if(result.data){setSelection(null);} })}>Refresh review</Button></div>}
       <DialogFooter><Button variant="outline" disabled={busy} onClick={()=>setSelection(null)}>Cancel</Button><Button disabled={disabled||busy||(choice==="copy_remote"&&!alias.trim())} onClick={()=>void resolve()}>Confirm version</Button></DialogFooter>
