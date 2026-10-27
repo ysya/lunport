@@ -83,7 +83,7 @@ The header description becomes: "Google accounts, access grants and IAP hosts on
 
 1. Each directory of Lunport's own `PATH`.
 2. Known install places: `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/homebrew/share/google-cloud-sdk/bin`, `/usr/local/share/google-cloud-sdk/bin`, `/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin`, `/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin`, `~/google-cloud-sdk/bin`, `/usr/lib/google-cloud-sdk/bin`, `/usr/share/google-cloud-sdk/bin`, `/snap/bin`, `/usr/bin`; on Windows `%LOCALAPPDATA%\Google\Cloud SDK\google-cloud-sdk\bin`, `%ProgramFiles(x86)%\Google\Cloud SDK\google-cloud-sdk\bin` and `%ProgramFiles%\Google\Cloud SDK\google-cloud-sdk\bin` (`gcloud.cmd`).
-3. Not on Windows: the login shell, once: `$SHELL -l -c 'command -v gcloud'` (`$SHELL` must be an absolute path to an executable file; `/bin/sh` otherwise), with stdin closed and a 5-second bound. Its answer is taken only when it is one absolute path to an executable file named `gcloud`.
+3. Not on Windows: the login shell, once: `$SHELL -i -l -c 'command -v gcloud'` (interactive too, since gcloud's installer adds itself to `PATH` in `.zshrc` or `.bashrc`) (`$SHELL` must be an absolute path to an executable file; `/bin/sh` otherwise), with stdin closed and a 5-second bound. Its answer is taken only when it is one absolute path to an executable file named `gcloud`.
 
 The answer is cached for the app's run. It is looked up again when the cached file is gone, and when the person presses **Check again** on the Accounts tab.
 
