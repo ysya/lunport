@@ -140,7 +140,7 @@ fn fixture_with_service(mut service: Service) -> Fixture {
         id: "catalog".into(),
         scope: None,
     };
-    let catalog = Data::Catalog(Catalog {
+    let catalog = Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
         tunnels: vec![],
         transports: vec![],
         collections: vec![],
@@ -855,6 +855,36 @@ fn a_route_another_device_published_reaches_a_device_at_the_central_version() {
     assert_eq!(transports::get(&after, host), Some(iap_route(host)));
     assert!(transports::synced(&after, host));
     assert_eq!(after.version, transports::SYNC_STATE_VERSION);
+}
+
+/// Design 2026-10-27: a device at central sync's own version receives a search scope and a grant memory another device published; the
+/// round projects them as the library's rows and saves the state at the version they need. A memory this device then writes reaches the
+/// library by the next round's capture.
+#[test]
+fn a_scope_and_memory_another_device_published_reach_this_device_and_its_own_memory_is_published() {
+    use crate::sync::pam_records::{self, GrantRequestMemory, PamScope};
+    let f = fixture();
+    round::sync_once(&f.d.env()).unwrap();
+    assert_eq!(state(&f.d).version, CENTRAL_STATE_VERSION);
+    let scope = PamScope { id: "00000000000000a1".into(), parent: "projects/acme-dev-654321".into(), location: "global".into(), account: Some("frank@example.com".into()) };
+    let theirs = GrantRequestMemory { name: "projects/acme-dev-654321/locations/global/entitlements/dev-operate".into(), justification: "debug".into(), duration_secs: 1800 };
+    let (published_scope, published_memory) = (scope.clone(), theirs.clone());
+    remote_catalog(&f, move |catalog| {
+        catalog.pam_scopes.push(published_scope.clone());
+        catalog.pam_requests.push(published_memory.clone());
+    });
+    round::sync_once(&f.d.env()).unwrap();
+    let after = state(&f.d);
+    assert_eq!(pam_records::scopes(&after), vec![scope.clone()]);
+    assert_eq!(pam_records::memory(&after, &theirs.name), Some(theirs.clone()));
+    assert_eq!(after.version, pam_records::STATE_VERSION);
+
+    let mine = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
+    crate::sync::record_runtime::mutate_records(&f.d.env(), |latest| Ok(pam_records::remember(latest, mine, "restart app-api", 1800, None, 500).unwrap())).unwrap();
+    round::sync_once(&f.d.env()).unwrap();
+    let catalog = &state(&f.d).local.central_projection.unwrap().catalog;
+    assert!(catalog.pam_requests.iter().any(|memory| memory.name == mine), "the capture published this device's memory");
+    assert_eq!(catalog.pam_scopes, vec![scope]);
 }
 
 /// The raise R19 lets a delta make still needs the exact source it was staged from: a saved source whose format changed meanwhile is

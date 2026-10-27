@@ -451,7 +451,7 @@ pub(super) mod tests {
     fn catalog() -> (Identity, Data) {
         (
             identity("meta", "catalog"),
-            Data::Catalog(Catalog {
+            Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections: vec![],
@@ -611,7 +611,7 @@ pub(super) mod tests {
             let host = || {
                 Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":"fixture","hostname":"fixture.invalid","auth":"password"})).unwrap())
             };
-            let catalogue = Data::Catalog(Catalog {
+            let catalogue = Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections: if named {

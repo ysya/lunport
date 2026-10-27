@@ -54,10 +54,13 @@ pub(super) fn move_local_routes(
     keys: &VaultKeys,
     now: u64,
 ) -> Result<Option<SyncStateV3>, AppError> {
-    if state.local.transports.is_empty() || !catalog_settled(state, keys)? {
+    if state.local.transports.is_empty() && state.local.pam_records.is_empty() || !catalog_settled(state, keys)? {
         return Ok(None);
     }
-    crate::sync::transports::publish_local(state, now)
+    // Search scopes and grant memory this device kept alone move in by the same step (design 2026-10-27).
+    let routed = crate::sync::transports::publish_local(state, now)?;
+    let pam = crate::sync::pam_records::publish_local(routed.as_ref().unwrap_or(state), now).map_err(AppError::Other)?;
+    Ok(pam.or(routed))
 }
 
 pub fn public_candidate(

@@ -49,7 +49,9 @@ impl Prepared {
 /// library's route rows: the account's rows themselves (R19), the routes this device keeps for the publish step to turn into such rows
 /// (R64a), or what its grant requests taught it (R8). The initial publication requires exactly this version.
 pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
-    if transports::needs_sync_version(candidate) || transports::has_data(candidate) {
+    if crate::sync::pam_records::has_data(candidate) {
+        crate::sync::pam_records::STATE_VERSION
+    } else if transports::needs_sync_version(candidate) || transports::has_data(candidate) {
         transports::SYNC_STATE_VERSION
     } else {
         records_v3::CENTRAL_STATE_VERSION
@@ -80,6 +82,12 @@ fn keep_routes(
         Some(host_ids) => {
             transports::follow_hosts(source, candidate, host_ids, now).map_err(|_| invalid())?
         }
+    }
+    // Search scopes and grant memory name no host: they stay as they are, for the publish step to move in (design 2026-10-27). The
+    // library's own, from its Catalog, give way to none of them: a memory or scope of the same id the library holds wins.
+    crate::sync::pam_records::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
+    if let Some(account) = &candidate.account {
+        candidate.local.pam_records.retain(|key, _| !account.records.contains_key(key));
     }
     // The account's route rows are the Catalog's routes, keyed as this device's own are.
     if let Some(account) = &candidate.account {
@@ -194,6 +202,7 @@ impl Candidate {
         // is below theirs. `finish` keeps them in the final candidate, under the host ids an adoption gives (`keep_routes`).
         shadow.local.transports.clear();
         shadow.local.transport_grants.clear();
+        shadow.local.pam_records.clear();
         // All source pointers and files remain in source. A native stage supplies new verified mappings.
         shadow.local.keys.clear();
         shadow.local.credential_approvals.clear();
@@ -430,7 +439,7 @@ pub(in crate::sync) mod tests {
     }
     /// A Catalog of one collection, which the fixtures' source holds unselected.
     fn unselected_catalog() -> Catalog {
-        Catalog {
+        Catalog { pam_scopes: vec![], pam_requests: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![Collection {

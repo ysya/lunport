@@ -67,6 +67,10 @@ pub struct LocalState {
     /// edits a route. Needs `TRANSPORT_SYNC_STATE_VERSION`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub transport_grants: BTreeMap<String, crate::sync::transports::GrantMemory>,
+    /// Search scopes and grant memory kept on this device (`pam_scope:` and `pam_request:` Meta records) while the library does not use
+    /// central sync; there they are the account's rows. Needs `PAM_STATE_VERSION`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pam_records: BTreeMap<String, LocalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -154,7 +158,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
             .map(DecodedState::V2)
             .map_err(state_decode_error),
         STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
-        | TRANSPORT_STATE_VERSION | TRANSPORT_SYNC_STATE_VERSION => {
+        | TRANSPORT_STATE_VERSION | TRANSPORT_SYNC_STATE_VERSION | PAM_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -309,6 +313,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             | CENTRAL_STATE_VERSION
             | TRANSPORT_STATE_VERSION
             | TRANSPORT_SYNC_STATE_VERSION
+            | PAM_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -394,6 +399,15 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
     for (host_id, memory) in &state.local.transport_grants {
         if !is_host_id(host_id) || memory.validate().is_err() {
             return Err(state_invalid("transport_grants", host_id, "invalid remembered grant request"));
+        }
+    }
+    if !state.local.pam_records.is_empty() && state.version < crate::sync::pam_records::STATE_VERSION {
+        return Err(state_invalid("pam", "local", "invalid access grant state version"));
+    }
+    for (key, row) in &state.local.pam_records {
+        validate_cache_key(key, row)?;
+        if !crate::sync::pam_records::valid(&row.record) {
+            return Err(state_invalid("pam", &row.record.id, "invalid access grant metadata"));
         }
     }
     read_hosts(&state.local.hosts, HostScope::Local)?;
@@ -490,6 +504,16 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                     }
                     if state.version < crate::sync::transports::SYNC_STATE_VERSION {
                         return Err(state_invalid("transport", "account", "invalid transport state version"));
+                    }
+                }
+                // A library's search scope or grant memory, tombstones included, needs the version a Lunport that cannot publish it
+                // does not open.
+                RecordKind::Meta if crate::sync::pam_records::is_id(&record.id) => {
+                    if !crate::sync::pam_records::valid(record) {
+                        return Err(state_invalid("pam", &record.id, "invalid access grant metadata"));
+                    }
+                    if state.version < crate::sync::pam_records::STATE_VERSION {
+                        return Err(state_invalid("pam", "account", "invalid access grant state version"));
                     }
                 }
                 RecordKind::Meta if record.id == ACCOUNT_META_ID && !record.deleted => {
