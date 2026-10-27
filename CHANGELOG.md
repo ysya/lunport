@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/ysya/lunport/compare/v1.13.0...v1.14.0) (2026-10-27)
+
+
+### Features
+
+* **ui:** expand settings and simplify host and AI activity views ([#98](https://github.com/ysya/lunport/issues/98)) ([fe0a814](https://github.com/ysya/lunport/commit/fe0a8142bc5198d9dbd47225504bac2586ff59ff))
+
 ## [1.13.0](https://github.com/ysya/lunport/compare/v1.12.1...v1.13.0) (2026-10-27)
 
 
