@@ -129,6 +129,7 @@ pub fn public_candidate(
                         && known.remote == conflict.remote
                 }) {
                     conflicts.push(conflict);
+                    super::replica::keep_latest(conflicts);
                 }
             }
         }
@@ -432,6 +433,23 @@ pub(super) mod tests {
             .unwrap();
         assert!(!replica.conflicts[&id].is_empty());
         assert_eq!(pending_alias(&state, &keys), "newer-B");
+    }
+    /// Each local edit of a record in conflict adds an entry; the record keeps its latest ones instead of failing every capture.
+    #[test]
+    fn local_edits_while_in_conflict_keep_the_entries_bounded() {
+        let (mut state, keys, _) = initial();
+        edit(&mut state, "B");
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        let row = remote(&state, &keys, "C", None);
+        apply(&mut state, &keys, row);
+        for n in 0..17 {
+            edit(&mut state, &format!("local-{n}"));
+            state = public_candidate(&state, &keys, &signer()).unwrap();
+        }
+        let id = opaque(&state, &keys);
+        let replica = state.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+        assert_eq!(replica.conflicts[&id].len(), super::super::replica::MAX_CONFLICT_ENTRIES);
+        assert_eq!(pending_alias(&state, &keys), "local-16", "the latest edit stays pending");
     }
     #[test]
     fn a_created_then_removed_row_replaces_its_unsent_draft_with_a_tombstone() {

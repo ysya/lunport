@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const CAP: usize = 32 * 1024 * 1024;
+/// The most entries one record in conflict keeps (`keep_latest`); `validate` refuses more.
+pub const MAX_CONFLICT_ENTRIES: usize = 16;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
@@ -77,6 +79,13 @@ pub struct PreparedPage {
     pub next: Replica,
     pub opened: Vec<Opened>,
     pub publish_baseline: bool,
+}
+/// Drops a conflicted record's oldest entries beyond `MAX_CONFLICT_ENTRIES`, after a newer one was added. Nothing reads an entry's
+/// versions to settle a conflict (the review and the Catalog merge use the pending draft, the current version and the basis), so a
+/// record whose synced version or local edit keeps changing keeps its latest ones instead of failing the whole replica.
+pub(super) fn keep_latest(entries: &mut Vec<Conflict>) {
+    let over = entries.len().saturating_sub(MAX_CONFLICT_ENTRIES);
+    entries.drain(..over);
 }
 impl Receipt {
     fn validate(&self) -> Result<(), AppError> {
@@ -262,7 +271,7 @@ impl Replica {
         }
         let mut count = 0;
         for (id, conflicts) in &self.conflicts {
-            if conflicts.is_empty() || conflicts.len() > 16 {
+            if conflicts.is_empty() || conflicts.len() > MAX_CONFLICT_ENTRIES {
                 return Err(invalid());
             }
             for c in conflicts {
@@ -633,6 +642,7 @@ impl Replica {
                     let versions = next.conflicts.entry(h.record_id.clone()).or_default();
                     if !versions.contains(&conflict) {
                         versions.push(conflict);
+                        keep_latest(versions);
                     }
                 }
             }
@@ -840,6 +850,31 @@ mod tests {
                 }
             )
             .is_err());
+    }
+    /// A record left in conflict while its synced version keeps changing keeps its latest entries: a 17th would fail the whole
+    /// replica, and with it every pull and capture.
+    #[test]
+    fn a_conflicted_record_keeps_its_16_latest_entries() {
+        let mut c = case();
+        let chain = c.proof.verify(&c.anchor, None).unwrap();
+        let id = c.header.record_id.clone();
+        let first = row(crypto::seal_record(&c.keys, &c.signer, c.header.clone(), b"base").unwrap(), 1, ZERO);
+        c.replica = c.replica.prepare_page(&chain, &c.keys, std::slice::from_ref(&first), &checkpoint(&first)).unwrap().next;
+        c.replica.enqueue(&chain, &c.keys, &c.signer, 2, c.header.clone(), b"local").unwrap();
+        let mut rows: Vec<Version> = vec![];
+        for n in 1..=17u64 {
+            let mut h = c.header.clone();
+            h.expected_revision = n.to_string();
+            h.operation_id = format!("{n:032x}");
+            let previous = rows.last().map_or(first.history_hash.clone(), |r| r.history_hash.clone());
+            rows.push(row(crypto::seal_record(&c.keys, &c.signer, h, format!("remote {n}").as_bytes()).unwrap(), n + 1, &previous));
+        }
+        let page = c.replica.prepare_page(&chain, &c.keys, &rows, &checkpoint(rows.last().unwrap())).unwrap();
+        let entries = &page.next.conflicts[&id];
+        assert_eq!(entries.len(), MAX_CONFLICT_ENTRIES);
+        assert_eq!(entries.last().unwrap().remote.version, rows[16]);
+        assert!(entries.iter().all(|entry| entry.remote.version != rows[0]), "the oldest is gone");
+        page.next.validate(&chain).unwrap();
     }
     #[test]
     fn concurrent_edits_preserve_base_local_and_remote_ciphertexts_without_overwriting_local() {
