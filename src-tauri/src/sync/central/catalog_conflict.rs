@@ -156,7 +156,8 @@ pub(super) fn review(state: &SyncStateV3, keys: &VaultKeys) -> Result<Option<Cat
 /// The automatic merge (design 2026-10-27, The automatic merge): `state` captured, with its Catalog conflict merged, when the capture
 /// leaves the Catalog in conflict (this round's pull read another device's Catalog, before or after this device's change was
 /// captured), the refused write can no longer commit (`conflicts::settled`), and no item collides and the result fits (`apply`).
-/// `None` otherwise, and in a library whose writes are blocked: the conflict waits for the review or a later round.
+/// `None` otherwise, and in a library whose writes are blocked: the conflict waits for the review or a later round. A merge that
+/// fails waits too, so the rest of the library keeps syncing; the review reads the versions again and says what failed.
 pub(super) fn merge_automatically(
     state: &SyncStateV3,
     keys: &VaultKeys,
@@ -172,9 +173,9 @@ pub(super) fn merge_automatically(
     if !replica.conflicts.contains_key(&opaque) || !super::conflicts::settled(replica, &opaque)? {
         return Ok(None);
     }
-    Ok(match apply(&captured, keys, signer, None, now)? {
-        Outcome::Merged(next) => Some(next),
-        Outcome::Collides(_) | Outcome::Over(_) => None,
+    Ok(match apply(&captured, keys, signer, None, now) {
+        Ok(Outcome::Merged(next)) => Some(next),
+        Ok(Outcome::Collides(_) | Outcome::Over(_)) | Err(_) => None,
     })
 }
 
@@ -378,6 +379,17 @@ pub(super) mod tests {
         });
         pending.sent = Some(sent);
         assert!(merge_automatically(&state, &keys, &signer, 300).unwrap().is_none(), "a claimed write is read back first");
+    }
+
+    /// Final review: a merge that fails (here the synced Catalog no longer opens) leaves the conflict for review, as a collision
+    /// does, instead of failing every round and with it the sync of the whole library.
+    #[test]
+    fn a_merge_that_fails_leaves_the_conflict_for_review() {
+        let (mut state, keys, signer) = conflicted(|state| with_tunnel(state, tunnel(B, 15433)), |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        let opaque = catalog_identity().opaque(&keys).unwrap();
+        state.local.central.as_mut().unwrap().replica.as_mut().unwrap().current.get_mut(&opaque).unwrap().content_hash = "e".repeat(64);
+        assert!(apply(&state, &keys, &signer, None, 300).is_err(), "the synced Catalog no longer opens");
+        assert!(merge_automatically(&state, &keys, &signer, 300).unwrap().is_none());
     }
 
     #[test]
