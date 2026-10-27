@@ -215,6 +215,10 @@ pub fn sign_in_url(line: &str) -> Option<String> {
 /// Whether a run is going on: gcloud's actions change gcloud's own files, so they never overlap.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Taken by every test that runs gcloud, in any module: `RUNNING` is process-wide.
+#[cfg(test)]
+pub(crate) static TEST_RUNS: Mutex<()> = Mutex::new(());
+
 /// Holds `RUNNING` for one run.
 struct Turn;
 
@@ -307,8 +311,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// `RUNNING` is process-wide: the tests that run gcloud take turns.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    use super::TEST_RUNS as SERIAL;
 
     fn env(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
         let map: BTreeMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
