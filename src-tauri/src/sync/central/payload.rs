@@ -174,6 +174,11 @@ pub struct Catalog {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transports: Vec<HostTransport>,
 }
+/// The most collections, tunnel rules and group orders a Catalog holds, and the most groups its orders name together.
+pub const MAX_COLLECTIONS: usize = 256;
+pub const MAX_TUNNELS: usize = 256;
+pub const MAX_GROUP_ORDERS: usize = 257;
+pub const MAX_ORDERED_GROUPS: usize = 4096;
 /// A route as the Catalog may hold it: one `HostTransport::validate` accepts, without the
 /// justification a grant request left in it. That is remembered on the device that asked
 /// (`GrantMemory`) and never syncs, so a Catalog that carries one is refused when built and read.
@@ -185,7 +190,7 @@ impl Catalog {
     pub fn validate(&self) -> Result<(), AppError> {
         let mut ids = BTreeSet::new();
         let mut scopes = BTreeSet::new();
-        if self.collections.len() > 256 || self.group_orders.len() > 257 {
+        if self.collections.len() > MAX_COLLECTIONS || self.group_orders.len() > MAX_GROUP_ORDERS {
             return Err(invalid());
         }
         for c in &self.collections {
@@ -200,7 +205,7 @@ impl Catalog {
             }
         }
         let mut tunnel_ids = BTreeSet::new();
-        if self.tunnels.len() > 256
+        if self.tunnels.len() > MAX_TUNNELS
             || self
                 .tunnels
                 .iter()
@@ -228,7 +233,7 @@ impl Catalog {
                 }
             }
             groups += order.ids.len();
-            if groups > 4096 {
+            if groups > MAX_ORDERED_GROUPS {
                 return Err(invalid());
             }
         }

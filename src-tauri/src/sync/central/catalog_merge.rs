@@ -1,6 +1,8 @@
 //! The three-way rule of a Catalog conflict (design 2026-10-27, Catalog conflicts keep both devices' changes). Pure: no state, keys
 //! or I/O; the caller reads the three versions and applies what `merge` returns.
-use super::payload::{Catalog, Collection, GroupOrder};
+use super::payload::{
+    catalog_fits, Catalog, Collection, GroupOrder, MAX_COLLECTIONS, MAX_GROUP_ORDERS, MAX_ORDERED_GROUPS, MAX_TUNNELS,
+};
 use crate::sync::{records_v3::HostScope, transports::HostTransport, tunnel_rules::TunnelRule};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -161,6 +163,75 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
         None => vec![],
     };
     Merged { catalog: Catalog { collections, group_orders, tunnels, transports }, collisions, new_routes }
+}
+
+/// Why a merged Catalog does not fit in the library's one record, even without this device's new routes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Over {
+    Tunnels(usize),
+    Collections(usize),
+    GroupOrders,
+    Size,
+}
+impl Over {
+    /// What the review says, and what to do.
+    pub fn sentence(&self) -> String {
+        let (held, remove) = match self {
+            Self::Tunnels(n) => (format!("hold {n} tunnels; a library holds at most {MAX_TUNNELS}"), "some tunnels or routes"),
+            Self::Collections(n) => (format!("hold {n} collections; a library holds at most {MAX_COLLECTIONS}"), "some collections"),
+            Self::GroupOrders => (format!("order more groups than one library holds ({MAX_ORDERED_GROUPS})"), "some groups"),
+            Self::Size => (
+                format!("are more than one library record holds ({} KB)", super::wire::MAX_PLAINTEXT_BYTES / 1024),
+                "some tunnels or routes",
+            ),
+        };
+        format!("Together, both devices’ changes {held}. Remove {remove} on this device; Lunport combines both devices’ changes on the next sync.")
+    }
+}
+
+/// A merged Catalog that fits, and this device's new routes it leaves out: they stay routes saved on this device alone.
+#[derive(Debug)]
+pub struct Fitted {
+    pub catalog: Catalog,
+    pub stay_local: Vec<HostTransport>,
+}
+
+/// Fits `merged` into one record (`Catalog::validate`, `catalog_fits`). Without this device's new routes it must fit, else `Over`
+/// says why. The new routes then join in host-id order while the Catalog fits; the first that does not, and every one after it,
+/// stay on this device, as the publish step leaves a route that does not fit.
+pub fn fit(merged: Merged) -> Result<Fitted, Over> {
+    let mut catalog = merged.catalog;
+    let (mut new, kept): (Vec<_>, Vec<_>) =
+        catalog.transports.into_iter().partition(|route| merged.new_routes.contains(&route.host_id));
+    catalog.transports = kept;
+    new.sort_by(|a, b| a.host_id.cmp(&b.host_id));
+    if catalog.tunnels.len() > MAX_TUNNELS {
+        return Err(Over::Tunnels(catalog.tunnels.len()));
+    }
+    if catalog.collections.len() > MAX_COLLECTIONS {
+        return Err(Over::Collections(catalog.collections.len()));
+    }
+    if catalog.group_orders.len() > MAX_GROUP_ORDERS
+        || catalog.group_orders.iter().map(|order| order.ids.len()).sum::<usize>() > MAX_ORDERED_GROUPS
+    {
+        return Err(Over::GroupOrders);
+    }
+    if !catalog_fits(&catalog) {
+        return Err(Over::Size);
+    }
+    let mut stay_local = vec![];
+    for route in new {
+        if stay_local.is_empty() {
+            catalog.transports.push(route);
+            if catalog_fits(&catalog) {
+                continue;
+            }
+            stay_local.extend(catalog.transports.pop());
+        } else {
+            stay_local.push(route);
+        }
+    }
+    Ok(Fitted { catalog, stay_local })
 }
 
 #[cfg(test)]
@@ -369,5 +440,88 @@ mod tests {
         assert_eq!(ids(&merged.catalog.tunnels), [C, A, D, B]);
         assert_eq!(hosts(&merged.catalog.transports), [H3, H1, H5, H2]);
         assert_eq!(merged.new_routes, [H5, H2]);
+    }
+
+    /// The largest route: every name at its maximum length, and the most entitlements.
+    fn long_route(host_id: &str) -> HostTransport {
+        serde_json::from_value(serde_json::json!({"host_id":host_id,"kind":{"type":"gcp_iap",
+            "project":format!("p{}", "x".repeat(29)),"zone":format!("z{}", "x".repeat(62)),"instance":format!("i{}", "x".repeat(62)),
+            "interface":"nic7","account":format!("{}@{}.example.com", "a".repeat(64), "b".repeat(63)),"os_login":true,
+            "pam":{"entitlements":(0..8).map(|e| format!("{}{e}", "e".repeat(62))).collect::<Vec<_>>(),
+                "location":format!("l{}", "x".repeat(62)),"duration_secs":480 * 60}}})).unwrap()
+    }
+    fn long_tunnel(n: usize) -> TunnelRule {
+        let mut rule = tunnel(&format!("{n:016x}"), 15432);
+        rule.name = "t".repeat(128);
+        rule
+    }
+    fn unmerged(catalog: Catalog) -> Merged {
+        Merged { catalog, collisions: vec![], new_routes: vec![] }
+    }
+
+    #[test]
+    fn a_merge_that_fits_keeps_everything() {
+        let (common, local, remote) = colliding();
+        let merged = merge(Some(&common), &local, &remote, &none(), Some(Side::Local));
+        let catalog = merged.catalog.clone();
+        let fitted = fit(merged).unwrap();
+        assert!(fitted.stay_local.is_empty());
+        assert_eq!(sorted(hosts(&fitted.catalog.transports)), sorted(hosts(&catalog.transports)));
+        assert_eq!(fitted.catalog.tunnels, catalog.tunnels);
+    }
+
+    #[test]
+    fn this_devices_new_routes_that_do_not_fit_stay_local_in_host_id_order() {
+        // The most long routes one record holds, found as payload.rs's own room test finds it: the synced Catalog holds one fewer.
+        let with = |n: usize| Catalog { transports: (0..n).map(|n| long_route(&format!("{n:016x}"))).collect(), ..Catalog::default() };
+        let most = (1..crate::sync::transports::MAX_ROUTES).take_while(|n| catalog_fits(&with(*n))).last().unwrap();
+        let remote = with(most - 1);
+        let mut local = remote.clone();
+        let (h5, h6, h7) = ("fffffffffffffff5", "fffffffffffffff6", "fffffffffffffff7");
+        local.transports.extend([long_route(h7), long_route(h5), long_route(h6)]);
+        let merged = merge(Some(&remote), &local, &remote, &none(), None);
+        assert_eq!(sorted(merged.new_routes.iter().map(String::as_str).collect()), [h5, h6, h7]);
+        let fitted = fit(merged).unwrap();
+        assert_eq!(fitted.catalog.transports.len(), most);
+        assert!(hosts(&fitted.catalog.transports).contains(&h5), "the first new route in host-id order fits");
+        assert_eq!(hosts(&fitted.stay_local), [h6, h7], "the first that does not fit, and every one after it");
+        assert!(catalog_fits(&fitted.catalog));
+    }
+
+    #[test]
+    fn too_many_tunnels_is_over_with_their_count() {
+        let over = fit(unmerged(Catalog { tunnels: (0..262).map(|n| tunnel(&format!("{n:016x}"), 15432)).collect(), ..Catalog::default() }));
+        assert_eq!(over.as_ref().err(), Some(&Over::Tunnels(262)));
+        assert_eq!(
+            over.err().unwrap().sentence(),
+            "Together, both devices’ changes hold 262 tunnels; a library holds at most 256. Remove some tunnels or routes on this device; Lunport combines both devices’ changes on the next sync."
+        );
+    }
+
+    #[test]
+    fn too_many_collections_is_over_with_their_count() {
+        let collections = (0..257).map(|n| collection(&format!("{n:064x}"), "Team")).collect();
+        let over = fit(unmerged(Catalog { collections, ..Catalog::default() })).err().unwrap();
+        assert_eq!(over, Over::Collections(257));
+        assert_eq!(
+            over.sentence(),
+            "Together, both devices’ changes hold 257 collections; a library holds at most 256. Remove some collections on this device; Lunport combines both devices’ changes on the next sync."
+        );
+    }
+
+    #[test]
+    fn a_catalog_over_one_record_is_over_by_size() {
+        let catalog = Catalog {
+            tunnels: (0..256).map(long_tunnel).collect(),
+            transports: (0..256).map(|n| long_route(&format!("{n:016x}"))).collect(),
+            ..Catalog::default()
+        };
+        assert!(catalog.validate().is_ok(), "every count is within its limit");
+        let over = fit(unmerged(catalog)).err().unwrap();
+        assert_eq!(over, Over::Size);
+        assert_eq!(
+            over.sentence(),
+            "Together, both devices’ changes are more than one library record holds (64 KB). Remove some tunnels or routes on this device; Lunport combines both devices’ changes on the next sync."
+        );
     }
 }
