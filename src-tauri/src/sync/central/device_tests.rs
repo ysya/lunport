@@ -62,6 +62,10 @@ struct Account {
     lose_access_response_once: bool,
     duplicate_access_row: bool,
     on_pull: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Other devices' versions, each appended to the history as the next push arrives: a push that lands just before this device's.
+    race: Vec<super::rekey::Version>,
+    /// Errors the next pushes are refused with (409), writing nothing.
+    refuse_pushes: Vec<&'static str>,
     devices: BTreeMap<String, Device>,
     sessions: BTreeMap<String, String>,
     requests: BTreeMap<String, Enrollment>,

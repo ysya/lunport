@@ -12,6 +12,9 @@ use crate::{
     error::AppError,
     sync::{env::SyncEnv, record_runtime},
 };
+/// How many pushes the relay may refuse for a stale revision before a round fails as it does for any refusal (design 2026-10-27, A
+/// refused push).
+const MAX_REFUSED_PUSHES: usize = 3;
 fn rekey_required() -> AppError {
     AppError::Other("Verified library reconciliation is required before this device can resume synchronization. Local edits and protected keys are retained.".into())
 }
@@ -36,6 +39,7 @@ pub(super) fn with_budget(
         return Ok(());
     }
     let mut renewed = false;
+    let mut refusals = 0;
     loop {
         budget.remaining()?;
         let state = record_runtime::snapshot(env)?.0;
@@ -104,6 +108,12 @@ pub(super) fn with_budget(
             if !controller::resume_bounded(env, true, budget)? {
                 return Err(rekey_required());
             }
+            continue;
+        }
+        // Another device's write took a record's revision first: nothing of the batch was written. Pulling now reads it, so the
+        // prepare that follows merges a Catalog conflict, or leaves another record's for review, instead of failing the round.
+        if reply.refused_revision() && refusals < MAX_REFUSED_PUSHES {
+            refusals += 1;
             continue;
         }
         round::require_success(env, &reply)?;
