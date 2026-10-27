@@ -135,9 +135,10 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         pending: ws
             .and_then(|w| w.replica.as_ref())
             .map_or(0, |r| r.pending.len()),
+        // Records in conflict: each reads as one review row, however many entries it keeps.
         conflicts: ws
             .and_then(|w| w.replica.as_ref())
-            .map_or(0, |r| r.conflicts.values().map(Vec::len).sum()),
+            .map_or(0, |r| r.conflicts.len()),
         error: core.central_user_action.clone(),
         cooldown_seconds: core.central_poll.service_retry_at.map_or(0, |deadline| {
             let left = deadline.saturating_duration_since(Instant::now());

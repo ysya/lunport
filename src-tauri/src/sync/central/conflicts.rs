@@ -824,6 +824,31 @@ mod tests {
         );
     }
 
+    /// One record in conflict reads as one conflict, however many synced or local versions it has met.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_status_counts_records_in_conflict_not_their_entries() {
+        let d = crate::sync::record_import::central_local::tests::fixture();
+        let env = d.env();
+        let (mut state, generation) = record_runtime::snapshot(&env).unwrap();
+        let context = Context::load(&env, &state).unwrap();
+        let alias = |state: &mut SyncStateV3, value: &str| {
+            state.local.hosts.get_mut(&record_key(RecordKind::Host, "0000000000000001")).unwrap().record.payload["alias"] = value.into();
+        };
+        alias(&mut state, "local-B");
+        let mut state = super::super::capture_public(&state, context.keys(), context.signer()).unwrap();
+        let row = remote(&state, context.keys(), "remote-C", None);
+        apply(&mut state, context.keys(), row);
+        for value in ["local-D", "local-E"] {
+            alias(&mut state, value);
+            state = super::super::capture_public(&state, context.keys(), context.signer()).unwrap();
+        }
+        let replica = state.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+        assert_eq!((replica.conflicts.len(), replica.conflicts.values().map(Vec::len).sum::<usize>()), (1, 3));
+        record_runtime::commit_candidate(&env, generation, state).unwrap();
+        assert_eq!(controller::status(&env).unwrap().conflicts, 1);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn status_remains_responsive_during_unlock_and_exposes_the_server_wait() {
