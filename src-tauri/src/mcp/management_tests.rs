@@ -586,7 +586,7 @@ fn transport_of(d: &TestDevice, id: &str) -> Option<crate::sync::transports::Hos
 }
 
 fn pam_transport() -> Value {
-    json!({"alias":"fixture-web","project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox","account":"frank@retower.io","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"]}})
+    json!({"alias":"fixture-web","project":"acme-prod-123456","zone":"asia-east1-b","instance":"jumpbox","account":"frank@example.com","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"]}})
 }
 
 fn never(_: &McpPendingRequest) -> ApprovalDecision {
@@ -614,7 +614,7 @@ fn a_new_transport_needs_its_place_and_shows_every_field() {
             asked.fetch_add(1, Ordering::SeqCst);
             assert_eq!(q.host_proposal.as_ref().unwrap().kind, proposal_kinds::SET_TRANSPORT);
             let rows = rows(q);
-            for row in [("Project", "knowknow-prod"), ("OS Login", "off"), ("PAM entitlements", "prod-operate, prod-admin"), ("Grant duration", "30 min"), ("Account", "frank@retower.io")] {
+            for row in [("Project", "acme-prod-123456"), ("OS Login", "off"), ("PAM entitlements", "prod-operate, prod-admin"), ("Grant duration", "30 min"), ("Account", "frank@example.com")] {
                 assert!(rows.contains(&(row.0.into(), row.1.into())), "{row:?} in {rows:?}");
             }
             assert!(transport_of(&d, &id).is_none(), "nothing saved before consent");
@@ -623,10 +623,10 @@ fn a_new_transport_needs_its_place_and_shows_every_field() {
         .unwrap();
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         let (project, zone, instance, account, os_login, pam) = kind_of(&transport_of(&d, &id).expect("saved"));
-        assert_eq!((project.as_str(), zone.as_str(), instance.as_str(), account.as_deref(), os_login), ("knowknow-prod", "asia-east1-b", "jumpbox", Some("frank@retower.io"), false));
+        assert_eq!((project.as_str(), zone.as_str(), instance.as_str(), account.as_deref(), os_login), ("acme-prod-123456", "asia-east1-b", "jumpbox", Some("frank@example.com"), false));
         let pam = pam.unwrap();
         assert_eq!((pam.entitlements.clone(), pam.location.as_str(), pam.duration_secs, pam.justification), (vec!["prod-operate".to_string(), "prod-admin".to_string()], "global", 1800, None));
-        assert_eq!(value["host"]["transport"]["project"], "knowknow-prod");
+        assert_eq!(value["host"]["transport"]["project"], "acme-prod-123456");
         assert_eq!(value["message"], "Transport saved.");
         assert_eq!(last_outcome(&r), "transport_set");
         assert!(r.records_active.lock().unwrap().is_empty());
@@ -819,7 +819,7 @@ fn tools_refuse_a_host_whose_group_needs_review_before_the_window() {
     })
     .unwrap();
     r.policy.lock().unwrap().allowed_hosts.insert(id.into());
-    set_transport(&d.env(), &r, &json!({"alias":"grouped","project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox"}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    set_transport(&d.env(), &r, &json!({"alias":"grouped","project":"acme-prod-123456","zone":"asia-east1-b","instance":"jumpbox"}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
     // The Group the host inherits from goes away under it: the host needs review.
     crate::sync::record_commands::edit_records(&d.env(), |state, _now| {
         let mut next = state.clone();

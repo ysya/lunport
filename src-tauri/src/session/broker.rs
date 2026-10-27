@@ -1091,7 +1091,7 @@ mod tests {
         let terminal = FakeOwner::default();
         let window = Arc::new(FakeOwner::typing(&["30\nrestart app-api", "hunter2"]));
         let owner = SessionOwner { terminal: &terminal, authentication: Some(window.clone() as Arc<dyn Owner>) };
-        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None };
         let reply = owner.ask(QuestionKind::Grant, &prompt.to_text(), true, None);
         assert!(matches!(reply, Reply::Answer(ref answer) if answer.as_str() == "30\nrestart app-api"));
         assert_eq!(locked(&terminal.notices).as_slice(), ["Waiting for you to request a Privileged Access Manager grant in Lunport."]);

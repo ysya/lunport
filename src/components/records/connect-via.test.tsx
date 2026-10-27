@@ -40,7 +40,7 @@ const SYNCED = "Saved with the host, so it syncs wherever the host does.";
 const LOCAL = "Saved on this computer only.";
 const iap = (patch: Partial<TransportKind> = {}): TransportKind => ({
   type: "gcp_iap",
-  project: "eng-dev-396409",
+  project: "acme-dev-654321",
   zone: "asia-east1-b",
   instance: "jumpbox",
   interface: "nic0",
@@ -279,7 +279,7 @@ describe("Connect via in the host editor", () => {
     expect(usernameField()).toBe("frank_example_com");
     expect(invoked("records_host_update")).toBe(false);
     // It asks for the route's account in the route's project.
-    expect(lastInvoke("transports_oslogin_profile")).toEqual({ account: "frank@example.com", project: "eng-dev-396409", keyId: null });
+    expect(lastInvoke("transports_oslogin_profile")).toEqual({ account: "frank@example.com", project: "acme-dev-654321", keyId: null });
   });
 
   it("keeps Use OS Login username off while the host takes its username from its Group", () => {

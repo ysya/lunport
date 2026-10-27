@@ -268,13 +268,13 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    const ACCOUNT: &str = "frank@retower.io";
+    const ACCOUNT: &str = "frank@example.com";
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGvBwpCj0GQWLW0hG8bQ4qJ8r7ZcXx9x2nH0f0e3Q1aB";
 
     fn profile_json() -> serde_json::Value {
         json!({
-            "name": "users/frank@retower.io",
-            "posixAccounts": [{ "primary": true, "username": "frank_retower_io", "operatingSystemType": "LINUX" }],
+            "name": "users/frank@example.com",
+            "posixAccounts": [{ "primary": true, "username": "frank_example_com", "operatingSystemType": "LINUX" }],
             "sshPublicKeys": {}
         })
     }
@@ -306,7 +306,7 @@ mod tests {
         });
         let client = RestClient::with_bases_and_timeout(Arc::new(StaticToken("t0k".into())), &base, &base, Duration::from_millis(300));
         let started = std::time::Instant::now();
-        let result = client.grants(Some("frank@retower.io"), "knowknow-prod", "global", "prod-operate");
+        let result = client.grants(Some("frank@example.com"), "acme-prod-123456", "global", "prod-operate");
         assert!(matches!(result, Err(GcpError::Network(_))), "{result:?}");
         assert!(started.elapsed() < Duration::from_millis(1500), "the library must not retry on its own: {:?}", started.elapsed());
     }
@@ -315,14 +315,14 @@ mod tests {
     fn a_login_profile_is_fetched_with_the_project_and_the_bearer_token() {
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/v1/users/frank%40retower.io/loginProfile")
-            .match_query(mockito::Matcher::UrlEncoded("projectId".into(), "eng-dev-396409".into()))
+            .mock("GET", "/v1/users/frank%40example.com/loginProfile")
+            .match_query(mockito::Matcher::UrlEncoded("projectId".into(), "acme-dev-654321".into()))
             .match_header("authorization", "Bearer t0k")
             .with_header("content-type", "application/json")
             .with_body(profile_json().to_string())
             .create();
-        let profile = client(&server).login_profile(Some(ACCOUNT), "eng-dev-396409").unwrap();
-        assert_eq!(profile.username(), Some("frank_retower_io"));
+        let profile = client(&server).login_profile(Some(ACCOUNT), "acme-dev-654321").unwrap();
+        assert_eq!(profile.username(), Some("frank_example_com"));
         mock.assert();
     }
 
@@ -332,26 +332,26 @@ mod tests {
         let mut returned = profile_json();
         returned["sshPublicKeys"] = json!({ "3b2f": { "key": KEY, "fingerprint": "3b2f" } });
         let mock = server
-            .mock("POST", "/v1/users/frank%40retower.io:importSshPublicKey")
-            .match_query(mockito::Matcher::UrlEncoded("projectId".into(), "eng-dev-396409".into()))
+            .mock("POST", "/v1/users/frank%40example.com:importSshPublicKey")
+            .match_query(mockito::Matcher::UrlEncoded("projectId".into(), "acme-dev-654321".into()))
             .match_header("authorization", "Bearer t0k")
             .match_body(mockito::Matcher::Json(json!({ "key": KEY })))
             .with_header("content-type", "application/json")
             .with_body(json!({ "loginProfile": returned, "details": "Key imported" }).to_string())
             .create();
-        let profile = client(&server).import_ssh_public_key(Some(ACCOUNT), "eng-dev-396409", KEY).unwrap();
+        let profile = client(&server).import_ssh_public_key(Some(ACCOUNT), "acme-dev-654321", KEY).unwrap();
         assert!(profile.has_key(KEY));
-        assert_eq!(profile.username(), Some("frank_retower_io"));
+        assert_eq!(profile.username(), Some("frank_example_com"));
         mock.assert();
     }
 
     #[test]
     fn a_403_is_denied_naming_the_account_and_api() {
         let mut server = mockito::Server::new();
-        server.mock("GET", "/v1/users/frank%40retower.io/loginProfile").match_query(mockito::Matcher::Any).with_status(403).create();
-        let error = client(&server).login_profile(Some(ACCOUNT), "eng-dev-396409").unwrap_err();
+        server.mock("GET", "/v1/users/frank%40example.com/loginProfile").match_query(mockito::Matcher::Any).with_status(403).create();
+        let error = client(&server).login_profile(Some(ACCOUNT), "acme-dev-654321").unwrap_err();
         assert_eq!(error, GcpError::Denied { api: "OS Login", status: 403, account: ACCOUNT.into() });
-        assert_eq!(error.to_string(), "frank@retower.io may not call the OS Login API (HTTP 403).");
+        assert_eq!(error.to_string(), "frank@example.com may not call the OS Login API (HTTP 403).");
         server.mock("GET", "/v1/projects/p/locations/global/entitlements/e/grants:search").match_query(mockito::Matcher::Any).with_status(500).create();
         let error = client(&server).grants(Some(ACCOUNT), "p", "global", "e").unwrap_err();
         assert_eq!(error, GcpError::Http { api: "Privileged Access Manager", status: 500 });
@@ -362,7 +362,7 @@ mod tests {
     fn grants_are_searched_as_the_caller_created_them_and_filtered_here() {
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants:search")
+            .mock("GET", "/v1/projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants:search")
             // The library sends enums by their number (`$alt=json;enum-encoding=int`): HAD_CREATED is 1.
             .match_query(mockito::Matcher::AllOf(vec![
                 mockito::Matcher::UrlEncoded("callerRelationship".into(), "1".into()),
@@ -379,7 +379,7 @@ mod tests {
                 .to_string(),
             )
             .create();
-        let grants = client(&server).grants(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate");
+        let grants = client(&server).grants(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate");
         mock.assert();
         let grants = grants.unwrap();
         assert_eq!(grants.len(), 3);
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn grants_are_read_across_pages() {
         let mut server = mockito::Server::new();
-        let path = "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants:search";
+        let path = "/v1/projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants:search";
         let first = server
             .mock("GET", path)
             .match_query(mockito::Matcher::UrlEncoded("callerRelationship".into(), "1".into()))
@@ -407,7 +407,7 @@ mod tests {
             .with_body(json!({ "grants": [{ "name": "…/grants/3", "state": "ACTIVE" }] }).to_string())
             .expect(1)
             .create();
-        let grants = client(&server).grants(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate").unwrap();
+        let grants = client(&server).grants(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate").unwrap();
         assert_eq!(grants.iter().map(|grant| grant.state.as_str()).collect::<Vec<_>>(), vec!["ENDED", "ENDED", "ACTIVE"]);
         first.assert();
         second.assert();
@@ -420,14 +420,14 @@ mod tests {
         let mut server = mockito::Server::new();
         // The library adds its own query parameters (`$alt=json;enum-encoding=int`, an empty `requestId`); only the path matters here.
         let mock = server
-            .mock("POST", "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants")
+            .mock("POST", "/v1/projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants")
             .match_query(mockito::Matcher::Any)
             .match_header("authorization", "Bearer t0k")
             .match_body(mockito::Matcher::PartialJson(json!({ "requestedDuration": "1800s", "justification": { "unstructuredJustification": "restart app-api" } })))
             .with_header("content-type", "application/json")
             .with_body(
                 json!({
-                    "name": "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42",
+                    "name": "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/42",
                     "state": "ACTIVATING",
                     "requestedDuration": "1800s",
                     "justification": { "unstructuredJustification": "restart app-api" }
@@ -436,8 +436,8 @@ mod tests {
             )
             .expect(1)
             .create();
-        let grant = client(&server).create_grant(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate", 1800, "restart app-api").unwrap();
-        assert_eq!(grant.name, "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42");
+        let grant = client(&server).create_grant(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate", 1800, "restart app-api").unwrap();
+        assert_eq!(grant.name, "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/42");
         assert_eq!((grant.state.as_str(), grant.requested_duration.as_deref(), grant.justification.as_deref()), ("ACTIVATING", Some("1800s"), Some("restart app-api")));
         assert_eq!(grant.until(), None, "no grant time yet");
         mock.assert();
@@ -447,14 +447,14 @@ mod tests {
     fn a_400_from_pam_is_its_own_sentence() {
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("POST", "/v1/projects/knowknow-prod/locations/global/entitlements/prod-operate/grants")
+            .mock("POST", "/v1/projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants")
             .match_query(mockito::Matcher::Any)
             .with_status(400)
             .with_header("content-type", "application/json")
             .with_body(json!({ "error": { "code": 400, "message": "requested_duration exceeds the maximum", "status": "INVALID_ARGUMENT" } }).to_string())
             .expect(1)
             .create();
-        let error = client(&server).create_grant(Some(ACCOUNT), "knowknow-prod", "global", "prod-operate", 7200, "x").unwrap_err();
+        let error = client(&server).create_grant(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate", 7200, "x").unwrap_err();
         mock.assert();
         assert_eq!(error, GcpError::Refused { api: "Privileged Access Manager", message: "requested_duration exceeds the maximum".into() });
         assert_eq!(error.to_string(), "Privileged Access Manager refused the request: requested_duration exceeds the maximum.");
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn get_grant_reads_a_grant_by_name() {
         let mut server = mockito::Server::new();
-        let name = "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42";
+        let name = "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/42";
         server
             .mock("GET", format!("/v1/{name}").as_str())
             .match_query(mockito::Matcher::Any)
@@ -495,8 +495,8 @@ mod tests {
         }
         let server = mockito::Server::new();
         let client = RestClient::with_bases(Arc::new(NoCredentials), &server.url(), &server.url());
-        let error = client.login_profile(Some(ACCOUNT), "eng-dev-396409").unwrap_err();
+        let error = client.login_profile(Some(ACCOUNT), "acme-dev-654321").unwrap_err();
         assert_eq!(error, GcpError::Auth(AuthError::NoCredentials { account: Some(ACCOUNT.into()), config_dir: "/d".into() }));
-        assert!(error.to_string().starts_with("No Google Cloud credentials for frank@retower.io"));
+        assert!(error.to_string().starts_with("No Google Cloud credentials for frank@example.com"));
     }
 }

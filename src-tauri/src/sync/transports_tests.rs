@@ -15,11 +15,11 @@ pub(crate) fn iap(host: &str) -> HostTransport {
     HostTransport {
         host_id: host.into(),
         kind: TransportKind::GcpIap {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
-            account: Some("frank@retower.io".into()),
+            account: Some("frank@example.com".into()),
             os_login: true,
             pam: None,
         },
@@ -109,7 +109,7 @@ fn validation_rejects_bad_fields() {
     assert_eq!(other_host.validate(), Err("Invalid host identity.".to_string()));
     assert_eq!(edit(|p, _, _, _, _, _| *p = "Eng".into()), Some("Enter the Google Cloud project id.".to_string()));
     assert_eq!(edit(|p, _, _, _, _, _| *p = "123".into()), Some("Enter the Google Cloud project id.".to_string()));
-    assert_eq!(edit(|p, _, _, _, _, _| *p = "834470760514".into()), None, "a project number is fine");
+    assert_eq!(edit(|p, _, _, _, _, _| *p = "123456789012".into()), None, "a project number is fine");
     assert_eq!(edit(|_, z, _, _, _, _| *z = "asia east1".into()), Some("Enter the zone of the instance.".to_string()));
     assert_eq!(edit(|_, _, i, _, _, _| *i = String::new()), Some("Enter the instance name.".to_string()));
     assert_eq!(edit(|_, _, _, n, _, _| *n = "eth0".into()), Some("Enter a network interface such as nic0.".to_string()));

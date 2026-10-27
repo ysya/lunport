@@ -63,7 +63,7 @@ describe("records native client", () => {
     const host = hostView();
     const route: RouteChange = {
       expected: null,
-      kind: { type: "gcp_iap", project: "eng-dev-396409", zone: "asia-east1-b", instance: "jumpbox", interface: "nic0", account: null, os_login: true, pam: null },
+      kind: { type: "gcp_iap", project: "acme-dev-654321", zone: "asia-east1-b", instance: "jumpbox", interface: "nic0", account: null, os_login: true, pam: null },
     };
     await api.createRecordHost({ kind: "local" }, host.payload, undefined, route);
     await api.updateRecordHost(host.id, host.revision, host.payload, true, route);

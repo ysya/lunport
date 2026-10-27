@@ -649,7 +649,7 @@ mod tests {
         HostTransport {
             host_id: HOST.into(),
             kind: TransportKind::GcpIap {
-                project: "eng-dev-396409".into(),
+                project: "acme-dev-654321".into(),
                 zone: "asia-east1-b".into(),
                 instance: "jumpbox".into(),
                 interface: "nic0".into(),
@@ -684,13 +684,13 @@ mod tests {
     fn with_pam(entitlements: &[&str]) -> HostTransport {
         let mut transport = iap();
         let TransportKind::GcpIap { account, pam, .. } = &mut transport.kind;
-        *account = Some("frank@retower.io".into());
+        *account = Some("frank@example.com".into());
         *pam = Some(PamCheck { entitlements: entitlements.iter().map(|e| e.to_string()).collect(), location: "global".into(), duration_secs: 1800, justification: Some("restart app-api".into()) });
         transport
     }
 
     /// The route of `host_id` that names `account` (none: gcloud's active one) and requires a grant on `entitlements`, in project
-    /// `eng-dev-396409`, PAM location `global`.
+    /// `acme-dev-654321`, PAM location `global`.
     fn pam_route(host_id: &str, account: Option<&str>, entitlements: &[&str]) -> HostTransport {
         let mut route = with_pam(entitlements);
         route.host_id = host_id.into();
@@ -747,7 +747,7 @@ mod tests {
             panic!("the panel never imports a key")
         }
         fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
-            assert_eq!((account, project, location), (Some("frank@retower.io"), "eng-dev-396409", "global"));
+            assert_eq!((account, project, location), (Some("frank@example.com"), "acme-dev-654321", "global"));
             match self.grants.lock().unwrap().get(entitlement) {
                 Some(Ok(grants)) => Ok(grants.clone()),
                 Some(Err(message)) => Err(Pam::refusal(message)),
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.entitlement.as_str()).collect::<Vec<_>>(), ["prod-operate", "prod-admin"]);
         assert_eq!(
             gcp.searched(),
-            [call(Some("frank@example.com"), "eng-dev-396409", "global", "prod-operate"), call(Some("frank@example.com"), "eng-dev-396409", "global", "prod-admin")]
+            [call(Some("frank@example.com"), "acme-dev-654321", "global", "prod-operate"), call(Some("frank@example.com"), "acme-dev-654321", "global", "prod-admin")]
         );
     }
 
@@ -950,11 +950,11 @@ mod tests {
             serde_json::to_value(&rows).unwrap(),
             json!([
                 {
-                    "account": "frank@example.com", "project": "eng-dev-396409", "location": "global", "entitlement": "prod-operate",
+                    "account": "frank@example.com", "project": "acme-dev-654321", "location": "global", "entitlement": "prod-operate",
                     "state": "active", "active_until_ms": ends(granted, 1800), "message": null, "host_ids": ["0000000000000001"],
                 },
                 {
-                    "account": "frank@example.com", "project": "eng-dev-396409", "location": "global", "entitlement": "prod-admin",
+                    "account": "frank@example.com", "project": "acme-dev-654321", "location": "global", "entitlement": "prod-admin",
                     "state": "error", "active_until_ms": null, "message": Pam::refusal("quota exceeded").to_string(), "host_ids": ["0000000000000001"],
                 },
             ])
@@ -999,7 +999,7 @@ mod tests {
             pam_route("0000000000000001", None, &["prod-operate"]),
             pam_route("0000000000000002", Some("ann@example.com"), &["prod-operate"]),
             placed(pam_route("0000000000000003", Some("ann@example.com"), &["prod-operate"]), "other-project-123456", "global"),
-            placed(pam_route("0000000000000004", Some("ann@example.com"), &["prod-operate"]), "eng-dev-396409", "europe-west1"),
+            placed(pam_route("0000000000000004", Some("ann@example.com"), &["prod-operate"]), "acme-dev-654321", "europe-west1"),
         ];
         let gcp = FakeGcp::default();
         let rows = pam_grants(&gcp, None, &routes);
@@ -1007,19 +1007,19 @@ mod tests {
         assert_eq!(
             places,
             [
-                (None, "eng-dev-396409", "global", vec!["0000000000000001".to_string()]),
-                (Some("ann@example.com"), "eng-dev-396409", "global", vec!["0000000000000002".to_string()]),
+                (None, "acme-dev-654321", "global", vec!["0000000000000001".to_string()]),
+                (Some("ann@example.com"), "acme-dev-654321", "global", vec!["0000000000000002".to_string()]),
                 (Some("ann@example.com"), "other-project-123456", "global", vec!["0000000000000003".to_string()]),
-                (Some("ann@example.com"), "eng-dev-396409", "europe-west1", vec!["0000000000000004".to_string()]),
+                (Some("ann@example.com"), "acme-dev-654321", "europe-west1", vec!["0000000000000004".to_string()]),
             ]
         );
         assert_eq!(
             gcp.searched(),
             [
-                call(None, "eng-dev-396409", "global", "prod-operate"),
-                call(Some("ann@example.com"), "eng-dev-396409", "global", "prod-operate"),
+                call(None, "acme-dev-654321", "global", "prod-operate"),
+                call(Some("ann@example.com"), "acme-dev-654321", "global", "prod-operate"),
                 call(Some("ann@example.com"), "other-project-123456", "global", "prod-operate"),
-                call(Some("ann@example.com"), "eng-dev-396409", "europe-west1", "prod-operate"),
+                call(Some("ann@example.com"), "acme-dev-654321", "europe-west1", "prod-operate"),
             ]
         );
         // Once gcloud's active account is known, the first route is ann's and shares her row.
@@ -1059,8 +1059,8 @@ mod tests {
         assert_eq!((view.state.as_str(), view.entitlement.as_deref(), view.message), ("active", Some("prod-admin"), None));
         assert!(view.active_until_ms.is_some());
         // The entitlement chosen was the one searched and requested, with the form's words, and what was asked is remembered.
-        assert_eq!(gcp.searched(), [call(None, "eng-dev-396409", "global", "prod-admin")]);
-        assert_eq!(gcp.created(), [(call(None, "eng-dev-396409", "global", "prod-admin"), 1800, "Deploy hotfix".to_string())]);
+        assert_eq!(gcp.searched(), [call(None, "acme-dev-654321", "global", "prod-admin")]);
+        assert_eq!(gcp.created(), [(call(None, "acme-dev-654321", "global", "prod-admin"), 1800, "Deploy hotfix".to_string())]);
         assert_eq!(remembered.lock().unwrap().as_slice(), [("Deploy hotfix".to_string(), 1800)]);
         // One the route does not list is refused before Google is asked anything, and nothing is remembered.
         for unlisted in ["other", "PROD-ADMIN", ""] {
@@ -1114,21 +1114,21 @@ mod tests {
     #[test]
     fn the_profile_view_reports_the_username_and_whether_the_key_is_registered() {
         let profile = LoginProfile {
-            posix_accounts: vec![PosixAccount { username: "frank_retower_io".into(), primary: true, operating_system_type: Some("LINUX".into()) }],
-            ssh_public_keys: vec![format!("{KEY_LINE} frank@retower.pub")],
+            posix_accounts: vec![PosixAccount { username: "frank_example_com".into(), primary: true, operating_system_type: Some("LINUX".into()) }],
+            ssh_public_keys: vec![format!("{KEY_LINE} frank@laptop")],
         };
-        let view = os_login_profile(&Profile(profile.clone()), "frank@retower.io", Some("frank@retower.io"), "eng-dev-396409", Some(KEY_LINE)).unwrap();
+        let view = os_login_profile(&Profile(profile.clone()), "frank@example.com", Some("frank@example.com"), "acme-dev-654321", Some(KEY_LINE)).unwrap();
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
-            json!({"account": "frank@retower.io", "username": "frank_retower_io", "key_registered": true})
+            json!({"account": "frank@example.com", "username": "frank_example_com", "key_registered": true})
         );
-        let view = os_login_profile(&Profile(profile.clone()), "frank@retower.io", Some("frank@retower.io"), "eng-dev-396409", None).unwrap();
+        let view = os_login_profile(&Profile(profile.clone()), "frank@example.com", Some("frank@example.com"), "acme-dev-654321", None).unwrap();
         assert_eq!(view.key_registered, None, "without a key there is nothing to check");
         let other_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherBlobOtherBlobOtherBlobOtherBlobOtherBlob";
-        let view = os_login_profile(&Profile(profile), "frank@retower.io", Some("frank@retower.io"), "eng-dev-396409", Some(other_key)).unwrap();
+        let view = os_login_profile(&Profile(profile), "frank@example.com", Some("frank@example.com"), "acme-dev-654321", Some(other_key)).unwrap();
         assert_eq!(view.key_registered, Some(false));
-        let empty = os_login_profile(&Profile(LoginProfile::default()), "frank@retower.io", None, "eng-dev-396409", None).unwrap();
-        assert_eq!((empty.username, empty.account.as_str()), (None, "frank@retower.io"));
+        let empty = os_login_profile(&Profile(LoginProfile::default()), "frank@example.com", None, "acme-dev-654321", None).unwrap();
+        assert_eq!((empty.username, empty.account.as_str()), (None, "frank@example.com"));
     }
 
     /// What a token looks like when a fake hands one out: it must never reach a view.
@@ -1398,7 +1398,7 @@ mod tests {
     /// The instance of `iap()` as the account `account` reaches it, through `relay`: nothing in these tests may reach Google's own relay.
     fn iap_target(relay: &FakeRelay, account: Option<&str>) -> IapTarget {
         IapTarget {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
@@ -1467,7 +1467,7 @@ mod tests {
             String::from_utf8_lossy(&seen).lines().next().unwrap_or_default().to_string()
         });
         let target = IapTarget {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic1".into(),
@@ -1478,7 +1478,7 @@ mod tests {
         assert_eq!(view.status, "unreachable", "{view:?}");
         let line = request_line.await.unwrap();
         assert!(line.starts_with("GET /v4/connect?"), "{line}");
-        for wanted in ["project=eng-dev-396409", "port=2222", "zone=asia-east1-b", "instance=jumpbox", "interface=nic1"] {
+        for wanted in ["project=acme-dev-654321", "port=2222", "zone=asia-east1-b", "instance=jumpbox", "interface=nic1"] {
             assert!(line.contains(wanted), "{wanted} in {line}");
         }
     }
@@ -1499,9 +1499,9 @@ mod tests {
     async fn the_probe_opens_the_tunnel_as_the_routes_account_and_closes_it() {
         let relay = FakeRelay::start(echo_server().await, TOKEN);
         let named = Arc::new(Answers::ok());
-        let view = probe_iap(&iap_target(&relay, Some("frank@retower.io")), 22, named.clone(), Duration::from_secs(5)).await;
+        let view = probe_iap(&iap_target(&relay, Some("frank@example.com")), 22, named.clone(), Duration::from_secs(5)).await;
         assert_eq!(view.status, "reachable");
-        assert_eq!(named.asked(), [Some("frank@retower.io".to_string())]);
+        assert_eq!(named.asked(), [Some("frank@example.com".to_string())]);
         let user_agent = relay.last_headers().into_iter().find(|(name, _)| name == "user-agent").map(|(_, value)| value);
         assert_eq!(user_agent, Some(auth::user_agent()));
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -1520,9 +1520,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_sign_in_that_gives_no_token_is_denied_with_its_sentence() {
         let relay = FakeRelay::start(echo_server().await, TOKEN);
-        let expired = AuthError::SignInExpired { account: "frank@retower.io".into() };
+        let expired = AuthError::SignInExpired { account: "frank@example.com".into() };
         let sentence = expired.to_string();
-        let view = probe_iap(&iap_target(&relay, Some("frank@retower.io")), 22, Arc::new(Answers::err(expired)), Duration::from_secs(5)).await;
+        let view = probe_iap(&iap_target(&relay, Some("frank@example.com")), 22, Arc::new(Answers::err(expired)), Duration::from_secs(5)).await;
         assert_eq!((view.status.as_str(), view.latency_ms, view.message), ("denied", None, Some(sentence)));
         assert_eq!(relay.connects(), 0, "without a token nothing reached the relay");
     }
@@ -1572,7 +1572,7 @@ mod tests {
         let unauthorized = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
         assert_eq!(unauthorized.pointing_to_the_grant().message.as_deref(), Some("IAP refused this Google account. Request a grant, then check again."));
 
-        let expired = probe_iap(&target, 22, Arc::new(Answers::err(AuthError::SignInExpired { account: "frank@retower.io".into() })), Duration::from_secs(5)).await;
+        let expired = probe_iap(&target, 22, Arc::new(Answers::err(AuthError::SignInExpired { account: "frank@example.com".into() })), Duration::from_secs(5)).await;
         assert_eq!(expired.clone().pointing_to_the_grant(), expired, "a sign-in that failed is not a missing grant");
         relay.set(Behaviour::CloseAtOpen(4003, "failed to connect to backend"));
         let unreachable = probe_iap(&target, 22, tokens(), Duration::from_secs(5)).await;
@@ -1593,17 +1593,17 @@ mod tests {
     /// dials too; a route with a grant check says so, so that a refusal can point to it.
     #[test]
     fn a_check_goes_to_the_routes_instance_on_the_hosts_port() {
-        let saved = saved_with(2222, pam_route(HOST, Some("frank@retower.io"), &["prod-operate"]));
+        let saved = saved_with(2222, pam_route(HOST, Some("frank@example.com"), &["prod-operate"]));
         let probe = probe_target(&saved, HOST).unwrap();
         let instance = |account: Option<&str>| IapTarget {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
             account: account.map(str::to_string),
             url_root: None,
         };
-        assert_eq!(probe.target, instance(Some("frank@retower.io")));
+        assert_eq!(probe.target, instance(Some("frank@example.com")));
         assert_eq!((probe.port, probe.requires_grant), (2222, true));
         let plain = probe_target(&saved_with(22, iap()), HOST).unwrap();
         assert_eq!((plain.target, plain.port, plain.requires_grant), (instance(None), 22, false));

@@ -705,7 +705,7 @@ fn tunnel_catalog_edits_upload_read_back_materialize_and_delete_without_plaintex
 
 /// The smallest IAP route to `host_id`.
 fn iap_route(host_id: &str) -> crate::sync::transports::HostTransport {
-    serde_json::from_value(json!({"host_id":host_id,"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap()
+    serde_json::from_value(json!({"host_id":host_id,"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap()
 }
 
 /// Design 2026-10-26 (Existing routes move in, once, by one step): a route this device saved alone, for a host the library has, is

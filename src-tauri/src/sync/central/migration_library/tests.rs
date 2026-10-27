@@ -157,7 +157,7 @@ fn local_unselected_and_retained_structured_values_are_preserved_and_current_val
 #[test]
 fn a_first_publication_leaves_the_routes_saved_on_this_device_out_of_the_catalog() {
     let (state, known, materials) = fixture();
-    let route: crate::sync::transports::HostTransport = serde_json::from_value(json!({"host_id":"1111111111111111","kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    let route: crate::sync::transports::HostTransport = serde_json::from_value(json!({"host_id":"1111111111111111","kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
     let state = crate::sync::transports::set(&state, &route.host_id, None, Some(route.clone()), 10).unwrap();
     assert_eq!(crate::sync::transports::view(&state), [route], "a route for the local host the library publishes");
     let rows = prepare(&state, &known, materials).unwrap().into_rows();

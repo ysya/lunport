@@ -2314,7 +2314,7 @@ fn adopting_a_library_whose_catalog_holds_a_route_keeps_the_route() {
     let f = fixture(true);
     let s = service(&f);
     // The library holds no host for it: the Catalog tolerates such a route, as it tolerates such a tunnel.
-    let route: transports::HostTransport = serde_json::from_value(json!({"host_id":"c".repeat(16),"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    let route: transports::HostTransport = serde_json::from_value(json!({"host_id":"c".repeat(16),"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
     catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| catalog.transports.push(route.clone()));
     api::with_test_transport(&f.origin, &s.server.url(), || {
         let (scope, ticket) = prepared(&f);

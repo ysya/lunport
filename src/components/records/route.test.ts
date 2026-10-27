@@ -7,11 +7,11 @@ const iap = (hostId: string): HostTransport => ({
   host_id: hostId,
   kind: {
     type: "gcp_iap",
-    project: "eng-dev-396409",
+    project: "acme-dev-654321",
     zone: "asia-east1-b",
     instance: "jumpbox",
     interface: "nic0",
-    account: "frank@retower.io",
+    account: "frank@example.com",
     os_login: true,
     pam: null,
   },
@@ -103,11 +103,11 @@ describe("route drafts", () => {
     const reordered: TransportKind = {
       pam: { justification: null, duration_secs: 1800, location: "global", entitlements: ["prod-operate"] },
       os_login: true,
-      account: "frank@retower.io",
+      account: "frank@example.com",
       interface: "nic0",
       instance: "jumpbox",
       zone: "asia-east1-b",
-      project: "eng-dev-396409",
+      project: "acme-dev-654321",
       type: "gcp_iap",
     };
     expect(routeChange({ via: "iap", iap: reordered }, saved)).toBeUndefined();

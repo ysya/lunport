@@ -43,11 +43,11 @@ const iap = (hostId = HOST): HostTransport => ({
   host_id: hostId,
   kind: {
     type: "gcp_iap",
-    project: "eng-dev-396409",
+    project: "acme-dev-654321",
     zone: "asia-east1-b",
     instance: "jumpbox",
     interface: "nic0",
-    account: "frank@retower.io",
+    account: "frank@example.com",
     os_login: true,
     pam: null,
   },
@@ -75,7 +75,7 @@ describe("transports", () => {
     expect(transportProblem(iap())).toBeNull();
     expect(transportProblem(newIapTransport(HOST))).toBe("Enter the Google Cloud project id.");
     expect(transportProblem(withKind({ project: "Eng" }))).toBe("Enter the Google Cloud project id.");
-    expect(transportProblem(withKind({ project: "834470760514" }))).toBeNull();
+    expect(transportProblem(withKind({ project: "123456789012" }))).toBeNull();
     expect(transportProblem(withKind({ zone: "asia east1" }))).toBe("Enter the zone of the instance.");
     expect(transportProblem(withKind({ instance: "" }))).toBe("Enter the instance name.");
     expect(transportProblem(withKind({ interface: "eth0" }))).toBe("Enter a network interface such as nic0.");
@@ -99,16 +99,16 @@ describe("transports", () => {
   });
 
   it("asks the backend for the OS Login profile", async () => {
-    const calls = stubBackend(async () => ({ account: "frank@retower.io", username: "frank_retower_io", key_registered: false }));
-    const view = await fetchOsLoginProfile("frank@retower.io", "eng-dev-396409", null);
-    expect(view.username).toBe("frank_retower_io");
-    expect(calls).toEqual([["transports_oslogin_profile", { account: "frank@retower.io", project: "eng-dev-396409", keyId: null }]]);
+    const calls = stubBackend(async () => ({ account: "frank@example.com", username: "frank_example_com", key_registered: false }));
+    const view = await fetchOsLoginProfile("frank@example.com", "acme-dev-654321", null);
+    expect(view.username).toBe("frank_example_com");
+    expect(calls).toEqual([["transports_oslogin_profile", { account: "frank@example.com", project: "acme-dev-654321", keyId: null }]]);
   });
 
   it("asks the backend for the gcloud accounts, the grants the routes need, and a check through IAP", async () => {
-    const accounts: GcloudAccountsView = { config_found: true, active: "frank@retower.io", accounts: [{ account: "frank@retower.io", state: "signed_in", message: null }] };
+    const accounts: GcloudAccountsView = { config_found: true, active: "frank@example.com", accounts: [{ account: "frank@example.com", state: "signed_in", message: null }] };
     const grants: PamGrantView[] = [
-      { account: "frank@retower.io", project: "eng-dev-396409", location: "global", entitlement: "prod-operate", state: "none", active_until_ms: null, message: null, host_ids: [HOST] },
+      { account: "frank@example.com", project: "acme-dev-654321", location: "global", entitlement: "prod-operate", state: "none", active_until_ms: null, message: null, host_ids: [HOST] },
     ];
     const probe: IapProbeView = { status: "reachable", latency_ms: 120, elapsed_ms: 340, checked_at_ms: 1_700_000_000_000, message: null };
     const replies: Record<string, unknown> = { gcp_accounts: accounts, gcp_pam_grants: grants, transports_iap_probe: probe };
@@ -148,7 +148,7 @@ describe("transports", () => {
   });
 
   it("names a route's target as project / instance", () => {
-    expect(iapTarget(iap().kind)).toBe("eng-dev-396409 / jumpbox");
+    expect(iapTarget(iap().kind)).toBe("acme-dev-654321 / jumpbox");
   });
 
   it("says what a grant is up to in one line, on this computer's clock", () => {

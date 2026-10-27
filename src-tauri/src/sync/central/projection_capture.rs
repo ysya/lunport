@@ -597,7 +597,7 @@ pub(super) mod tests {
     fn with_local_route(state: &SyncStateV3, id: &str) -> SyncStateV3 {
         let host: crate::sync::records_v3::HostPayload = serde_json::from_value(serde_json::json!({"schema":2,"alias":format!("jump-{id}"),"hostname":"fixture.invalid","auth":"password"})).unwrap();
         let state = crate::sync::record_repository::create_host(state, id, HostScope::Local, host, 100).unwrap();
-        let route = serde_json::from_value(serde_json::json!({"host_id":id,"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+        let route = serde_json::from_value(serde_json::json!({"host_id":id,"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
         crate::sync::transports::tests::saved_on_this_device(&state, &route)
     }
     fn catalog_identity() -> Identity {

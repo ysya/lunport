@@ -257,7 +257,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn grant(state: &str, granted: Option<&str>) -> Grant {
-        Grant { name: format!("projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: granted.map(str::to_string), justification: None }
+        Grant { name: format!("projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/{state}"), state: state.into(), requested_duration: Some("1800s".into()), access_grant_time: granted.map(str::to_string), justification: None }
     }
 
     #[test]
@@ -271,9 +271,9 @@ mod tests {
     fn grants_are_parsed_from_the_search_response() {
         let json = json!({
             "grants": [
-                { "name": "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/1", "state": "ENDED", "requestedDuration": "1800s" },
-                { "name": "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/2", "state": "ACTIVE", "requestedDuration": "3600s",
-                  "auditTrail": { "accessGrantTime": "2026-10-25T10:00:00.123456Z" }, "requester": "frank@retower.io" }
+                { "name": "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/1", "state": "ENDED", "requestedDuration": "1800s" },
+                { "name": "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/2", "state": "ACTIVE", "requestedDuration": "3600s",
+                  "auditTrail": { "accessGrantTime": "2026-10-25T10:00:00.123456Z" }, "requester": "frank@example.com" }
             ]
         });
         let grants = parse_grants(&json);

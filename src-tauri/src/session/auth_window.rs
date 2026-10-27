@@ -367,14 +367,14 @@ mod tests {
         use crate::session::protocol::GrantAnswer;
         let hub = Arc::new(AuthHub::default());
         let owner = NativeOwner { hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "terminal-7".into(), cancel: CancelToken::default() };
-        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
         let text = prompt.to_text();
         let worker = std::thread::spawn(move || owner.ask(QuestionKind::Grant, &text, true, Some(Instant::now() + Duration::from_secs(3600))));
         wait(&hub);
         let q = hub.pending().remove(0);
         assert_eq!(q.kind, "grant");
         assert_eq!(q.grant, Some(prompt));
-        assert_eq!(q.text, "No active Privileged Access Manager grant for prod-operate on knowknow-prod.");
+        assert_eq!(q.text, "No active Privileged Access Manager grant for prod-operate on acme-prod-123456.");
         assert!(q.remaining_ms > 120_000 && q.remaining_ms <= 300_000, "a grant question waits five minutes, not two: {}ms", q.remaining_ms);
         let answer = GrantAnswer { minutes: 45, justification: "restart app-api after the deploy".into() };
         hub.resolve(&q.id, Some(Zeroizing::new(answer.encode()))).unwrap();

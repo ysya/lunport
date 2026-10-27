@@ -128,7 +128,7 @@ describe("AI edit proposals", () => {
     expect(edit).not.toContain("Add host");
     expect(disabled(edit, "Save changes")).toBe(false);
     expect(disabled(renderReview({ request: proposal("update_host", [["Port", "22 → 2222"]]), armed: false }), "Save changes")).toBe(true);
-    const set = renderReview({ request: proposal("set_transport", [["Project", "knowknow-prod"]]) });
+    const set = renderReview({ request: proposal("set_transport", [["Project", "acme-prod-123456"]]) });
     // Static markup writes the apostrophe as an entity.
     expect(set).toMatch(/Change this host(&#x27;|')s transport\?/);
     expect(disabled(set, "Save transport")).toBe(false);

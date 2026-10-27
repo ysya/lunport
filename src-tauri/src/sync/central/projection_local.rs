@@ -337,7 +337,7 @@ mod tests {
     }
     /// The smallest route.
     fn plain_route(host_id: &str) -> HostTransport {
-        serde_json::from_value(json!({"host_id":host_id,"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap()
+        serde_json::from_value(json!({"host_id":host_id,"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap()
     }
     fn hosts(routes: &[HostTransport]) -> Vec<&str> {
         routes.iter().map(|route| route.host_id.as_str()).collect()

@@ -399,7 +399,7 @@ mod tests {
         // The window's limits are the grant memory's, so that an answer can always be remembered on this computer.
         assert_eq!(MAX_GRANT_MINUTES * 60, crate::sync::transports::MAX_DURATION_SECS);
         assert_eq!(MAX_GRANT_JUSTIFICATION_CHARS, crate::sync::transports::MAX_JUSTIFICATION_CHARS);
-        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
         assert_eq!(GrantPrompt::from_text(&prompt.to_text()), Some(prompt));
         assert_eq!(GrantPrompt::from_text("No active grant."), None);
         assert_eq!(serde_json::to_string(&QuestionKind::Grant).unwrap(), r#""grant""#);

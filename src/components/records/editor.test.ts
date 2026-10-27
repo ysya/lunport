@@ -214,7 +214,7 @@ describe("record editor", () => {
   it("saves a route change with the host it was edited with", async () => {
     const route: RouteChange = {
       expected: null,
-      kind: { type: "gcp_iap", project: "eng-dev-396409", zone: "asia-east1-b", instance: "jumpbox", interface: "nic0", account: null, os_login: true, pam: null },
+      kind: { type: "gcp_iap", project: "acme-dev-654321", zone: "asia-east1-b", instance: "jumpbox", interface: "nic0", account: null, os_login: true, pam: null },
     };
     const calls = stubBackend(async () => recordOverview());
     await submitEditor(changeEditor(beginEditor(null), hostPayload()), undefined, route);

@@ -670,7 +670,7 @@ mod tests {
         GrantNeed {
             host: HostId::from("id-web"),
             account: None,
-            project: "knowknow-prod".into(),
+            project: "acme-prod-123456".into(),
             location: "global".into(),
             entitlement: "prod-operate".into(),
             entitlements: vec!["prod-operate".into()],
@@ -1049,11 +1049,11 @@ mod behavior_tests {
         let transport = HostTransport {
             host_id: "0000000000000001".into(),
             kind: TransportKind::GcpIap {
-                project: "knowknow-prod".into(),
+                project: "acme-prod-123456".into(),
                 zone: "asia-east1-b".into(),
                 instance: "jumpbox".into(),
                 interface: "nic0".into(),
-                account: Some("frank@retower.io".into()),
+                account: Some("frank@example.com".into()),
                 os_login: false,
                 pam: Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into(), duration_secs: 1800, justification: Some("restart app-api".into()) }),
             },
@@ -1062,7 +1062,7 @@ mod behavior_tests {
         let with = metadata(&state, &repo::get_host(&state, "0000000000000001").unwrap()).unwrap();
         assert_eq!(
             with["transport"],
-            json!({"project":"knowknow-prod","zone":"asia-east1-b","instance":"jumpbox","interface":"nic0","account":"frank@retower.io","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"],"location":"global","duration_minutes":30}})
+            json!({"project":"acme-prod-123456","zone":"asia-east1-b","instance":"jumpbox","interface":"nic0","account":"frank@example.com","os_login":false,"pam":{"entitlements":["prod-operate","prod-admin"],"location":"global","duration_minutes":30}})
         );
         assert!(!with.to_string().contains("restart app-api"), "the justification is the person's, not the client's");
     }

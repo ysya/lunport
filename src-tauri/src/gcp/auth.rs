@@ -439,9 +439,9 @@ mod tests {
         assert_eq!(active_account(dir.path()), None, "no active_config yet");
         write(dir.path(), "active_config", "prod\n");
         assert_eq!(active_account(dir.path()), None, "the configuration file is missing");
-        write(dir.path(), "configurations/config_prod", "# comment\n[core]\naccount = frank@re-tower.com\nproject = knowknow-prod\n\n[compute]\nzone = asia-east1-b\n");
-        assert_eq!(active_account(dir.path()), Some("frank@re-tower.com".to_string()));
-        write(dir.path(), "configurations/config_prod", "[core]\nproject = knowknow-prod\n[compute]\naccount = not-core@example.com\n");
+        write(dir.path(), "configurations/config_prod", "# comment\n[core]\naccount = ops@example.com\nproject = acme-prod-123456\n\n[compute]\nzone = asia-east1-b\n");
+        assert_eq!(active_account(dir.path()), Some("ops@example.com".to_string()));
+        write(dir.path(), "configurations/config_prod", "[core]\nproject = acme-prod-123456\n[compute]\naccount = not-core@example.com\n");
         assert_eq!(active_account(dir.path()), None, "only [core] account counts");
         assert_eq!(legacy_credentials_path(dir.path(), "a:b@example.com"), dir.path().join("legacy_credentials").join("ab@example.com").join("adc.json"));
     }
@@ -513,26 +513,26 @@ mod tests {
     #[test]
     fn a_named_account_reads_its_legacy_file_and_refreshes_a_token() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "legacy_credentials/frank@retower.io/adc.json", &authorized_user("frank@retower.io", "rt-frank"));
+        write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "rt-frank"));
         let mut server = mockito::Server::new();
         let mock = token_mock(&mut server, "rt-frank", "ya29.frank");
-        let token = store(dir.path(), None, &server).access_token(Some("frank@retower.io")).unwrap();
-        assert_eq!((token.account.as_str(), token.value.as_str()), ("frank@retower.io", "ya29.frank"));
+        let token = store(dir.path(), None, &server).access_token(Some("frank@example.com")).unwrap();
+        assert_eq!((token.account.as_str(), token.value.as_str()), ("frank@example.com", "ya29.frank"));
         mock.assert();
     }
 
     #[test]
     fn a_fresh_token_is_cached_until_five_minutes_before_expiry() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "legacy_credentials/frank@retower.io/adc.json", &authorized_user("frank@retower.io", "rt-frank"));
+        let path = write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "rt-frank"));
         let mut server = mockito::Server::new();
         let mock = token_mock(&mut server, "rt-frank", "ya29.frank").expect(2);
         let store = store(dir.path(), None, &server);
-        store.access_token(Some("frank@retower.io")).unwrap();
-        store.access_token(Some("frank@retower.io")).unwrap();
+        store.access_token(Some("frank@example.com")).unwrap();
+        store.access_token(Some("frank@example.com")).unwrap();
         assert!(!mock.matched(), "the second call was answered from the cache");
         store.set_cached_expiry(&path, Instant::now() + Duration::from_secs(4 * 60));
-        store.access_token(Some("frank@retower.io")).unwrap();
+        store.access_token(Some("frank@example.com")).unwrap();
         mock.assert();
     }
 
@@ -547,12 +547,12 @@ mod tests {
         let override_file = write(dir.path(), "elsewhere/creds.json", &authorized_user("override@example.com", "rt-override"));
         write(dir.path(), "application_default_credentials.json", &authorized_user("adc@example.com", "rt-adc"));
         write(dir.path(), "active_config", "default");
-        write(dir.path(), "configurations/config_default", "[core]\naccount = frank@re-tower.com\n");
-        write(dir.path(), "legacy_credentials/frank@re-tower.com/adc.json", &authorized_user("frank@re-tower.com", "rt-active"));
+        write(dir.path(), "configurations/config_default", "[core]\naccount = ops@example.com\n");
+        write(dir.path(), "legacy_credentials/ops@example.com/adc.json", &authorized_user("ops@example.com", "rt-active"));
 
         // gcloud's active account first, as the editor promises, even when an ADC override and an ADC file exist.
         let token = store(dir.path(), Some(override_file.clone()), &server).access_token(None).unwrap();
-        assert_eq!((token.account.as_str(), token.value.as_str()), ("frank@re-tower.com", "ya29.active"));
+        assert_eq!((token.account.as_str(), token.value.as_str()), ("ops@example.com", "ya29.active"));
         std::fs::remove_file(dir.path().join("active_config")).unwrap();
         let token = store(dir.path(), Some(override_file), &server).access_token(None).unwrap();
         assert_eq!((token.account.as_str(), token.value.as_str()), ("override@example.com", "ya29.override"));
@@ -585,9 +585,9 @@ mod tests {
         let server = mockito::Server::new();
         let store = store(dir.path(), None, &server);
         assert_eq!(store.access_token(None).unwrap_err(), AuthError::NoCredentials { account: None, config_dir: dir.path().to_path_buf() });
-        let named = store.access_token(Some("frank@retower.io")).unwrap_err();
-        assert_eq!(named, AuthError::NoCredentials { account: Some("frank@retower.io".into()), config_dir: dir.path().to_path_buf() });
-        assert!(named.to_string().contains("gcloud auth login frank@retower.io"), "{named}");
+        let named = store.access_token(Some("frank@example.com")).unwrap_err();
+        assert_eq!(named, AuthError::NoCredentials { account: Some("frank@example.com".into()), config_dir: dir.path().to_path_buf() });
+        assert!(named.to_string().contains("gcloud auth login frank@example.com"), "{named}");
         assert!(!named.is_retryable());
     }
 
@@ -631,13 +631,13 @@ mod tests {
     fn error_texts_are_the_specs_sentences_and_name_no_secret() {
         let dir = PathBuf::from("/d");
         assert_eq!(
-            AuthError::NoCredentials { account: Some("frank@retower.io".into()), config_dir: dir.clone() }.to_string(),
-            "No Google Cloud credentials for frank@retower.io were found under /d; run `gcloud auth login frank@retower.io`."
+            AuthError::NoCredentials { account: Some("frank@example.com".into()), config_dir: dir.clone() }.to_string(),
+            "No Google Cloud credentials for frank@example.com were found under /d; run `gcloud auth login frank@example.com`."
         );
         assert_eq!(AuthError::NoCredentials { account: None, config_dir: dir.clone() }.to_string(), "No Google Cloud credentials were found under /d; run `gcloud auth login`.");
         assert_eq!(
-            AuthError::SignInExpired { account: "frank@retower.io".into() }.to_string(),
-            "Google sign-in for frank@retower.io has expired or was revoked; run `gcloud auth login frank@retower.io` and connect again."
+            AuthError::SignInExpired { account: "frank@example.com".into() }.to_string(),
+            "Google sign-in for frank@example.com has expired or was revoked; run `gcloud auth login frank@example.com` and connect again."
         );
         assert_eq!(AuthError::Http { status: 503 }.to_string(), "Google's token service answered 503.");
         // The file is named as the platform writes its path (`/d\\x.json` on Windows), so the expectation is built the same way.

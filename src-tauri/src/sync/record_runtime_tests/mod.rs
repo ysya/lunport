@@ -422,7 +422,7 @@ fn a_transport_promotes_the_state_version_when_persisted() {
     let transport = HostTransport {
         host_id: "0000000000000001".into(),
         kind: TransportKind::GcpIap {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),

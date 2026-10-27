@@ -6,8 +6,8 @@ import type { AuthRequest } from "@/bindings/AuthRequest";
 
 const grant: AuthRequest = {
   id: "g1", request_id: "terminal-7", hop: null, kind: "grant", echo: true, remaining_ms: 300000,
-  text: "No active Privileged Access Manager grant for prod-operate on knowknow-prod.",
-  grant: { project: "knowknow-prod", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
+  text: "No active Privileged Access Manager grant for prod-operate on acme-prod-123456.",
+  grant: { project: "acme-prod-123456", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
 };
 const render = (over: Partial<Parameters<typeof AuthenticationCardView>[0]> = {}) =>
   renderToStaticMarkup(
@@ -31,7 +31,7 @@ describe("the Request-a-grant window", () => {
     const html = render();
     expect(html).toContain("Request a grant");
     expect(html).not.toContain("SSH authentication");
-    expect(html).toContain("No active Privileged Access Manager grant for prod-operate on knowknow-prod.");
+    expect(html).toContain("No active Privileged Access Manager grant for prod-operate on acme-prod-123456.");
     expect(tag(html, "Justification")).toContain('value="restart app-api"');
     expect(tag(html, "Justification")).toContain('autofocus=""');
     expect(tag(html, "Duration (minutes)")).toContain('value="30"');
