@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.13.0](https://github.com/ysya/lunport/compare/v1.12.1...v1.13.0) (2026-10-27)
+
+
+### Features
+
+* Cloud section with gcloud account actions and standalone PAM access ([#96](https://github.com/ysya/lunport/issues/96)) ([55b63b4](https://github.com/ysya/lunport/commit/55b63b4224f90d285232f36e6b4c3664a640b123))
+* Connect via in the host editor, synced IAP routes, and grant status for hosts and tunnels ([#93](https://github.com/ysya/lunport/issues/93)) ([f33b292](https://github.com/ysya/lunport/commit/f33b292c007c590e659e1aae557681cac52edcad))
+* keep both devices' changes in a Catalog conflict ([#94](https://github.com/ysya/lunport/issues/94)) ([3b6d756](https://github.com/ysya/lunport/commit/3b6d7567af803bc8ef0b8b69d342635da0f2177b))
+
+
+### Bug Fixes
+
+* **gcp:** accept the bare host id in the PAM status and request commands ([adf108b](https://github.com/ysya/lunport/commit/adf108b0aa9fcbecb0831ca62304848dcab09a75))
+* **gcp:** accept the bare host id in the PAM status and request commands ([6bfea97](https://github.com/ysya/lunport/commit/6bfea97e6576793aa4b6c199ef348f524a0d247c))
+
 ## [1.12.1](https://github.com/ysya/lunport/compare/v1.12.0...v1.12.1) (2026-10-25)
 
 
