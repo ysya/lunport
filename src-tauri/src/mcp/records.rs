@@ -475,10 +475,12 @@ pub(super) fn execute_context(
         }
     }
     let done = AtomicBool::new(false);
+    // A request the policy already denies is audited as denied, never as canceled by the watcher.
+    let allowed = policy.enabled && authorize(&policy, &host_id).is_ok();
     let result = std::thread::scope(|scope| {
         // Revoke/disable and disconnect wake native authentication and approval while the worker waits.
         scope.spawn(|| {
-            while !done.load(Ordering::SeqCst) {
+            while allowed && !done.load(Ordering::SeqCst) {
                 let p = runtime.policy.lock().unwrap().clone();
                 if !p.enabled || p.approval_mode != mode || authorize(&p, &host_id).is_err()
                 {
@@ -1128,6 +1130,52 @@ mod behavior_tests {
             &|_| panic!("denied hosts never ask")
         )
         .is_err());
+        assert!(e.events().is_empty());
+        assert_eq!(r.status().recent[0].outcome, "denied");
+    }
+    #[test]
+    fn denied_host_is_audited_as_denied_even_when_the_watcher_checks_first() {
+        let r = runtime(ApprovalMode::Ask);
+        r.policy.lock().unwrap().allowed_hosts.clear();
+        let e = FakeEngine::new();
+        let d = directory(AuthMethod::Password, true);
+        let caller = thread::current().id();
+        let watched = AtomicBool::new(false);
+        let cancel = CancelToken::default();
+        // Each check on the request's own thread waits for the policy watcher to check first.
+        let authorize = |policy: &McpPolicy, id: &str| {
+            if thread::current().id() == caller {
+                let end = Instant::now() + Duration::from_millis(200);
+                while !watched.load(Ordering::SeqCst) && Instant::now() < end {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            } else {
+                watched.store(true, Ordering::SeqCst);
+            }
+            ensure_allowed(policy, id)
+        };
+        let error = execute_context(
+            &r,
+            &Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
+                engine: &e,
+                directory: &d,
+                keys: &FakeKeys::new(),
+                keychain: &MemKeychain::default(),
+                confirmer: &FakeConfirmer::default(),
+            },
+            "id-web",
+            "uptime",
+            60,
+            &cancel,
+            &FakeOwner::default(),
+            &|_| panic!("denied hosts never ask"),
+            RequestContext::default(),
+            &authorize,
+        )
+        .unwrap_err();
+        assert_eq!(error, "MCP request was denied by host policy");
+        assert!(!cancel.is_cancelled());
         assert!(e.events().is_empty());
         assert_eq!(r.status().recent[0].outcome, "denied");
     }
