@@ -463,7 +463,7 @@ mod tests {
                 id: "catalog".into(),
                 scope: None,
             },
-            Data::Catalog(payload::Catalog {
+            Data::Catalog(payload::Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections: vec![],

@@ -17,6 +17,9 @@ pub const TRANSPORT_STATE_VERSION: u32 = 9;
 /// `local.transport_grants` exists, and the library's route rows may sit in `account.records` (design 2026-10-26): an older Lunport
 /// refuses the state instead of misreading it or meeting rows it cannot publish.
 pub const TRANSPORT_SYNC_STATE_VERSION: u32 = 10;
+/// Search scopes and grant memory exist (`pam_scope:` and `pam_request:` records, design 2026-10-27), in `local.pam_records` or as the
+/// library's rows in `account.records`: an older Lunport refuses the state instead of meeting rows it cannot publish.
+pub const PAM_STATE_VERSION: u32 = 11;
 pub const MAX_JUMPS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

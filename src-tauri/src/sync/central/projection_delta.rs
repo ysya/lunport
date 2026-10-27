@@ -214,6 +214,22 @@ pub(super) fn catalog(
     if !value.transports.is_empty() {
         state.version = state.version.max(transports::SYNC_STATE_VERSION);
     }
+    // Search scopes and grant memory take the same path, and need their version too.
+    let previous_pam: BTreeMap<_, _> = account
+        .records
+        .iter()
+        .filter(|(_, r)| r.record.kind == RecordKind::Meta && crate::sync::pam_records::is_id(&r.record.id))
+        .map(|(k, r)| (k.clone(), r.clone()))
+        .collect();
+    account.records.retain(|_, r| !(r.record.kind == RecordKind::Meta && crate::sync::pam_records::is_id(&r.record.id)));
+    for (id, payload) in crate::sync::pam_records::catalog_rows(value) {
+        let key = record_key(RecordKind::Meta, &id);
+        account.records.insert(key.clone(), fresh(previous_pam.get(&key), RecordKind::Meta, &id, payload, receipt, observed)?);
+        state.local.pam_records.remove(&key);
+    }
+    if !value.pam_scopes.is_empty() || !value.pam_requests.is_empty() {
+        state.version = state.version.max(crate::sync::pam_records::STATE_VERSION);
+    }
     state.local.group_order = value
         .group_orders
         .iter()
@@ -892,6 +908,8 @@ pub(super) mod tests {
             .catalog
             .clone();
         catalog.transports = routes.transports.clone();
+        catalog.pam_scopes = routes.pam_scopes.clone();
+        catalog.pam_requests = routes.pam_requests.clone();
         let mut state = library.state.clone();
         append(
             &mut state,
@@ -960,6 +978,25 @@ pub(super) mod tests {
                 "the library's route rows need version 10 (R19)"
             );
         }
+    }
+
+    /// Design 2026-10-27: search scopes and grant memory take the routes' path through both projections, need version 11, and the
+    /// capture builds them back into the Catalog it would publish.
+    #[test]
+    fn scopes_and_memories_round_trip_through_both_projections() {
+        use crate::sync::pam_records::{self, GrantRequestMemory, PamScope};
+        let scope = PamScope { id: "00000000000000a1".into(), parent: "folders/123456789012".into(), location: "global".into(), account: None };
+        let memory = GrantRequestMemory { name: "projects/acme-prod-123456/locations/global/entitlements/prod-operate".into(), justification: "restart app-api".into(), duration_secs: 1800 };
+        let catalog = Catalog { pam_scopes: vec![scope.clone()], pam_requests: vec![memory.clone()], ..Catalog::default() };
+        for next in [project_initial(&cache_with_host(HOST), &catalog), project_delta(&cache_with_host(HOST), &catalog)] {
+            assert_eq!(pam_records::scopes(&next), vec![scope.clone()]);
+            assert_eq!(pam_records::memory(&next, &memory.name), Some(memory.clone()));
+            assert_eq!(next.version, pam_records::STATE_VERSION);
+            let built = super::super::catalog_of(&next, &next.local.central_projection.as_ref().unwrap().catalog).unwrap();
+            assert_eq!((built.pam_scopes, built.pam_requests), (vec![scope.clone()], vec![memory.clone()]));
+        }
+        let gone = project_delta(&project_delta(&cache_with_host(HOST), &catalog), &Catalog::default());
+        assert!(pam_records::scopes(&gone).is_empty() && pam_records::memories(&gone).is_empty(), "a Catalog without them removes the rows");
     }
 
     #[test]

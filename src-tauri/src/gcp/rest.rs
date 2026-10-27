@@ -14,7 +14,7 @@ use google_cloud_privilegedaccessmanager_v1 as pam_api;
 use super::auth::{user_agent, AuthError, TokenSource};
 use super::credentials::credentials;
 use super::oslogin::{parse_profile, LoginProfile};
-use super::pam::Grant;
+use super::pam::{EntitlementInfo, Grant};
 
 const OSLOGIN_BASE: &str = "https://oslogin.googleapis.com";
 const PAM_BASE: &str = "https://privilegedaccessmanager.googleapis.com";
@@ -24,6 +24,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// fewer than asked: every page is read, up to `GRANTS_PAGES`, so the one active grant of someone who requests one every day is found.
 const GRANTS_PAGE: i32 = 50;
 const GRANTS_PAGES: usize = 10;
+/// A page of the entitlement search, and the most entitlements one scope lists (the search answers only those the caller may request).
+const ENTITLEMENTS_PAGE: i32 = 100;
+const MAX_ENTITLEMENTS: usize = 500;
 
 /// Why a call to Google did not answer. Every text is a sentence for the person.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,11 +66,16 @@ pub trait GcpClient: Send + Sync {
     /// Registers `key_line` (an OpenSSH public key line) with OS Login for `project` and returns the profile as it is afterwards. OS Login
     /// creates the POSIX account on the first import, as `gcloud compute ssh` relies on.
     fn import_ssh_public_key(&self, account: Option<&str>, project: &str, key_line: &str) -> Result<LoginProfile, GcpError>;
-    /// The caller's own grants on `entitlement`, whatever their state.
-    fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError>;
-    /// Requests a grant on `entitlement` for `duration_secs` with `justification`, and answers the grant as PAM created it (usually
-    /// still `ACTIVATING`).
-    fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError>;
+    /// The caller's own grants on the entitlement `entitlement` (its full name, `pam::EntitlementName::full`), whatever their state.
+    fn grants(&self, account: Option<&str>, entitlement: &str) -> Result<Vec<Grant>, GcpError>;
+    /// Requests a grant on the entitlement `entitlement` (its full name) for `duration_secs` with `justification`, and answers the grant
+    /// as PAM created it (usually still `ACTIVATING`).
+    fn create_grant(&self, account: Option<&str>, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError>;
+    /// The entitlements in `scope` (`<parent>/locations/<location>`) the caller may request a grant on (design 2026-10-27, The Access
+    /// tab). The fakes of the tests that never search answer none.
+    fn search_entitlements(&self, _account: Option<&str>, _scope: &str) -> Result<Vec<EntitlementInfo>, GcpError> {
+        Ok(Vec::new())
+    }
     /// The grant `name` (`projects/…/grants/…`) as it is now.
     fn get_grant(&self, account: Option<&str>, name: &str) -> Result<Grant, GcpError>;
 }
@@ -201,14 +209,13 @@ impl GcpClient for RestClient {
         parse_profile(profile)
     }
 
-    fn grants(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
+    fn grants(&self, account: Option<&str>, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
         let who = self.pam_account(account)?;
         let client = self.pam_client(account)?;
-        let parent = entitlement_name(project, location, entitlement);
         self.runtime.block_on(async {
             let mut items = client
                 .search_grants()
-                .set_parent(parent)
+                .set_parent(entitlement)
                 .set_caller_relationship(pam_api::model::search_grants_request::CallerRelationshipType::HadCreated)
                 .set_page_size(GRANTS_PAGE)
                 .by_item();
@@ -223,16 +230,34 @@ impl GcpClient for RestClient {
         })
     }
 
-    fn create_grant(&self, account: Option<&str>, project: &str, location: &str, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
+    fn create_grant(&self, account: Option<&str>, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError> {
         let who = self.pam_account(account)?;
         let client = self.pam_client(account)?;
         let grant = pam_api::model::Grant::new()
             .set_requested_duration(google_cloud_wkt::Duration::clamp(i64::from(duration_secs), 0))
             .set_justification(pam_api::model::Justification::new().set_unstructured_justification(justification));
-        self.runtime
-            .block_on(client.create_grant().set_parent(entitlement_name(project, location, entitlement)).set_grant(grant).send())
-            .map(Grant::from)
-            .map_err(|error| gax_error(&who, error))
+        self.runtime.block_on(client.create_grant().set_parent(entitlement).set_grant(grant).send()).map(Grant::from).map_err(|error| gax_error(&who, error))
+    }
+
+    fn search_entitlements(&self, account: Option<&str>, scope: &str) -> Result<Vec<EntitlementInfo>, GcpError> {
+        let who = self.pam_account(account)?;
+        let client = self.pam_client(account)?;
+        self.runtime.block_on(async {
+            let mut items = client
+                .search_entitlements()
+                .set_parent(scope)
+                .set_caller_access_type(pam_api::model::search_entitlements_request::CallerAccessType::GrantRequester)
+                .set_page_size(ENTITLEMENTS_PAGE)
+                .by_item();
+            let mut found = Vec::new();
+            while let Some(item) = items.next().await {
+                found.push(EntitlementInfo::from(item.map_err(|error| gax_error(&who, error))?));
+                if found.len() >= MAX_ENTITLEMENTS {
+                    break;
+                }
+            }
+            Ok(found)
+        })
     }
 
     fn get_grant(&self, account: Option<&str>, name: &str) -> Result<Grant, GcpError> {
@@ -240,11 +265,6 @@ impl GcpClient for RestClient {
         let client = self.pam_client(account)?;
         self.runtime.block_on(client.get_grant().set_name(name).send()).map(Grant::from).map_err(|error| gax_error(&who, error))
     }
-}
-
-/// `projects/{project}/locations/{location}/entitlements/{entitlement}`: the parent of its grants.
-fn entitlement_name(project: &str, location: &str, entitlement: &str) -> String {
-    format!("projects/{project}/locations/{location}/entitlements/{entitlement}")
 }
 
 /// What the library's error means in Lunport's sentences: a permission refusal names the account, a `400` carries PAM's own words,
@@ -306,7 +326,7 @@ mod tests {
         });
         let client = RestClient::with_bases_and_timeout(Arc::new(StaticToken("t0k".into())), &base, &base, Duration::from_millis(300));
         let started = std::time::Instant::now();
-        let result = client.grants(Some("frank@example.com"), "acme-prod-123456", "global", "prod-operate");
+        let result = client.grants(Some("frank@example.com"), "projects/acme-prod-123456/locations/global/entitlements/prod-operate");
         assert!(matches!(result, Err(GcpError::Network(_))), "{result:?}");
         assert!(started.elapsed() < Duration::from_millis(1500), "the library must not retry on its own: {:?}", started.elapsed());
     }
@@ -353,7 +373,7 @@ mod tests {
         assert_eq!(error, GcpError::Denied { api: "OS Login", status: 403, account: ACCOUNT.into() });
         assert_eq!(error.to_string(), "frank@example.com may not call the OS Login API (HTTP 403).");
         server.mock("GET", "/v1/projects/p/locations/global/entitlements/e/grants:search").match_query(mockito::Matcher::Any).with_status(500).create();
-        let error = client(&server).grants(Some(ACCOUNT), "p", "global", "e").unwrap_err();
+        let error = client(&server).grants(Some(ACCOUNT), "projects/p/locations/global/entitlements/e").unwrap_err();
         assert_eq!(error, GcpError::Http { api: "Privileged Access Manager", status: 500 });
         assert_eq!(error.to_string(), "The Privileged Access Manager API answered 500.");
     }
@@ -379,7 +399,7 @@ mod tests {
                 .to_string(),
             )
             .create();
-        let grants = client(&server).grants(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate");
+        let grants = client(&server).grants(Some(ACCOUNT), "projects/acme-prod-123456/locations/global/entitlements/prod-operate");
         mock.assert();
         let grants = grants.unwrap();
         assert_eq!(grants.len(), 3);
@@ -407,7 +427,7 @@ mod tests {
             .with_body(json!({ "grants": [{ "name": "…/grants/3", "state": "ACTIVE" }] }).to_string())
             .expect(1)
             .create();
-        let grants = client(&server).grants(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate").unwrap();
+        let grants = client(&server).grants(Some(ACCOUNT), "projects/acme-prod-123456/locations/global/entitlements/prod-operate").unwrap();
         assert_eq!(grants.iter().map(|grant| grant.state.as_str()).collect::<Vec<_>>(), vec!["ENDED", "ENDED", "ACTIVE"]);
         first.assert();
         second.assert();
@@ -436,11 +456,91 @@ mod tests {
             )
             .expect(1)
             .create();
-        let grant = client(&server).create_grant(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate", 1800, "restart app-api").unwrap();
+        let grant = client(&server).create_grant(Some(ACCOUNT), "projects/acme-prod-123456/locations/global/entitlements/prod-operate", 1800, "restart app-api").unwrap();
         assert_eq!(grant.name, "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/42");
         assert_eq!((grant.state.as_str(), grant.requested_duration.as_deref(), grant.justification.as_deref()), ("ACTIVATING", Some("1800s"), Some("restart app-api")));
         assert_eq!(grant.until(), None, "no grant time yet");
         mock.assert();
+    }
+
+    /// Grants on a folder's entitlement go to the folder's path (design 2026-10-27): the name is the parent, whatever it is.
+    #[test]
+    fn a_folder_entitlement_is_addressed_by_its_own_name() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/folders/123456789012/locations/global/entitlements/break-glass/grants:search")
+            .match_query(mockito::Matcher::Any)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "grants": [] }).to_string())
+            .expect(1)
+            .create();
+        assert_eq!(client(&server).grants(Some(ACCOUNT), "folders/123456789012/locations/global/entitlements/break-glass").unwrap(), vec![]);
+        mock.assert();
+    }
+
+    /// The entitlements the caller may request in a scope (design 2026-10-27, The Access tab): asked as a grant requester, every page,
+    /// with what each gives, its longest grant and whether an approver must approve.
+    #[test]
+    fn entitlements_are_searched_as_a_grant_requester_across_pages() {
+        let mut server = mockito::Server::new();
+        let path = "/v1/projects/acme-dev-654321/locations/global/entitlements:search";
+        let first = server
+            .mock("GET", path)
+            // GRANT_REQUESTER is 1 in the library's integer enum encoding.
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("callerAccessType".into(), "1".into()),
+                mockito::Matcher::UrlEncoded("pageSize".into(), "100".into()),
+            ]))
+            .match_header("authorization", "Bearer t0k")
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "entitlements": [{
+                        "name": "projects/acme-dev-654321/locations/global/entitlements/dev-operate",
+                        "maxRequestDuration": "3600s",
+                        "privilegedAccess": { "gcpIamAccess": {
+                            "resourceType": "cloudresourcemanager.googleapis.com/Project",
+                            "resource": "//cloudresourcemanager.googleapis.com/projects/acme-dev-654321",
+                            "roleBindings": [{ "role": "roles/container.developer" }, { "role": "roles/cloudsql.client" }]
+                        }}
+                    }],
+                    "nextPageToken": "two"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create();
+        let second = server
+            .mock("GET", path)
+            .match_query(mockito::Matcher::UrlEncoded("pageToken".into(), "two".into()))
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({ "entitlements": [{
+                    "name": "projects/acme-dev-654321/locations/global/entitlements/dev-admin",
+                    "approvalWorkflow": { "manualApprovals": { "steps": [{ "approvalsNeeded": 1 }] } }
+                }]})
+                .to_string(),
+            )
+            .expect(1)
+            .create();
+        let found = client(&server).search_entitlements(Some(ACCOUNT), "projects/acme-dev-654321/locations/global").unwrap();
+        first.assert();
+        second.assert();
+        assert_eq!(
+            found,
+            vec![
+                EntitlementInfo {
+                    name: "projects/acme-dev-654321/locations/global/entitlements/dev-operate".into(),
+                    max_duration_secs: Some(3600),
+                    needs_approval: false,
+                    roles: vec![
+                        ("roles/container.developer".into(), "projects/acme-dev-654321".into()),
+                        ("roles/cloudsql.client".into(), "projects/acme-dev-654321".into())
+                    ],
+                },
+                EntitlementInfo { name: "projects/acme-dev-654321/locations/global/entitlements/dev-admin".into(), max_duration_secs: None, needs_approval: true, roles: vec![] },
+            ]
+        );
     }
 
     #[test]
@@ -454,7 +554,7 @@ mod tests {
             .with_body(json!({ "error": { "code": 400, "message": "requested_duration exceeds the maximum", "status": "INVALID_ARGUMENT" } }).to_string())
             .expect(1)
             .create();
-        let error = client(&server).create_grant(Some(ACCOUNT), "acme-prod-123456", "global", "prod-operate", 7200, "x").unwrap_err();
+        let error = client(&server).create_grant(Some(ACCOUNT), "projects/acme-prod-123456/locations/global/entitlements/prod-operate", 7200, "x").unwrap_err();
         mock.assert();
         assert_eq!(error, GcpError::Refused { api: "Privileged Access Manager", message: "requested_duration exceeds the maximum".into() });
         assert_eq!(error.to_string(), "Privileged Access Manager refused the request: requested_duration exceeds the maximum.");

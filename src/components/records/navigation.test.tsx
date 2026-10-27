@@ -43,6 +43,22 @@ describe("Records navigation controls", () => {
     expect(html).toContain('aria-label="All hosts (1)"');
   });
 
+  it("lists the cloud providers under a Cloud heading of their own, Google Cloud first", () => {
+    const html = renderToStaticMarkup(<LibraryNavigation
+      overview={recordOverview()}
+      panel="hosts"
+      filter={{ kind: "all" }}
+      navigate={vi.fn()}
+      changeFilter={vi.fn()}
+      createGroup={vi.fn()}
+    />);
+    const cloud = html.slice(html.indexOf('aria-label="Cloud providers"'));
+    expect(html).toContain(">Cloud</div>");
+    expect(cloud).toContain('aria-label="Google Cloud"');
+    // Google Cloud is no longer among the library's own rows.
+    expect(html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'))).not.toContain("Google Cloud");
+  });
+
   it("keeps group navigation separate from its disclosure and removes closed children from interaction", () => {
     navigationState.collapsedRecordGroups = ["local:0000000000000010"];
     const html = navigation();

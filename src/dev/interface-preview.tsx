@@ -17,7 +17,9 @@ import type { GrantMemoryView } from "@/bindings/GrantMemoryView";
 import type { HostTransport } from "@/bindings/HostTransport";
 import type { IapProbeView } from "@/bindings/IapProbeView";
 import type { OsLoginProfileView } from "@/bindings/OsLoginProfileView";
-import type { PamGrantView } from "@/bindings/PamGrantView";
+import type { PamOverview } from "@/bindings/PamOverview";
+import type { PamEntitlementView } from "@/bindings/PamEntitlementView";
+import type { PamScope } from "@/bindings/PamScope";
 import type { PamStatusView } from "@/bindings/PamStatusView";
 import type { RouteChange } from "@/bindings/RouteChange";
 import type { TransportKind } from "@/bindings/TransportKind";
@@ -93,14 +95,14 @@ else {
   // The `iap` scenario (design 2026-10-26, Connect via): a central library whose hosts connect through Google Cloud IAP, with fakes of the
   // commands the host editor, the details pane and the Google Cloud page call, in the shapes of src/bindings. Nothing reaches Google or a
   // gcloud directory, and every grant, route and request lives in memory.
-  const gcloud = {
+  const gcloud: GcloudAccountsView = {
     config_found: true,
     active: "frank@example.com",
     accounts: [
       { account: "frank@acme.dev", state: "expired", message: null },
       { account: "frank@example.com", state: "signed_in", message: null },
     ],
-  } satisfies GcloudAccountsView;
+  };
   // The end of each active grant, by what makes an entitlement one: the account, project, location and entitlement id together.
   const grants = new Map<string, number>();
   const grantKey = (kind: TransportKind, entitlement: string) =>
@@ -213,26 +215,78 @@ else {
           return { account, username: account.replace(/[@.]/g, "_"), key_registered: args.keyId == null ? null : false } satisfies OsLoginProfileView;
         }
         if (command === "gcp_accounts") return gcloud;
-        if (command === "gcp_pam_grants") {
-          const rows: PamGrantView[] = [];
-          // The routes whose host the library has; a grant row is one entitlement however many routes name it.
+        if (command === "gcp_cli_status" || command === "gcp_cli_locate_again") return { path: "/opt/homebrew/bin/gcloud" };
+        if (command === "gcp_account_action") {
+          // gcloud runs for a while; a sign-in prints the sign-in page's address first, as gcloud does.
+          const action = args.action as { kind: string; account?: string };
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (action.kind === "remove") gcloud.accounts = gcloud.accounts.filter((entry) => entry.account !== action.account);
+          if (action.kind === "activate") gcloud.active = action.account ?? null;
+          if (action.kind === "sign_in") gcloud.accounts = gcloud.accounts.map((entry) => (entry.account === action.account ? { ...entry, state: "signed_in", message: null } : entry));
+          const message = { sign_in: `Signed in as ${action.account}.`, add: "Signed in.", activate: `gcloud now uses ${action.account}.`, remove: `Removed ${action.account} from gcloud on this computer.` }[action.kind];
+          return { account: action.account ?? null, message };
+        }
+        if (command === "gcp_account_cancel") return;
+        if (command === "gcp_pam_overview") {
+          // The routes' projects and the added scopes are searched; every entitlement a route names is listed too.
+          const rows = new Map<string, PamEntitlementView>();
+          const scopes: PamOverview["scopes"] = [];
           for (const route of overview.transports ?? []) {
             const { kind } = route;
             const { pam } = kind;
             if (!pam || !overview.hosts.some((host) => host.id === route.host_id)) continue;
+            const account = kind.account ?? gcloud.active;
+            const parent = `projects/${kind.project}`;
+            const scope = scopes.find((other) => other.parent === parent && other.account === account && other.location === pam.location);
+            if (scope) scope.host_ids.push(route.host_id);
+            else scopes.push({ id: null, parent, location: pam.location, account, from_routes: true, host_ids: [route.host_id], message: null });
             for (const entitlement of pam.entitlements) {
-              const account = kind.account ?? gcloud.active;
-              let row = rows.find((other) => other.account === account && other.project === kind.project && other.location === pam.location && other.entitlement === entitlement);
-              if (!row) {
-                const until = grantEnd(kind, entitlement);
-                row = { account, project: kind.project, location: pam.location, entitlement, state: until ? "active" : "none", active_until_ms: until, message: null, host_ids: [] };
-                rows.push(row);
-              }
+              const name = `${parent}/locations/${pam.location}/entitlements/${entitlement}`;
+              const until = grantEnd(kind, entitlement);
+              const row = rows.get(name) ?? {
+                account, name, parent, location: pam.location, entitlement, max_duration_secs: 3600, needs_approval: false,
+                roles: [{ role: "roles/compute.osAdminLogin", resource: parent }], state: until ? "active" : "none", active_until_ms: until, message: null,
+                host_ids: [], memory: overview.pam_requests?.find((memory) => memory.name === name) ?? null, default_duration_secs: pam.duration_secs,
+              };
               if (!row.host_ids.includes(route.host_id)) row.host_ids.push(route.host_id);
+              rows.set(name, row);
             }
           }
-          return rows;
+          for (const scope of overview.pam_scopes ?? []) {
+            scopes.push({ id: scope.id, parent: scope.parent, location: scope.location, account: scope.account, from_routes: false, host_ids: [], message: null });
+            // Each added scope offers one self-service entitlement and one an approver approves.
+            for (const [entitlement, approval] of [["dev-operate", false], ["break-glass", true]] as const) {
+              const name = `${scope.parent}/locations/${scope.location}/entitlements/${entitlement}`;
+              const until = grants.get(JSON.stringify([scope.account ?? gcloud.active, name])) ?? null;
+              rows.set(name, {
+                account: scope.account ?? gcloud.active, name, parent: scope.parent, location: scope.location, entitlement, max_duration_secs: approval ? 7200 : 3600,
+                needs_approval: approval, roles: [{ role: approval ? "roles/owner" : "roles/container.developer", resource: scope.parent }],
+                state: until === null ? "none" : until > Date.now() ? "active" : "approval_awaited", active_until_ms: until !== null && until > Date.now() ? until : null, message: null,
+                host_ids: [], memory: overview.pam_requests?.find((memory) => memory.name === name) ?? null, default_duration_secs: 1800,
+              });
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          return { scopes, entitlements: [...rows.values()] } satisfies PamOverview;
         }
+        if (command === "gcp_pam_request") {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          const name = String(args.name);
+          const approval = name.endsWith("/break-glass");
+          const route = (overview.transports ?? []).find((other) => other.kind.pam && name.startsWith(`projects/${other.kind.project}/`));
+          const entitlement = name.split("/").pop()!;
+          const until = Date.now() + Number(args.durationSecs) * 1000;
+          if (route) grants.set(grantKey(route.kind, entitlement), until);
+          else grants.set(JSON.stringify([args.account ?? gcloud.active, name]), approval ? 0 : until);
+          updateOverview({ pam_requests: [{ name, justification: String(args.justification), duration_secs: Number(args.durationSecs) }, ...(overview.pam_requests ?? []).filter((memory) => memory.name !== name)] });
+          return { entitlement, state: approval ? "approval_awaited" : "active", active_until_ms: approval ? null : until, message: null } satisfies PamStatusView;
+        }
+        if (command === "gcp_pam_scope_save") {
+          const scope: PamScope = { id: Math.random().toString(16).slice(2, 18).padEnd(16, "0"), parent: String(args.parent), location: String(args.location), account: (args.account as string | null) ?? null };
+          return updateOverview({ pam_scopes: [...(overview.pam_scopes ?? []), scope] });
+        }
+        if (command === "gcp_pam_scope_remove") return updateOverview({ pam_scopes: (overview.pam_scopes ?? []).filter((scope) => scope.id !== args.id) });
+        if (command === "gcp_pam_suggestions") return String(args.project).startsWith("acme-prod") ? ["prod-admin", "prod-deploy", "prod-operate"] : [];
         if (command === "transports_pam_status") {
           // The entitlement whose grant lasts longest, as the backend names it.
           const { kind } = routeOrFail(args.hostId);
@@ -248,8 +302,9 @@ else {
           await new Promise((resolve) => setTimeout(resolve, 900));
           const until = Date.now() + Number(args.durationSecs) * 1000;
           grants.set(grantKey(kind, entitlement), until);
-          // What it asked is remembered on this computer, never in the route.
-          updateOverview({ grant_memory: [...(overview.grant_memory ?? []).filter((memory) => memory.host_id !== args.hostId), { host_id: String(args.hostId), justification: String(args.justification), duration_secs: Number(args.durationSecs) }] });
+          // What it asked is remembered in the library for the entitlement, never in the route.
+          const name = `projects/${kind.project}/locations/${kind.pam.location}/entitlements/${entitlement}`;
+          updateOverview({ pam_requests: [{ name, justification: String(args.justification), duration_secs: Number(args.durationSecs) }, ...(overview.pam_requests ?? []).filter((memory) => memory.name !== name)] });
           return { entitlement, state: "active", active_until_ms: until, message: null } satisfies PamStatusView;
         }
         if (command === "transports_iap_probe") {

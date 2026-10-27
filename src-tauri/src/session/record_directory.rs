@@ -88,7 +88,8 @@ pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryErro
 }
 /// Writes what a grant request taught this computer about a host: `(host, justification, duration_secs)` (design 2026-10-26, Grant
 /// requests).
-pub type GrantMemory = dyn Fn(&HostId, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
+/// Remembers a grant request a connection made: the host it was for, the entitlement's full name, the justification and the length.
+pub type GrantMemory = dyn Fn(&HostId, &str, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
 
 impl RecordDirectory {
     pub fn new(sources: RecordSources) -> Self {
@@ -119,14 +120,15 @@ impl RecordDirectory {
         wait: Duration,
     ) -> Result<GrantReceipt, DirectoryError> {
         let gcp = self.gcp.as_deref().ok_or_else(|| DirectoryError::Failed("Google Cloud access is not configured in this build.".into()))?;
-        let place = crate::gcp::pam::Entitlement { account: need.account.as_deref(), project: &need.project, location: &need.location, entitlement: &need.entitlement };
+        let name = crate::gcp::pam::EntitlementName::in_project(&need.project, &need.location, &need.entitlement).full();
+        let place = crate::gcp::pam::Entitlement { account: need.account.as_deref(), name: &name };
         // A failed memory write does not fail the request: the grant exists either way.
         let remember = || {
             if let Some(remember) = &self.grant_memory {
-                let _ = remember(&need.host, justification, duration_secs);
+                let _ = remember(&need.host, &name, justification, duration_secs);
             }
         };
-        let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled()).map_err(|error| match error {
+        let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled(), false).map_err(|error| match error {
             crate::gcp::pam::RequestError::Cancelled => DirectoryError::Failed(error.sentence(&need.entitlement)),
             other => DirectoryError::Denied(other.sentence(&need.entitlement)),
         })?;
@@ -336,7 +338,8 @@ impl HostDirectory for RecordDirectory {
         if let Some(pam) = &pam {
             let mut in_flight = false;
             for entitlement in &pam.entitlements {
-                let grants = gcp.grants(account.as_deref(), &project, &pam.location, entitlement).map_err(denied)?;
+                let name = crate::gcp::pam::EntitlementName::in_project(&project, &pam.location, entitlement).full();
+                let grants = gcp.grants(account.as_deref(), &name).map_err(denied)?;
                 let current = crate::gcp::pam::in_flight(&grants);
                 if !current.is_empty() {
                     in_flight = true;
@@ -350,10 +353,13 @@ impl HostDirectory for RecordDirectory {
                 }
             }
             if !in_flight {
-                // The question starts from what this computer last asked for on the host (the justification and the length, kept in the
-                // device-local grant memory, never in the synced route); a host it never asked a grant for gets the route's own default
-                // length and nothing to prefill (design 2026-10-26, Grant requests).
-                let memory = transports::grant_memory(&state, hop.id.as_str());
+                // The question starts from what was last asked for on the entitlement it requests (the justification and the length,
+                // the library's grant memory, design 2026-10-27), else from what this computer last asked for on the host, as an earlier
+                // release remembered it; an entitlement never asked for gets the route's own default length and nothing to prefill.
+                let first = crate::gcp::pam::EntitlementName::in_project(&project, &pam.location, &pam.entitlements[0]).full();
+                let memory = crate::sync::pam_records::memory(&state, &first)
+                    .map(|memory| crate::sync::transports::GrantMemory { justification: memory.justification, duration_secs: memory.duration_secs })
+                    .or_else(|| transports::grant_memory(&state, hop.id.as_str()));
                 return Err(DirectoryError::GrantNeeded(Box::new(GrantNeed {
                     host: hop.id.clone(),
                     account: account.clone(),

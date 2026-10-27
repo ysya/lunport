@@ -3,7 +3,12 @@
 use super::payload::{
     catalog_fits, Catalog, Collection, GroupOrder, MAX_COLLECTIONS, MAX_GROUP_ORDERS, MAX_ORDERED_GROUPS, MAX_TUNNELS,
 };
-use crate::sync::{records_v3::HostScope, transports::HostTransport, tunnel_rules::TunnelRule};
+use crate::sync::{
+    pam_records::{GrantRequestMemory, PamScope},
+    records_v3::HostScope,
+    transports::HostTransport,
+    tunnel_rules::TunnelRule,
+};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -24,6 +29,8 @@ pub enum Collision {
     /// A collection's name.
     Collection { id: String, local: Option<String>, remote: Option<String> },
     GroupOrder { scope: HostScope, local: Option<Vec<String>>, remote: Option<Vec<String>> },
+    /// A Privileged Access Manager search scope (design 2026-10-27).
+    PamScope { id: String, local: Option<PamScope>, remote: Option<PamScope> },
 }
 
 #[derive(Debug)]
@@ -150,6 +157,31 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
         |host_id, local, remote| Collision::Route { host_id, local, remote },
         &mut collisions,
     );
+    let pam_scopes = merge_list(
+        common.map(|c| c.pam_scopes.as_slice()),
+        &local.pam_scopes,
+        &remote.pam_scopes,
+        |s: &PamScope| s.id.clone(),
+        |_: &String| false,
+        side,
+        |id, local, remote| Collision::PamScope { id, local, remote },
+        &mut collisions,
+    );
+    // A grant memory both devices changed takes the synced one, never a review (design 2026-10-27): it is a convenience. Two scopes
+    // that look in the same place keep the synced one too.
+    let pam_requests = merge_list(
+        common.map(|c| c.pam_requests.as_slice()),
+        &local.pam_requests,
+        &remote.pam_requests,
+        |m: &GrantRequestMemory| m.name.clone(),
+        |_: &String| false,
+        Some(Side::Remote),
+        |_, _, _| unreachable!("a side settles every memory"),
+        &mut collisions,
+    );
+    // The synced side's scopes come first, so of two that look in the same place the synced one stays.
+    let mut places = BTreeSet::new();
+    let pam_scopes: Vec<PamScope> = pam_scopes.into_iter().filter(|s| places.insert((s.parent.clone(), s.location.clone(), s.account.clone()))).collect();
     let new_routes = match common {
         Some(common) => local
             .transports
@@ -162,7 +194,7 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
             .collect(),
         None => vec![],
     };
-    Merged { catalog: Catalog { collections, group_orders, tunnels, transports }, collisions, new_routes }
+    Merged { catalog: Catalog { collections, group_orders, tunnels, transports, pam_scopes, pam_requests }, collisions, new_routes }
 }
 
 /// Why a merged Catalog does not fit in the library's one record, even without this device's new routes.
@@ -215,6 +247,11 @@ pub fn fit(merged: Merged) -> Result<Fitted, Over> {
         || catalog.group_orders.iter().map(|order| order.ids.len()).sum::<usize>() > MAX_ORDERED_GROUPS
     {
         return Err(Over::GroupOrders);
+    }
+    // Grant memories make room before anything else, the first in the Catalog's order first: a memory is a convenience (design
+    // 2026-10-27).
+    while !catalog_fits(&catalog) && !catalog.pam_requests.is_empty() {
+        catalog.pam_requests.remove(0);
     }
     if !catalog_fits(&catalog) {
         return Err(Over::Size);
@@ -329,7 +366,7 @@ pub(super) mod tests {
     /// added.
     fn colliding() -> (Catalog, Catalog, Catalog) {
         let x = "c".repeat(64);
-        let common = Catalog {
+        let common = Catalog { pam_scopes: vec![], pam_requests: vec![],
             collections: vec![collection(&x, "Team")],
             group_orders: vec![order(HostScope::Local, &[G1, G2, G3])],
             tunnels: vec![tunnel(A, 15432), tunnel(E, 15500)],
@@ -337,13 +374,13 @@ pub(super) mod tests {
         };
         let mut renamed = tunnel(E, 15500);
         renamed.name = "renamed-here".into();
-        let local = Catalog {
+        let local = Catalog { pam_scopes: vec![], pam_requests: vec![],
             collections: vec![collection(&x, "Work")],
             group_orders: vec![order(HostScope::Local, &[G3, G1, G2])],
             tunnels: vec![tunnel(A, 15433), renamed],
             transports: vec![route(H4, "asia-east1-a"), route(H5, "asia-east1-b")],
         };
-        let remote = Catalog {
+        let remote = Catalog { pam_scopes: vec![], pam_requests: vec![],
             collections: vec![collection(&x, "Clients")],
             group_orders: vec![order(HostScope::Local, &[G2, G3, G1])],
             tunnels: vec![tunnel(A, 15434), tunnel(E, 15501)],
@@ -523,5 +560,58 @@ pub(super) mod tests {
             over.sentence(),
             "Together, both devices’ changes are more than one library record holds (64 KB). Remove some tunnels or routes on this device; Lunport combines both devices’ changes on the next sync."
         );
+    }
+
+    fn scope(id: &str, parent: &str) -> PamScope {
+        PamScope { id: id.into(), parent: parent.into(), location: "global".into(), account: None }
+    }
+
+    fn memory(name: &str, justification: &str) -> GrantRequestMemory {
+        GrantRequestMemory { name: format!("projects/acme-prod-123456/locations/global/entitlements/{name}"), justification: justification.into(), duration_secs: 1800 }
+    }
+
+    /// Design 2026-10-27: both devices' scopes and memories survive a merge; a scope both changed is reviewed, a memory both changed
+    /// takes the synced one without asking, and two scopes that look in the same place keep the synced one.
+    #[test]
+    fn scopes_merge_as_items_and_a_memory_collision_takes_the_synced_one() {
+        let common = Catalog { pam_requests: vec![memory("prod-operate", "first")], ..Catalog::default() };
+        let mut local = common.clone();
+        local.pam_scopes.push(scope(A, "projects/acme-dev-654321"));
+        local.pam_requests[0] = memory("prod-operate", "mine");
+        local.pam_requests.push(memory("prod-admin", "audit"));
+        let mut remote = common.clone();
+        remote.pam_scopes.push(scope(B, "folders/123456789012"));
+        remote.pam_requests[0] = memory("prod-operate", "theirs");
+        let merged = merge(Some(&common), &local, &remote, &none(), None);
+        assert!(merged.collisions.is_empty());
+        assert_eq!(merged.catalog.pam_scopes, vec![scope(B, "folders/123456789012"), scope(A, "projects/acme-dev-654321")]);
+        assert_eq!(merged.catalog.pam_requests, vec![memory("prod-operate", "theirs"), memory("prod-admin", "audit")]);
+
+        let same_place = Catalog { pam_scopes: vec![scope(C, "folders/123456789012")], ..Catalog::default() };
+        let merged = merge(Some(&Catalog::default()), &same_place, &remote, &none(), None);
+        assert_eq!(merged.catalog.pam_scopes, vec![scope(B, "folders/123456789012")], "one place is looked at once");
+        assert!(merged.catalog.validate().is_ok());
+
+        let base = Catalog { pam_scopes: vec![scope(A, "projects/acme-dev-654321")], ..Catalog::default() };
+        let edited = Catalog { pam_scopes: vec![PamScope { account: Some("frank@example.com".into()), ..scope(A, "projects/acme-dev-654321") }], ..Catalog::default() };
+        let merged = merge(Some(&base), &edited, &Catalog::default(), &none(), None);
+        assert_eq!(merged.collisions, vec![Collision::PamScope { id: A.into(), local: Some(edited.pam_scopes[0].clone()), remote: None }]);
+    }
+
+    /// A merge too large for one record drops grant memories before it gives up (design 2026-10-27).
+    #[test]
+    fn grant_memories_make_room_before_a_merge_is_over() {
+        let mut catalog = Catalog { tunnels: (0..256).map(long_tunnel).collect(), ..Catalog::default() };
+        while !catalog_fits(&catalog) {
+            catalog.tunnels.pop();
+        }
+        // Room for some of the memories, not all.
+        catalog.tunnels.truncate(catalog.tunnels.len() - 20);
+        catalog.pam_requests = (0..20).map(|n| memory(&format!("e{n}"), &"j".repeat(500))).collect();
+        assert!(!catalog_fits(&catalog));
+        let fitted = fit(unmerged(catalog)).expect("memories make room");
+        assert!(catalog_fits(&fitted.catalog));
+        assert!((1..20).contains(&fitted.catalog.pam_requests.len()), "{}", fitted.catalog.pam_requests.len());
+        assert_eq!(fitted.catalog.pam_requests.last().map(|m| m.name.as_str()), Some("projects/acme-prod-123456/locations/global/entitlements/e19"), "the first go first");
     }
 }

@@ -6,7 +6,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { revealHidden } from "@/lib/sync-approvals";
 import { justificationAcceptable } from "@/lib/mcp-flow";
-import { pamStatusLine, requestPamGrant, type GrantMemoryView, type HostTransport, type PamStatusView } from "@/lib/transports";
+import {
+  parentLabel,
+  pamStatusLine,
+  requestEntitlementGrant,
+  requestPamGrant,
+  type GrantMemoryView,
+  type HostTransport,
+  type PamEntitlementView,
+  type PamStatusView,
+} from "@/lib/transports";
 
 const MAX_MINUTES = 480;
 const MAX_JUSTIFICATION = 512;
@@ -21,11 +30,25 @@ export function grantRequestDefaults(transport: HostTransport, memory: GrantMemo
   return { justification: "", minutes: String(Math.round((transport.kind.pam?.duration_secs ?? 1800) / 60)) };
 }
 
-/** Whether Request may go: whole minutes from 1 to 480 and a justification the backend accepts (one line, no control characters). */
-export function grantRequestReady(justification: string, minutes: string): boolean {
+/** Whether Request may go: whole minutes from 1 to `max` (480 at most) and a justification the backend accepts (one line, no control characters). */
+export function grantRequestReady(justification: string, minutes: string, max = MAX_MINUTES): boolean {
   const whole = /^\d+$/.test(minutes.trim()) ? Number(minutes.trim()) : NaN;
-  return justificationAcceptable(justification) && whole >= 1 && whole <= MAX_MINUTES;
+  return justificationAcceptable(justification) && whole >= 1 && whole <= Math.min(max, MAX_MINUTES);
 }
+
+/** The most minutes a request on an entitlement may ask for: its own maximum when the search said, within Lunport's 480. */
+export const maxMinutesOf = (row: Pick<PamEntitlementView, "max_duration_secs">) =>
+  row.max_duration_secs === null ? MAX_MINUTES : Math.max(1, Math.min(MAX_MINUTES, Math.floor(row.max_duration_secs / 60)));
+
+/** What a request on an entitlement starts from: the library's memory of its last request, else its default length (design 2026-10-27). */
+export function entitlementRequestDefaults(row: PamEntitlementView): { justification: string; minutes: string } {
+  const max = maxMinutesOf(row);
+  if (row.memory) return { justification: row.memory.justification, minutes: String(Math.min(max, Math.round(row.memory.duration_secs / 60))) };
+  return { justification: "", minutes: String(Math.min(max, Math.round(row.default_duration_secs / 60))) };
+}
+
+/** What the dialog says once a request waits for an approver. */
+export const AWAITING_APPROVER = "Requested. The grant becomes active once an approver approves it.";
 
 /**
  * What Request sends: the grant on `entitlement` (the route's first when none is named, which the backend picks) for the minutes typed,
@@ -36,10 +59,16 @@ export function requestGrant(transport: HostTransport, entitlement: string | und
 }
 
 export type GrantRequestCardViewProps = {
-  transport: HostTransport;
+  /** The host's route the request goes through (a host's details); left out for a request on an entitlement (the Access tab). */
+  transport?: HostTransport;
   /** The entitlement the request is for; the route's first when left out. */
   entitlement?: string;
-  alias: string;
+  /** The host's alias, with `transport`. */
+  alias?: string;
+  /** What a request on an entitlement is for, in place of the host: where the entitlement lives and the account requesting it. */
+  subject?: { parent: string; account: string | null };
+  /** The most minutes the form takes: the entitlement's own maximum when known, else 480. */
+  maxMinutes?: number;
   justification: string;
   minutes: string;
   busy: boolean;
@@ -52,11 +81,13 @@ export type GrantRequestCardViewProps = {
 };
 
 /** The dialog's content, apart from its state: rendered inside a `Dialog` (the tests render it in one without the portal). */
-export function GrantRequestCardView({ transport, entitlement: named, alias, justification, minutes, busy, result, error, onJustification, onMinutes, onRequest, onClose }: GrantRequestCardViewProps) {
+export function GrantRequestCardView({ transport, entitlement: named, alias, subject, maxMinutes = MAX_MINUTES, justification, minutes, busy, result, error, onJustification, onMinutes, onRequest, onClose }: GrantRequestCardViewProps) {
   const justificationId = useId();
   const minutesId = useId();
-  const ready = !busy && result === null && grantRequestReady(justification, minutes);
-  const entitlement = named ?? transport.kind.pam?.entitlements[0] ?? "";
+  const ready = !busy && result === null && grantRequestReady(justification, minutes, maxMinutes);
+  const entitlement = named ?? transport?.kind.pam?.entitlements[0] ?? "";
+  const account = (subject ? subject.account : transport?.kind.account) ?? "gcloud's active account";
+  const what = subject ? `${entitlement} (${parentLabel(subject.parent)})` : `${entitlement} for ${revealHidden(alias ?? "")}`;
   const requestOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -67,7 +98,7 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, jus
       <DialogHeader>
         <DialogTitle>Request a grant</DialogTitle>
         <DialogDescription>
-          A Privileged Access Manager grant on {entitlement} for {revealHidden(alias)}, requested as {transport.kind.account ?? "gcloud's active account"}. Lunport waits until it is active; the entitlement's own maximum applies.
+          A Privileged Access Manager grant on {what}, requested as {account}. Lunport waits until it is active, or until it waits for an approver; the entitlement's own maximum applies.
         </DialogDescription>
       </DialogHeader>
       <TaskDialogBody>
@@ -92,7 +123,7 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, jus
               type="number"
               inputMode="numeric"
               min={1}
-              max={MAX_MINUTES}
+              max={maxMinutes}
               step={1}
               className="w-28"
               value={minutes}
@@ -102,7 +133,7 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, jus
             />
           </div>
           {busy && <p role="status" className="text-xs text-muted-foreground">Requesting the grant and waiting for it to become active…</p>}
-          {result && <p role="status" className="text-xs">{pamStatusLine(result)}</p>}
+          {result && <p role="status" className="text-xs">{result.state === "approval_awaited" ? AWAITING_APPROVER : pamStatusLine(result)}</p>}
           {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         </div>
       </TaskDialogBody>
@@ -169,6 +200,60 @@ export function GrantRequestDialog({ transport, entitlement, memory, alias, onCl
           transport={transport}
           entitlement={entitlement}
           alias={alias}
+          justification={justification}
+          minutes={minutes}
+          busy={busy}
+          result={result}
+          error={error}
+          onJustification={setJustification}
+          onMinutes={setMinutes}
+          onRequest={() => void request()}
+          onClose={onClose}
+        />
+      </TaskDialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The Request-a-grant dialog of the Access tab (design 2026-10-27): a request on the entitlement of `row`, as its account, prefilled from
+ * the library's memory of its last request, else its default length, and capped by its own maximum. Mount it for one request at a time,
+ * keyed by the row, so another starts afresh.
+ */
+export function EntitlementGrantDialog({ row, onClose, onRequested }: { row: PamEntitlementView; onClose: () => void; onRequested: (view: PamStatusView) => void }) {
+  const defaults = entitlementRequestDefaults(row);
+  const maxMinutes = maxMinutesOf(row);
+  const [justification, setJustification] = useState(defaults.justification);
+  const [minutes, setMinutes] = useState(defaults.minutes);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<PamStatusView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const flight = useRef(false);
+
+  const request = async () => {
+    if (busy || result !== null || !grantRequestReady(justification, minutes, maxMinutes) || flight.current) return;
+    flight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const view = await requestEntitlementGrant(row.account, row.name, justification.trim(), Number(minutes.trim()) * 60);
+      setResult(view);
+      onRequested(view);
+    } catch (failure) {
+      setError(revealHidden(failure instanceof Error ? failure.message : String(failure)));
+    } finally {
+      flight.current = false;
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
+      <TaskDialogContent className="sm:max-w-lg">
+        <GrantRequestCardView
+          entitlement={row.entitlement}
+          subject={{ parent: row.parent, account: row.account }}
+          maxMinutes={maxMinutes}
           justification={justification}
           minutes={minutes}
           busy={busy}

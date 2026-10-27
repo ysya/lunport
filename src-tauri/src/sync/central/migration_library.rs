@@ -420,6 +420,7 @@ pub(super) fn prepare(
             scope: HostScope::Local,
             ids: vec![],
         }],
+        ..Catalog::default()
     };
     // The routes saved on this device stay there: they move into the library after the cutover.
     let public = super::projection_local::public_rows(&next, &empty, &storage)?;

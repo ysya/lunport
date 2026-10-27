@@ -795,7 +795,7 @@ pub(super) mod tests {
                 id: "catalog".into(),
                 scope: None,
             },
-            Data::Catalog(Catalog {
+            Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                 tunnels: vec![],
                 transports: vec![],
                 collections,
@@ -852,7 +852,7 @@ pub(super) mod tests {
             }),
         };
         let (ws, keys) = fixture(vec![
-            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { tunnels: vec![], transports: vec![], collections: vec![], group_orders: vec![] })),
+            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![], tunnels: vec![], transports: vec![], collections: vec![], group_orders: vec![] })),
             (Identity { kind: "host".into(), id: id.into(), scope: Some(HostScope::Local) }, Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":"local-preserved","hostname":"fixture.invalid","auth":"password"})).unwrap())),
             (deleted.clone(), Data::Deleted),
         ]);
@@ -1048,7 +1048,7 @@ pub(super) mod tests {
                     id: "catalog".into(),
                     scope: None,
                 },
-                Data::Catalog(Catalog {
+                Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
                     tunnels: vec![],
                     transports: vec![],
                     collections: vec![],

@@ -37,6 +37,10 @@ impl fmt::Debug for Token {
 /// code (the broker's threads, `spawn_blocking` in the engine); may take a network round trip.
 pub trait TokenSource: Send + Sync {
     fn access_token(&self, account: Option<&str>) -> Result<Token, AuthError>;
+
+    /// Drops every token kept for later: gcloud's credentials changed (an account signed in, removed or made active from the Google
+    /// Cloud page, design 2026-10-27), so a token kept from before may belong to a sign-in that is gone.
+    fn forget(&self) {}
 }
 
 /// Why no token could be had. Every text is a sentence for the person; none carries a secret.
@@ -344,6 +348,10 @@ fn describe(error: &reqwest::Error) -> String {
 }
 
 impl TokenSource for FileStore {
+    fn forget(&self) {
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
     fn access_token(&self, account: Option<&str>) -> Result<Token, AuthError> {
         let path = self.credentials_file(account)?;
         {
