@@ -80,9 +80,11 @@ pub struct PreparedPage {
     pub opened: Vec<Opened>,
     pub publish_baseline: bool,
 }
-/// Drops a conflicted record's oldest entries beyond `MAX_CONFLICT_ENTRIES`, after a newer one was added. Nothing reads an entry's
-/// versions to settle a conflict (the review and the Catalog merge use the pending draft, the current version and the basis), so a
-/// record whose synced version or local edit keeps changing keeps its latest ones instead of failing the whole replica.
+/// Drops a conflicted record's oldest entries beyond `MAX_CONFLICT_ENTRIES`, after a newer one was added: by the pull, the capture
+/// and a rotation (`rotation::note_conflicts`). No conflict is settled from an entry (the review and the Catalog merge use the pending
+/// draft, the current version and the basis); a historical-state capture reads every entry (`historical_state.rs`), so it then
+/// lacks the dropped oldest ones, local drafts that later edits superseded. A record whose synced version or local edit keeps
+/// changing keeps its latest entries instead of failing the whole replica.
 pub(super) fn keep_latest(entries: &mut Vec<Conflict>) {
     let over = entries.len().saturating_sub(MAX_CONFLICT_ENTRIES);
     entries.drain(..over);
@@ -851,16 +853,11 @@ mod tests {
             )
             .is_err());
     }
-    /// A record left in conflict while its synced version keeps changing keeps its latest entries: a 17th would fail the whole
-    /// replica, and with it every pull and capture.
-    #[test]
-    fn a_conflicted_record_keeps_its_16_latest_entries() {
-        let mut c = case();
-        let chain = c.proof.verify(&c.anchor, None).unwrap();
-        let id = c.header.record_id.clone();
+    /// A record with a pending local edit, after its first synced version, and the next 17 synced versions of it, each new.
+    fn record_in_conflict(c: &mut Case, chain: &VerifiedChain) -> Vec<Version> {
         let first = row(crypto::seal_record(&c.keys, &c.signer, c.header.clone(), b"base").unwrap(), 1, ZERO);
-        c.replica = c.replica.prepare_page(&chain, &c.keys, std::slice::from_ref(&first), &checkpoint(&first)).unwrap().next;
-        c.replica.enqueue(&chain, &c.keys, &c.signer, 2, c.header.clone(), b"local").unwrap();
+        c.replica = c.replica.prepare_page(chain, &c.keys, std::slice::from_ref(&first), &checkpoint(&first)).unwrap().next;
+        c.replica.enqueue(chain, &c.keys, &c.signer, 2, c.header.clone(), b"local").unwrap();
         let mut rows: Vec<Version> = vec![];
         for n in 1..=17u64 {
             let mut h = c.header.clone();
@@ -869,6 +866,34 @@ mod tests {
             let previous = rows.last().map_or(first.history_hash.clone(), |r| r.history_hash.clone());
             rows.push(row(crypto::seal_record(&c.keys, &c.signer, h, format!("remote {n}").as_bytes()).unwrap(), n + 1, &previous));
         }
+        rows
+    }
+    /// A key rotation whose rebuilt history holds a newer version of a record already at its most entries keeps the latest ones,
+    /// as the pull and the capture do: a 17th would fail the rotation and every later capture and pull.
+    #[test]
+    fn a_rotation_keeps_a_conflicted_records_16_latest_entries() {
+        let mut c = case();
+        let chain = c.proof.verify(&c.anchor, None).unwrap();
+        let id = c.header.record_id.clone();
+        let rows = record_in_conflict(&mut c, &chain);
+        let before = c.replica.prepare_page(&chain, &c.keys, &rows[..16], &checkpoint(&rows[15])).unwrap().next;
+        assert_eq!(before.conflicts[&id].len(), MAX_CONFLICT_ENTRIES);
+        let mut rotated = before.prepare_page(&chain, &c.keys, &rows[16..], &checkpoint(&rows[16])).unwrap().next;
+        // `rotation::activate` carries the entries over to the history it rebuilt, then notes what that history changed.
+        rotated.conflicts = before.conflicts.clone();
+        super::super::rotation::note_conflicts(&before, &mut rotated, &BTreeSet::new());
+        assert_eq!(rotated.conflicts[&id].len(), MAX_CONFLICT_ENTRIES);
+        assert_eq!(rotated.conflicts[&id].last().unwrap().remote.version, rows[16]);
+        rotated.validate(&chain).unwrap();
+    }
+    /// A record left in conflict while its synced version keeps changing keeps its latest entries: a 17th would fail the whole
+    /// replica, and with it every pull and capture.
+    #[test]
+    fn a_conflicted_record_keeps_its_16_latest_entries() {
+        let mut c = case();
+        let chain = c.proof.verify(&c.anchor, None).unwrap();
+        let id = c.header.record_id.clone();
+        let rows = record_in_conflict(&mut c, &chain);
         let page = c.replica.prepare_page(&chain, &c.keys, &rows, &checkpoint(rows.last().unwrap())).unwrap();
         let entries = &page.next.conflicts[&id];
         assert_eq!(entries.len(), MAX_CONFLICT_ENTRIES);
