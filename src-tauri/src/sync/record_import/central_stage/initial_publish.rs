@@ -72,7 +72,7 @@ impl Publication<'_> {
                     owner.control.phase,
                     AccountPhase::Enrolled | AccountPhase::Active
                 )
-            || candidate.version != crate::sync::records_v3::CENTRAL_STATE_VERSION
+            || candidate.version != central::initial_candidate_version(candidate)
             || candidate.local.central_projection.is_none()
             || !after.control.cutover
             || after.control.phase != AccountPhase::Active

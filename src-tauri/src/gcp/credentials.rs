@@ -81,7 +81,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_provider_answers_a_bearer_header_from_the_token_source() {
-        let credentials = credentials(Arc::new(StaticToken("t0k".into())), Some("frank@retower.io".into()));
+        let credentials = credentials(Arc::new(StaticToken("t0k".into())), Some("frank@example.com".into()));
         let answer = credentials.headers(Extensions::new()).await.expect("a header");
         let google_cloud_auth::credentials::CacheableResource::New { data, .. } = answer else { panic!("a fresh header, not a cache hit") };
         let value = data.get("authorization").expect("an authorization header");
@@ -92,8 +92,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_failure_is_a_credentials_error_that_says_why() {
-        let credentials = credentials(Arc::new(Refusing(AuthError::SignInExpired { account: "frank@retower.io".into() })), None);
+        let credentials = credentials(Arc::new(Refusing(AuthError::SignInExpired { account: "frank@example.com".into() })), None);
         let error = credentials.headers(Extensions::new()).await.unwrap_err();
-        assert!(error.to_string().contains("run `gcloud auth login frank@retower.io`"), "{error}");
+        assert!(error.to_string().contains("run `gcloud auth login frank@example.com`"), "{error}");
     }
 }

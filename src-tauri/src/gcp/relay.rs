@@ -260,7 +260,7 @@ mod tests {
 
     fn endpoint() -> Endpoint {
         Endpoint {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
@@ -315,7 +315,7 @@ mod tests {
         let endpoint = endpoint();
         assert_eq!(
             endpoint.connect_url(),
-            "wss://tunnel.cloudproxy.app/v4/connect?project=eng-dev-396409&port=22&newWebsocket=True&zone=asia-east1-b&instance=jumpbox&interface=nic0"
+            "wss://tunnel.cloudproxy.app/v4/connect?project=acme-dev-654321&port=22&newWebsocket=True&zone=asia-east1-b&instance=jumpbox&interface=nic0"
         );
         assert_eq!(
             endpoint.reconnect_url(b"s id/1", 70000),
@@ -328,7 +328,7 @@ mod tests {
         let overridden = Endpoint { url_root: Some("ws://127.0.0.1:4321/v4".into()), ..endpoint() };
         assert_eq!(
             overridden.connect_url(),
-            "ws://127.0.0.1:4321/v4/connect?project=eng-dev-396409&port=22&newWebsocket=True&zone=asia-east1-b&instance=jumpbox&interface=nic0"
+            "ws://127.0.0.1:4321/v4/connect?project=acme-dev-654321&port=22&newWebsocket=True&zone=asia-east1-b&instance=jumpbox&interface=nic0"
         );
         assert!(overridden.reconnect_url(b"x", 1).starts_with("ws://127.0.0.1:4321/v4/reconnect?sid=x&ack=1&"));
         let bare = Endpoint { url_root: Some("ws://relay.test".into()), ..endpoint() };

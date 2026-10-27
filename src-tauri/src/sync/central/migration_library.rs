@@ -414,12 +414,14 @@ pub(super) fn prepare(
     let next = normalized(state, known, &active)?;
     let empty = Catalog {
         tunnels: vec![],
+        transports: vec![],
         collections: vec![],
         group_orders: vec![GroupOrder {
             scope: HostScope::Local,
             ids: vec![],
         }],
     };
+    // The routes saved on this device stay there: they move into the library after the cutover.
     let public = super::projection_local::public_rows(&next, &empty, &storage)?;
     let catalog = public
         .iter()

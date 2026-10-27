@@ -31,6 +31,9 @@ use crate::sync::upgrade;
 /// app data 目錄裡的行程間同步鎖:一個 OS 使用者同時只有一個行程跑同步引擎。
 const ENGINE_LOCK_FILE: &str = "sync.lock";
 pub(crate) const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another Lunport process — quit it to use sync here";
+/// The background thread's stack. A round can run central sync's first publication, whose frames hold whole library states and need
+/// about 2 MiB in a debug build, more on Windows: a default thread's whole stack. Tests get the same from `.cargo/config.toml`.
+const SYNC_THREAD_STACK: usize = 8 * 1024 * 1024;
 
 /// 喚醒背景執行緒的原因(`wake`、`wake_implicit`):退避期間(spec §6.4)只有順便的喚醒要等。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,7 +521,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
         }
     }
     let(tx,rx)=mpsc::channel();*WAKER.get_or_init(||Mutex::new(None)).lock().unwrap()=Some(tx);
-    let handle=app.clone();std::thread::Builder::new().name("sshelter-sync".into()).spawn(move||worker_loop(handle,rx)).map_err(AppError::Io)?;
+    let handle=app.clone();std::thread::Builder::new().name("sshelter-sync".into()).stack_size(SYNC_THREAD_STACK).spawn(move||worker_loop(handle,rx)).map_err(AppError::Io)?;
     Ok(())
 }
 

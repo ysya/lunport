@@ -6,15 +6,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { revealHidden } from "@/lib/sync-approvals";
 import { justificationAcceptable } from "@/lib/mcp-flow";
-import { pamStatusLine, requestPamGrant, type HostTransport, type PamStatusView } from "@/lib/transports";
+import { pamStatusLine, requestPamGrant, type GrantMemoryView, type HostTransport, type PamStatusView } from "@/lib/transports";
 
 const MAX_MINUTES = 480;
 const MAX_JUSTIFICATION = 512;
 
-/** What the form starts with: the transport's last justification and its default duration, in minutes. */
-export function grantRequestDefaults(transport: HostTransport): { justification: string; minutes: string } {
-  const pam = transport.kind.pam;
-  return { justification: pam?.justification ?? "", minutes: String(Math.round((pam?.duration_secs ?? 1800) / 60)) };
+/**
+ * What the form starts with: what this computer remembers of its last request for the host, its justification and its length in minutes;
+ * for a host this computer never asked a grant for, no justification and the route's default length (the route no longer carries a
+ * justification, so one an earlier release saved there is not offered).
+ */
+export function grantRequestDefaults(transport: HostTransport, memory: GrantMemoryView | null): { justification: string; minutes: string } {
+  if (memory) return { justification: memory.justification, minutes: String(Math.round(memory.duration_secs / 60)) };
+  return { justification: "", minutes: String(Math.round((transport.kind.pam?.duration_secs ?? 1800) / 60)) };
 }
 
 /** Whether Request may go: whole minutes from 1 to 480 and a justification the backend accepts (one line, no control characters). */
@@ -23,8 +27,18 @@ export function grantRequestReady(justification: string, minutes: string): boole
   return justificationAcceptable(justification) && whole >= 1 && whole <= MAX_MINUTES;
 }
 
+/**
+ * What Request sends: the grant on `entitlement` (the route's first when none is named, which the backend picks) for the minutes typed,
+ * with the justification trimmed.
+ */
+export function requestGrant(transport: HostTransport, entitlement: string | undefined, justification: string, minutes: string): Promise<PamStatusView> {
+  return requestPamGrant(transport.host_id, justification.trim(), Number(minutes.trim()) * 60, entitlement);
+}
+
 export type GrantRequestCardViewProps = {
   transport: HostTransport;
+  /** The entitlement the request is for; the route's first when left out. */
+  entitlement?: string;
   alias: string;
   justification: string;
   minutes: string;
@@ -38,11 +52,11 @@ export type GrantRequestCardViewProps = {
 };
 
 /** The dialog's content, apart from its state: rendered inside a `Dialog` (the tests render it in one without the portal). */
-export function GrantRequestCardView({ transport, alias, justification, minutes, busy, result, error, onJustification, onMinutes, onRequest, onClose }: GrantRequestCardViewProps) {
+export function GrantRequestCardView({ transport, entitlement: named, alias, justification, minutes, busy, result, error, onJustification, onMinutes, onRequest, onClose }: GrantRequestCardViewProps) {
   const justificationId = useId();
   const minutesId = useId();
   const ready = !busy && result === null && grantRequestReady(justification, minutes);
-  const entitlement = transport.kind.pam?.entitlements[0] ?? "";
+  const entitlement = named ?? transport.kind.pam?.entitlements[0] ?? "";
   const requestOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -107,17 +121,23 @@ export function GrantRequestCardView({ transport, alias, justification, minutes,
 }
 
 /**
- * The Google Cloud panel's Request-a-grant dialog (design 2026-10-25, PAM grant requests): a justification and a duration, prefilled
- * from the transport's defaults, requested on the transport's first entitlement as the connect would; the grant's state, or the refusal,
- * shows inside once Lunport has waited for it. Mount it for one transport at a time (key it by the host).
+ * The Request-a-grant dialog (design 2026-10-25, PAM grant requests; 2026-10-26, Commands): a justification and a duration, prefilled
+ * from what this computer remembers of its last request for the host (`memory`), else the route's default length; requested on
+ * `entitlement`, else the route's first as the connect would; the grant's state, or the refusal, shows inside once Lunport has waited
+ * for it. Mount it for one request at a time, keyed by what the request is for, so another starts afresh: the details pane keys the
+ * section that holds it by the host, the Google Cloud page keys the dialog by the row (account, project, location and entitlement).
  */
-export function GrantRequestDialog({ transport, alias, onClose, onRequested }: {
+export function GrantRequestDialog({ transport, entitlement, memory, alias, onClose, onRequested }: {
   transport: HostTransport;
+  /** The entitlement to request, one the route lists; the route's first when left out. */
+  entitlement?: string;
+  /** This computer's memory of its last request for the host; `null` when it made none. */
+  memory: GrantMemoryView | null;
   alias: string;
   onClose: () => void;
   onRequested: (view: PamStatusView) => void;
 }) {
-  const defaults = grantRequestDefaults(transport);
+  const defaults = grantRequestDefaults(transport, memory);
   const [justification, setJustification] = useState(defaults.justification);
   const [minutes, setMinutes] = useState(defaults.minutes);
   const [busy, setBusy] = useState(false);
@@ -131,7 +151,7 @@ export function GrantRequestDialog({ transport, alias, onClose, onRequested }: {
     setBusy(true);
     setError(null);
     try {
-      const view = await requestPamGrant(transport.host_id, justification.trim(), Number(minutes.trim()) * 60);
+      const view = await requestGrant(transport, entitlement, justification, minutes);
       setResult(view);
       onRequested(view);
     } catch (failure) {
@@ -147,6 +167,7 @@ export function GrantRequestDialog({ transport, alias, onClose, onRequested }: {
       <TaskDialogContent className="sm:max-w-lg">
         <GrantRequestCardView
           transport={transport}
+          entitlement={entitlement}
           alias={alias}
           justification={justification}
           minutes={minutes}

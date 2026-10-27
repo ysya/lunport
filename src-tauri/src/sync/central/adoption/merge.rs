@@ -45,7 +45,13 @@ fn scope(operation: &str, old: &HostScope) -> Result<HostScope, AppError> {
         )?,
     })
 }
-fn host(operation: &str, old_scope: &HostScope, id: &str) -> Result<String, AppError> {
+/// The id this merge gives a host it imports from `old_scope`, wherever the host's id is used: its own rows, the jumps and tunnels that
+/// name it, and what this device keeps by host id (`route_host_ids`).
+pub(crate) fn adopted_host_id(
+    operation: &str,
+    old_scope: &HostScope,
+    id: &str,
+) -> Result<String, AppError> {
     named(operation, "host", Some(old_scope), id, 16)
 }
 fn group(operation: &str, old_scope: &HostScope, id: &str) -> Result<String, AppError> {
@@ -161,7 +167,7 @@ pub(super) fn history(
                 value.jump = value
                     .jump
                     .iter()
-                    .map(|v| host(operation, s, v))
+                    .map(|v| adopted_host_id(operation, s, v))
                     .collect::<Result<_, _>>()?;
                 // Source trust approvals are scoped to their old host identity/device.
                 value.host_key = None;
@@ -175,11 +181,14 @@ pub(super) fn history(
                 if let Some(jump) = &mut value.defaults.jump {
                     *jump = jump
                         .iter()
-                        .map(|v| host(operation, s, v))
+                        .map(|v| adopted_host_id(operation, s, v))
                         .collect::<Result<_, _>>()?;
                 }
             }
             Data::Catalog(value) => {
+                // The library's routes stay as they are: this device brings none (R11). The routes that apply on it, a replaced
+                // library's included (R22), stay on it under the ids its hosts get here (`route_host_ids`) until a capture
+                // publishes them.
                 let mut merged = remote.clone();
                 if has_local {
                     merged.collections.push(Collection {
@@ -213,19 +222,24 @@ pub(super) fn history(
                     let mut rule = old.clone();
                     rule.id = named(operation, "tunnel", None, &old.id, 16)?;
                     rule.host_id = match host_scopes.get(&old.host_id) {
-                    Some(scopes) if scopes.len() == 1 => host(operation, scopes.first().ok_or_else(invalid)?, &old.host_id)?,
+                    Some(scopes) if scopes.len() == 1 => adopted_host_id(operation, scopes.first().ok_or_else(invalid)?, &old.host_id)?,
                     Some(_) => return Err(AppError::Other("A retained tunnel has an ambiguous host identity. Original data is retained; resolve its host before merging.".into())),
                     None => named(operation, "orphan-tunnel-host", None, &old.host_id, 16)?,
                 };
                     merged.tunnels.push(rule);
                 }
                 merged.validate()?;
+                // The merged Catalog is published as one record (design 2026-10-26, Room in the Catalog). It is checked once it is
+                // valid, so that only its size reads as the room sentence (R26).
+                if !payload::catalog_fits(&merged) {
+                    return Err(AppError::Other(crate::sync::transports::NO_ROOM.into()));
+                }
                 *value = merged;
             }
             _ => {}
         }
         match id.kind.as_str() {
-            "host" | "password" => id.id = host(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
+            "host" | "password" => id.id = adopted_host_id(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?,
             "group" => {
                 id.id = group(operation, old_scope.as_ref().ok_or_else(invalid)?, &id.id)?
             }
@@ -432,6 +446,56 @@ pub(super) fn owned_collections(
         }
     }
     Ok(owned)
+}
+/// The ids this merge gives the hosts that routes and grant memory name on the source (old → new): this device's own routes and, in a
+/// replacement, the replaced library's too (`transports::view`). They follow their hosts as this device's own (design 2026-10-26,
+/// Existing routes move in; R22) until the publish step moves them into the library (R64a). Hosts are read from the rows `history` rewrites, not from the
+/// source's own tables (R24), so a route lands on exactly the id the merge writes for its host.
+pub(super) fn route_host_ids(
+    package: &super::super::source_package::Package,
+    keys: &VaultKeys,
+    operation: &str,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let original = package
+        .structured_history(keys, &BTreeMap::new())?
+        .into_rows();
+    followed_host_ids(&package.state, &original, operation)
+}
+/// `route_host_ids` for `source` and the rows `history` rewrites (`original`). The merge writes those rows under their new ids in
+/// order, so the last row of a host identity is what the merged library holds for it. A host is followed when exactly one of its
+/// identities ends live there: a host deleted there does not survive the merge, and an id live in two scopes names no one host. What
+/// names no followed host goes.
+pub(super) fn followed_host_ids(
+    source: &SyncStateV3,
+    original: &[(Identity, Data)],
+    operation: &str,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let mut last = BTreeMap::new();
+    for (id, data) in original {
+        if id.kind == "host" {
+            let scope = id.scope.as_ref().ok_or_else(invalid)?;
+            last.insert((id.id.as_str(), scope), matches!(data, Data::Host(_)));
+        }
+    }
+    let mut live: BTreeMap<&str, Vec<&HostScope>> = BTreeMap::new();
+    for ((id, scope), alive) in last {
+        if alive {
+            live.entry(id).or_default().push(scope);
+        }
+    }
+    let followed: std::collections::BTreeSet<String> = crate::sync::transports::view(source)
+        .into_iter()
+        .map(|route| route.host_id)
+        .chain(source.local.transport_grants.keys().cloned())
+        .collect();
+    let mut host_ids = BTreeMap::new();
+    for id in followed {
+        if let Some([scope]) = live.get(id.as_str()).map(Vec::as_slice) {
+            let adopted = adopted_host_id(operation, scope, &id)?;
+            host_ids.insert(id, adopted);
+        }
+    }
+    Ok(host_ids)
 }
 pub(super) fn selections(
     source: &SyncStateV3,

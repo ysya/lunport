@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn a_key_is_recognised_by_algorithm_and_blob_whatever_the_comment() {
-        let profile = LoginProfile { posix_accounts: vec![], ssh_public_keys: vec![format!("{KEY} frank@retower.pub")] };
+        let profile = LoginProfile { posix_accounts: vec![], ssh_public_keys: vec![format!("{KEY} frank@laptop")] };
         assert!(profile.has_key(KEY));
         assert!(profile.has_key(&format!("{KEY} another comment\n")));
         assert!(!profile.has_key("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherBlobOtherBlobOtherBlobOtherBlobOtherBlob"));
@@ -115,25 +115,25 @@ mod tests {
     #[test]
     fn a_profile_is_parsed_from_the_apis_json() {
         let json = json!({
-            "name": "users/frank@retower.io",
+            "name": "users/frank@example.com",
             "posixAccounts": [{
                 "primary": true,
-                "username": "frank_retower_io",
+                "username": "frank_example_com",
                 "uid": "1001",
                 "gid": "1001",
-                "homeDirectory": "/home/frank_retower_io",
+                "homeDirectory": "/home/frank_example_com",
                 "operatingSystemType": "LINUX",
-                "accountId": "eng-dev-396409"
+                "accountId": "acme-dev-654321"
             }],
             "sshPublicKeys": {
-                "3b2f": { "key": format!("{KEY} frank@retower.pub"), "fingerprint": "3b2f", "name": "users/frank@retower.io/sshPublicKeys/3b2f" }
+                "3b2f": { "key": format!("{KEY} frank@laptop"), "fingerprint": "3b2f", "name": "users/frank@example.com/sshPublicKeys/3b2f" }
             }
         });
         let profile = parse_profile(&json).unwrap();
-        assert_eq!(profile.username(), Some("frank_retower_io"));
+        assert_eq!(profile.username(), Some("frank_example_com"));
         assert_eq!(profile.posix_accounts[0].operating_system_type.as_deref(), Some("LINUX"));
         assert!(profile.has_key(KEY));
-        let empty = parse_profile(&json!({"name": "users/frank@retower.io"})).unwrap();
+        let empty = parse_profile(&json!({"name": "users/frank@example.com"})).unwrap();
         assert_eq!((empty.username(), empty.ssh_public_keys.len()), (None, 0));
         assert!(parse_profile(&json!("not an object")).is_err());
     }

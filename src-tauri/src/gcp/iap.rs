@@ -501,7 +501,7 @@ mod tests {
 
     fn endpoint(relay: &FakeRelay) -> Endpoint {
         Endpoint {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
@@ -511,7 +511,7 @@ mod tests {
     }
 
     async fn open_quick(relay: &FakeRelay, tokens: Arc<dyn TokenSource>) -> Result<Tunnel, IapError> {
-        open_with(endpoint(relay), tokens, Some("frank@retower.io".into()), "lunport-test".into(), quick()).await
+        open_with(endpoint(relay), tokens, Some("frank@example.com".into()), "lunport-test".into(), quick()).await
     }
 
     /// A TCP server that echoes everything, on the test's runtime.
@@ -697,7 +697,7 @@ mod tests {
 
         let relay = FakeRelay::start(echo_server().await, TOKEN);
         relay.set(Behaviour::DropAfter(1));
-        let tokens = Scripted::new(vec![Ok(TOKEN.into()), Err(AuthError::SignInExpired { account: "frank@retower.io".into() })]);
+        let tokens = Scripted::new(vec![Ok(TOKEN.into()), Err(AuthError::SignInExpired { account: "frank@example.com".into() })]);
         let mut tunnel = open_quick(&relay, tokens.clone()).await.expect("the tunnel opens");
         tunnel.stream.write_all(b"two").await.unwrap();
         assert!(read_to_end_within(&mut tunnel.stream, Duration::from_secs(5)).await.is_some(), "an expired sign-in ends the stream");
@@ -763,7 +763,7 @@ mod tests {
         // A link that breaks and a relay that refuses every reconnect: the budget runs out, and the tunnel says so.
         let relay = FakeRelay::start(echo_server().await, TOKEN);
         let short = Backoff { initial: Duration::from_millis(200), multiplier: 1.1, ceiling: Duration::from_millis(300), budget: Duration::from_secs(1) };
-        let mut tunnel = open_with(endpoint(&relay), Arc::new(StaticToken(TOKEN.into())), Some("frank@retower.io".into()), "lunport-test".into(), short)
+        let mut tunnel = open_with(endpoint(&relay), Arc::new(StaticToken(TOKEN.into())), Some("frank@example.com".into()), "lunport-test".into(), short)
             .await
             .expect("the tunnel opens");
         relay.set(Behaviour::DropAfter(1));
@@ -783,7 +783,7 @@ mod tests {
     async fn a_reconnect_attempt_that_never_answers_is_bounded_by_the_budget() {
         let relay = FakeRelay::start(echo_server().await, TOKEN);
         let short = Backoff { initial: Duration::from_millis(200), multiplier: 1.1, ceiling: Duration::from_millis(300), budget: Duration::from_secs(1) };
-        let mut tunnel = open_with(endpoint(&relay), Arc::new(StaticToken(TOKEN.into())), Some("frank@retower.io".into()), "lunport-test".into(), short)
+        let mut tunnel = open_with(endpoint(&relay), Arc::new(StaticToken(TOKEN.into())), Some("frank@example.com".into()), "lunport-test".into(), short)
             .await
             .expect("the tunnel opens");
         relay.set(Behaviour::DropAfter(1));
@@ -804,7 +804,7 @@ mod tests {
         let relay = FakeRelay::start(echo_server().await, TOKEN);
         let slow = Backoff { initial: Duration::from_millis(200), multiplier: 1.0, ceiling: Duration::from_millis(200), budget: Duration::from_secs(30) };
         let tokens = Scripted::new(vec![Ok(TOKEN.into())]);
-        let Tunnel { mut stream, guard, .. } = open_with(endpoint(&relay), tokens.clone(), Some("frank@retower.io".into()), "lunport-test".into(), slow).await.expect("the tunnel opens");
+        let Tunnel { mut stream, guard, .. } = open_with(endpoint(&relay), tokens.clone(), Some("frank@example.com".into()), "lunport-test".into(), slow).await.expect("the tunnel opens");
         guard.release();
         relay.set(Behaviour::DropAfter(1));
         stream.write_all(b"x").await.unwrap();

@@ -2,7 +2,7 @@
 use super::{
     api::{Api, DeviceState, Reply},
     controller::Session,
-    crypto::RecordEnvelope,
+    crypto::{RecordEnvelope, VaultKeys},
     outbox::{self, claims::PushReply},
     wire::invalid,
 };
@@ -277,6 +277,26 @@ impl Operation {
         Ok(())
     }
 }
+/// The publish step (design 2026-10-26, Existing routes move in; R64a): the routes saved on this device alone that the library takes
+/// become its rows by an ordinary save of their own (they change the library's rows, which this dispatch's own publication never does),
+/// so that the capture after it publishes them. It waits while a Catalog captured now would conflict with the library's: until the
+/// latest Catalog the pull staged is read into this device's rows, which the round that staged it does at its end, and while the
+/// Catalog is in conflict (`projection_capture::move_local_routes`). A library that takes no edit, its writes blocked or frozen for an
+/// encrypted migration, takes none either. Whether it saved.
+fn publish_local_routes(env: &SyncEnv, state: &SyncStateV3, keys: &VaultKeys) -> Result<bool, AppError> {
+    let now = env.now();
+    if super::projection_capture::move_local_routes(state, keys, now)?.is_none() {
+        return Ok(false);
+    }
+    super::migration_flow::refresh_edit_gate(env)?;
+    if env.runtime.core.lock().unwrap().central_migration_frozen {
+        return Ok(false);
+    }
+    record_runtime::mutate_records(env, |latest| {
+        Ok(super::projection_capture::move_local_routes(latest, keys, now)?.unwrap_or_else(|| latest.clone()))
+    })?;
+    Ok(true)
+}
 pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppError> {
     super::controller::require_enabled()?;
     let _life = env.runtime.lifecycle.lock().unwrap();
@@ -293,6 +313,13 @@ pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppEr
     if context.session().is_none_or(|s| !Arc::ptr_eq(s, &session)) {
         return Err(crate::sync::runtime::superseded());
     }
+    let (before, generation) = if publish_local_routes(env, &before, context.keys())? {
+        let (before, generation) = record_runtime::snapshot(env)?;
+        fresh(&session, &before)?;
+        (before, generation)
+    } else {
+        (before, generation)
+    };
     let adopted = super::passwords::adopt_saved(env, &before, context.keys(), context.signer())?;
     let captured = super::capture_public(&adopted, context.keys(), context.signer())?;
     let prepared = outbox::prepare(&captured, context.keys(), context.signer(), after)?;

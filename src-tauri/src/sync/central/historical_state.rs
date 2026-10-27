@@ -318,7 +318,9 @@ fn read_inner(
                 ledger.key_storage(id).ok_or_else(invalid)?.clone(),
             );
         }
-        for (id, data) in super::projection_local::public_rows(state, &ledger.catalog, &storage)? {
+        for (id, data) in
+            super::projection_local::public_rows(state, &ledger.catalog, &storage)?
+        {
             reader.rows.push_retained(id, data)?;
         }
     }

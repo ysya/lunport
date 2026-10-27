@@ -6,6 +6,7 @@ import type {
   RecordOverview,
   RecordsStatus,
 } from "@/lib/records";
+import type { HostTransport, TransportKind } from "@/lib/transports";
 export const hostPayload = (p: Partial<HostPayload> = {}): HostPayload => ({
   schema: 2,
   alias: "web",
@@ -38,6 +39,24 @@ export const hostView = (p: Partial<RecordHostView> = {}): RecordHostView => ({
   group_error: null,
   readiness: { kind: "ready" },
   ...p,
+});
+/** A host's Google Cloud IAP route, with synthetic names and no account or grant check; `kind` overrides its fields. */
+export const hostTransport = (
+  kind: Partial<TransportKind> = {},
+  hostId: string = hostView().id,
+): HostTransport => ({
+  host_id: hostId,
+  kind: {
+    type: "gcp_iap",
+    project: "acme-prod-123456",
+    zone: "asia-east1-b",
+    instance: "web-1",
+    interface: "nic0",
+    account: null,
+    os_login: true,
+    pam: null,
+    ...kind,
+  },
 });
 export const recordOverview = (
   p: Partial<RecordOverview> = {},

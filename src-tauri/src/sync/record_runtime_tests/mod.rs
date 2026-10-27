@@ -251,7 +251,7 @@ fn invalid_state_save_preserves_existing_bytes_and_creates_no_other_files() {
     let path = temp.path().join("sync-state.json");
     fs::write(&path, b"source").unwrap();
     let mut invalid = state();
-    invalid.version = crate::sync::records_v3::TRANSPORT_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::TRANSPORT_SYNC_STATE_VERSION + 1;
     assert!(save_active(&path, &invalid).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"source");
     assert_eq!(names(temp.path()), vec!["sync-state.json"]);
@@ -422,7 +422,7 @@ fn a_transport_promotes_the_state_version_when_persisted() {
     let transport = HostTransport {
         host_id: "0000000000000001".into(),
         kind: TransportKind::GcpIap {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
@@ -439,4 +439,24 @@ fn a_transport_promotes_the_state_version_when_persisted() {
     let StartupProbe::Records { state: reopened, .. } = probe_startup(&path, "unused") else { panic!("records") };
     assert_eq!(reopened.version, crate::sync::records_v3::TRANSPORT_STATE_VERSION);
     assert!(transports::has_data(&reopened));
+}
+
+/// Design 2026-10-26: the device-local grant memory needs state version 10, the same way (and so will a library's synced route rows). A
+/// candidate that reached the runtime by another road than `remember_grant_request` carries the version it had.
+#[test]
+fn grant_memory_promotes_the_state_version_when_persisted() {
+    use crate::sync::transports::{self, GrantMemory};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let previous = state();
+    save_active(&path, &previous).unwrap();
+    let mut core = crate::sync::runtime::SyncCore::default();
+    activate_probe(&mut core, StartupProbe::Records { state: Box::new(previous.clone()), fresh: false }).unwrap();
+    let mut candidate = previous.clone();
+    candidate.local.transport_grants.insert("0000000000000001".into(), GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 });
+    persist_candidate(&mut core, &path, candidate).unwrap();
+    assert_eq!(core.records.as_ref().unwrap().version, crate::sync::records_v3::TRANSPORT_SYNC_STATE_VERSION);
+    let StartupProbe::Records { state: reopened, .. } = probe_startup(&path, "unused") else { panic!("records") };
+    assert_eq!(reopened.version, crate::sync::records_v3::TRANSPORT_SYNC_STATE_VERSION);
+    assert_eq!(transports::grant_memory(&reopened, "0000000000000001").map(|memory| memory.duration_secs), Some(1800));
 }

@@ -128,6 +128,20 @@ impl Cache {
                 ),
             );
         }
+        // Routes take the tunnels' path: a row of the account per route, whether or not the library holds its host.
+        for route in &catalogue.transports {
+            let id = crate::sync::transports::wire_id(&route.host_id);
+            cache.account.records.insert(
+                record_key(RecordKind::Meta, &id),
+                row(
+                    RecordKind::Meta,
+                    &id,
+                    serde_json::json!({"schema":1,"transport":route}),
+                    catalogue_receipt,
+                    observed,
+                ),
+            );
+        }
         for order in &catalogue.group_orders {
             match &order.scope {
                 HostScope::Local => cache.group_order = order.ids.clone(),
@@ -256,6 +270,7 @@ mod tests {
         };
         let catalogue = Catalog {
             tunnels: vec![],
+            transports: vec![],
             collections: vec![Collection {
                 id: collection.clone(),
                 name: "Private collection".into(),

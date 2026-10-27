@@ -155,6 +155,23 @@ fn local_unselected_and_retained_structured_values_are_preserved_and_current_val
     assert_eq!(serde_json::to_vec(&state).unwrap(), before);
 }
 #[test]
+fn a_first_publication_leaves_the_routes_saved_on_this_device_out_of_the_catalog() {
+    let (state, known, materials) = fixture();
+    let route: crate::sync::transports::HostTransport = serde_json::from_value(json!({"host_id":"1111111111111111","kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    let state = crate::sync::transports::set(&state, &route.host_id, None, Some(route.clone()), 10).unwrap();
+    assert_eq!(crate::sync::transports::view(&state), [route], "a route for the local host the library publishes");
+    let rows = prepare(&state, &known, materials).unwrap().into_rows();
+    let catalogs: Vec<_> = rows
+        .iter()
+        .filter_map(|(_, data)| match data {
+            Data::Catalog(catalog) => Some(catalog),
+            _ => None,
+        })
+        .collect();
+    assert!(!catalogs.is_empty());
+    assert!(catalogs.iter().all(|catalog| catalog.transports.is_empty()), "routes move in after the cutover, by one step");
+}
+#[test]
 fn missing_collections_or_unresolved_source_conflicts_never_return_a_partial_history() {
     for conflict in [false, true] {
         let (mut state, known, materials) = fixture();

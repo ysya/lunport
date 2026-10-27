@@ -11,8 +11,10 @@ use std::time::{Duration, Instant};
 
 use super::channel::{ByteQueue, ExitCell, QueuedShell, ShellInput};
 use super::error::{ConnectError, SessionError};
+use super::forward::{ForwardSpec, ForwardStatus, Forwarder};
 use super::traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
 use super::types::{AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Secret, Target};
+use crate::gcp::iap::IapError;
 use crate::sync::slot_rules::test_keys;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -285,10 +287,24 @@ impl FakeEngine {
     /// Every live session ends now for `reason`, as a connection does when its link is cut or the server goes away: `is_alive` turns
     /// false, `disconnect_reason` says why, and every shell opened on it ends as `Exit::Disconnected` after what it printed.
     pub fn disconnect_now(&self, reason: DisconnectReason) {
-        let sessions: Vec<Arc<SessionState>> = locked(&self.shared.sessions).iter().filter_map(Weak::upgrade).collect();
-        for session in sessions {
+        for session in self.live_sessions() {
             session.end(reason.clone());
         }
+    }
+
+    /// The Google Cloud IAP tunnel that carries every live session's first hop ends now for `end` (the relay closed it, the credentials
+    /// need a person), and each session ends with it, as with the real engine: `tunnel_end` answers `end` (written down before
+    /// `is_alive` turns false, as the real tunnel writes its record before the connection can see its end), `disconnect_reason` gives
+    /// the tunnel's sentence on the first hop, and the shells end as on `disconnect_now`. A session that is over already keeps its end.
+    pub fn end_tunnel_now(&self, end: IapError) {
+        for session in self.live_sessions() {
+            let reason = DisconnectReason { hop: session.first.clone(), kind: DisconnectKind::ConnectionLost, detail: end.to_string() };
+            session.end_with(reason, Some(end.clone()));
+        }
+    }
+
+    fn live_sessions(&self) -> Vec<Arc<SessionState>> {
+        locked(&self.shared.sessions).iter().filter_map(Weak::upgrade).collect()
     }
 }
 
@@ -381,7 +397,13 @@ impl SshEngine for FakeEngine {
         self.shared.record(FakeEvent::Connect { aliases: target.hops.iter().map(|hop| hop.alias.clone()).collect() });
         let disconnect = locked(&self.shared.script).disconnect.clone();
         let destination = target.hops.last().map(Hop::reference).ok_or_else(|| ConnectError::BadJumpChain { why: "the target has no hosts".to_string() })?;
-        let state = Arc::new(SessionState { destination, closed: Mutex::new(disconnect), shells: Mutex::new(Vec::new()) });
+        let state = Arc::new(SessionState {
+            destination,
+            first: target.hops[0].reference(),
+            closed: Mutex::new(disconnect),
+            tunnel_end: Mutex::new(None),
+            shells: Mutex::new(Vec::new()),
+        });
         locked(&self.shared.sessions).push(Arc::downgrade(&state));
         Ok(Box::new(FakeSession { shared: Arc::clone(&self.shared), state }))
     }
@@ -488,7 +510,11 @@ fn fake_login(hop: &Hop, server: &FakeMethods, auth: &dyn AuthSource, mut prefet
 /// What a session and the shells opened on it share: whether (and why) it is over.
 struct SessionState {
     destination: HopRef,
+    /// The first hop, which an IAP tunnel would carry (`FakeEngine::end_tunnel_now`).
+    first: HopRef,
     closed: Mutex<Option<DisconnectReason>>,
+    /// Why the first hop's IAP tunnel ended, when `end_tunnel_now` ended the session; written while `closed` is held, before it is set.
+    tunnel_end: Mutex<Option<IapError>>,
     /// The queue, exit cell and "session over" flag of every shell opened here: when the session ends, so do they, as they do on a lost
     /// connection. A shell is added while `closed` is held (see `shell`) and `end` ends them while it holds `closed`, so none is missed.
     shells: Mutex<Vec<(Arc<ByteQueue>, Arc<ExitCell>, Arc<AtomicBool>)>>,
@@ -497,9 +523,17 @@ struct SessionState {
 impl SessionState {
     /// Ends the session for `reason` unless it is over already; true when this call ended it.
     fn end(&self, reason: DisconnectReason) -> bool {
+        self.end_with(reason, None)
+    }
+
+    /// `end`, with why the first hop's IAP tunnel ended written down first when the tunnel is what ended it.
+    fn end_with(&self, reason: DisconnectReason, tunnel_end: Option<IapError>) -> bool {
         let mut closed = locked(&self.closed);
         if closed.is_some() {
             return false;
+        }
+        if tunnel_end.is_some() {
+            *locked(&self.tunnel_end) = tunnel_end;
         }
         *closed = Some(reason);
         for (queue, exit, over) in locked(&self.shells).iter() {
@@ -586,7 +620,36 @@ fn capped(mut result: ExecResult, cap: usize) -> ExecResult {
     result
 }
 
+/// A forward the fake opened. It listens on nothing and carries nothing: it runs until it is stopped or its session ends, as the real
+/// one does (which then also says that the SSH connection ended; the tunnel manager says the same when a forward does not).
+struct FakeForwarder {
+    session: Arc<SessionState>,
+    port: u16,
+    stopped: AtomicBool,
+}
+
+impl Forwarder for FakeForwarder {
+    fn status(&self) -> ForwardStatus {
+        let running = !self.stopped.load(Ordering::SeqCst) && locked(&self.session.closed).is_none();
+        ForwardStatus { running, port: self.port, connections: 0, error: None }
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+}
+
 impl Session for FakeSession {
+    /// A forward as `FakeForwarder` says; its status names the port asked for. Checked and refused as on the real engine: a spec that is
+    /// not valid, a session that is over.
+    fn forward(&self, spec: &ForwardSpec) -> Result<Box<dyn Forwarder>, SessionError> {
+        spec.validate().map_err(SessionError::Channel)?;
+        if !self.is_alive() {
+            return Err(SessionError::Closed);
+        }
+        Ok(Box::new(FakeForwarder { session: Arc::clone(&self.state), port: spec.port, stopped: AtomicBool::new(false) }))
+    }
+
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
         let (output, exit, ends_at_once, error) = {
             let script = locked(&self.shared.script);
@@ -645,6 +708,10 @@ impl Session for FakeSession {
         locked(&self.state.closed).clone()
     }
 
+    fn tunnel_end(&self) -> Option<IapError> {
+        locked(&self.state.tunnel_end).clone()
+    }
+
     fn close(&self) {
         let reason = DisconnectReason { hop: self.state.destination.clone(), kind: DisconnectKind::ClosedByUs, detail: "closed by the caller".to_string() };
         if self.state.end(reason) {
@@ -664,6 +731,7 @@ impl Drop for FakeSession {
 mod tests {
     use super::*;
     use crate::ssh::error::AuthError;
+    use crate::ssh::forward::ForwardKind;
     use crate::ssh::types::{HostId, Secret, Signature};
     use std::time::Instant;
     use zeroize::Zeroizing;
@@ -1139,6 +1207,56 @@ mod tests {
             assert_eq!(shell.write(b"x"), Err(SessionError::Closed));
             assert!(!engine.events().contains(&FakeEvent::Closed), "the connection was lost, not closed by us");
         });
+    }
+
+    /// The IAP tunnel of a chain's first hop ends: the session ends with it, says why on that hop as the real engine does, and keeps
+    /// the tunnel's end; a session that ended another way, or that we closed, has none.
+    #[test]
+    fn an_ended_iap_tunnel_ends_the_session_and_says_why() {
+        bounded(|| {
+            let engine = FakeEngine::new();
+            let chain = connect(&engine, &Target { hops: vec![hop("bastion"), hop("web")] }, &Auth::default()).unwrap();
+            let shell = chain.shell(pty()).unwrap();
+            assert_eq!(chain.tunnel_end(), None, "a live session's tunnel has not ended");
+            let end = IapError::Closed { code: 4033, reason: "not authorized".into() };
+            engine.end_tunnel_now(end.clone());
+            assert!(!chain.is_alive());
+            assert_eq!(chain.tunnel_end(), Some(end.clone()));
+            let reason = DisconnectReason { hop: hop("bastion").reference(), kind: DisconnectKind::ConnectionLost, detail: "the relay closed the tunnel (4033: not authorized)".into() };
+            assert_eq!(chain.disconnect_reason(), Some(reason));
+            assert_eq!(read_some(shell.as_ref()), b"");
+            assert_eq!(shell.exited(), Some(Exit::Disconnected));
+
+            let lost = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+            engine.disconnect_now(DisconnectReason { hop: hop("web").reference(), kind: DisconnectKind::ConnectionLost, detail: "reset".into() });
+            engine.end_tunnel_now(end.clone());
+            assert_eq!(lost.tunnel_end(), None, "the session was over before the tunnel ended");
+            let closed = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+            closed.close();
+            engine.end_tunnel_now(end);
+            assert_eq!(closed.tunnel_end(), None);
+            assert_eq!(engine.events().iter().filter(|event| **event == FakeEvent::Closed).count(), 1, "only our own close is recorded");
+        });
+    }
+
+    /// A forward listens on nothing: it runs until it is stopped or its session ends, and a session that is over refuses one, as the
+    /// real engine does.
+    #[test]
+    fn a_forward_runs_until_it_is_stopped_or_its_session_ends() {
+        let spec = ForwardSpec { kind: ForwardKind::Local, bind_address: "127.0.0.1".into(), port: 15432, target_host: "db.internal".into(), target_port: 5432 };
+        let engine = FakeEngine::new();
+        let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+        let stopped = session.forward(&spec).unwrap();
+        assert_eq!(stopped.status(), ForwardStatus { running: true, port: 15432, connections: 0, error: None });
+        stopped.stop();
+        assert!(!stopped.status().running);
+        let lost = session.forward(&spec).unwrap();
+        engine.end_tunnel_now(IapError::Closed { code: 4033, reason: "not authorized".into() });
+        assert!(!lost.status().running);
+        assert_eq!(session.forward(&spec).err(), Some(SessionError::Closed));
+        let invalid = ForwardSpec { bind_address: "localhost".into(), ..spec };
+        let live = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+        assert_eq!(live.forward(&invalid).err(), Some(SessionError::Channel("Enter an IPv4 or IPv6 listening address.".into())));
     }
 
     /// As with the real engine: input to a shell fails with `Closed` once the session is over, but a shell we closed ourselves still

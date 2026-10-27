@@ -1,6 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook, stubBackend } from "@/lib/test-ipc";
+import type { RouteChange } from "@/bindings/RouteChange";
 import {
   hostPayload,
   hostView,
@@ -55,6 +56,31 @@ describe("records native client", () => {
           destination: { kind: "space", space_id: "a".repeat(64) },
         },
       ],
+    ]);
+  });
+  it("sends a route change with a host save, and no route key without one", async () => {
+    const calls = stubBackend(async () => recordOverview());
+    const host = hostView();
+    const route: RouteChange = {
+      expected: null,
+      kind: { type: "gcp_iap", project: "acme-dev-654321", zone: "asia-east1-b", instance: "jumpbox", interface: "nic0", account: null, os_login: true, pam: null },
+    };
+    await api.createRecordHost({ kind: "local" }, host.payload, undefined, route);
+    await api.updateRecordHost(host.id, host.revision, host.payload, true, route);
+    await api.createRecordHost({ kind: "local" }, host.payload, true);
+    await api.updateRecordHost(host.id, host.revision, host.payload);
+    expect(calls).toEqual([
+      ["records_host_create", { scope: { kind: "local" }, payload: host.payload, route }],
+      ["records_host_update", { id: host.id, revision: host.revision, payload: host.payload, upgradeConfirmed: true, route }],
+      ["records_host_create", { scope: { kind: "local" }, payload: host.payload, upgradeConfirmed: true }],
+      ["records_host_update", { id: host.id, revision: host.revision, payload: host.payload }],
+    ]);
+    // An omitted route is a missing key: the backend then leaves the host's route untouched.
+    expect(calls.map(([, args]) => Object.keys(args as object))).toEqual([
+      ["scope", "payload", "route"],
+      ["id", "revision", "payload", "upgradeConfirmed", "route"],
+      ["scope", "payload", "upgradeConfirmed"],
+      ["id", "revision", "payload"],
     ]);
   });
   it("connects a stable ID with terminal preference and never substitutes its alias", async () => {

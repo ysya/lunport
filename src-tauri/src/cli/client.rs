@@ -612,7 +612,7 @@ mod tests {
     fn a_grant_question_cannot_be_answered_in_the_terminal_and_is_cancelled() {
         use crate::session::protocol::GrantPrompt;
         let mut client = started();
-        let prompt = GrantPrompt { project: "knowknow-prod".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None };
         assert_eq!(client.handle(question("g1", QuestionKind::Grant, &prompt.to_text(), true)), [cancel("g1".into())]);
         assert!(matches!(client.phase, Phase::Connecting), "no prompt mode is opened for it");
     }

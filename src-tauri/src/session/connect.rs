@@ -1707,8 +1707,8 @@ mod tests {
     fn need() -> GrantNeed {
         GrantNeed {
             host: HostId::from("id-web"),
-            account: Some("frank@retower.io".into()),
-            project: "knowknow-prod".into(),
+            account: Some("frank@example.com".into()),
+            project: "acme-prod-123456".into(),
             location: "global".into(),
             entitlement: "prod-operate".into(),
             entitlements: vec!["prod-operate".into(), "prod-admin".into()],
@@ -1729,7 +1729,7 @@ mod tests {
     /// IAP refusing the tunnel to web with `code`.
     fn refused(code: u16) -> ConnectError {
         let hop = FakeDirectory::new().with_host("web", AuthMethod::Password).resolve(&web()).unwrap().hops.remove(0).reference();
-        ConnectError::Tunnel { hop, text: "frank@retower.io is not authorized to tunnel to jumpbox through IAP.".into(), code: Some(code) }
+        ConnectError::Tunnel { hop, text: "frank@example.com is not authorized to tunnel to jumpbox through IAP.".into(), code: Some(code) }
     }
 
     /// The person at the terminal who answers only once the test lets them (`release`): a question waits at `ask`, so that another
@@ -1777,7 +1777,7 @@ mod tests {
         }
     }
 
-    const GRANT_NOTICE: &str = "Requested a 30-minute prod-operate grant on knowknow-prod; active until ";
+    const GRANT_NOTICE: &str = "Requested a 30-minute prod-operate grant on acme-prod-123456; active until ";
     const IAP_WAITING: &str = "IAP has not seen the grant yet; retrying for up to two minutes.";
 
     /// Design 2026-10-25 (PAM grant requests): a connection that needs a grant asks the person once, requests what they answered, tells
@@ -1792,13 +1792,13 @@ mod tests {
         assert_eq!(asked[0].kind, QuestionKind::Grant);
         assert!(asked[0].echo);
         let prompt = GrantPrompt::from_text(&asked[0].text).expect("the question carries the prompt");
-        assert_eq!((prompt.project.as_str(), prompt.entitlement.as_str(), prompt.minutes, prompt.justification.as_deref()), ("knowknow-prod", "prod-operate", 30, Some("restart app-api")));
+        assert_eq!((prompt.project.as_str(), prompt.entitlement.as_str(), prompt.minutes, prompt.justification.as_deref()), ("acme-prod-123456", "prod-operate", 30, Some("restart app-api")));
         let deadline = asked[0].deadline.expect("the question has a deadline").saturating_duration_since(std::time::Instant::now());
         assert!(deadline > Duration::from_secs(290) && deadline <= Duration::from_secs(300), "five minutes, not two: {deadline:?}");
         assert_eq!(directory.requested(), [("restart app-api after the deploy".to_string(), 45 * 60)], "what the person answered, in seconds");
         let notices = locked(&world.owner.notices).clone();
         assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].starts_with("Requested a 45-minute prod-operate grant on knowknow-prod; active until ") && notices[0].ends_with('.'), "{}", notices[0]);
+        assert!(notices[0].starts_with("Requested a 45-minute prod-operate grant on acme-prod-123456; active until ") && notices[0].ends_with('.'), "{}", notices[0]);
         assert_eq!(locked(&directory.prepared).len(), 2, "checked again after the grant");
         assert_eq!(world.engine.attempts(), 1);
     }
@@ -1941,7 +1941,7 @@ mod tests {
 
     #[test]
     fn the_grace_runs_out_with_the_note() {
-        let note = "frank@retower.io is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.";
+        let note = "frank@example.com is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.";
         // No grace at all: the first refusal is the end, and nothing is said about retrying.
         let world = world(FakeEngine::new().failing_times(5, refused(4033)), pinned_password_web()).with_saved_password();
         let directory = Preparing::answering(&world.directory, Ok(Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) }));
@@ -1985,7 +1985,7 @@ mod tests {
     #[test]
     fn a_denied_preparation_is_an_auth_failure_and_nothing_connects() {
         let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())).with_saved_password();
-        let sentence = "No active Privileged Access Manager grant for prod-operate on knowknow-prod. Request one and connect again.";
+        let sentence = "No active Privileged Access Manager grant for prod-operate on acme-prod-123456. Request one and connect again.";
         let directory = Preparing::answering(&world.directory, Err(DirectoryError::Denied(sentence.into())));
         let error = world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails");
         assert_eq!(error, failure(kinds::AUTH, sentence));
@@ -2003,11 +2003,11 @@ mod tests {
             let directory = Preparing::answering(&world.directory, Ok(prepared));
             world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails")
         };
-        let bare = "frank@retower.io is not authorized to tunnel to jumpbox through IAP.";
+        let bare = "frank@example.com is not authorized to tunnel to jumpbox through IAP.";
         // One sentence, as every failure text is (design 2026-10-25, "Error texts").
         assert_eq!(
             fails_with(refused(4033), Prepared { recent_grant: true, ..Default::default() }),
-            failure(kinds::CONNECT, "frank@retower.io is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.")
+            failure(kinds::CONNECT, "frank@example.com is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.")
         );
         assert_eq!(fails_with(refused(4033), Prepared { recent_grant: false, ..Default::default() }), failure(kinds::CONNECT, bare));
         assert_eq!(fails_with(refused(4003), Prepared { recent_grant: true, ..Default::default() }), failure(kinds::CONNECT, bare));

@@ -1,15 +1,20 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useState, type ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
+import { stubBackend } from "@/lib/test-ipc";
+import type { RecordHostView, RecordOverview } from "@/lib/records";
+import { pamStatusQuery, type HostTransport, type PamStatusView } from "@/lib/transports";
 import { RecordHostEditor } from "./HostEditor";
 import { RecordHostList } from "./HostList";
+import { HostPreview } from "./HostPreview";
 import { RecordsKeysPanel } from "./KeysPanel";
 import { RecordsAccountPanel } from "./AccountPanel";
 import { ImportReview } from "./ImportPanel";
 import {
   hostPayload,
+  hostTransport,
   hostView,
   importPreview,
   recordOverview,
@@ -24,6 +29,7 @@ function SelectedKeysPanel(props: Parameters<typeof RecordsKeysPanel>[0]) {
   vi.mocked(useState).mockReturnValueOnce([props.overview.keys[0]?.id ?? null, vi.fn()]);
   return <RecordsKeysPanel {...props} />;
 }
+afterEach(() => vi.unstubAllGlobals());
 const render = (node: ReactNode) =>
   renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient()}>
@@ -291,5 +297,149 @@ describe("explicit import consent and key/account controls", () => {
     expect(text(html)).not.toContain("Create sync chain");
     expect(text(html)).not.toContain("Join with sync code");
     expect(text(html)).toContain("Sync is optional");
+  });
+});
+
+describe("a host's route on its card and in its details", () => {
+  const HOST = "0000000000000001";
+  const web = hostView({ id: HOST, payload: hostPayload({ alias: "web-1", hostname: "10.0.0.8", user: "deploy" }) });
+  const iap = hostTransport({ account: "ops@example.com" });
+  const withGrant = hostTransport({ pam: { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null } });
+  const library = (route: HostTransport | null): RecordOverview => recordOverview({ hosts: [web], transports: route ? [route] : [] });
+  const list = (overview: RecordOverview) => render(<RecordHostList overview={overview} selectedId={null} select={vi.fn()} />);
+  const preview = (host: RecordHostView, overview: RecordOverview, client = new QueryClient()) =>
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <HostPreview host={host} overview={overview} connect={vi.fn()} edit={vi.fn()} close={vi.fn()} busy={false} />
+      </QueryClientProvider>,
+    );
+  /**
+   * The details pane once the host's grant has been read, as it draws after the latest answer (or failure); `earlier` is what a read
+   * before it had found.
+   */
+  async function settled(overview: RecordOverview, answer: (command: string) => unknown, earlier?: PamStatusView) {
+    const calls = stubBackend(async (command) => answer(command));
+    // A mounting pane reads the grant again whatever the last read found; this one draws what that read left, even a failure.
+    const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
+    if (earlier) client.setQueryData(pamStatusQuery(HOST).queryKey, earlier);
+    await client.prefetchQuery(pamStatusQuery(HOST));
+    return { html: preview(web, overview, client), calls };
+  }
+  const status = (state: string, entitlement: string | null, until: number | null = null, message: string | null = null) => ({
+    entitlement,
+    state,
+    active_until_ms: until,
+    message,
+  });
+
+  it("marks an IAP host's card, and names the route in its tooltip", () => {
+    const html = list(library(iap));
+    expect(html).toContain("</svg>IAP · deploy</span>");
+    expect(html).toContain("lucide-cloud");
+    expect(html).toContain('title="Google Cloud IAP · acme-prod-123456 / web-1"');
+    expect(text(html)).not.toContain("SSH · deploy");
+    // A host without a route reads as before, and an IAP host with no username shows the bare marker.
+    const plain = list(library(null));
+    expect(plain).toContain(">SSH · deploy</span>");
+    expect(plain).toContain('title="SSH · deploy · 10.0.0.8:22"');
+    expect(plain).not.toContain("IAP");
+    expect(plain).not.toContain("lucide-cloud");
+    const anonymous = hostView({ id: HOST, payload: hostPayload({ user: "" }) });
+    expect(list(recordOverview({ hosts: [anonymous], transports: [iap] }))).toContain("</svg>IAP</span>");
+  });
+
+  it("leads the details with the IAP target and drops the address", () => {
+    const html = preview(web, library(iap));
+    expect(html).toContain("</svg>acme-prod-123456 / web-1</p>");
+    expect(html).toContain("lucide-cloud");
+    expect(html).not.toContain(">Address<");
+    expect(html).not.toContain("10.0.0.8");
+    const rows = text(html);
+    expect(rows).toContain("Connect via Google Cloud IAP");
+    expect(rows).toContain("Instance web-1 · asia-east1-b");
+    expect(rows).toContain("Project acme-prod-123456");
+    expect(rows).toContain("Google account ops@example.com");
+    expect(rows).toContain("Checks OS Login");
+    expect(rows).toContain("Username deploy Port 22 Group Ungrouped");
+    // The account falls back to gcloud's active one, and Checks names only what applies.
+    const bare = text(preview(web, library(hostTransport({ os_login: false }))));
+    expect(bare).toContain("Google account gcloud's active account");
+    expect(bare).not.toContain("Checks");
+    expect(text(preview(web, library(withGrant)))).toContain("Checks OS Login · PAM grant");
+    // An address host keeps its address.
+    const plain = preview(web, library(null));
+    expect(plain).toContain(">Address<");
+    expect(plain).toContain('<p class="library-preview-address">10.0.0.8</p>');
+    expect(plain).not.toContain("lucide-cloud");
+    expect(text(plain)).not.toContain("Connect via");
+  });
+
+  it("checks an IAP host through IAP, and an address host at its port", () => {
+    const iapPane = text(preview(web, library(iap)));
+    expect(iapPane).toContain("Check through IAP");
+    expect(iapPane).toContain("Check whether this computer reaches the instance's port through IAP with its Google sign-in.");
+    expect(iapPane).not.toContain("Check port");
+    const plain = text(preview(web, library(null)));
+    expect(plain).toContain("Check port");
+    expect(plain).not.toContain("Check through IAP");
+  });
+
+  it("shows the grant and disables Request grant while it is active", async () => {
+    const until = new Date(2026, 9, 27, 10, 0).getTime();
+    const { html, calls } = await settled(library(withGrant), () => status("active", "prod-operate", until));
+    expect(calls).toEqual([["transports_pam_status", { hostId: HOST }]]);
+    expect(text(html)).toContain("Access grant");
+    expect(text(html)).toContain("prod-operate · Active until 10:00");
+    expect(text(html)).toContain("Required: prod-operate, prod-admin");
+    expect(buttonTag(html, "Request grant…")).toContain(DISABLED);
+  });
+
+  it("keeps Request grant off while a grant activates, and offers it when there is none", async () => {
+    const activating = await settled(library(withGrant), () => status("activating", "prod-admin"));
+    expect(text(activating.html)).toContain("prod-admin · Activating…");
+    expect(buttonTag(activating.html, "Request grant…")).toContain(DISABLED);
+    const none = await settled(library(withGrant), () => status("none", null));
+    expect(text(none.html)).toContain("No active grant");
+    expect(buttonTag(none.html, "Request grant…")).not.toContain(DISABLED);
+  });
+
+  it("says why the grant could not be read instead of saying there is none", async () => {
+    const refused = "Privileged Access Manager refused the request: quota exceeded.";
+    const answered = await settled(library(withGrant), () => status("error", null, null, refused));
+    expect(text(answered.html)).toContain(refused);
+    expect(text(answered.html)).not.toContain("No active grant");
+    expect(buttonTag(answered.html, "Request grant…")).not.toContain(DISABLED);
+    // A sentence about a grant on a named entitlement stands alone, as it does for one that names none.
+    const named = await settled(library(withGrant), () => status("error", "prod-operate", null, refused));
+    expect(text(named.html)).toContain(refused);
+    expect(text(named.html)).not.toContain("prod-operate ·");
+    // The command itself failing reads the same way.
+    const failed = await settled(library(withGrant), () => {
+      throw "Invalid host identity.";
+    });
+    expect(text(failed.html)).toContain("Invalid host identity.");
+    expect(buttonTag(failed.html, "Request grant…")).not.toContain(DISABLED);
+    // A read that fails after one that succeeded speaks for the grant: what the earlier one found may be gone by now.
+    const lost = await settled(
+      library(withGrant),
+      () => {
+        throw "Google did not answer.";
+      },
+      status("active", "prod-operate", new Date(2026, 9, 27, 10, 0).getTime()),
+    );
+    expect(text(lost.html)).toContain("Google did not answer.");
+    expect(text(lost.html)).not.toContain("Active until");
+    expect(buttonTag(lost.html, "Request grant…")).not.toContain(DISABLED);
+  });
+
+  it("waits for the first answer, and has no Access grant for a route without a PAM check", () => {
+    const calls = stubBackend(async () => status("none", null));
+    const waiting = preview(web, library(withGrant));
+    expect(text(waiting)).toContain("Checking the grant…");
+    expect(buttonTag(waiting, "Request grant…")).not.toContain(DISABLED);
+    expect(text(preview(web, library(iap)))).not.toContain("Access grant");
+    expect(text(preview(web, library(null)))).not.toContain("Access grant");
+    // A server render reads nothing: the pane reads the grant once it is open.
+    expect(calls).toEqual([]);
   });
 });

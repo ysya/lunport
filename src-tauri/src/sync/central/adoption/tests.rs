@@ -490,7 +490,23 @@ fn append(
     });
 }
 fn catalog_write(f: &Fixture, rows: &mut Vec<super::super::rekey::Version>, name: &str) {
-    use super::super::payload::{Collection, Data, Identity};
+    catalog_edit(f, rows, |catalog| {
+        if !name.is_empty() {
+            catalog.collections.retain(|c| c.id != "f".repeat(64));
+            catalog.collections.push(super::super::payload::Collection {
+                id: "f".repeat(64),
+                name: name.into(),
+            });
+        }
+    });
+}
+/// Appends the next version of the library's Catalog, the latest one after `edit`, as the first device writes it.
+fn catalog_edit(
+    f: &Fixture,
+    rows: &mut Vec<super::super::rekey::Version>,
+    edit: impl FnOnce(&mut super::super::payload::Catalog),
+) {
+    use super::super::payload::{Data, Identity};
     let owner = record_runtime::snapshot(&f.first.env())
         .unwrap()
         .0
@@ -533,13 +549,7 @@ fn catalog_write(f: &Fixture, rows: &mut Vec<super::super::rekey::Version>, name
         Data::Catalog(c) => c,
         _ => panic!("missing catalogue"),
     };
-    if !name.is_empty() {
-        catalog.collections.retain(|c| c.id != "f".repeat(64));
-        catalog.collections.push(Collection {
-            id: "f".repeat(64),
-            name: name.into(),
-        });
-    }
+    edit(&mut catalog);
     let data = Data::Catalog(catalog);
     let row = super::super::crypto::seal_record(
         &f.keys,
@@ -1094,9 +1104,15 @@ fn an_enrolled_peer_can_adopt_a_later_epoch_only_with_the_verified_original_sour
                     .unwrap();
             assert!(forged.require_read(&read, &transcript).is_err());
         }
-        let candidate =
-            Candidate::adopt(&source, &read, &"c".repeat(64), env.now(), &BTreeMap::new())
-                .unwrap();
+        let candidate = Candidate::adopt(
+            &source,
+            &read,
+            &"c".repeat(64),
+            env.now(),
+            &BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert!(!candidate.delta().required_material().is_empty());
         candidate
             .shadow()
@@ -1861,6 +1877,10 @@ fn replacement_fixture() -> Fixture {
     replacement_fixture_kind(false)
 }
 fn replacement_fixture_kind(legacy: bool) -> Fixture {
+    replacement_fixture_with(legacy, |_| {})
+}
+/// `replacement_fixture_kind`, with `edit` applied to the replaced device's library just before it is archived for the replacement.
+fn replacement_fixture_with(legacy: bool, edit: impl FnOnce(&SyncEnv)) -> Fixture {
     let mut f = fixture_legacy(false, false, legacy);
     let old_env = f.first.env();
     let raw = Zeroizing::new(crate::sync::slot_rules::test_keys::encrypted());
@@ -1888,6 +1908,7 @@ fn replacement_fixture_kind(legacy: bool) -> Fixture {
         .map_err(|e| AppError::Other(e.to_string()))
     })
     .unwrap();
+    edit(&old_env);
     let original = record_runtime::snapshot(&old_env).unwrap().0;
     let old = original.local.central.as_ref().unwrap();
     assert!(!old.replica.as_ref().unwrap().pending.is_empty());
@@ -2247,8 +2268,8 @@ fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
             .map_err(|e| AppError::Other(e.to_string()))
     })
     .unwrap();
-    // A device-local transport on the same source host: the projection re-keys hosts and forces the state version, so it is cleared.
-    let transport: crate::sync::transports::HostTransport = serde_json::from_value(json!({"host_id":"a".repeat(16),"kind":{"type":"gcp_iap","project":"eng-dev-396409","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    // A route this device saved for the same source host: it follows the host, as the tunnel does.
+    let transport = crate::sync::transports::tests::iap(&"a".repeat(16));
     crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
         crate::sync::transports::set(s, &transport.host_id, None, Some(transport.clone()), now).map_err(|e| AppError::Other(e.to_string()))
     })
@@ -2273,7 +2294,468 @@ fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
                 && !r.record.deleted
                 && r.record.payload["alias"] == "peer-local-host"));
         assert!(state.local.tunnel_rules.is_empty());
-        assert!(state.local.transports.is_empty(), "device-local transports are cleared by the projection");
+        let host_id = &rules[0].rule.host_id;
+        assert_eq!(
+            crate::sync::transports::view(&state),
+            vec![crate::sync::transports::HostTransport { host_id: host_id.clone(), ..transport.clone() }],
+            "the route is kept, under the id the tunnel's host was given"
+        );
+        assert!(!crate::sync::transports::synced(&state, host_id));
         assert!(crate::sync::records_v3::validate_state(&state).is_ok());
+    });
+}
+
+/// R13: adopting a library whose Catalog holds a route keeps the route, as the library's. The initial projection writes it into the
+/// account, from which its ledger rebuilds the Catalog; the ledger used to refuse such a library ("Initial projection ledger is
+/// invalid.").
+#[test]
+fn adopting_a_library_whose_catalog_holds_a_route_keeps_the_route() {
+    use crate::sync::transports;
+    let f = fixture(true);
+    let s = service(&f);
+    // The library holds no host for it: the Catalog tolerates such a route, as it tolerates such a tunnel.
+    let route: transports::HostTransport = serde_json::from_value(json!({"host_id":"c".repeat(16),"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap();
+    catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| catalog.transports.push(route.clone()));
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let state = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert_eq!(transports::get(&state, &route.host_id), Some(route.clone()));
+        assert!(transports::synced(&state, &route.host_id));
+        assert_eq!(state.version, transports::SYNC_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&state).unwrap();
+        assert!(s.rows.lock().unwrap().len() > f.rows.len() + 1, "the device's own library was merged in too");
+    });
+}
+
+/// Design 2026-10-26 (Existing routes move in): adoption keeps the routes this device saved, and what its grant requests taught it,
+/// under the ids the merge gives their hosts. They stay this device's until the publish step moves them into the library (R64a).
+#[test]
+fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
+    use crate::sync::{
+        records_v3::HostScope,
+        transports::{self, tests::with_pam, GrantMemory, HostTransport},
+    };
+    let f = fixture(true);
+    let host = "a".repeat(16);
+    crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
+        let saved = transports::set(s, &host, None, Some(with_pam(&host)), now)
+            .map_err(|e| AppError::Other(e.to_string()))?;
+        transports::remember_grant_request(&saved, &host, "restart app-api", 1800, now)
+            .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let memory = GrantMemory {
+        justification: "restart app-api".into(),
+        duration_secs: 1800,
+    };
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        let operation = load(&f.peer.env()).unwrap().unwrap().state.operation;
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let adopted = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        // The id the merge wrote for the host, read back from the adopted library (R24).
+        let new_id = merged_host_id(&adopted, "peer-local-host");
+        assert_eq!(
+            new_id,
+            merge::adopted_host_id(&operation, &HostScope::Local, &host).unwrap()
+        );
+        assert_eq!(
+            transports::get(&adopted, &new_id).map(|t| t.kind),
+            Some(with_pam(&host).kind)
+        );
+        assert_eq!(transports::get(&adopted, &host), None);
+        assert!(
+            !transports::synced(&adopted, &new_id),
+            "this device's until the publish step moves it in"
+        );
+        assert_eq!(transports::grant_memory(&adopted, &new_id), Some(memory.clone()));
+        assert_eq!(transports::grant_memory(&adopted, &host), None);
+        assert!(
+            crate::sync::record_repository::get_host(&adopted, &new_id).is_ok(),
+            "the library has the host the route names"
+        );
+        assert_eq!(adopted.version, transports::SYNC_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&adopted).unwrap();
+        // The next round's publish step makes the route the library's and its capture publishes it; the device that published the
+        // library receives it.
+        let route = HostTransport {
+            host_id: new_id.clone(),
+            ..with_pam(&host)
+        };
+        super::super::round::sync_once(&f.peer.env()).unwrap();
+        let published = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert_eq!(transports::get(&published, &new_id), Some(route.clone()));
+        assert!(transports::synced(&published, &new_id));
+        assert!(published.local.transports.is_empty());
+        assert_eq!(transports::grant_memory(&published, &new_id), Some(memory));
+        super::super::round::sync_once(&f.first.env()).unwrap();
+        let first = record_runtime::snapshot(&f.first.env()).unwrap().0;
+        assert_eq!(transports::get(&first, &new_id), Some(route));
+        assert_eq!(transports::grant_memory(&first, &new_id), None, "grant memory never syncs");
+    });
+}
+
+/// R11: this device brings no routes, so the library's routes are no part of what its merge owns. A rebase on another device's
+/// Catalog edit carries them as they are instead of pausing the merge ("Imported collection names or ordering changed on another
+/// device"), and the adoption keeps them.
+#[test]
+fn a_rebased_adoption_into_a_library_whose_catalog_holds_a_route_keeps_the_route() {
+    use crate::sync::transports;
+    let f = fixture(true);
+    let s = service(&f);
+    let route = transports::tests::iap(&"c".repeat(16));
+    catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| {
+        catalog.transports.push(route.clone())
+    });
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        // Another device edits the Catalog after this merge was planned: the merge's Catalog is rebased on that edit.
+        catalog_write(&f, &mut s.rows.lock().unwrap(), "A concurrent collection");
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let state = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert!(state.spaces.contains_key(&"f".repeat(64)), "the other device's edit is kept");
+        assert_eq!(transports::get(&state, &route.host_id), Some(route.clone()));
+        assert!(transports::synced(&state, &route.host_id));
+        crate::sync::records_v3::validate_state(&state).unwrap();
+    });
+}
+
+/// Design 2026-10-26 (Room in the Catalog): a merge whose Catalog would not fit in one sync record is refused with the room sentence,
+/// before anything is sent.
+#[test]
+fn an_adoption_merge_that_would_not_fit_is_refused() {
+    use crate::sync::{
+        central::payload::catalog_fits,
+        transports,
+        tunnel_rules::{self, TunnelRule},
+    };
+    let tunnel = |n: usize, host: &str| -> TunnelRule {
+        serde_json::from_value(json!({"id":format!("{:016x}", 0x1000 + n),"name":"t".repeat(128),"host_id":host,
+            "forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"db.internal","target_port":5432}}))
+        .unwrap()
+    };
+    let f = fixture(true);
+    // This device brings two long tunnels for its host.
+    crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
+        let mut next = s.clone();
+        for n in 0..2 {
+            let rule = tunnel(n, &"a".repeat(16));
+            next = tunnel_rules::set(&next, None, &rule.id.clone(), None, Some(rule), now)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let s = service(&f);
+    // The library's Catalog holds as many long tunnels as fit.
+    catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| {
+        for n in 100.. {
+            catalog.tunnels.push(tunnel(n, &"c".repeat(16)));
+            if !catalog_fits(catalog) {
+                catalog.tunnels.pop();
+                break;
+            }
+        }
+    });
+    let published = s.rows.lock().unwrap().len();
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let scope = Scope::from_state(&record_runtime::snapshot(&env).unwrap().0).unwrap();
+        let error = migration_flow::prepare(&env, &scope)
+            .err()
+            .expect("the merge is refused");
+        assert_eq!(error.to_string(), transports::NO_ROOM);
+        assert_eq!(s.rows.lock().unwrap().len(), published, "nothing was sent");
+    });
+}
+
+/// R24: `followed_host_ids` reads hosts from the rows the merge rewrites, not from the source's own tables, which are empty here as a
+/// replacement's history view leaves them. A host that a route (this device's own or the library's) or grant memory names is followed
+/// when exactly one of its identities ends live in those rows, under the id the merge gives that identity. A host live in two scopes,
+/// one whose last row is a tombstone and a missing one are not followed: what names them goes.
+#[test]
+fn followed_host_ids_come_from_the_rows_the_merge_rewrites() {
+    use super::super::payload::{Data, Identity};
+    use crate::sync::{
+        record::{record_key, LocalRecord, Record, RecordKind},
+        records_v3::HostScope,
+        state_v2::AccountState,
+        transports::{self, tests::{iap, saved_on_this_device}, GrantMemory},
+    };
+    let [local, shared, both, deleted, closed, missing, remembered] =
+        ["1", "2", "3", "4", "5", "6", "7"].map(|n| n.repeat(16));
+    let space = HostScope::Space {
+        space_id: "e".repeat(64),
+    };
+    let live = || {
+        Data::Host(
+            serde_json::from_value(json!({"schema":2,"alias":"host","hostname":"fixture.invalid","auth":"password"})).unwrap(),
+        )
+    };
+    let row = |id: &str, scope: &HostScope, data: Data| {
+        let identity = Identity {
+            kind: "host".into(),
+            id: id.into(),
+            scope: Some(scope.clone()),
+        };
+        (identity, data)
+    };
+    let original = [
+        row(&local, &HostScope::Local, live()),
+        row(&shared, &space, live()),
+        row(&both, &HostScope::Local, live()),
+        row(&both, &space, live()),
+        row(&deleted, &HostScope::Local, live()),
+        row(&deleted, &HostScope::Local, Data::Deleted),
+        // Live in this device's own scope; its collection identity is closed by a later tombstone, as a retained one is.
+        row(&closed, &space, live()),
+        row(&closed, &HostScope::Local, live()),
+        row(&closed, &space, Data::Deleted),
+        row(&remembered, &HostScope::Local, live()),
+    ];
+    let mut state: SyncStateV3 = serde_json::from_value(json!({"version":10,"device_id":"d".repeat(32),"device_name":"fixture",
+        "relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null}))
+    .unwrap();
+    // `shared`'s route is the library's; the others are this device's own, and `remembered` has grant memory but no route.
+    let mut account = AccountState::new(&"a".repeat(64));
+    let wire = transports::wire_id(&shared);
+    account.records.insert(
+        record_key(RecordKind::Meta, &wire),
+        LocalRecord {
+            record: Record {
+                kind: RecordKind::Meta,
+                id: wire.clone(),
+                version: 1,
+                updated_at_ms: 1,
+                device_id: "d".repeat(32),
+                deleted: false,
+                payload: json!({"schema":1,"transport":iap(&shared)}),
+            },
+            seq: 0,
+            dirty: false,
+        },
+    );
+    state.account = Some(account);
+    for id in [&local, &both, &deleted, &closed, &missing] {
+        state = saved_on_this_device(&state, &iap(id));
+    }
+    state.local.transport_grants.insert(
+        remembered.clone(),
+        GrantMemory {
+            justification: "restart app-api".into(),
+            duration_secs: 1800,
+        },
+    );
+    let operation = "7".repeat(32);
+    let adopted = |id: &str, scope: &HostScope| (id.to_owned(), merge::adopted_host_id(&operation, scope, id).unwrap());
+    assert_eq!(
+        merge::followed_host_ids(&state, &original, &operation).unwrap(),
+        BTreeMap::from([
+            adopted(&local, &HostScope::Local),
+            adopted(&shared, &space),
+            adopted(&closed, &HostScope::Local),
+            adopted(&remembered, &HostScope::Local),
+        ])
+    );
+}
+
+/// R22: a replacement keeps the replaced library's routes. The route of a host that survives becomes this device's own, under the
+/// host's new id, for the publish step to move into the new library (R64a); a route whose host does not survive is gone. The merge itself
+/// brings no routes (R11).
+#[test]
+fn a_replacement_keeps_the_replaced_librarys_route_of_a_surviving_host_as_this_devices_own() {
+    use crate::sync::{
+        records_v3::HostScope,
+        transports::{self, tests::iap, HostTransport},
+    };
+    // The replaced device's own host, which the replacement carries over, and an id that names no host.
+    let (kept, gone) = ("9".repeat(16), "c".repeat(16));
+    let f = replacement_fixture_with(false, |env| {
+        crate::sync::record_commands::edit_records(env, |s, now| {
+            let next = transports::set(s, &kept, None, Some(iap(&kept)), now)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            transports::set(&next, &gone, None, Some(iap(&gone)), now)
+                .map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    });
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let before = record_runtime::snapshot(&env).unwrap().0;
+        assert!(
+            transports::synced(&before, &kept) && transports::synced(&before, &gone),
+            "both are the replaced library's routes"
+        );
+        let (scope, ticket) = prepared(&f);
+        let operation = load(&env).unwrap().unwrap().state.operation;
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let after = record_runtime::snapshot(&env).unwrap().0;
+        // The id the merge wrote for the host, read back from the reconciled library (R24).
+        let moved = merged_host_id(&after, "old-local-edit");
+        assert_eq!(
+            moved,
+            merge::adopted_host_id(&operation, &HostScope::Local, &kept).unwrap()
+        );
+        let route = HostTransport {
+            host_id: moved.clone(),
+            ..iap(&kept)
+        };
+        assert_eq!(transports::get(&after, &moved), Some(route.clone()));
+        assert!(
+            !transports::synced(&after, &moved),
+            "this device's own until a capture publishes it"
+        );
+        assert!(
+            crate::sync::record_repository::get_host(&after, &moved).is_ok(),
+            "its host survived the replacement"
+        );
+        assert_eq!(transports::get(&after, &gone), None, "its host did not survive");
+        assert_eq!(transports::view(&after), vec![route]);
+        assert_eq!(after.version, transports::SYNC_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&after).unwrap();
+    });
+}
+
+/// The id of the live host called `alias` in one of `state`'s collections: where an adoption or a replacement merges this device's
+/// hosts, under the ids the merge writes for them.
+fn merged_host_id(state: &SyncStateV3, alias: &str) -> String {
+    let mut found = state
+        .spaces
+        .values()
+        .flat_map(|space| space.records.values())
+        .filter(|row| {
+            row.record.kind == crate::sync::record::RecordKind::Host
+                && !row.record.deleted
+                && row.record.payload["alias"] == alias
+        });
+    let row = found.next().expect("the merged host");
+    assert!(found.next().is_none(), "one merged host called {alias}");
+    row.record.id.clone()
+}
+
+/// R24: a route follows its host to exactly the id the merge writes for it, whatever the host's scope. Here the host is in a
+/// collection of the replaced library, and its merged id is read back from the reconciled library.
+#[test]
+fn a_replacement_moves_a_collection_hosts_route_to_the_id_the_merge_wrote() {
+    use crate::sync::{
+        record::{record_key, LocalRecord, Record, RecordKind},
+        records_v3::{HostScope, SpaceStateV3},
+        transports::{self, tests::iap, HostTransport},
+    };
+    let (collection, host) = ("d".repeat(64), "8".repeat(16));
+    let f = replacement_fixture_with(false, |env| {
+        record_runtime::mutate_records(env, |s| {
+            // A collection of the replaced library, a host in it, and the library's route for that host.
+            let mut next = s.clone();
+            let payload = json!({"schema":1,"name":"Shared","slug":format!("central-{}", &collection[..16]),"created_at_ms":1,"previous_id":null});
+            next.account.as_mut().unwrap().records.insert(
+                record_key(RecordKind::Space, &collection),
+                LocalRecord {
+                    record: Record {
+                        kind: RecordKind::Space,
+                        id: collection.clone(),
+                        version: 1,
+                        updated_at_ms: 1,
+                        device_id: next.device_id.clone(),
+                        deleted: false,
+                        payload,
+                    },
+                    seq: 0,
+                    dirty: false,
+                },
+            );
+            next.spaces.insert(
+                collection.clone(),
+                SpaceStateV3 {
+                    selected: true,
+                    baseline_established: true,
+                    ..Default::default()
+                },
+            );
+            let payload: crate::sync::records_v3::HostPayload = serde_json::from_value(
+                json!({"schema":2,"alias":"collection-jump","hostname":"collection.invalid","auth":"password"}),
+            )
+            .unwrap();
+            let scope = HostScope::Space {
+                space_id: collection.clone(),
+            };
+            let next = crate::sync::record_repository::create_host(&next, &host, scope, payload, 2)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            transports::set(&next, &host, None, Some(iap(&host)), 3)
+                .map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    });
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        assert!(transports::synced(&record_runtime::snapshot(&env).unwrap().0, &host));
+        let (scope, ticket) = prepared(&f);
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let after = record_runtime::snapshot(&env).unwrap().0;
+        let merged = merged_host_id(&after, "collection-jump");
+        assert_ne!(merged, host);
+        assert_eq!(
+            transports::get(&after, &merged),
+            Some(HostTransport {
+                host_id: merged.clone(),
+                ..iap(&host)
+            })
+        );
+        assert!(!transports::synced(&after, &merged), "this device's own until the publish step moves it in");
+        assert_eq!(transports::get(&after, &host), None);
+        crate::sync::records_v3::validate_state(&after).unwrap();
+    });
+}
+
+/// R26: the room check runs on a merged Catalog that is otherwise valid. A Catalog refused for another reason, here one tunnel past the
+/// 256 a library holds, keeps its own refusal rather than the room sentence.
+#[test]
+fn an_adoption_merge_past_the_tunnel_count_is_not_refused_as_out_of_room() {
+    use crate::sync::{
+        transports,
+        tunnel_rules::{self, TunnelRule},
+    };
+    let tunnel = |n: usize, host: &str| -> TunnelRule {
+        serde_json::from_value(json!({"id":format!("{:016x}", 0x1000 + n),"name":"t","host_id":host,
+            "forward":{"kind":"local","bind_address":"127.0.0.1","port":15432,"target_host":"db.internal","target_port":5432}}))
+        .unwrap()
+    };
+    let f = fixture(true);
+    crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
+        let mut next = s.clone();
+        for n in 0..2 {
+            let rule = tunnel(n, &"a".repeat(16));
+            next = tunnel_rules::set(&next, None, &rule.id.clone(), None, Some(rule), now)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let s = service(&f);
+    // The library's Catalog holds 255 short tunnels, far from its byte limit; this device's two make 257.
+    catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| {
+        let mut n = 100;
+        while catalog.tunnels.len() < 255 {
+            catalog.tunnels.push(tunnel(n, &"c".repeat(16)));
+            n += 1;
+        }
+    });
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let scope = Scope::from_state(&record_runtime::snapshot(&env).unwrap().0).unwrap();
+        let error = migration_flow::prepare(&env, &scope)
+            .err()
+            .expect("the merge is refused");
+        assert_ne!(error.to_string(), transports::NO_ROOM);
+        assert_eq!(error.to_string(), "Invalid central sync protocol data.");
     });
 }

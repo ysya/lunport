@@ -392,17 +392,17 @@ mod tests {
     #[test]
     fn an_iap_target_becomes_a_relay_endpoint_with_the_hops_port() {
         let target = IapTarget {
-            project: "eng-dev-396409".into(),
+            project: "acme-dev-654321".into(),
             zone: "asia-east1-b".into(),
             instance: "jumpbox".into(),
             interface: "nic0".into(),
-            account: Some("frank@retower.io".into()),
+            account: Some("frank@example.com".into()),
             url_root: Some("ws://127.0.0.1:1/v4".into()),
         };
         let endpoint = target.endpoint(2222);
         assert_eq!(
             (endpoint.project.as_str(), endpoint.zone.as_str(), endpoint.instance.as_str(), endpoint.interface.as_str(), endpoint.port, endpoint.url_root.as_deref()),
-            ("eng-dev-396409", "asia-east1-b", "jumpbox", "nic0", 2222, Some("ws://127.0.0.1:1/v4"))
+            ("acme-dev-654321", "asia-east1-b", "jumpbox", "nic0", 2222, Some("ws://127.0.0.1:1/v4"))
         );
     }
 }

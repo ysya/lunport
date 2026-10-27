@@ -62,6 +62,16 @@ pub trait Session: Send + Sync {
     /// end may wait up to 0.3 s for the hop that ended to write down why.
     fn disconnect_reason(&self) -> Option<DisconnectReason>;
 
+    /// Why the Google Cloud IAP tunnel that carries the first hop ended, when the relay or the credentials ended it (the relay's close,
+    /// a sign-in that needs a person, the reconnect budget spent); such an end takes the connection with it. `None` while the tunnel is
+    /// up and for a first hop reached over TCP. After Lunport closed the connection it is usually `None` too, but the relay's own close
+    /// of the tunnel (its answer to the server leaving) can race that close and be the one written down. The tunnel writes this down
+    /// before the connection can see its end, so a session found dead answers at once. The default is `None`: an engine without IAP
+    /// tunnels.
+    fn tunnel_end(&self) -> Option<crate::gcp::iap::IapError> {
+        None
+    }
+
     /// Closes the connection: an explicit disconnect on every hop, innermost first. Safe to call twice. On a link that has stopped
     /// answering it gives each hop up to about 2.5 s.
     fn close(&self);

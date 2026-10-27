@@ -59,8 +59,8 @@ describe("grant questions", () => {
   const now = { wall: 0, monotonic: 0 };
   const grant: AuthRequest = {
     ...question, id: "g1", kind: "grant", echo: true, remaining_ms: 400000,
-    text: "No active Privileged Access Manager grant for prod-operate on knowknow-prod.",
-    grant: { project: "knowknow-prod", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
+    text: "No active Privileged Access Manager grant for prod-operate on acme-prod-123456.",
+    grant: { project: "acme-prod-123456", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
   };
 
   it("waits up to five minutes for a grant request, two for a server's question", () => {

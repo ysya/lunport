@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::{settle, ShellProbe, SHELL_SERVER};
 use crate::gcp::auth::{StaticToken, TokenSource};
+use crate::gcp::iap::IapError;
 use crate::gcp::testing::{Behaviour, FakeRelay};
 use crate::ssh::russh_engine::{EngineOptions, RusshEngine};
 use crate::ssh::testing::doubles::{TestPolicy, VaultAuth};
@@ -19,11 +20,11 @@ const MIB: usize = 1024 * 1024;
 
 fn iap_target(relay: &FakeRelay) -> IapTarget {
     IapTarget {
-        project: "eng-dev-396409".into(),
+        project: "acme-dev-654321".into(),
         zone: "asia-east1-b".into(),
         instance: "jumpbox".into(),
         interface: "nic0".into(),
-        account: Some("frank@retower.io".into()),
+        account: Some("frank@example.com".into()),
         url_root: Some(relay.url_root.clone()),
     }
 }
@@ -37,7 +38,7 @@ fn iap_hop(server: &Server, relay: &FakeRelay, alias: &str, key_id: &str) -> Hop
 
 /// A hop to a jump box that no sshd backs (the relay refuses or stalls before any SSH happens).
 fn unreachable_iap_hop(relay: &FakeRelay) -> Hop {
-    let mut hop = Hop::new("host-jumpbox", "jumpbox", "127.0.0.1", 22, "frank_retower_io", AuthMethod::Key { key_id: "k1".into() });
+    let mut hop = Hop::new("host-jumpbox", "jumpbox", "127.0.0.1", 22, "frank_example_com", AuthMethod::Key { key_id: "k1".into() });
     hop.transport = Transport::GcpIap(iap_target(relay));
     hop
 }
@@ -74,6 +75,10 @@ fn a_shell_and_a_command_work_through_the_relay() {
     probe.wait_for_text(10, "relay-42").expect("the shell answers through the relay");
     assert_eq!((relay.connects(), relay.reconnects()), (1, 0));
     session.close();
+    // The relay's answer to sshd leaving (`FakeRelay` closes with 1000 "target closed") can race our close and be written down; what
+    // never follows our own close is IAP refusing the account.
+    let end = session.tunnel_end();
+    assert!(!matches!(end, Some(IapError::Closed { code: 4033, .. })), "closing the session is no IAP refusal: {end:?}");
 }
 
 #[test]
@@ -103,6 +108,7 @@ fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
     let target = Target { hops: vec![iap_hop(&server, &relay, "jumpbox", "k1")] };
     let session = engine().connect(&target, &*TestPolicy::trusting(), &server.vault("k1")).expect("the hop connects through the relay");
     settle(&*session);
+    assert_eq!(session.tunnel_end(), None, "the tunnel is up");
     relay.set(Behaviour::CloseAfter(0, 4033, "not authorized"));
     let _ = session.exec("echo poke", Duration::from_secs(10), MIB);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -110,6 +116,9 @@ fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!session.is_alive(), "the relay ended the session");
+    // The tunnel wrote down why it ended before the connection saw its end, so the first look after `is_alive` turned false has it
+    // (design 2026-10-26, Tunnels through a host that needs a grant).
+    assert_eq!(session.tunnel_end(), Some(IapError::Closed { code: 4033, reason: "not authorized".into() }));
     let reason = session.disconnect_reason().expect("a dead session says why");
     assert_eq!((reason.kind, reason.detail.as_str()), (DisconnectKind::ConnectionLost, "the relay closed the tunnel (4033: not authorized)"));
 }
@@ -155,7 +164,7 @@ fn close_codes_and_a_refused_handshake_have_their_sentences() {
 
     relay.set(Behaviour::CloseAtOpen(4033, "not authorized"));
     let error = engine().connect(&target, &*policy, &vault).err().expect("refused");
-    assert_eq!(tunnel_text(&error), "frank@retower.io is not authorized to tunnel to jumpbox through IAP.");
+    assert_eq!(tunnel_text(&error), "frank@example.com is not authorized to tunnel to jumpbox through IAP.");
     // The close code travels with the sentence: the broker adds a note to a 4033 that follows a fresh PAM grant.
     assert!(matches!(error, ConnectError::Tunnel { code: Some(4033), .. }), "{error:?}");
 
@@ -167,7 +176,7 @@ fn close_codes_and_a_refused_handshake_have_their_sentences() {
     let text = tunnel_text(&engine().connect(&target, &*policy, &vault).err().expect("refused"));
     assert_eq!(
         text,
-        "Google Cloud IAP refused the tunnel to jumpbox (HTTP 403): check that frank@retower.io has roles/iap.tunnelResourceAccessor on the instance, and for production that a PAM grant is active."
+        "Google Cloud IAP refused the tunnel to jumpbox (HTTP 403): check that frank@example.com has roles/iap.tunnelResourceAccessor on the instance, and for production that a PAM grant is active."
     );
 
     let other = FakeRelay::start(closed_port(), "other");

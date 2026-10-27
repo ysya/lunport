@@ -566,9 +566,9 @@ mod gcp_transport {
     use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
     use std::collections::VecDeque;
 
-    const ACCOUNT: &str = "frank@retower.io";
+    const ACCOUNT: &str = "frank@example.com";
     const LINE: &str = test_keys::PLAIN_PUBLIC;
-    const GRANT_NAME: &str = "projects/knowknow-prod/locations/global/entitlements/prod-operate/grants/42";
+    const GRANT_NAME: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-operate/grants/42";
 
     /// A scripted Google: one login profile, optionally another one after an import, the grants of every entitlement, the states a
     /// requested grant goes through (`get_grant` answers them in turn, the last one again and again), and the calls made.
@@ -686,10 +686,10 @@ mod gcp_transport {
         d.with_gcp(Arc::new(Handle(Arc::clone(gcp))))
     }
 
-    /// What grant requests asked the transport to remember: `(host, justification, duration)`.
+    /// What grant requests asked this computer to remember: `(host, justification, duration)`.
     type Remembered = Arc<Mutex<Vec<(String, String, u32)>>>;
 
-    /// `directory` that also records what a grant request asked the transport to remember.
+    /// `directory` that also records what a grant request asked this computer to remember.
     fn directory_with_memory(s: SyncStateV3, gcp: &Arc<FakeGcp>) -> (RecordDirectory, Remembered) {
         let remembered = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&remembered);
@@ -722,12 +722,12 @@ mod gcp_transport {
     #[test]
     fn a_transport_on_the_first_hop_becomes_an_iap_target() {
         let gcp = Arc::new(FakeGcp::default());
-        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let d = directory(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         let t = d.resolve(&gate()).unwrap();
         assert_eq!(
             t.hops[0].transport,
             Transport::GcpIap(IapTarget {
-                project: "eng-dev-396409".into(),
+                project: "acme-dev-654321".into(),
                 zone: "asia-east1-b".into(),
                 instance: "jumpbox".into(),
                 interface: "nic0".into(),
@@ -735,7 +735,7 @@ mod gcp_transport {
                 url_root: None,
             })
         );
-        assert_eq!(t.hops[0].user, "frank_retower_io", "resolving leaves the saved user alone");
+        assert_eq!(t.hops[0].user, "frank_example_com", "resolving leaves the saved user alone");
         assert!(calls(&gcp).is_empty(), "resolving talks to nobody");
         let d = directory(gate_state("deploy", None), &gcp);
         assert_eq!(d.resolve(&gate()).unwrap().hops[0].transport, Transport::Tcp);
@@ -747,7 +747,7 @@ mod gcp_transport {
         let mut web = payload("web");
         web.jump = vec![GATE.into()];
         s = add(&s, WEB, web);
-        s = transports::set(&s, WEB, None, Some(transport("eng-dev-396409", WEB, false, None)), 2).unwrap();
+        s = transports::set(&s, WEB, None, Some(transport("acme-dev-654321", WEB, false, None)), 2).unwrap();
         let d = directory(s, &Arc::new(FakeGcp::default()));
         assert_eq!(
             d.resolve(&HostQuery::Id(WEB.into())).unwrap_err(),
@@ -758,49 +758,49 @@ mod gcp_transport {
     #[test]
     fn prepare_imports_a_missing_key_and_accepts_a_matching_username() {
         let gcp = Arc::new(FakeGcp::default());
-        *gcp.profile.lock().unwrap() = linux("frank_retower_io", &[]);
-        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        *gcp.profile.lock().unwrap() = linux("frank_example_com", &[]);
+        let d = directory(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
-        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} eng-dev-396409"), format!("import {ACCOUNT} eng-dev-396409 {LINE}")]);
+        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} acme-dev-654321"), format!("import {ACCOUNT} acme-dev-654321 {LINE}")]);
     }
 
     #[test]
     fn prepare_skips_the_import_when_the_key_is_registered() {
         let gcp = Arc::new(FakeGcp::default());
-        *gcp.profile.lock().unwrap() = linux("frank_retower_io", &[&format!("{LINE} frank@retower.pub")]);
-        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        *gcp.profile.lock().unwrap() = linux("frank_example_com", &[&format!("{LINE} frank@laptop")]);
+        let d = directory(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
-        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} eng-dev-396409")]);
+        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} acme-dev-654321")]);
     }
 
     #[test]
     fn prepare_imports_the_key_when_the_profile_has_no_posix_account_and_uses_the_returned_profile() {
         let gcp = Arc::new(FakeGcp::default());
-        *gcp.after_import.lock().unwrap() = Some(linux("frank_retower_io", &[LINE]));
-        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        *gcp.after_import.lock().unwrap() = Some(linux("frank_example_com", &[LINE]));
+        let d = directory(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
-        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} eng-dev-396409"), format!("import {ACCOUNT} eng-dev-396409 {LINE}")]);
+        assert_eq!(calls(&gcp), vec![format!("profile {ACCOUNT} acme-dev-654321"), format!("import {ACCOUNT} acme-dev-654321 {LINE}")]);
         let gcp = Arc::new(FakeGcp::default());
-        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let d = directory(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         assert_eq!(
             denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err()),
-            "OS Login has no POSIX account for frank@retower.io in eng-dev-396409; the project may not have OS Login enabled."
+            "OS Login has no POSIX account for frank@example.com in acme-dev-654321; the project may not have OS Login enabled."
         );
     }
 
     #[test]
     fn prepare_refuses_a_username_that_differs_from_os_login() {
         let gcp = Arc::new(FakeGcp::default());
-        *gcp.profile.lock().unwrap() = linux("frank_retower_io", &[LINE]);
-        let d = directory(gate_state("frank", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        *gcp.profile.lock().unwrap() = linux("frank_example_com", &[LINE]);
+        let d = directory(gate_state("frank", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         assert_eq!(
             denied(d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err()),
-            "OS Login names frank@retower.io frank_retower_io on eng-dev-396409, but the host is saved with user frank; save that username into the host (Use OS Login username in the host's Google Cloud transport)."
+            "OS Login names frank@example.com frank_example_com on acme-dev-654321, but the host is saved with user frank; save that username into the host (Use OS Login username in the host editor)."
         );
     }
 
@@ -808,18 +808,18 @@ mod gcp_transport {
     fn prepare_refuses_without_an_in_flight_pam_grant_and_passes_with_one() {
         let gcp = Arc::new(FakeGcp::default());
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("DENIED")];
-        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let d = directory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         // A missing grant is a `GrantNeeded` now (design 2026-10-25, PAM grant requests); its sentence is the refusal of old.
         let error = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err();
         assert!(matches!(error, DirectoryError::GrantNeeded(_)), "{error:?}");
         let text = error.to_string();
-        assert!(text.starts_with("No active Privileged Access Manager grant for prod-operate or prod-admin on knowknow-prod."), "{text}");
+        assert!(text.starts_with("No active Privileged Access Manager grant for prod-operate or prod-admin on acme-prod-123456."), "{text}");
         assert!(
-            text.contains("gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=knowknow-prod"),
+            text.contains("gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=acme-prod-123456"),
             "{text}"
         );
-        assert_eq!(calls(&gcp), vec![format!("grants {ACCOUNT} knowknow-prod global prod-operate"), format!("grants {ACCOUNT} knowknow-prod global prod-admin")]);
+        assert_eq!(calls(&gcp), vec![format!("grants {ACCOUNT} acme-prod-123456 global prod-operate"), format!("grants {ACCOUNT} acme-prod-123456 global prod-admin")]);
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("ACTIVE")];
         assert!(!d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
     }
@@ -831,7 +831,7 @@ mod gcp_transport {
         use crate::gcp::pam::rfc3339;
         use std::time::{Duration, SystemTime};
         let gcp = Arc::new(FakeGcp::default());
-        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let d = directory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         let given = |ago: u64| Grant { access_grant_time: Some(rfc3339(SystemTime::now() - Duration::from_secs(ago))), ..grant("ACTIVE") };
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), given(60)];
@@ -851,7 +851,7 @@ mod gcp_transport {
     fn prepare_asks_for_a_grant_with_the_transports_defaults_when_none_is_in_flight() {
         let gcp = Arc::new(FakeGcp::default());
         *gcp.grants.lock().unwrap() = vec![grant("ENDED")];
-        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let d = directory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         let error = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err();
         let DirectoryError::GrantNeeded(need) = error.clone() else { panic!("expected GrantNeeded, got {error:?}") };
@@ -861,7 +861,7 @@ mod gcp_transport {
             GrantNeed {
                 host: GATE.into(),
                 account: Some(ACCOUNT.into()),
-                project: "knowknow-prod".into(),
+                project: "acme-prod-123456".into(),
                 location: "global".into(),
                 entitlement: "prod-operate".into(),
                 entitlements: vec!["prod-operate".into(), "prod-admin".into()],
@@ -871,7 +871,7 @@ mod gcp_transport {
         );
         assert_eq!(
             need.refusal_sentence(),
-            "No active Privileged Access Manager grant for prod-operate or prod-admin on knowknow-prod. Request one (for example gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=knowknow-prod) and connect again."
+            "No active Privileged Access Manager grant for prod-operate or prod-admin on acme-prod-123456. Request one (for example gcloud pam grants create --entitlement=prod-operate --requested-duration=30m --justification=\"…\" --location=global --project=acme-prod-123456) and connect again."
         );
         assert_eq!(error.to_string(), need.refusal_sentence());
         // Automation (an MCP request, the verification probe) gets the refusal, never a question.
@@ -879,11 +879,55 @@ mod gcp_transport {
         assert_eq!(DirectoryError::Failed("x".into()).for_automation(), DirectoryError::Failed("x".into()));
     }
 
+    /// The grant `prepare` says GATE's connection needs, with no grant in flight.
+    fn grant_needed(s: SyncStateV3) -> GrantNeed {
+        let gcp = Arc::new(FakeGcp::default());
+        *gcp.grants.lock().unwrap() = vec![grant("ENDED")];
+        let d = directory(s, &gcp);
+        let target = d.resolve(&gate()).unwrap();
+        let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
+        *need
+    }
+
+    /// Design 2026-10-26 (Grant requests): the question a connection asks offers what this computer last asked for on the host, as the
+    /// request dialog does, not what the route holds: that justification and that length, whatever the route's default length is.
+    #[test]
+    fn the_grant_question_offers_what_this_computer_last_asked_for_on_the_host() {
+        let routed = gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam())));
+        let remembered = transports::remember_grant_request(&routed, GATE, "restart app-api", 2700, 2).unwrap();
+        let need = grant_needed(remembered);
+        assert_eq!((need.duration_secs, need.justification.as_deref()), (2700, Some("restart app-api")));
+        // The rest of the question is the route's, as before.
+        assert_eq!((need.entitlement.as_str(), need.entitlements.len(), need.project.as_str()), ("prod-operate", 2, "acme-prod-123456"));
+        // The route itself keeps the default (1800 s): the memory is not part of it.
+        let TransportKind::GcpIap { pam, .. } = transports::get(&routed, GATE).unwrap().kind;
+        assert_eq!(pam.map(|pam| pam.duration_secs), Some(1800));
+    }
+
+    /// A host this computer never asked a grant for is offered the route's own default length and nothing to prefill: a justification
+    /// an earlier release left in the route is not offered (no request writes it any more), nor is another host's memory.
+    #[test]
+    fn without_a_memory_the_grant_question_offers_the_routes_default_length_and_no_justification() {
+        let mut pam = prod_pam();
+        let check = pam.as_mut().unwrap();
+        (check.duration_secs, check.justification) = (3600, Some("left by an earlier release".into()));
+        let mut s = gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, pam)));
+        let need = grant_needed(s.clone());
+        assert_eq!((need.duration_secs, need.justification), (3600, None));
+        // Another host's memory is that host's.
+        s = add(&s, WEB, payload("web"));
+        s = transports::set(&s, WEB, None, Some(transport("acme-prod-123456", WEB, false, prod_pam())), 2).unwrap();
+        s = transports::remember_grant_request(&s, WEB, "rotate certs", 600, 3).unwrap();
+        assert!(transports::grant_memory(&s, WEB).is_some() && transports::grant_memory(&s, GATE).is_none());
+        let need = grant_needed(s);
+        assert_eq!((need.duration_secs, need.justification), (3600, None));
+    }
+
     #[test]
     fn prepare_dates_a_fresh_grant_and_never_in_the_future() {
         use crate::gcp::pam::rfc3339;
         let gcp = Arc::new(FakeGcp::default());
-        let d = directory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let d = directory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         let at = |offset: i64| {
             let time = if offset >= 0 { std::time::SystemTime::now() + std::time::Duration::from_secs(offset as u64) } else { std::time::SystemTime::now() - std::time::Duration::from_secs((-offset) as u64) };
@@ -905,7 +949,7 @@ mod gcp_transport {
     fn request_grant_creates_remembers_polls_and_answers_a_receipt() {
         let gcp = Arc::new(FakeGcp::default());
         *gcp.states.lock().unwrap() = VecDeque::from(vec!["ACTIVATING", "ACTIVE"]);
-        let (d, remembered) = directory_with_memory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let (d, remembered) = directory_with_memory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
         let receipt = d.request_grant_with(&need, "restart app-api", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap();
@@ -914,14 +958,14 @@ mod gcp_transport {
         assert!(std::time::SystemTime::now().duration_since(receipt.granted_at).unwrap_or_default().as_secs() <= 2);
         assert_eq!(*remembered.lock().unwrap(), vec![(GATE.to_string(), "restart app-api".to_string(), 1800)]);
         let calls = calls(&gcp);
-        assert!(calls.contains(&format!("create {ACCOUNT} knowknow-prod global prod-operate 1800 restart app-api")), "{calls:?}");
+        assert!(calls.contains(&format!("create {ACCOUNT} acme-prod-123456 global prod-operate 1800 restart app-api")), "{calls:?}");
         assert_eq!(calls.iter().filter(|call| call.starts_with("get ")).count(), 2, "polled until ACTIVE: {calls:?}");
     }
 
     #[test]
     fn request_grant_reuses_a_grant_that_appeared_meanwhile() {
         let gcp = Arc::new(FakeGcp::default());
-        let (d, remembered) = directory_with_memory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let (d, remembered) = directory_with_memory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
         // Another connection (or the panel) requested one in between: PAM would refuse a second request with the same scope.
@@ -936,7 +980,7 @@ mod gcp_transport {
     fn request_grant_names_a_state_that_will_not_activate_and_gives_up_after_a_while() {
         let gcp = Arc::new(FakeGcp::default());
         *gcp.states.lock().unwrap() = VecDeque::from(vec!["APPROVAL_AWAITED"]);
-        let (d, _) = directory_with_memory(gate_state("deploy", Some(transport("knowknow-prod", GATE, false, prod_pam()))), &gcp);
+        let (d, _) = directory_with_memory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
         let DirectoryError::GrantNeeded(need) = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err() else { panic!("a needed grant") };
         let waiting = d.request_grant_with(&need, "x", 1800, &CancelToken::default(), std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap_err();
@@ -965,7 +1009,7 @@ mod gcp_transport {
         d.prepare(&target, &public_key, &CancelToken::default()).unwrap();
         assert!(calls(&gcp).is_empty());
 
-        let (d, _, _) = fixture(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), true, true);
+        let (d, _, _) = fixture(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), true, true);
         let target = d.resolve(&gate()).unwrap();
         assert_eq!(
             d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err(),
@@ -974,7 +1018,7 @@ mod gcp_transport {
 
         let cancel = CancelToken::default();
         cancel.cancel();
-        let d = directory(gate_state("frank_retower_io", Some(transport("eng-dev-396409", GATE, true, None))), &gcp);
+        let d = directory(gate_state("frank_example_com", Some(transport("acme-dev-654321", GATE, true, None))), &gcp);
         assert_eq!(d.prepare(&target, &public_key, &cancel).unwrap_err(), DirectoryError::Failed("The connection was cancelled.".into()));
         assert!(calls(&gcp).is_empty(), "a cancelled connect talks to nobody");
     }
