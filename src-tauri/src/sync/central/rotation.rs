@@ -375,6 +375,34 @@ impl Journal {
         }
     }
 }
+/// The conflicts the rebuilt history raises: a pending record whose version it changed from `before`'s, unless it confirmed this
+/// device's own write (`confirmed`), gains an entry beside those carried over, and keeps only its latest (`replica::keep_latest`).
+pub(super) fn note_conflicts(before: &Replica, replica: &mut Replica, confirmed: &BTreeSet<String>) {
+    let Replica { pending, current, conflicts, .. } = replica;
+    for (id, pending) in pending.iter() {
+        if let Some(remote) = current.get(id) {
+            if !confirmed.contains(id)
+                && remote.content_hash != pending.latest.content_hash
+                && before.current.get(id).map(|b| &b.content_hash) != Some(&remote.content_hash)
+            {
+                let conflict = Conflict {
+                    base: before.current.get(id).cloned(),
+                    local: pending.latest.clone(),
+                    remote: remote.clone(),
+                };
+                let existing = conflicts.entry(id.clone()).or_default();
+                if !existing.iter().any(|c| {
+                    c.local.local_revision == conflict.local.local_revision
+                        && c.local.content_hash == conflict.local.content_hash
+                        && c.remote.content_hash == conflict.remote.content_hash
+                }) {
+                    existing.push(conflict);
+                    super::replica::keep_latest(existing);
+                }
+            }
+        }
+    }
+}
 /// Rebuild a complete authenticated target history before committing the epoch. Local pending B,
 /// uncertain sent A and old encrypted conflict versions survive until exact history confirms A.
 pub fn activate(
@@ -451,7 +479,7 @@ pub fn activate(
         }
         true
     });
-    for (id, pending) in &replica.pending {
+    for pending in replica.pending.values() {
         if let Some(sent) = &pending.sent {
             if pending.claimed.is_some()
                 || operations.contains_key(&sent.envelope.header.operation_id)
@@ -459,27 +487,8 @@ pub fn activate(
                 return Err(invalid());
             }
         }
-        if let Some(remote) = replica.current.get(id) {
-            if !confirmed.contains(id)
-                && remote.content_hash != pending.latest.content_hash
-                && before.current.get(id).map(|b| &b.content_hash) != Some(&remote.content_hash)
-            {
-                let conflict = Conflict {
-                    base: before.current.get(id).cloned(),
-                    local: pending.latest.clone(),
-                    remote: remote.clone(),
-                };
-                let existing = replica.conflicts.entry(id.clone()).or_default();
-                if !existing.iter().any(|c| {
-                    c.local.local_revision == conflict.local.local_revision
-                        && c.local.content_hash == conflict.local.content_hash
-                        && c.remote.content_hash == conflict.remote.content_hash
-                }) {
-                    existing.push(conflict);
-                }
-            }
-        }
     }
+    note_conflicts(before, &mut replica, &confirmed);
     let mut next = workspace.clone();
     next.rotation = None;
     next.replica = Some(replica);

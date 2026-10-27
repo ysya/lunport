@@ -157,7 +157,7 @@ What the row shows in the other states:
 
 ### Conflict entries
 
-A record in conflict keeps at most its 16 latest conflict entries; the oldest is dropped when a newer one is added. Today a 17th entry fails `Replica::validate` (`replica.rs:265`). That validation runs in both the capture and the pull, so a Catalog collision left for review would stop this device's sync after 16 more versions of the Catalog, or 16 local edits of it. Nothing reads an entry's contents: the review and the merge use the pending draft, the current version and the basis.
+A record in conflict keeps at most its 16 latest conflict entries; the oldest is dropped when a newer one is added. Today a 17th entry fails `Replica::validate` (`replica.rs:265`). That validation runs in both the capture and the pull, so a Catalog collision left for review would stop this device's sync after 16 more versions of the Catalog, or 16 local edits of it. No conflict is settled from an entry's contents: the review and the merge use the pending draft, the current version and the basis. A historical-state capture reads every entry (`historical_state.rs`), and then lacks the dropped oldest ones, local drafts that later edits superseded. The pull, the capture and a key rotation (`rotation.rs`) all add entries, and all keep the latest 16.
 
 The status counts records in conflict, not entries (`controller.rs:140`), so one Catalog row reads "1 sync conflict needs review".
 
