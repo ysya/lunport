@@ -7,6 +7,7 @@ import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
 import { revealHidden } from "@/lib/sync-approvals";
 import { useUiStore } from "@/stores/ui";
+import { CLOUD_PROVIDERS } from "@/lib/cloud";
 import { Disclosure } from "@/components/app/Disclosure";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { buildRecordTree, affectedRecords, scopeKey, type GroupNode } from "./group-tree";
@@ -243,7 +244,14 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
           {row("Needs attention", <AlertCircle className="size-4" />, panel === "hosts" && filter.kind === "attention", () => choose({ kind: "attention" }), attention || undefined)}
           {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.filter((key) => key.status !== "deleted").length)}
           {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
-          {row("Google Cloud", <Cloud className="size-4" />, panel === "transports", () => navigate("transports"))}
+        </nav>
+        <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Cloud</div>
+        <nav aria-label="Cloud providers" className="space-y-1">
+          {CLOUD_PROVIDERS.map((provider) => (
+            <span key={provider.id} className="contents">
+              {row(provider.label, <Cloud className="size-4" />, panel === provider.panel, () => navigate(provider.panel))}
+            </span>
+          ))}
         </nav>
         <div
           className="library-nav-collections min-h-0 flex-1 overflow-y-auto"

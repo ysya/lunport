@@ -9,8 +9,16 @@ import type { PamStatusView } from "@/bindings/PamStatusView";
 import type { GcloudAccountsView } from "@/bindings/GcloudAccountsView";
 import type { GrantMemoryView } from "@/bindings/GrantMemoryView";
 import type { IapProbeView } from "@/bindings/IapProbeView";
-import type { PamGrantView } from "@/bindings/PamGrantView";
 import type { TransportLocalReason } from "@/bindings/TransportLocalReason";
+import type { AccountAction } from "@/bindings/AccountAction";
+import type { AccountActionView } from "@/bindings/AccountActionView";
+import type { GcloudCliView } from "@/bindings/GcloudCliView";
+import type { PamOverview } from "@/bindings/PamOverview";
+import type { PamEntitlementView } from "@/bindings/PamEntitlementView";
+import type { PamScopeView } from "@/bindings/PamScopeView";
+import type { PamRoleView } from "@/bindings/PamRoleView";
+import type { PamScope } from "@/bindings/PamScope";
+import type { GrantRequestMemory } from "@/bindings/GrantRequestMemory";
 export type {
   HostTransport,
   TransportKind,
@@ -20,8 +28,16 @@ export type {
   GcloudAccountsView,
   GrantMemoryView,
   IapProbeView,
-  PamGrantView,
   TransportLocalReason,
+  AccountAction,
+  AccountActionView,
+  GcloudCliView,
+  PamOverview,
+  PamEntitlementView,
+  PamScopeView,
+  PamRoleView,
+  PamScope,
+  GrantRequestMemory,
 };
 
 /** A placeholder for the PAM entitlements field, never a default: Lunport is a public product. */
@@ -71,24 +87,90 @@ export const gcloudAccountsQuery = queryOptions({
   staleTime: 60_000,
   networkMode: "always",
 });
-/** One row per entitlement the saved routes require, with the state of the grant on it, read now. */
-export const listPamGrants = () => tauriInvoke<PamGrantView[]>("gcp_pam_grants");
-/** The query key of `listPamGrants`, for the Google Cloud page's Access grants. */
-export const pamGrantsKey = ["gcp", "pam-grants"] as const;
+/** Where gcloud is on this computer, found once for the app's run (design 2026-10-27, Finding gcloud). */
+export const gcloudCliKey = ["gcp", "cli"] as const;
+export const gcloudCliQuery = queryOptions({
+  queryKey: gcloudCliKey,
+  queryFn: () => tauriInvoke<GcloudCliView>("gcp_cli_status"),
+  retry: false,
+  staleTime: Infinity,
+  networkMode: "always",
+});
+/** Looks for gcloud again: the Accounts tab's Check again. */
+export const locateGcloudAgain = () => tauriInvoke<GcloudCliView>("gcp_cli_locate_again");
+/** Runs one account action with gcloud, once the person confirmed it (design 2026-10-27, The Accounts tab). */
+export const runAccountAction = (action: AccountAction) => tauriInvoke<AccountActionView>("gcp_account_action", { action });
+/** Stops the account action that is running, if one is. */
+export const cancelAccountAction = () => tauriInvoke<void>("gcp_account_cancel");
+/** The event that carries the sign-in page's address while gcloud waits for the browser. */
+export const SIGN_IN_URL_EVENT = "gcp://sign-in-url";
+
+/** The Access tab's overview: the places Lunport looks and every entitlement it found or a route names, read now. */
+export const listPamOverview = () => tauriInvoke<PamOverview>("gcp_pam_overview");
+export const pamOverviewKey = ["gcp", "pam-overview"] as const;
 /**
- * The Google Cloud page's Access grants: read when the section shows and again every minute while it stays open. As with
- * `pamStatusQuery`, a window gaining focus does not read it again (every read is a Google call for each entitlement), it is not retried
- * (the next minute reads it again), and it is read even when the webview thinks it is offline, since the answer comes from this app's
- * backend, which says in its own sentence when Google cannot be reached. The page turns it on only while a listed route requires a grant.
+ * The Access tab's overview: read when the tab shows and again every minute while it stays open. As with `pamStatusQuery`, a window
+ * gaining focus does not read it again (every read is a Google call per scope and per entitlement), it is not retried (the next minute
+ * reads it again), and it is read even when the webview thinks it is offline, since the backend says in its own sentence when Google
+ * cannot be reached.
  */
-export const pamGrantsQuery = queryOptions({
-  queryKey: pamGrantsKey,
-  queryFn: listPamGrants,
+export const pamOverviewQuery = queryOptions({
+  queryKey: pamOverviewKey,
+  queryFn: listPamOverview,
   refetchInterval: 60_000,
   refetchOnWindowFocus: false,
   retry: false,
   networkMode: "always",
 });
+/** Requests a grant on the entitlement `name` as `account` (none: gcloud's active account) and waits for it, or for its approver. */
+export const requestEntitlementGrant = (account: string | null, name: string, justification: string, durationSecs: number) =>
+  tauriInvoke<PamStatusView>("gcp_pam_request", { account, name, justification, durationSecs });
+/** Adds a search scope; the answer is the overview with it. */
+export const savePamScope = (parent: string, location: string, account: string | null) =>
+  tauriInvoke<RecordOverview>("gcp_pam_scope_save", { parent, location, account });
+/** Removes a search scope; the answer is the overview without it. */
+export const removePamScope = (id: string) => tauriInvoke<RecordOverview>("gcp_pam_scope_remove", { id });
+/** The entitlement ids the account may request in the project's location, for the host editor's suggestions. */
+export const pamSuggestionsQuery = (account: string | null, project: string, location: string) =>
+  queryOptions({
+    queryKey: ["gcp", "pam-suggestions", account, project, location],
+    queryFn: () => tauriInvoke<string[]>("gcp_pam_suggestions", { account, project, location }),
+    staleTime: 5 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    networkMode: "always",
+  });
+
+/** The kinds of place a search scope names, as the Add scope dialog offers them. */
+export type ScopeKind = "projects" | "folders" | "organizations";
+/** A scope's parent from what the dialog was given, or the backend's sentence why not. */
+export function scopeParent(kind: ScopeKind, id: string): { parent: string } | { problem: string } {
+  const trimmed = id.trim();
+  const ok = kind === "projects" ? isScopeProject(trimmed) : /^\d{1,20}$/.test(trimmed);
+  return ok ? { parent: `${kind}/${trimmed}` } : { problem: "Enter a project ID, or a folder or organization number." };
+}
+const isScopeProject = (value: string) => {
+  const colon = value.lastIndexOf(":");
+  const id = colon < 0 ? value : value.slice(colon + 1);
+  if (colon >= 0 && !/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(value.slice(0, colon))) return false;
+  return isProject(id);
+};
+/** A scope or an entitlement's parent as the page names it: `project acme-dev-654321`, `folder 123456789012`, `organization 987…`. */
+export function parentLabel(parent: string): string {
+  const [kind, id] = parent.split("/", 2);
+  const word = kind === "projects" ? "project" : kind === "folders" ? "folder" : kind === "organizations" ? "organization" : kind;
+  return id === undefined ? parent : `${word} ${id}`;
+}
+/** How long a grant may last, in words: `Up to 1 hour`, `Up to 45 minutes`. */
+export function upTo(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  if (minutes >= 60 && minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `Up to ${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  return `Up to ${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
 /** Check through IAP: whether this computer reaches the host's instance through its route. It attempts no SSH. */
 export const probeIap = (hostId: string) => tauriInvoke<IapProbeView>("transports_iap_probe", { hostId });
 
@@ -107,6 +189,8 @@ export function pamStatusLine(view: PamStatusView): string {
       return `${view.entitlement ?? "grant"} · active${view.active_until_ms === null ? "" : ` until ${hhmm(view.active_until_ms)}`}`;
     case "activating":
       return `${view.entitlement ?? "grant"} · activating…`;
+    case "approval_awaited":
+      return `${view.entitlement ?? "grant"} · awaiting approval`;
     case "error":
       return grantProblem(view);
     default:
@@ -121,6 +205,8 @@ export function grantStateLine(grant: { state: string; active_until_ms: number |
       return grant.active_until_ms === null ? "Active" : `Active until ${hhmm(grant.active_until_ms)}`;
     case "activating":
       return "Activating…";
+    case "approval_awaited":
+      return "Awaiting approval";
     default:
       return "No active grant";
   }
@@ -140,6 +226,14 @@ export function grantStateOrMessage(grant: { state: string; active_until_ms: num
  */
 export function grantHeld(grant: { state: string } | null): boolean {
   return grant?.state === "active" || grant?.state === "activating";
+}
+
+/**
+ * Whether Request grant is off for a grant that was read: held, or waiting for an approver (design 2026-10-27), since PAM refuses another
+ * request on the entitlement while one waits.
+ */
+export function grantBusy(grant: { state: string } | null): boolean {
+  return grantHeld(grant) || grant?.state === "approval_awaited";
 }
 
 /** What a host's Access grant says of the grant it read: the entitlement holding it and its state, or why it could not be checked. */
@@ -183,9 +277,22 @@ export function routeLocalReason(overview: RecordOverview, hostId: string): Tran
   return overview.transport_sync?.find((entry) => entry.host_id === hostId)?.reason ?? null;
 }
 
-/** What this computer remembers of the host's last grant request, to offer again; `null` when it made none. */
-export function grantMemoryFor(overview: RecordOverview, hostId: string | null): GrantMemoryView | null {
+/** An entitlement of a route by its full name, as PAM names it and the library's grant memory is kept. */
+export const entitlementName = (project: string, location: string, id: string) => `projects/${project}/locations/${location}/entitlements/${id}`;
+
+/**
+ * What a request for the host's route starts from (design 2026-10-27): the library's memory of the entitlement it requests (`entitlement`,
+ * else the route's first), else what this computer remembered for the host as an earlier release kept it; `null` when there is neither.
+ */
+export function grantMemoryFor(overview: RecordOverview, hostId: string | null, entitlement?: string): GrantMemoryView | null {
   if (!hostId) return null;
+  const pam = transportFor(overview, hostId)?.kind;
+  const id = entitlement ?? pam?.pam?.entitlements[0];
+  if (pam?.pam && id) {
+    const name = entitlementName(pam.project, pam.pam.location, id);
+    const synced = overview.pam_requests?.find((memory) => memory.name === name);
+    if (synced) return { host_id: hostId, justification: synced.justification, duration_secs: synced.duration_secs };
+  }
   return overview.grant_memory?.find((memory) => memory.host_id === hostId) ?? null;
 }
 
@@ -207,6 +314,8 @@ const resourceName = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const isResourceName = (value: string) => resourceName.test(value) && !value.endsWith("-");
 const isProject = (value: string) =>
   /^[0-9]{6,20}$/.test(value) || (value.length >= 6 && value.length <= 30 && /^[a-z][a-z0-9-]*[a-z0-9]$/.test(value));
+/** Whether `value` reads as a project id or number, as the route editor and the backend check it. */
+export const isProjectId = (value: string) => isProject(value);
 /** The backend's rule: the account names a directory under gcloud's config, so only the characters an address and a directory name share. */
 const isEmail = (value: string) => {
   const at = value.indexOf("@");
