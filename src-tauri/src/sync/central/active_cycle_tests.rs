@@ -45,15 +45,28 @@ fn install_push(
     let lose = Arc::new(AtomicBool::new(false));
     let status = Arc::clone(&lose);
     let state = Arc::clone(&service.state);
+    // Each request is decided once, by the status callback, which mockito runs before the body callback; the body is handed over.
+    let reply = Arc::new(Mutex::new(Vec::new()));
+    let body = Arc::clone(&reply);
     service.server.mock("POST", mockito::Matcher::Regex("^/v1/vaults/[0-9a-f]{64}/records$".into()))
-        .with_status_code_from_request(move |_| if status.swap(false, Ordering::SeqCst) {503} else {200})
-        .with_body_from_request(move |request| {
+        .with_status_code_from_request(move |request| {
             let body:Value = serde_json::from_slice(request.body().unwrap()).unwrap();
             let rows:Vec<crypto::RecordEnvelope> = serde_json::from_value(body["records"].clone()).unwrap();
             assert!(!rows.is_empty() && rows.len() <= 32);
             seen.lock().unwrap().push(rows.clone());
-            let mut account = state.lock().unwrap(); let mut next = account.history.clone();
-            let chain = account.chain().unwrap(); let mut receipts = vec![];
+            let mut account = state.lock().unwrap();
+            // Another device's push that lands just before this one.
+            if !account.race.is_empty() {
+                let version = account.race.remove(0);
+                account.history.push(version);
+            }
+            if !account.refuse_pushes.is_empty() {
+                let error = account.refuse_pushes.remove(0);
+                *reply.lock().unwrap() = json!({"error":error}).to_string().into_bytes();
+                return 409;
+            }
+            let mut next = account.history.clone();
+            let chain = account.chain().unwrap(); let mut receipts = vec![]; let mut conflicts = vec![];
             for envelope in rows {
                 let h = &envelope.header;
                 assert_eq!(h.author, account.device(request)); assert_eq!(h.membership_head, chain.current().head());
@@ -63,7 +76,11 @@ fn install_push(
                     assert_eq!(old.envelope, envelope); old.clone()
                 } else {
                     let revision = next.iter().rev().find(|row| row.envelope.header.record_id == h.record_id).map_or(0, |row| number(&row.revision, false).unwrap());
-                    assert_eq!(number(&h.expected_revision,true).unwrap(), revision);
+                    // As the relay (`relay/src/v2/store.ts`): a stale expected revision refuses the whole batch, and nothing is written.
+                    if number(&h.expected_revision,true).unwrap() != revision {
+                        conflicts.push(json!({"record_id":h.record_id}));
+                        continue;
+                    }
                     let sequence = (next.len()+1).to_string();
                     let history_hash = crypto::hash(&wire::canonical(&["lunport-history-v2", next.last().map_or(crate::sync::central::rotation::ZERO, |row| row.history_hash.as_str()), &sequence, &digest]).unwrap());
                     let row = rekey::Version {envelope:envelope.clone(), revision:(revision+1).to_string(), sequence, digest:digest.clone(), history_hash};
@@ -71,9 +88,16 @@ fn install_push(
                 };
                 receipts.push(json!({"operation_id":row.envelope.header.operation_id,"record_id":row.envelope.header.record_id,"revision":row.revision,"sequence":row.sequence,"digest":row.digest,"history_hash":row.history_hash}));
             }
+            if !conflicts.is_empty() {
+                *reply.lock().unwrap() = json!({"error":"revision_conflict","conflicts":conflicts}).to_string().into_bytes();
+                return 409;
+            }
             account.history = next;
-            json!({"receipts":receipts,"sequence":account.history.len().to_string(),"history_hash":account.history.last().unwrap().history_hash}).to_string().into_bytes()
-        }).create();
+            *reply.lock().unwrap() = json!({"receipts":receipts,"sequence":account.history.len().to_string(),"history_hash":account.history.last().unwrap().history_hash}).to_string().into_bytes();
+            if status.swap(false, Ordering::SeqCst) {503} else {200}
+        })
+        .with_body_from_request(move |_| std::mem::take(&mut *body.lock().unwrap()))
+        .create();
     (batches, lose)
 }
 fn fixture() -> Fixture {
@@ -738,21 +762,40 @@ fn a_route_saved_on_this_device_moves_into_the_library_once() {
 
 /// Another device's next version of the library's Catalog, this device's latest after `edit`, appended to the service's history.
 fn remote_catalog(f: &Fixture, edit: impl FnOnce(&mut Catalog)) {
+    let version = remote_catalog_version(f, edit);
+    f.service.state.lock().unwrap().history.push(version);
+}
+fn catalog_identity() -> Identity {
+    Identity {
+        kind: "meta".into(),
+        id: "catalog".into(),
+        scope: None,
+    }
+}
+/// That version, not yet in the service's history: for a push that lands just before this device's (`Account::race`).
+fn remote_catalog_version(f: &Fixture, edit: impl FnOnce(&mut Catalog)) -> rekey::Version {
+    let mut catalog = state(&f.d).local.central_projection.as_ref().unwrap().catalog.clone();
+    edit(&mut catalog);
+    let history = f.service.state.lock().unwrap().history.clone();
+    next_version(f, &history, &catalog_identity(), &Data::Catalog(catalog))
+}
+/// Another device's version of the Local host `id` (named `alias`) next after the service's history.
+fn remote_host_version(f: &Fixture, id: &str, alias: &str) -> rekey::Version {
+    let identity = Identity { kind: "host".into(), id: id.into(), scope: Some(HostScope::Local) };
+    let host = serde_json::from_value(json!({"schema":2,"alias":alias,"hostname":"other.invalid","auth":"password"})).unwrap();
+    let history = f.service.state.lock().unwrap().history.clone();
+    next_version(f, &history, &identity, &Data::Host(host))
+}
+/// The version of record `identity` holding `data` that would follow `history`: the next revision of that record and the next
+/// sequence, signed as the fixture's other device signs.
+fn next_version(f: &Fixture, history: &[rekey::Version], identity: &Identity, data: &Data) -> rekey::Version {
     let before = state(&f.d);
     let owner = before.local.central.as_ref().unwrap();
     let anchor = owner.control.anchor.as_ref().unwrap();
     let session = controller::context(&f.d.env()).unwrap();
-    let id = Identity {
-        kind: "meta".into(),
-        id: "catalog".into(),
-        scope: None,
-    };
-    let mut catalog = before.local.central_projection.as_ref().unwrap().catalog.clone();
-    edit(&mut catalog);
+    let id = identity;
     let record_id = id.opaque(&f.keys).unwrap();
-    let mut account = f.service.state.lock().unwrap();
-    let revision = account
-        .history
+    let revision = history
         .iter()
         .rev()
         .find(|row| row.envelope.header.record_id == record_id)
@@ -771,30 +814,30 @@ fn remote_catalog(f: &Fixture, edit: impl FnOnce(&mut Catalog)) {
             author: owner.control.device.id.clone(),
             operation_id: crypto::random_id(16).unwrap(),
             expected_revision: revision.to_string(),
-            kind: "meta".into(),
+            kind: id.kind.clone(),
             deleted: false,
         },
-        &payload::encode(&id, &Data::Catalog(catalog)).unwrap(),
+        &payload::encode(id, data).unwrap(),
     )
     .unwrap();
     let digest = rekey::envelope_digest(&envelope).unwrap();
-    let sequence = (account.history.len() + 1).to_string();
+    let sequence = (history.len() + 1).to_string();
     let history_hash = crypto::hash(
         &wire::canonical(&[
             "lunport-history-v2",
-            &account.history.last().unwrap().history_hash,
+            &history.last().unwrap().history_hash,
             &sequence,
             &digest,
         ])
         .unwrap(),
     );
-    account.history.push(rekey::Version {
+    rekey::Version {
         envelope,
         revision: (revision + 1).to_string(),
         sequence,
         digest,
         history_hash,
-    });
+    }
 }
 
 /// R19: a device at central sync's own version receives a route another device published; the round projects it as the library's row
@@ -907,4 +950,253 @@ fn a_device_upgraded_with_routes_of_its_own_keeps_the_librarys_and_publishes_the
     assert_eq!(transports::get(&second, y), Some(mine_y));
     assert!(transports::synced(&second, y) && second.local.transports.is_empty());
     assert_eq!(second.version, transports::SYNC_STATE_VERSION);
+}
+
+/// Design 2026-10-27 (Catalog conflicts keep both devices' changes): helpers for the Catalog merge rounds.
+mod catalog_merge_rounds {
+    use super::*;
+    use crate::sync::{
+        central::catalog_merge::tests::tunnel,
+        records_v3::SyncStateV3,
+        transports,
+        tunnel_rules::{self, TunnelRule},
+    };
+
+    fn save_tunnel(f: &Fixture, rule: TunnelRule) {
+        let id = rule.id.clone();
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            tunnel_rules::set(state, None, &id, None, Some(rule), 900).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    }
+    fn remove_tunnel(f: &Fixture, rule: &TunnelRule) {
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            tunnel_rules::set(state, None, &rule.id, Some(rule), None, 950).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    }
+    fn catalog_id(f: &Fixture) -> String {
+        Identity { kind: "meta".into(), id: "catalog".into(), scope: None }.opaque(&f.keys).unwrap()
+    }
+    fn in_conflict(f: &Fixture, state: &SyncStateV3) -> bool {
+        state.local.central.as_ref().unwrap().replica.as_ref().unwrap().conflicts.contains_key(&catalog_id(f))
+    }
+    fn tunnel_ids(state: &SyncStateV3) -> Vec<String> {
+        let mut ids: Vec<_> = tunnel_rules::view(state).into_iter().map(|row| row.rule.id).collect();
+        ids.sort();
+        ids
+    }
+    fn library_tunnels(state: &SyncStateV3) -> Vec<String> {
+        let mut ids: Vec<_> = state.local.central_projection.as_ref().unwrap().catalog.tunnels.iter().map(|t| t.id.clone()).collect();
+        ids.sort();
+        ids
+    }
+    const B: &str = "000000000000000b";
+    const C: &str = "000000000000000c";
+
+    /// A tunnel saved while another device's Catalog change arrives is merged with it in the round that reads it: both reach this
+    /// device's rows and the library, with no review and no error.
+    #[test]
+    fn a_tunnel_saved_while_another_device_changed_the_catalog_merges_in_one_round() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        remote_catalog(&f, |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert_eq!(tunnel_ids(&after), [B, C]);
+        assert!(!in_conflict(&f, &after));
+        assert!(!after.local.central.as_ref().unwrap().replica.as_ref().unwrap().pending.contains_key(&catalog_id(&f)));
+        assert_eq!(library_tunnels(&after), [B, C], "the library holds both");
+        assert!(controller::status(&f.d.env()).unwrap().error.is_none());
+    }
+
+    /// Review Focus 1: the first route reaching a device through a merge raises its state to the version route rows need.
+    #[test]
+    fn the_first_route_a_merge_brings_raises_the_state_version() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        assert_eq!(state(&f.d).version, CENTRAL_STATE_VERSION);
+        let host = "0000000000000009";
+        save_tunnel(&f, tunnel(B, 15433));
+        remote_catalog(&f, |catalog| catalog.transports.push(iap_route(host)));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert!(!in_conflict(&f, &after));
+        assert_eq!(transports::get(&after, host), Some(iap_route(host)));
+        assert!(transports::synced(&after, host));
+        assert_eq!(after.version, transports::SYNC_STATE_VERSION);
+    }
+
+    /// Review Focus 4: a library that takes no edit takes no merge either; the conflict waits and the rows stay as they are.
+    #[test]
+    fn a_library_whose_writes_are_blocked_keeps_its_catalog_conflict() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        remote_catalog(&f, |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            let mut next = state.clone();
+            next.shared_writes_blocked = true;
+            Ok(next)
+        })
+        .unwrap();
+        let _ = round::sync_once(&f.d.env());
+        let after = state(&f.d);
+        assert!(in_conflict(&f, &after));
+        assert_eq!(tunnel_ids(&after), [B], "the other device's tunnel is not read in");
+    }
+
+    /// Together the two devices' tunnels exceed what a library holds: the conflict waits, and once this device removes some of its
+    /// own the next round merges.
+    #[test]
+    fn a_catalog_over_its_room_merges_once_this_device_removes_a_tunnel() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        let mine: Vec<_> = (0..10).map(|n| tunnel(&format!("{:016x}", 0x1000 + n), 15432)).collect();
+        for rule in &mine {
+            save_tunnel(&f, rule.clone());
+        }
+        remote_catalog(&f, |catalog| catalog.tunnels.extend((0..250).map(|n| tunnel(&format!("{n:016x}"), 15432))));
+        round::sync_once(&f.d.env()).unwrap();
+        assert!(in_conflict(&f, &state(&f.d)), "260 tunnels do not fit");
+        assert_eq!(controller::status(&f.d.env()).unwrap().conflicts, 1);
+        for rule in &mine[..4] {
+            remove_tunnel(&f, rule);
+        }
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert!(!in_conflict(&f, &after));
+        assert_eq!(library_tunnels(&after).len(), 256);
+    }
+
+    const A: &str = "000000000000000a";
+    fn create_host(f: &Fixture, id: &str) {
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            let host = serde_json::from_value(json!({"schema":2,"alias":format!("jump-{id}"),"hostname":"jump.invalid","auth":"password"})).unwrap();
+            record_repository::create_host(state, id, HostScope::Local, host, 900).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    }
+    fn save_route(f: &Fixture, host: &str) {
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            transports::set(state, host, None, Some(iap_route(host)), 900).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    }
+    fn on(mut rule: TunnelRule, host: &str) -> TunnelRule {
+        rule.host_id = host.into();
+        rule
+    }
+    /// No error status and no backoff: the round that met the refusal finished it.
+    fn clean_round(f: &Fixture) {
+        let core = f.d.runtime.core.lock().unwrap();
+        assert!(core.central_user_action.is_none(), "{:?}", core.central_user_action);
+        assert!(core.central_poll.retry_at.is_none());
+    }
+
+    /// The done criterion (design 2026-10-27): two devices push Catalog changes inside one pull-to-push window, each a tunnel and a
+    /// route. The relay takes the other device's push and refuses this one (409); the same round pulls again, merges and pushes, so
+    /// neither device's routes or tunnels are lost, and the library the other device reads next holds all four.
+    #[test]
+    fn two_devices_racing_catalog_pushes_both_keep_their_tunnels_and_routes() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        let (h_a, h_b) = ("000000000000a00a", "000000000000b00b");
+        create_host(&f, h_a);
+        create_host(&f, h_b);
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, on(tunnel(B, 15433), h_b));
+        save_route(&f, h_b);
+        let other = remote_catalog_version(&f, |catalog| {
+            catalog.tunnels.push(on(tunnel(A, 15432), h_a));
+            catalog.transports.push(iap_route(h_a));
+        });
+        f.service.state.lock().unwrap().race.push(other);
+        let pushed = f.batches.lock().unwrap().len();
+        round::sync_once(&f.d.env()).unwrap();
+        assert_eq!(f.batches.lock().unwrap().len(), pushed + 2, "the refused push, then the merged one");
+        let after = state(&f.d);
+        assert_eq!(tunnel_ids(&after), [A, B]);
+        for host in [h_a, h_b] {
+            assert_eq!(transports::get(&after, host), Some(iap_route(host)));
+            assert!(transports::synced(&after, host));
+        }
+        assert!(!in_conflict(&f, &after));
+        assert!(!after.local.central.as_ref().unwrap().replica.as_ref().unwrap().pending.contains_key(&catalog_id(&f)));
+        let library = &after.local.central_projection.as_ref().unwrap().catalog;
+        assert_eq!(library_tunnels(&after), [A, B]);
+        let mut routes: Vec<_> = library.transports.iter().map(|route| route.host_id.as_str()).collect();
+        routes.sort();
+        assert_eq!(routes, [h_a, h_b]);
+        clean_round(&f);
+    }
+
+    /// Design 2026-10-27 (A refused push), call 13: a host race reaches its review in the round that met the refusal, without an
+    /// error first.
+    #[test]
+    fn a_host_race_reaches_review_in_the_refused_round() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        let host = "000000000000c00c";
+        create_host(&f, host);
+        round::sync_once(&f.d.env()).unwrap();
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            let mut next = state.clone();
+            next.local.hosts.get_mut(&crate::sync::record::record_key(crate::sync::record::RecordKind::Host, host)).unwrap().record.payload["alias"] = "this-name".into();
+            Ok(next)
+        })
+        .unwrap();
+        let other = remote_host_version(&f, host, "other-name");
+        f.service.state.lock().unwrap().race.push(other);
+        round::sync_once(&f.d.env()).unwrap();
+        assert_eq!(controller::status(&f.d.env()).unwrap().conflicts, 1);
+        clean_round(&f);
+    }
+
+    #[test]
+    fn a_push_refused_for_another_reason_still_fails_the_round() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        f.service.state.lock().unwrap().refuse_pushes.push("retry");
+        assert!(round::sync_once(&f.d.env()).is_err());
+        assert!(f.d.runtime.core.lock().unwrap().central_user_action.is_some());
+    }
+
+    #[test]
+    fn a_round_stops_pulling_again_after_three_refusals() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        f.service.state.lock().unwrap().refuse_pushes = vec!["revision_conflict"; 4];
+        let pushed = f.batches.lock().unwrap().len();
+        assert!(round::sync_once(&f.d.env()).is_err());
+        assert_eq!(f.batches.lock().unwrap().len(), pushed + 4, "the first push and three more");
+        let after = state(&f.d);
+        assert!(after.local.central.as_ref().unwrap().replica.as_ref().unwrap().pending.contains_key(&catalog_id(&f)), "nothing is lost");
+        assert_eq!(tunnel_ids(&after), [B]);
+    }
+
+    /// Review Focus 5: a third device's push lands while this device pushes its merge; the round pulls and merges again.
+    #[test]
+    fn a_third_device_pushing_during_the_merge_round_is_merged_too() {
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        save_tunnel(&f, tunnel(B, 15433));
+        let history = f.service.state.lock().unwrap().history.clone();
+        let library = state(&f.d).local.central_projection.as_ref().unwrap().catalog.clone();
+        let mut first = library.clone();
+        first.tunnels.push(tunnel(A, 15432));
+        let v1 = next_version(&f, &history, &catalog_identity(), &Data::Catalog(first.clone()));
+        let mut second = first;
+        second.tunnels.push(tunnel(C, 15434));
+        let v2 = next_version(&f, &[history, vec![v1.clone()]].concat(), &catalog_identity(), &Data::Catalog(second));
+        f.service.state.lock().unwrap().race = vec![v1, v2];
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert_eq!(library_tunnels(&after), [A, B, C]);
+        assert!(!in_conflict(&f, &after));
+        clean_round(&f);
+    }
 }

@@ -32,6 +32,8 @@ pub struct View {
     can_resolve: bool,
     can_remote: bool,
     can_copy: bool,
+    /// The Catalog's items both devices changed (design 2026-10-27); `None` for every other record.
+    catalog: Option<super::catalog_conflict::CatalogReview>,
 }
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
@@ -57,7 +59,7 @@ fn token(state: &SyncStateV3, generation: u64, id: &str) -> Result<String, AppEr
         .map_err(|_| invalid())?,
     ))
 }
-fn open(
+pub(super) fn open(
     state: &SyncStateV3,
     keys: &VaultKeys,
     envelope: &super::crypto::RecordEnvelope,
@@ -85,7 +87,7 @@ fn public(value: &Data) -> Result<Option<serde_json::Value>, AppError> {
         Data::Deleted | Data::Key(_) | Data::Password(_) => None,
     })
 }
-fn settled(replica: &super::replica::Replica, id: &str) -> Result<bool, AppError> {
+pub(super) fn settled(replica: &super::replica::Replica, id: &str) -> Result<bool, AppError> {
     let Some(pending) = replica.pending.get(id) else {
         return Ok(false);
     };
@@ -135,6 +137,11 @@ fn views(state: &SyncStateV3, generation: u64, keys: &VaultKeys) -> Result<Vec<V
                 .map_or_else(||"Saved SSH password".into(),|host|host.host.payload.alias)
         } else {name};
         let can_resolve = settled(replica, id)?;
+        let catalog = if kind == "meta" { super::catalog_conflict::review(state, keys)? } else { None };
+        let can_remote = match &catalog {
+            Some(review) => review.can_remote,
+            None => matches!(kind.as_str(), "host" | "group" | "password"),
+        };
         rows.push(View {
             id: id.clone(),
             token: token(state, generation, id)?,
@@ -146,8 +153,9 @@ fn views(state: &SyncStateV3, generation: u64, keys: &VaultKeys) -> Result<Vec<V
             remote_deleted: matches!(other.data, Data::Deleted),
             remote_revision: remote.version.revision.clone(),
             can_resolve,
-            can_remote: can_resolve && matches!(kind.as_str(), "host" | "group" | "password"),
+            can_remote: can_resolve && can_remote,
             can_copy: can_resolve && matches!(other.data, Data::Host(_)),
+            catalog,
         });
     }
     Ok(rows)
@@ -244,6 +252,21 @@ fn candidate(
     if local.identity != other.identity {
         return Err(invalid());
     }
+    // The Catalog merges both versions; the choice settles only the items both devices changed (design 2026-10-27).
+    if local.identity.kind == "meta" {
+        use super::catalog_conflict::{apply, Outcome};
+        use super::catalog_merge::Side;
+        let side = match choice {
+            Choice::Local => Side::Local,
+            Choice::Remote => Side::Remote,
+            Choice::CopyRemote => return Err(invalid()),
+        };
+        return match apply(state, keys, signer, Some(side), now)? {
+            Outcome::Merged(next) => Ok(*next),
+            Outcome::Over(over) => Err(AppError::Other(over.sentence())),
+            Outcome::Collides(_) => Err(invalid()),
+        };
+    }
     let mut next = state.clone();
     match choice {
         Choice::Remote => {
@@ -269,13 +292,28 @@ fn candidate(
         }
         Choice::Local => {}
     }
+    let draft = (!matches!(choice, Choice::Remote)).then_some((&local.identity, &local.data));
+    retire_conflict(next, keys, signer, id, draft, remote)
+}
+/// Retires the conflict of record `id` in `state`: this device's pending draft is replaced by `draft` (the version kept, written
+/// against the synced version `remote`, which becomes its confirmed basis), or dropped (`None`: the synced version kept), and the
+/// capture runs. Shared by the review's choices and the Catalog merge (`catalog_conflict::apply`).
+pub(super) fn retire_conflict(
+    mut next: SyncStateV3,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+    id: &str,
+    draft: Option<(&payload::Identity, &Data)>,
+    remote: &super::replica::Base,
+) -> Result<SyncStateV3, AppError> {
     let owner = next.local.central.as_mut().ok_or_else(invalid)?;
     let chain = owner.control.verified_chain()?;
     let replica = owner.replica.as_mut().ok_or_else(invalid)?;
+    let pending = replica.pending.get(id).ok_or_else(invalid)?.clone();
     replica.conflicts.remove(id);
     replica.pending.remove(id);
-    if !matches!(choice, Choice::Remote) {
-        let bytes = payload::encode(&local.identity, &local.data)?;
+    if let Some((identity, data)) = draft {
+        let bytes = payload::encode(identity, data)?;
         let mut header = pending.latest.envelope.header.clone();
         header.author = owner.control.device.id.clone();
         header.membership_head = chain.current().head().into();
@@ -824,6 +862,31 @@ mod tests {
         );
     }
 
+    /// One record in conflict reads as one conflict, however many synced or local versions it has met.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_status_counts_records_in_conflict_not_their_entries() {
+        let d = crate::sync::record_import::central_local::tests::fixture();
+        let env = d.env();
+        let (mut state, generation) = record_runtime::snapshot(&env).unwrap();
+        let context = Context::load(&env, &state).unwrap();
+        let alias = |state: &mut SyncStateV3, value: &str| {
+            state.local.hosts.get_mut(&record_key(RecordKind::Host, "0000000000000001")).unwrap().record.payload["alias"] = value.into();
+        };
+        alias(&mut state, "local-B");
+        let mut state = super::super::capture_public(&state, context.keys(), context.signer()).unwrap();
+        let row = remote(&state, context.keys(), "remote-C", None);
+        apply(&mut state, context.keys(), row);
+        for value in ["local-D", "local-E"] {
+            alias(&mut state, value);
+            state = super::super::capture_public(&state, context.keys(), context.signer()).unwrap();
+        }
+        let replica = state.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+        assert_eq!((replica.conflicts.len(), replica.conflicts.values().map(Vec::len).sum::<usize>()), (1, 3));
+        record_runtime::commit_candidate(&env, generation, state).unwrap();
+        assert_eq!(controller::status(&env).unwrap().conflicts, 1);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn status_remains_responsive_during_unlock_and_exposes_the_server_wait() {
@@ -843,5 +906,168 @@ mod tests {
         assert!(
             ready.observation.parse::<u64>().unwrap() > status.observation.parse::<u64>().unwrap()
         );
+    }
+
+    /// Design 2026-10-27 (Collisions: the review): the Catalog's row lists only the items both devices changed differently, and each
+    /// choice keeps every other change of both.
+    mod catalog_review {
+        use super::super::super::{
+            catalog_conflict::{
+                catalog_identity,
+                tests::{conflicted, with_route, with_tunnel},
+            },
+            catalog_merge::{
+                tests::{long_route, route, tunnel},
+                Collision, Over,
+            },
+            payload::{catalog_fits, Catalog},
+            projection_delta::tests::append,
+        };
+        use super::*;
+        use crate::sync::{transports, tunnel_rules};
+
+        const A: &str = "000000000000000a";
+        const B: &str = "000000000000000b";
+        const C: &str = "000000000000000c";
+        /// The fixture's host.
+        const H1: &str = "0000000000000001";
+        const H2: &str = "0000000000000002";
+
+        /// Tunnel A added on both devices with different ports, and a route each side added.
+        fn colliding() -> (SyncStateV3, VaultKeys, DeviceKeys) {
+            conflicted(
+                |state| with_route(with_tunnel(state, tunnel(A, 15433)), route(H1, "asia-east1-b")),
+                |catalog| {
+                    catalog.tunnels.push(tunnel(A, 15434));
+                    catalog.transports.push(route(H2, "asia-east1-c"));
+                },
+            )
+        }
+        fn catalog_row(state: &SyncStateV3, keys: &VaultKeys) -> View {
+            views(state, 1, keys).unwrap().into_iter().find(|row| row.kind == "meta").unwrap()
+        }
+        fn port(state: &SyncStateV3) -> u16 {
+            tunnel_rules::view(state).into_iter().find(|row| row.rule.id == A).unwrap().rule.forward.port
+        }
+
+        #[test]
+        fn a_catalog_conflict_lists_only_the_colliding_items() {
+            let (state, keys, _) = colliding();
+            let row = catalog_row(&state, &keys);
+            let review = row.catalog.as_ref().unwrap();
+            assert_eq!(review.items, [Collision::Tunnel { id: A.into(), local: Some(tunnel(A, 15433)), remote: Some(tunnel(A, 15434)) }]);
+            assert!(review.can_local && review.can_remote && review.over.is_none());
+            assert!(row.can_resolve && row.can_remote && !row.can_copy);
+        }
+
+        #[test]
+        fn each_catalog_choice_keeps_every_other_change() {
+            let (state, keys, signer) = colliding();
+            let id = catalog_identity().opaque(&keys).unwrap();
+            let mine = candidate(&state, &keys, &signer, &id, Choice::Local, None, 300).unwrap();
+            assert_eq!(port(&mine), 15433);
+            let synced = candidate(&state, &keys, &signer, &id, Choice::Remote, None, 300).unwrap();
+            assert_eq!(port(&synced), 15434);
+            for chosen in [&mine, &synced] {
+                assert_eq!(transports::get(chosen, H1), Some(route(H1, "asia-east1-b")), "this device's route stays");
+                assert_eq!(transports::get(chosen, H2), Some(route(H2, "asia-east1-c")), "the other device's route stays");
+                assert!(!chosen.local.central.as_ref().unwrap().replica.as_ref().unwrap().conflicts.contains_key(&id));
+            }
+        }
+
+        #[test]
+        fn a_catalog_choice_that_does_not_fit_is_not_offered() {
+            // Twenty tunnels added on both devices, with names at their longest here and short there, beside the synced Catalog's
+            // routes: the most that leave room for the short names. Keeping this device's names does not fit; the synced ones do.
+            let ids: Vec<String> = (0..20).map(|n| format!("{:016x}", 0x2000 + n)).collect();
+            let named = |name: &str| -> Vec<_> {
+                ids.iter().map(|id| { let mut rule = tunnel(id, 15432); rule.name = name.into(); rule }).collect()
+            };
+            let (_, _, ledger) = super::super::super::projection_state::tests::initial();
+            let synced = |routes: usize| Catalog {
+                tunnels: named("short"),
+                transports: (0..routes).map(|n| long_route(&format!("{n:016x}"))).collect(),
+                ..ledger.catalog.clone()
+            };
+            let routes = (1..transports::MAX_ROUTES).take_while(|n| catalog_fits(&synced(*n))).last().unwrap();
+            let (state, keys, signer) = conflicted(
+                |state| named(&"t".repeat(128)).into_iter().fold(state, with_tunnel),
+                |catalog| *catalog = synced(routes),
+            );
+            let review = catalog_row(&state, &keys).catalog.unwrap();
+            assert_eq!(review.items.len(), 20);
+            assert!(!review.can_local && review.can_remote && review.over.is_none());
+            let id = catalog_identity().opaque(&keys).unwrap();
+            let refused = candidate(&state, &keys, &signer, &id, Choice::Local, None, 300).err().unwrap();
+            assert_eq!(refused.to_string(), Over::Size.sentence());
+            assert!(candidate(&state, &keys, &signer, &id, Choice::Remote, None, 300).is_ok());
+        }
+
+        #[test]
+        fn a_collision_free_catalog_conflict_waits_for_the_next_sync() {
+            let (state, keys, _) = conflicted(|state| with_tunnel(state, tunnel(B, 15433)), |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+            let row = catalog_row(&state, &keys);
+            let review = row.catalog.as_ref().unwrap();
+            assert!(review.items.is_empty() && review.over.is_none());
+            assert!(!review.can_local && !review.can_remote && !row.can_remote);
+        }
+
+        #[test]
+        fn a_collision_free_catalog_conflict_over_its_room_says_so() {
+            let (state, keys, _) = conflicted(
+                |state| (0..12).fold(state, |state, n| with_tunnel(state, tunnel(&format!("{:016x}", 0x1000 + n), 15432))),
+                |catalog| catalog.tunnels.extend((0..250).map(|n| tunnel(&format!("{n:016x}"), 15432))),
+            );
+            let review = catalog_row(&state, &keys).catalog.unwrap();
+            assert!(review.items.is_empty());
+            assert_eq!(review.over, Some(Over::Tunnels(262).sentence()));
+            assert!(!review.can_local && !review.can_remote);
+        }
+
+        #[test]
+        fn keeping_both_is_refused_for_the_catalog() {
+            let (state, keys, signer) = colliding();
+            let id = catalog_identity().opaque(&keys).unwrap();
+            assert!(candidate(&state, &keys, &signer, &id, Choice::CopyRemote, Some("copy"), 300).is_err());
+        }
+
+        /// Review Focus 3: a Catalog choice keeps its recovery snapshot, and a later Catalog collision on the same device resolves
+        /// too, reusing the record's archive key.
+        #[cfg(any(unix, windows))]
+        #[test]
+        fn catalog_choices_are_durable_and_a_later_one_still_resolves() {
+            let d = crate::sync::record_import::central_local::tests::fixture();
+            let env = d.env();
+            let collide = |here: u16, there: u16| {
+                let (state, generation) = record_runtime::snapshot(&env).unwrap();
+                let context = Context::load(&env, &state).unwrap();
+                let current = tunnel_rules::view(&state).into_iter().find(|row| row.rule.id == A).map(|row| row.rule);
+                let state = tunnel_rules::set(&state, None, A, current.as_ref(), Some(tunnel(A, here)), 900).unwrap();
+                let mut state = super::super::super::capture_public(&state, context.keys(), context.signer()).unwrap();
+                let opaque = catalog_identity().opaque(context.keys()).unwrap();
+                let replica = state.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+                let mut catalog = match open(&state, context.keys(), &replica.current[&opaque].version.envelope, &replica.current[&opaque].content_hash).unwrap().data {
+                    Data::Catalog(catalog) => catalog,
+                    _ => panic!(),
+                };
+                catalog.tunnels.retain(|rule| rule.id != A);
+                catalog.tunnels.push(tunnel(A, there));
+                append(&mut state, context.keys(), catalog_identity(), Data::Catalog(catalog));
+                let state = super::super::super::capture_public(&state, context.keys(), context.signer()).unwrap();
+                let generation = record_runtime::commit_candidate(&env, generation, state.clone()).unwrap();
+                let review = token(&state, generation, &opaque).unwrap();
+                (opaque, review)
+            };
+            for (here, there) in [(15433, 15434), (15435, 15436)] {
+                let (id, review) = collide(here, there);
+                resolve(&env, &id, &review, Choice::Local, None).unwrap();
+                let saved = record_runtime::read_saved_records(&env.state_path).unwrap();
+                assert!(!saved.local.central.as_ref().unwrap().replica.as_ref().unwrap().conflicts.contains_key(&id));
+                assert_eq!(port(&saved), here);
+            }
+            let files = super::super::super::migration_files::Files::capture(&env, None).unwrap();
+            let retained = super::super::super::replacement_archive::captured::read_all(&files.bytes, &d.keychain).unwrap();
+            assert!(retained.states.len() >= 2, "each choice kept its recovery snapshot");
+        }
     }
 }
