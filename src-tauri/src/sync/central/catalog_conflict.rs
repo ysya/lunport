@@ -120,6 +120,31 @@ pub(super) fn apply(
     Ok(Outcome::Merged(Box::new(next)))
 }
 
+/// The automatic merge (design 2026-10-27, The automatic merge): `state` captured, with its Catalog conflict merged, when the capture
+/// leaves the Catalog in conflict (this round's pull read another device's Catalog, before or after this device's change was
+/// captured), the refused write can no longer commit (`conflicts::settled`), and no item collides and the result fits (`apply`).
+/// `None` otherwise, and in a library whose writes are blocked: the conflict waits for the review or a later round.
+pub(super) fn merge_automatically(
+    state: &SyncStateV3,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+    now: u64,
+) -> Result<Option<Box<SyncStateV3>>, AppError> {
+    if crate::sync::records_v3::account_writes_blocked(state) {
+        return Ok(None);
+    }
+    let captured = Box::new(super::capture_public(state, keys, signer)?);
+    let replica = captured.local.central.as_ref().and_then(|owner| owner.replica.as_ref()).ok_or_else(invalid)?;
+    let opaque = catalog_identity().opaque(keys)?;
+    if !replica.conflicts.contains_key(&opaque) || !super::conflicts::settled(replica, &opaque)? {
+        return Ok(None);
+    }
+    Ok(match apply(&captured, keys, signer, None, now)? {
+        Outcome::Merged(next) => Some(next),
+        Outcome::Collides(_) | Outcome::Over(_) => None,
+    })
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::super::{
@@ -299,6 +324,40 @@ pub(super) mod tests {
             |catalog| catalog.tunnels.extend((0..250).map(|n| tunnel(&format!("{n:016x}"), 15432))),
         );
         assert!(matches!(apply(&state, &keys, &signer, None, 300).unwrap(), Outcome::Over(Over::Tunnels(260))));
+    }
+
+    #[test]
+    fn the_automatic_merge_waits_for_a_settled_conflict() {
+        let (mut state, keys, signer) = conflicted(|state| with_tunnel(state, tunnel(B, 15433)), |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        assert!(merge_automatically(&state, &keys, &signer, 300).unwrap().is_some(), "settled, it merges");
+        let opaque = catalog_identity().opaque(&keys).unwrap();
+        let replica = state.local.central.as_mut().unwrap().replica.as_mut().unwrap();
+        let sequence = (replica.checkpoint.sequence + 1).to_string();
+        let pending = replica.pending.get_mut(&opaque).unwrap();
+        let sent = pending.latest.clone();
+        pending.claimed = Some(super::super::replica::Receipt {
+            operation_id: sent.envelope.header.operation_id.clone(),
+            record_id: opaque.clone(),
+            revision: (number(&sent.envelope.header.expected_revision, true).unwrap() + 1).to_string(),
+            sequence,
+            digest: super::super::rekey::envelope_digest(&sent.envelope).unwrap(),
+            history_hash: "f".repeat(64),
+        });
+        pending.sent = Some(sent);
+        assert!(merge_automatically(&state, &keys, &signer, 300).unwrap().is_none(), "a claimed write is read back first");
+    }
+
+    #[test]
+    fn the_automatic_merge_leaves_a_collision_for_review() {
+        let (state, keys, signer) = colliding();
+        assert!(merge_automatically(&state, &keys, &signer, 300).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_automatic_merge_leaves_a_library_that_refuses_edits() {
+        let (mut state, keys, signer) = conflicted(|state| with_tunnel(state, tunnel(B, 15433)), |catalog| catalog.tunnels.push(tunnel(C, 15434)));
+        state.shared_writes_blocked = true;
+        assert!(merge_automatically(&state, &keys, &signer, 300).unwrap().is_none());
     }
 
     #[test]
