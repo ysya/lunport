@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { SettingsCategoryPane } from "./SettingsDialog";
+import { SettingsCategoryPane } from "./SettingsPage";
 import { recordOverview, hostView, hostPayload, groupView } from "./records/fixtures";
 import { mcpStatusKey } from "@/lib/mcp";
 import type { McpStatus } from "@/bindings/McpStatus";
@@ -40,7 +40,9 @@ describe("Records AI Access", () => {
     const html = render();
     expect(html).toContain(status.audit_error!);
     expect(html).toContain("disconnected");
-    expect(html).toContain("Exit: unknown");
+    expect(html).toContain("Connection lost");
+    expect(html).toContain("Exit code</dt><dd>Not reported");
+    expect(html).not.toContain("Succeeded");
     expect(html).toContain("observed-process");
     expect(html).toContain("Self-reported client");
     expect(html).toContain("claimed-client");
@@ -52,7 +54,8 @@ describe("Records AI Access", () => {
     const html = render(recordOverview(), { ...status, recent: [{
       ...status.recent[0], at_ms: requested.getTime(), completed_at_ms: completed.getTime(),
     }] });
-    const times = [...html.matchAll(/<time dateTime="([^"]+)">([^<]+)<\/time>/g)];
+    const details = html.slice(html.indexOf("<details", html.indexOf('aria-label="Recent AI activity"')));
+    const times = [...details.matchAll(/<time dateTime="([^"]+)">([^<]+)<\/time>/g)];
     expect(times.map(match => match[1])).toEqual([requested.toISOString(), completed.toISOString()]);
     expect(html).toContain("Requested:");
     expect(html).toContain("Completed:");

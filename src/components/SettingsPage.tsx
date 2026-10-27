@@ -1,4 +1,3 @@
-import { auditRows } from "@/lib/mcp-audit-rows";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -13,6 +12,7 @@ import {
   SlidersHorizontal,
   Search,
   ArrowRight,
+  ArrowLeft,
   Sun,
   SunMoon,
   TerminalSquare,
@@ -56,7 +56,6 @@ import {
   useSetMcpApprovalMode,
 } from "@/lib/mcp";
 
-import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -81,7 +80,7 @@ import { searchSettings, settingsDestinations, type SettingsMode } from "@/lib/s
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { revealHidden } from "@/lib/sync-approvals";
 import { chooseMcpMode } from "@/lib/mcp-flow";
-import { McpAttribution } from "@/components/McpAttribution";
+import { McpActivity } from "@/components/McpActivity";
 import { groupPath, groupAncestors } from "@/components/records/group-tree";
 import { groupComparator } from "@/components/records/group-order";
 import type { RecordOverview } from "@/lib/records";
@@ -182,25 +181,41 @@ const RETENTION_ALL = "__all__";
 const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: TerminalSquare, files: FolderCog, ai: Bot, sync: RefreshCw, updates: RefreshCw, advanced: SlidersHorizontal, about: Info };
 
 /**
- * The Settings window (⌘,): a System-Settings-style sidebar + detail layout.
+ * The Settings page (⌘,): a sidebar + detail view that keeps the workspace mounted.
  * Preferences persist via `useSettingsStore` (zustand persist); the ones the
  * backend also needs (tray, close-to-tray, retention) are mirrored with
  * fire-and-forget invokes here and re-sent on launch by
  * `useSyncBackendSettings`. Open state lives in the UI store so the toolbar
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
-export function SettingsDialog({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync }: {
+export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync }: {
   recordOverview?: RecordOverview;
   onOpenImport?: () => void;
   onOpenDataTools?: () => void;
   onOpenSync?: () => void;
 } = {}) {
-  const contentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const category = useUiStore((s) => s.settingsCategory);
   const setCategory = useUiStore((s) => s.setSettingsCategory);
+  const platform = usePlatform();
+
+  useEffect(() => {
+    if (!open) return;
+    const origin = document.activeElement;
+    returnFocusRef.current = origin instanceof HTMLElement && origin !== document.body && !contentRef.current?.contains(origin) ? origin : null;
+    const frame = requestAnimationFrame(() => contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]')?.focus());
+    return () => {
+      cancelAnimationFrame(frame);
+      requestAnimationFrame(() => {
+        const previous = returnFocusRef.current;
+        if (previous?.isConnected && !previous.closest("[inert]")) previous.focus();
+        else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+      });
+    };
+  }, [open]);
 
   // Global ⌘, / Ctrl+, shortcut — the macOS-standard Preferences accelerator.
   useEffect(() => {
@@ -255,26 +270,18 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenDataTools, 
   const navigate = (next: SettingsCategory) => { setSearch(""); setTarget(null); setCategory(next); };
   const jump = (next: SettingsCategory, anchor: string | null) => { navigate(next); setTarget(anchor ?? "settings-category-title"); };
 
+  if (!open) return null;
   return <>
-    <Dialog open={open} onOpenChange={close}>
-      <DialogContent ref={contentRef} className="app-shell settings-dialog" showCloseButton={!configBusy}
+      <main ref={contentRef} className={cn("app-shell settings-page", platform.data === "macos" && "is-macos")} aria-labelledby="settings-page-title"
         onKeyDown={(event) => {
+          if (event.defaultPrevented || isImeKey(event) || !event.currentTarget.contains(event.target as Node)) return;
           if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); event.stopPropagation(); searchRef.current?.focus(); }
-        }}
-        onOpenAutoFocus={(event) => {
-          const origin = document.activeElement;
-          returnFocusRef.current = origin instanceof HTMLElement && origin !== document.body && !contentRef.current?.contains(origin) ? origin : null;
-          const activeButton = contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]');
-          if (activeButton) { event.preventDefault(); activeButton.focus(); }
-        }}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          const origin = returnFocusRef.current;
-          if (origin?.isConnected) origin.focus();
-          else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(false); }
         }}>
-        <header className="settings-window-header">
-          <div><DialogTitle>Settings</DialogTitle><DialogDescription>{recordOverview ? "Records library" : "OpenSSH files"} · Preferences for this installation</DialogDescription></div>
+        <header className="settings-page-header" data-tauri-drag-region>
+          <Button variant="ghost" size="sm" aria-label="Back to workspace" disabled={configBusy} onClick={() => close(false)}><ArrowLeft className="size-4" />Back</Button>
+          <h1 id="settings-page-title">Settings</h1>
+          <p>{recordOverview ? "Records library" : "OpenSSH files"}</p>
         </header>
         <div className="settings-layout">
           <aside className="settings-navigation">
@@ -318,9 +325,8 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenDataTools, 
             </div>
           </div>
         </div>
-        <footer className="settings-window-footer">{configBusy ? <span role="status">Loading SSH configuration… Keep this window open until loading finishes.</span> : "Switches and selections apply immediately. Use Apply or Save where shown; imports require confirmation."}</footer>
-      </DialogContent>
-    </Dialog>
+        {configBusy && <footer className="settings-window-footer" role="status">Loading SSH configuration… Keep this page open until loading finishes.</footer>}
+      </main>
     <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>
       <AlertDialogContent onCloseAutoFocus={(event) => { if (open && configDirty) { event.preventDefault(); setCategory("files"); requestAnimationFrame(() => contentRef.current?.querySelector<HTMLInputElement>('input[aria-label="Config file path"]')?.focus()); } }}><AlertDialogHeader><AlertDialogTitle>Discard the config path draft?</AlertDialogTitle><AlertDialogDescription>The new path has not been applied. Your current SSH configuration stays loaded.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={() => { setConfirmClose(false); setOpen(false); }}>Discard draft</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
     </AlertDialog>
@@ -814,19 +820,6 @@ function LegacyMcpPane() {
   return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
 }
 
-function McpAuditTimes({ requested, completed }: { requested: number; completed: number }) {
-  const times = [{ label: "Requested", ms: requested }, { label: "Completed", ms: completed }]
-    .map(({ label, ms }) => ({ label, ms, date: new Date(ms) }))
-    .filter(({ ms, date }) => Number.isFinite(ms) && ms > 0 && Number.isFinite(date.getTime()));
-  return <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-muted-foreground">
-    {times.length === 0 ? "Time unavailable" : times.map(({ label, date }) => (
-      <span key={label}>{label}: <time dateTime={date.toISOString()}>
-        {date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "long" })}
-      </time></span>
-    ))}
-  </p>;
-}
-
 export function McpPane({ hosts, groups = [], generation, records = false }: {
   hosts: McpAccessHost[];
   generation?: string;
@@ -955,29 +948,7 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
         {status.data?.audit_error && <p role="alert" className="mb-2 break-words text-xs text-destructive">Audit persistence error: {status.data.audit_error}. Completed commands are not retried.</p>}
         {status.isError && <p role="alert" className="mb-2 text-xs text-destructive">AI access status is unavailable. Retry after the app reconnects.</p>}
         <SettingsGroup>
-          {(status.data?.recent.length ?? 0) === 0 ? (
-            <p className="px-3 py-3 text-sm text-muted-foreground">No AI commands yet.</p>
-          ) : (
-            auditRows(status.data?.recent ?? []).map(({ entry, key }) => (
-              <div key={key} className="space-y-1 px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="min-w-0 break-all font-mono text-xs">{revealHidden(entry.alias)}</span>
-                  <span className="break-words text-xs">{entry.client} · {entry.mode} · {entry.outcome.split("_").join(" ")}</span>
-                </div>
-                <p className="break-all text-xs text-muted-foreground">
-                  ID: {entry.host_id ?? "Unknown"}
-                  {entry.outcome.startsWith("host_")
-                    ? " · Connection management · No remote command"
-                    : ` · Ended: ${entry.ended ?? "unknown"} · Exit: ${entry.exit_code ?? "unknown"} · Signal: ${entry.signal ?? "none reported"}`}
-                </p>
-                <McpAuditTimes requested={entry.at_ms} completed={entry.completed_at_ms} />
-                <McpAttribution requestedBy={entry.requested_by} requesterId={entry.requester_id} clientInfo={entry.client_info} />
-                <p className="truncate font-mono text-xs text-muted-foreground" title={entry.command}>
-                  {entry.command}
-                </p>
-              </div>
-            ))
-          )}
+          <McpActivity entries={status.data?.recent ?? []} />
         </SettingsGroup>
       </Section>
 
@@ -1139,4 +1110,4 @@ function ThemeSegmented({
   );
 }
 
-export default SettingsDialog;
+export default SettingsPage;
