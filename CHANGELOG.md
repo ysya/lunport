@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.14.1](https://github.com/ysya/lunport/compare/v1.14.0...v1.14.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* Expired PAM grants now show **Expired** and enable **Request grant** automatically in Access, host details and tunnel hints. ([#100](https://github.com/ysya/lunport/pull/100))
+* PAM status refreshes when the window becomes visible again; grant request results also update as time passes.
+
 ## [1.14.0](https://github.com/ysya/lunport/compare/v1.13.0...v1.14.0) (2026-10-27)
 
 
