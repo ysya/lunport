@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/ysya/lunport/compare/v1.14.0...v1.14.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **pam:** refresh grants when access expires ([#100](https://github.com/ysya/lunport/issues/100)) ([f5da15a](https://github.com/ysya/lunport/commit/f5da15a2d2c8806a8d0cf8bae38b1fb75e1f862a))
+
 ## [1.14.0](https://github.com/ysya/lunport/compare/v1.13.0...v1.14.0) (2026-10-27)
 
 
