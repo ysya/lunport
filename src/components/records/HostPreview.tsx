@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
+import { useNow } from "@/lib/use-now";
 import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
@@ -36,13 +37,14 @@ import { ConnectionCheck } from "./ConnectionCheck";
  * every minute, with Request grant…, which is off while a grant is active or activating. Mount it for one host at a time (key it).
  */
 function AccessGrant({ transport, alias, memory }: { transport: HostTransport; alias: string; memory: GrantMemoryView | null }) {
+  const now = useNow(1000);
   const [requesting, setRequesting] = useState(false);
   const client = useQueryClient();
   const query = pamStatusQuery(transport.host_id);
   const read = useQuery(query);
   // The latest read failing speaks for the grant, whatever an earlier read found.
   const status = read.isError ? null : (read.data ?? null);
-  const held = grantHeld(status);
+  const held = grantHeld(status, now);
   return (
     <div className="library-preview-section">
       <h3>
@@ -50,10 +52,10 @@ function AccessGrant({ transport, alias, memory }: { transport: HostTransport; a
         Access grant
       </h3>
       <p className={held ? "text-primary" : undefined}>
-        {revealHidden(status ? grantLine(status) : read.isError ? errorMessage(read.error) : "Checking the grant…")}
+        {revealHidden(status ? grantLine(status, now) : read.isError ? errorMessage(read.error) : "Checking the grant…")}
       </p>
       <p className="mt-1 text-xs text-muted-foreground">Required: {revealHidden(transport.kind.pam?.entitlements.join(", ") ?? "")}</p>
-      <Button variant="outline" size="sm" className="mt-3" disabled={grantBusy(status)} onClick={() => setRequesting(true)}>
+      <Button variant="outline" size="sm" className="mt-3" disabled={grantBusy(status, now)} onClick={() => setRequesting(true)}>
         Request grant…
       </Button>
       {requesting && (

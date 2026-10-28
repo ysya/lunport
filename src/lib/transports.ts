@@ -47,8 +47,8 @@ export const fetchOsLoginProfile = (account: string | null, project: string, key
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
 export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
 /**
- * A host's Access grant as the details pane keeps it: read when the pane opens and again every minute while it stays open. A window
- * gaining focus does not read it again, since every read is a Google call. Not retried (the next minute reads it again), and read even
+ * A host's Access grant as the details pane keeps it: read when the pane opens, every minute while it stays open, and when the window
+ * becomes visible again after background polling stopped. Not retried (the next minute reads it again), and read even
  * when the webview thinks it is offline, since the answer comes from this app's backend, which says in its own sentence when Google
  * cannot be reached.
  */
@@ -57,7 +57,7 @@ export const pamStatusQuery = (hostId: string) =>
     queryKey: ["gcp", "pam-status", hostId],
     queryFn: () => fetchPamStatus(hostId),
     refetchInterval: 60_000,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
     retry: false,
     networkMode: "always",
   });
@@ -109,16 +109,15 @@ export const SIGN_IN_URL_EVENT = "gcp://sign-in-url";
 export const listPamOverview = () => tauriInvoke<PamOverview>("gcp_pam_overview");
 export const pamOverviewKey = ["gcp", "pam-overview"] as const;
 /**
- * The Access tab's overview: read when the tab shows and again every minute while it stays open. As with `pamStatusQuery`, a window
- * gaining focus does not read it again (every read is a Google call per scope and per entitlement), it is not retried (the next minute
- * reads it again), and it is read even when the webview thinks it is offline, since the backend says in its own sentence when Google
- * cannot be reached.
+ * The Access tab's overview: read when the tab shows, every minute while it stays open, and when the window becomes visible again.
+ * As with `pamStatusQuery`, it is not retried (the next minute reads it again), and it is read even when the webview thinks it is
+ * offline, since the backend says in its own sentence when Google cannot be reached.
  */
 export const pamOverviewQuery = queryOptions({
   queryKey: pamOverviewKey,
   queryFn: listPamOverview,
   refetchInterval: 60_000,
-  refetchOnWindowFocus: false,
+  refetchOnWindowFocus: true,
   retry: false,
   networkMode: "always",
 });
@@ -182,8 +181,13 @@ const hhmm = (ms: number) => {
 /** What a grant that could not be checked says in place of its state: the API's own sentence. */
 const grantProblem = (grant: { message: string | null }) => grant.message ?? "The grant could not be checked.";
 
+/** The API's active state can outlive a cached grant's deadline while a refresh is pending or paused. */
+const grantExpired = (grant: { state: string; active_until_ms?: number | null }, now: number) =>
+  grant.state === "active" && grant.active_until_ms != null && grant.active_until_ms <= now;
+
 /** One line about a transport's PAM grant (design 2026-10-25): which entitlement holds it and until when, on this computer's clock, or why there is none. */
-export function pamStatusLine(view: PamStatusView): string {
+export function pamStatusLine(view: PamStatusView, now = Date.now()): string {
+  if (grantExpired(view, now)) return `${view.entitlement ?? "grant"} · expired`;
   switch (view.state) {
     case "active":
       return `${view.entitlement ?? "grant"} · active${view.active_until_ms === null ? "" : ` until ${hhmm(view.active_until_ms)}`}`;
@@ -199,7 +203,8 @@ export function pamStatusLine(view: PamStatusView): string {
 }
 
 /** One line about a grant, as a row of the Google Cloud page or a host's details shows it. A grant in the `error` state shows its `message` instead; this line reads "No active grant" for it (see `grantStateOrMessage`). */
-export function grantStateLine(grant: { state: string; active_until_ms: number | null }): string {
+export function grantStateLine(grant: { state: string; active_until_ms: number | null }, now = Date.now()): string {
+  if (grantExpired(grant, now)) return "Expired";
   switch (grant.state) {
     case "active":
       return grant.active_until_ms === null ? "Active" : `Active until ${hhmm(grant.active_until_ms)}`;
@@ -216,29 +221,29 @@ export function grantStateLine(grant: { state: string; active_until_ms: number |
  * What a row of the Google Cloud page and the details pane say of a grant they read: `grantStateLine`, except for a grant in the
  * `error` state, which has the API's own sentence (its `message`) instead of "No active grant", since it could not be checked.
  */
-export function grantStateOrMessage(grant: { state: string; active_until_ms: number | null; message: string | null }): string {
-  return grant.state === "error" ? grantProblem(grant) : grantStateLine(grant);
+export function grantStateOrMessage(grant: { state: string; active_until_ms: number | null; message: string | null }, now = Date.now()): string {
+  return grant.state === "error" ? grantProblem(grant) : grantStateLine(grant, now);
 }
 
 /**
- * Whether a grant that was read is held: active, or activating (a request already in flight, R54). Request grant is off for both, and
- * a held grant is shown as held. A grant not read yet, or whose read failed, is not.
+ * Whether a grant that was read is held: active before its known deadline, or activating (a request already in flight, R54). Request
+ * grant is off for both, and a held grant is shown as held. A grant not read yet, or whose read failed, is not.
  */
-export function grantHeld(grant: { state: string } | null): boolean {
-  return grant?.state === "active" || grant?.state === "activating";
+export function grantHeld(grant: { state: string; active_until_ms?: number | null } | null, now = Date.now()): boolean {
+  return grant?.state === "activating" || (grant?.state === "active" && !grantExpired(grant, now));
 }
 
 /**
  * Whether Request grant is off for a grant that was read: held, or waiting for an approver (design 2026-10-27), since PAM refuses another
  * request on the entitlement while one waits.
  */
-export function grantBusy(grant: { state: string } | null): boolean {
-  return grantHeld(grant) || grant?.state === "approval_awaited";
+export function grantBusy(grant: { state: string; active_until_ms?: number | null } | null, now = Date.now()): boolean {
+  return grantHeld(grant, now) || grant?.state === "approval_awaited";
 }
 
 /** What a host's Access grant says of the grant it read: the entitlement holding it and its state, or why it could not be checked. */
-export function grantLine(status: PamStatusView): string {
-  const line = grantStateOrMessage(status);
+export function grantLine(status: PamStatusView, now = Date.now()): string {
+  const line = grantStateOrMessage(status, now);
   return status.state === "error" || !status.entitlement ? line : `${status.entitlement} · ${line}`;
 }
 
@@ -247,8 +252,8 @@ export function grantLine(status: PamStatusView): string {
  * grant as the host's Access grant says it, the API's sentence when it could not be checked, and otherwise the entitlements of the
  * route's PAM check, any of which can hold one.
  */
-export function tunnelGrantLine(status: PamStatusView, pam: PamCheck): string {
-  return grantBusy(status) || status.state === "error" ? grantLine(status) : `Needs a grant: ${pam.entitlements.join(", ")}`;
+export function tunnelGrantLine(status: PamStatusView, pam: PamCheck, now = Date.now()): string {
+  return grantBusy(status, now) || status.state === "error" ? grantLine(status, now) : `Needs a grant: ${pam.entitlements.join(", ")}`;
 }
 
 export function newIapTransport(hostId: string): HostTransport {

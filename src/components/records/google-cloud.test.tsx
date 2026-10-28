@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement, ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dialog } from "@/components/ui/dialog";
 import { AlertDialogAction } from "@/components/ui/alert-dialog";
 import { buttonsIn, buttonTag, DISABLED, elementsOf, HIDDEN_CHARS, text, textIn } from "@/components/keychain/test-markup";
@@ -30,7 +30,8 @@ import { AccountsTabView, confirmation, GoogleAccountsTab, runningLine, type Acc
 import { AccessTabView, PamAccessTab, ScopeDialog, newScopeDraft, scopeLine, type AccessTabViewProps, type ScopeDraft } from "./PamAccessTab";
 import { AWAITING_APPROVER, EntitlementGrantDialog, GrantRequestCardView, type GrantRequestCardViewProps } from "./GrantRequestDialog";
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(new Date(2026, 9, 27, 9).getTime()));
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 /*
  * There is no DOM here, so each tab is drawn two ways: as static markup (its words), and as the element tree of its hook-free view,
@@ -441,6 +442,18 @@ describe("the Access tab", () => {
     expect(view.row("Entitlements", "prod-admin")).toContain("Active until 11:30");
     expect(view.row("Entitlements", "prod-operate")).toContain("Active until 10:00");
     expect(view.client.getQueryData<PamOverview>(pamOverviewKey)?.entitlements[1].state).toBe("active");
+  });
+
+  it("expires the same cached grant and enables a new request as time passes", async () => {
+    const view = await accessTab(overview);
+    expect(view.row("Entitlements", "prod-operate")).toContain("Active until 10:00");
+    expect(view.disabled("Request grant", "Entitlements", "prod-operate")).toBe(true);
+    vi.spyOn(Date, "now").mockReturnValue(AT);
+    expect(view.row("Entitlements", "prod-operate")).toContain("Expired");
+    expect(view.row("Entitlements", "prod-operate")).not.toContain("Active until");
+    expect(view.disabled("Request grant", "Entitlements", "prod-operate")).toBe(false);
+    expect(view.calls).toEqual([]);
+    expect(view.client.getQueryData<PamOverview>(pamOverviewKey)?.entitlements[0].state).toBe("active");
   });
 
   it("starts a request without a memory from the entitlement's default length, and says when it waits for an approver", async () => {

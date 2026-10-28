@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useState, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
 import { stubBackend } from "@/lib/test-ipc";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
@@ -29,7 +29,8 @@ function SelectedKeysPanel(props: Parameters<typeof RecordsKeysPanel>[0]) {
   vi.mocked(useState).mockReturnValueOnce([props.overview.keys[0]?.id ?? null, vi.fn()]);
   return <RecordsKeysPanel {...props} />;
 }
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(new Date(2026, 9, 27, 9).getTime()));
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const render = (node: ReactNode) =>
   renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient()}>

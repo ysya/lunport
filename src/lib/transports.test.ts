@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { QueryClient } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { focusManager, QueryClient, QueryObserver } from "@tanstack/react-query";
 import { stubBackend } from "./test-ipc";
 import type { RecordOverview } from "./records";
 import { recordOverview } from "@/components/records/fixtures";
@@ -10,6 +10,7 @@ import {
   grantHeld,
   grantMemoryFor,
   grantStateLine,
+  tunnelGrantLine,
   grantStateOrMessage,
   iapTarget,
   listGcloudAccounts,
@@ -44,7 +45,8 @@ import {
   type TransportKind,
 } from "./transports";
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(new Date(2026, 9, 25).getTime()));
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 const HOST = "0000000000000001";
 const iap = (hostId = HOST): HostTransport => ({
@@ -185,15 +187,35 @@ describe("transports", () => {
     expect(Object.keys(calls[0][1] as object)).toEqual(["hostId", "justification", "durationSecs"]);
   });
 
-  it("reads a host's grant through the backend, apart for each host, when the pane opens and every minute, but not on window focus", async () => {
+  it("reads a host's grant through the backend, apart for each host, when the pane opens and every minute, and on window focus", async () => {
     const view: PamStatusView = { entitlement: "prod-operate", state: "active", active_until_ms: 1_700_000_000_000, message: null };
     const calls = stubBackend(async () => view);
     expect(await new QueryClient().fetchQuery(pamStatusQuery(HOST))).toEqual(view);
     expect(calls).toEqual([["transports_pam_status", { hostId: HOST }]]);
     expect(pamStatusQuery(HOST).queryKey).not.toEqual(pamStatusQuery("0000000000000002").queryKey);
     expect(pamStatusQuery(HOST).refetchInterval).toBe(60_000);
-    // A window gaining focus would cost a Google call the design does not ask for.
-    expect(pamStatusQuery(HOST).refetchOnWindowFocus).toBe(false);
+    expect(pamStatusQuery(HOST).refetchOnWindowFocus).toBe(true);
+  });
+
+  it("expires a cached active grant at its deadline without waiting for a Google response", () => {
+    const until = Date.now() + 1000;
+    const status: PamStatusView = { entitlement: "prod-operate", state: "active", active_until_ms: until, message: null };
+    vi.spyOn(Date, "now").mockReturnValue(until - 1);
+    expect(grantHeld(status)).toBe(true);
+    expect(grantBusy(status)).toBe(true);
+    expect(grantStateOrMessage(status)).toContain("Active until");
+    vi.spyOn(Date, "now").mockReturnValue(until);
+    expect(grantStateLine(status)).toBe("Expired");
+    expect(grantStateOrMessage(status)).toBe("Expired");
+    expect(grantHeld(status)).toBe(false);
+    expect(grantBusy(status)).toBe(false);
+    expect(pamStatusLine(status)).toBe("prod-operate · expired");
+    expect(tunnelGrantLine(status, { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null })).toBe("Needs a grant: prod-operate");
+    expect(status.state).toBe("active"); // Displaying expiry does not rewrite the server's cached response.
+    expect(grantHeld({ ...status, active_until_ms: null })).toBe(true);
+    expect(grantBusy({ ...status, state: "activating" })).toBe(true);
+    expect(grantBusy({ ...status, state: "approval_awaited" })).toBe(true);
+    expect(grantStateOrMessage({ ...status, state: "error", message: "Google is unreachable." })).toBe("Google is unreachable.");
   });
 
   it("names a route's target as project / instance", () => {
@@ -280,17 +302,39 @@ describe("transports", () => {
     expect(gcloudAccountsQuery.networkMode).toBe("always");
   });
 
-  it("reads the Access overview through the backend, when the tab shows and every minute, but not on window focus", async () => {
+  it("reads the Access overview through the backend, when the tab shows and every minute, and on window focus", async () => {
     const overview: PamOverview = { scopes: [], entitlements: [entitlementRow()] };
     const calls = stubBackend(async () => overview);
     expect(await new QueryClient().fetchQuery(pamOverviewQuery)).toEqual(overview);
     expect(calls).toEqual([["gcp_pam_overview", {}]]);
     expect(pamOverviewQuery.queryKey).toEqual(pamOverviewKey);
     expect(pamOverviewQuery.refetchInterval).toBe(60_000);
-    // A window gaining focus would cost a Google call for each scope and entitlement that nothing asked for; a failed read waits.
-    expect(pamOverviewQuery.refetchOnWindowFocus).toBe(false);
+    expect(pamOverviewQuery.refetchOnWindowFocus).toBe(true);
     expect(pamOverviewQuery.retry).toBe(false);
     expect(pamOverviewQuery.networkMode).toBe("always");
+  });
+
+  it("refreshes an observed Access overview when returning from the background", async () => {
+    const expired: PamOverview = { scopes: [], entitlements: [entitlementRow({ state: "active", active_until_ms: Date.now() - 1 })] };
+    const fresh: PamOverview = { scopes: [], entitlements: [entitlementRow({ state: "none" })] };
+    const calls = stubBackend(async () => calls.length === 1 ? expired : fresh);
+    const client = new QueryClient();
+    focusManager.setFocused(false);
+    client.mount();
+    const observer = new QueryObserver(client, pamOverviewQuery);
+    const stop = observer.subscribe(() => {});
+    try {
+      await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual(expired));
+      expect(calls).toHaveLength(1);
+      focusManager.setFocused(true);
+      await vi.waitFor(() => expect(observer.getCurrentResult().data).toEqual(fresh));
+      expect(calls).toHaveLength(2);
+    } finally {
+      stop();
+      client.unmount();
+      client.clear();
+      focusManager.setFocused(undefined);
+    }
   });
 
   it("words a grant request's result in one line", () => {
