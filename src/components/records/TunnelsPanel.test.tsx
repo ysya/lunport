@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TunnelsPanel } from "./TunnelsPanel";
 import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
 import { text } from "@/components/keychain/test-markup";
@@ -10,6 +10,8 @@ import { tunnelGrantLine, type PamStatusView } from "@/lib/transports";
 import { tunnelsKey, newTunnel, tunnelRoute, startTunnel, type TunnelView } from "@/lib/tunnels";
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
 vi.mock("@/lib/tunnels", async (original) => ({ ...await original<typeof import("@/lib/tunnels")>(), startTunnel: vi.fn() }));
+beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(new Date(2026, 9, 27, 9).getTime()));
+afterEach(() => vi.restoreAllMocks());
 function row(patch: Partial<TunnelView> = {}): TunnelView {
   return { rule: { ...newTunnel("0000000000000001"), id: "0000000000000002", name: "Database" }, live: { phase: "stopped", forwarding: { running: false, port: 0, connections: 0, error: null } }, synced: true, blocked: false, changed: false, removed: false, ...patch };
 }
