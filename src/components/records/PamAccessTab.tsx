@@ -30,6 +30,7 @@ import {
   type PamStatusView,
   type ScopeKind,
 } from "@/lib/transports";
+import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 import { EntitlementGrantDialog } from "./GrantRequestDialog";
 import { reading, type Reading } from "./GoogleAccountsTab";
@@ -64,6 +65,7 @@ export type ScopeDraft = { kind: ScopeKind; id: string; location: string; accoun
 export const newScopeDraft = (): ScopeDraft => ({ kind: "projects", id: "", location: "global", account: "" });
 
 export type AccessTabViewProps = {
+  now?: number;
   overview: RecordOverview;
   data: Reading<PamOverview>;
   accounts: GcloudAccountsView | undefined;
@@ -91,7 +93,7 @@ const kinds: Array<{ value: ScopeKind; label: string; placeholder: string }> = [
 const selectClass = "h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:ring-3 focus-visible:ring-ring/50";
 
 /** The tab, apart from its state and its reads: no hooks but the dialog's ids, so the tests call it and press what it draws. */
-export function AccessTabView({ overview, data, accounts, requesting, onRequest, onCloseRequest, onRequested, draft, draftError, busy, onOpenScope, onDraft, onSaveScope, onCloseScope, onRemoveScope }: AccessTabViewProps) {
+export function AccessTabView({ now = Date.now(), overview, data, accounts, requesting, onRequest, onCloseRequest, onRequested, draft, draftError, busy, onOpenScope, onDraft, onSaveScope, onCloseScope, onRemoveScope }: AccessTabViewProps) {
   const hosts = new Map(overview.hosts.map((host) => [host.id, host]));
   const aliases = (ids: string[]) => ids.flatMap((id) => (hosts.has(id) ? [revealHidden(hosts.get(id)!.payload.alias)] : []));
 
@@ -122,7 +124,7 @@ export function AccessTabView({ overview, data, accounts, requesting, onRequest,
 
   const entitlementRow = (row: PamEntitlementView) => {
     const used = aliases(row.host_ids);
-    const held = grantHeld(row);
+    const held = grantHeld(row, now);
     const details = [
       row.max_duration_secs === null ? null : upTo(row.max_duration_secs),
       row.needs_approval ? "Needs approval" : null,
@@ -141,8 +143,8 @@ export function AccessTabView({ overview, data, accounts, requesting, onRequest,
           {details.length > 0 && <p className="wrap-anywhere text-xs text-muted-foreground">{details.join(" · ")}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <span className={cn("wrap-anywhere max-w-xs text-sm", held && "text-primary")}>{revealHidden(grantStateOrMessage(row))}</span>
-          <Button size="sm" variant="outline" aria-label={`Request grant for ${revealHidden(row.entitlement)}`} disabled={grantBusy(row)} onClick={() => onRequest(row)}>
+          <span className={cn("wrap-anywhere max-w-xs text-sm", held && "text-primary")}>{revealHidden(grantStateOrMessage(row, now))}</span>
+          <Button size="sm" variant="outline" aria-label={`Request grant for ${revealHidden(row.entitlement)}`} disabled={grantBusy(row, now)} onClick={() => onRequest(row)}>
             Request grant
           </Button>
         </div>
@@ -293,6 +295,7 @@ export function ScopeDialog({ draft, error, busy, accounts, onDraft, onSave, onC
  * scope saved or removed answers the library's overview, which `accept` takes, and the entitlements are read again.
  */
 export function PamAccessTab({ overview, accept }: { overview: RecordOverview; accept: (next: RecordOverview) => void }) {
+  const now = useNow(1000);
   const client = useQueryClient();
   const data = useQuery(pamOverviewQuery);
   const accounts = useQuery(gcloudAccountsQuery).data;
@@ -315,6 +318,7 @@ export function PamAccessTab({ overview, accept }: { overview: RecordOverview; a
   };
   return (
     <AccessTabView
+      now={now}
       overview={overview}
       data={reading(data)}
       accounts={accounts}
