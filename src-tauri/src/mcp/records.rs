@@ -318,6 +318,9 @@ impl crate::sync::env::Keychain for CredentialView<'_> {
         }
         result
     }
+    fn get_noninteractive(&self, account: &str) -> Result<Option<String>, AppError> {
+        self.get(account)
+    }
     fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
         Err(AppError::Other(
             "needs interaction: credential writes are disabled".into(),
@@ -1647,6 +1650,37 @@ mod identity_tests {
             );
         }
         let _ = DirectoryError::Failed(String::new());
+    }
+
+    #[test]
+    fn nested_auto_log_credential_reads_stay_noninteractive() {
+        struct NoPrompt;
+        impl crate::sync::env::Keychain for NoPrompt {
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+                panic!("interactive credential read forbidden")
+            }
+            fn get_noninteractive(&self, account: &str) -> Result<Option<String>, AppError> {
+                assert_eq!(account, "device-identity");
+                Ok(Some("stored credential".into()))
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+                panic!("credential write forbidden")
+            }
+            fn delete(&self, _: &str) -> Result<(), AppError> {
+                panic!("credential deletion forbidden")
+            }
+        }
+        let view = CredentialView {
+            source: &NoPrompt,
+            reason: Mutex::new(None),
+        };
+        assert_eq!(
+            crate::sync::env::Keychain::get_noninteractive(&view, "device-identity")
+                .unwrap()
+                .as_deref(),
+            Some("stored credential")
+        );
+        assert!(view.reason.lock().unwrap().is_none());
     }
 }
 
