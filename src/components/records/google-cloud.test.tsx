@@ -169,12 +169,15 @@ describe("the Google Cloud page", () => {
     expect((await renderPage(overviewOf([web], [webRoute]), "hosts")).html).toMatch(/^<div class="transports-panel /);
   });
 
-  it("says what the page is for and offers New IAP host whatever the tab", async () => {
-    const view = await renderPage(overviewOf([], []), "access");
-    expect(view.text).toContain("Google accounts, access grants and IAP hosts on this computer.");
-    const header = elementsOf(view.tree, PageHeader)[0];
+  it("shows a focused description and action for the open tab", async () => {
+    const access = await renderPage(overviewOf([], []), "access");
+    expect(access.text).toContain("Find and request temporary access to Google Cloud resources.");
+    expect(access.text).not.toContain("New IAP host");
+    const hosts = await renderPage(overviewOf([], []), "hosts");
+    expect(hosts.text).toContain("Manage hosts that connect through Google Cloud IAP.");
+    const header = elementsOf(hosts.tree, PageHeader)[0];
     buttonIn((header.props as unknown as { actions: ReactNode }).actions, "New IAP host").props.onClick!();
-    expect(view.props.createIapHost).toHaveBeenCalledTimes(1);
+    expect(hosts.props.createIapHost).toHaveBeenCalledTimes(1);
   });
 
   it("has three tabs, and draws only the open one", async () => {
@@ -403,35 +406,37 @@ describe("the Access tab", () => {
 
   it("lists every entitlement with where it lives, what it gives, its limits and the hosts that need it", async () => {
     const view = await accessTab(overview);
-    expect(view.text()).toContain("Privileged Access Manager grants for your Google accounts. A grant gives its roles to every tool that uses the account until it ends; Lunport never ends one early.");
-    const line = view.row("Entitlements", "prod-operate");
+    expect(view.text()).toContain("Request temporary Google Cloud access for an account. Approved roles also apply to other tools using that account until the grant expires. Lunport cannot end a grant early.");
+    expect(view.text().indexOf("Projects and scopes")).toBeLessThan(view.text().indexOf("Access grants"));
+    const line = view.row("Access grants", "prod-operate");
     expect(line).toContain("project acme-prod-123456 · global · frank@example.com");
     expect(line).toContain("roles/compute.osAdminLogin on projects/acme-prod-123456");
     expect(line).toContain("Up to 1 hour · Used by db-1, db-2");
     expect(line).toContain("Active until 10:00");
-    const glassLine = view.row("Entitlements", "break-glass");
+    expect(renderToStaticMarkup(view.tree())).toContain('<details class="cloud-role-details"><summary>View 1 role</summary>');
+    const glassLine = view.row("Access grants", "break-glass");
     expect(glassLine).toContain("folder 123456789012 · global · ops@example.com");
     expect(glassLine).toContain("Up to 2 hours · Needs approval");
     expect(glassLine).not.toContain("Used by");
-    expect(view.row("Entitlements", "prod-admin")).toContain("No active grant");
+    expect(view.row("Access grants", "prod-admin")).toContain("No active grant");
   });
 
   it("keeps Request grant off while a grant is active, activating or waiting for its approver", async () => {
     const view = await accessTab(overview, {
       pam: { scopes: [], entitlements: [operate, entitlement({ name: ADMIN, entitlement: "prod-admin", state: "activating" }), { ...glass, state: "approval_awaited" }, entitlement({ name: `${OPERATE}-2`, entitlement: "prod-deploy" })] },
     });
-    expect(view.disabled("Request grant", "Entitlements", "prod-operate")).toBe(true);
-    expect(view.disabled("Request grant", "Entitlements", "prod-admin")).toBe(true);
-    expect(view.disabled("Request grant", "Entitlements", "break-glass")).toBe(true);
-    expect(view.row("Entitlements", "break-glass")).toContain("Awaiting approval");
-    expect(view.disabled("Request grant", "Entitlements", "prod-deploy")).toBe(false);
+    expect(view.disabled("Request grant", "Access grants", "prod-operate")).toBe(true);
+    expect(view.disabled("Request grant", "Access grants", "prod-admin")).toBe(true);
+    expect(view.disabled("Request grant", "Access grants", "break-glass")).toBe(true);
+    expect(view.row("Access grants", "break-glass")).toContain("Awaiting approval");
+    expect(view.disabled("Request grant", "Access grants", "prod-deploy")).toBe(false);
   });
 
   it("requests on the entitlement clicked, as its account, from its memory and within its maximum, and takes the answer into its row", async () => {
     const remembered = { ...admin, memory: { name: ADMIN, justification: "Deploy hotfix", duration_secs: 5400 }, max_duration_secs: 3600 };
     const granted: PamStatusView = { entitlement: "prod-admin", state: "active", active_until_ms: LATER, message: null };
     const view = await accessTab(overview, { pam: { scopes: [], entitlements: [operate, remembered] }, reply: (command) => (command === "gcp_pam_request" ? granted : undefined) });
-    view.press("Request grant", { title: "Entitlements", row: "prod-admin" });
+    view.press("Request grant", { title: "Access grants", row: "prod-admin" });
     const row = (view.dialog!.props as unknown as { row: PamEntitlementView }).row;
     expect(row.name).toBe(ADMIN);
     const card = elementsOf(renderHook(new QueryClient(), () => EntitlementGrantDialog({ row, onClose: () => {}, onRequested: () => {} })), GrantRequestCardView)[0].props as unknown as GrantRequestCardViewProps;
@@ -439,19 +444,19 @@ describe("the Access tab", () => {
     card.onRequest();
     await vi.waitFor(() => expect(view.calls).toEqual([["gcp_pam_request", { account: "frank@example.com", name: ADMIN, justification: "Deploy hotfix", durationSecs: 3600 }]]));
     view.wrapped().onRequested(row, granted);
-    expect(view.row("Entitlements", "prod-admin")).toContain("Active until 11:30");
-    expect(view.row("Entitlements", "prod-operate")).toContain("Active until 10:00");
+    expect(view.row("Access grants", "prod-admin")).toContain("Active until 11:30");
+    expect(view.row("Access grants", "prod-operate")).toContain("Active until 10:00");
     expect(view.client.getQueryData<PamOverview>(pamOverviewKey)?.entitlements[1].state).toBe("active");
   });
 
   it("expires the same cached grant and enables a new request as time passes", async () => {
     const view = await accessTab(overview);
-    expect(view.row("Entitlements", "prod-operate")).toContain("Active until 10:00");
-    expect(view.disabled("Request grant", "Entitlements", "prod-operate")).toBe(true);
+    expect(view.row("Access grants", "prod-operate")).toContain("Active until 10:00");
+    expect(view.disabled("Request grant", "Access grants", "prod-operate")).toBe(true);
     vi.spyOn(Date, "now").mockReturnValue(AT);
-    expect(view.row("Entitlements", "prod-operate")).toContain("Expired");
-    expect(view.row("Entitlements", "prod-operate")).not.toContain("Active until");
-    expect(view.disabled("Request grant", "Entitlements", "prod-operate")).toBe(false);
+    expect(view.row("Access grants", "prod-operate")).toContain("Expired");
+    expect(view.row("Access grants", "prod-operate")).not.toContain("Active until");
+    expect(view.disabled("Request grant", "Access grants", "prod-operate")).toBe(false);
     expect(view.calls).toEqual([]);
     expect(view.client.getQueryData<PamOverview>(pamOverviewKey)?.entitlements[0].state).toBe("active");
   });
@@ -474,11 +479,11 @@ describe("the Access tab", () => {
 
   it("lists where it looks: the routes' projects with their hosts, and the scopes added, which can be removed", async () => {
     const view = await accessTab(overview, { reply: (command) => (command === "gcp_pam_scope_remove" ? recordOverview({ pam_scopes: [] }) : undefined) });
-    expect(view.rows("Where Lunport looks")).toEqual([
-      "project acme-prod-123456 · global · frank@example.com From routes Used by db-1, db-2",
-      "folder 123456789012 · global · ops@example.com Remove",
+    expect(view.rows("Projects and scopes")).toEqual([
+      "project acme-prod-123456 From IAP hosts global · frank@example.com Used by db-1, db-2",
+      "folder 123456789012 global · ops@example.com Remove",
     ]);
-    view.press("Remove", { title: "Where Lunport looks", row: "folder 123456789012" });
+    view.press("Remove", { title: "Projects and scopes", row: "folder 123456789012" });
     await vi.waitFor(() => expect(view.accept).toHaveBeenCalled());
     expect(view.calls).toContainEqual(["gcp_pam_scope_remove", { id: "00000000000000a1" }]);
     expect(scopeLine({ parent: "projects/acme-dev-654321", location: "global", account: null })).toBe("project acme-dev-654321 · global · gcloud's active account");
@@ -486,12 +491,12 @@ describe("the Access tab", () => {
 
   it("says a scope's search failed on its row", async () => {
     const view = await accessTab(overview, { pam: { scopes: [{ ...addedScope, message: `ops@example.com may not call the Privileged Access Manager API (HTTP 403) ${SPOOFED_NAME}` }], entitlements: [] } });
-    expect(view.row("Where Lunport looks", "folder")).toContain(`(HTTP 403) ${SPOOFED_NAME_SHOWN}`);
+    expect(view.row("Projects and scopes", "folder")).toContain(`(HTTP 403) ${SPOOFED_NAME_SHOWN}`);
   });
 
   it("adds a scope from the dialog, checked as the backend checks it", async () => {
     const view = await accessTab(overview, { reply: (command) => (command === "gcp_pam_scope_save" ? recordOverview() : undefined) });
-    buttonIn(actionsOf(view.tree(), "Where Lunport looks"), "Add scope").props.onClick!();
+    buttonIn(actionsOf(view.tree(), "Projects and scopes"), "Add project or scope").props.onClick!();
     expect(view.scopeDialog).not.toBeNull();
     const dialog = (draft: ScopeDraft) => renderHook(new QueryClient(), () => ScopeDialog({ draft, error: null, busy: false, accounts, onDraft: () => {}, onSave: () => {}, onClose: () => {} }));
     const words = (draft: ScopeDraft) => textIn(dialog(draft));
@@ -506,21 +511,21 @@ describe("the Access tab", () => {
   });
 
   it("waits for the first answer, says why there is none, and says when there is nothing to show", async () => {
-    expect((await accessTab(overview, {}, false)).text()).toContain("Looking for entitlements…");
+    expect((await accessTab(overview, {}, false)).text()).toContain("Looking for access grants…");
     const failed = await accessTab(overview, { pam: new Error(`Google said ${SPOOFED_NAME}`) });
     expect(failed.text()).toContain(`Google said ${SPOOFED_NAME_SHOWN}`);
     expect(failed.text()).not.toMatch(HIDDEN_CHARS);
     const none = await accessTab(overview, { pam: { scopes: [], entitlements: [] } });
-    expect(none.text()).toContain("No entitlement found. Add a scope where your Google account can request a grant, or require a grant in a host's Google Cloud options.");
-    expect(none.text()).toContain("Lunport looks nowhere yet.");
+    expect(none.text()).toContain("No access grants found. Add a project or scope above, or require a grant in an IAP host's Google Cloud options.");
+    expect(none.text()).toContain("No projects or scopes to check yet.");
   });
 
   it("shows hidden and direction-changing characters in aliases and Google's sentences as visible escapes", async () => {
     const odd = hostView({ id: db.id, payload: hostPayload({ alias: SPOOFED_NAME }) });
     const failing = entitlement({ state: "error", message: `quota exceeded for ${SPOOFED_NAME}`, host_ids: [odd.id] });
     const view = await accessTab(overviewOf([odd], [{ ...dbRoute, host_id: odd.id }]), { pam: { scopes: [], entitlements: [failing] } });
-    expect(view.row("Entitlements", "prod-operate")).toContain(`Used by ${SPOOFED_NAME_SHOWN}`);
-    expect(view.row("Entitlements", "prod-operate")).toContain(`quota exceeded for ${SPOOFED_NAME_SHOWN}`);
+    expect(view.row("Access grants", "prod-operate")).toContain(`Used by ${SPOOFED_NAME_SHOWN}`);
+    expect(view.row("Access grants", "prod-operate")).toContain(`quota exceeded for ${SPOOFED_NAME_SHOWN}`);
     expect(view.text()).not.toMatch(HIDDEN_CHARS);
   });
 });
