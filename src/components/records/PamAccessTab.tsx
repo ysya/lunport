@@ -100,12 +100,13 @@ export function AccessTabView({ now = Date.now(), overview, data, accounts, requ
   const scopeRow = (scope: PamScopeView) => {
     const used = aliases(scope.host_ids);
     return (
-      <li key={scope.id ?? `route:${scopeLine(scope)}`} className="app-review-row">
+      <li key={scope.id ?? `route:${scopeLine(scope)}`} className="cloud-access-row cloud-scope-row">
         <div className="min-w-0 space-y-1">
           <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
-            <span className="wrap-anywhere">{revealHidden(scopeLine(scope))}</span>
-            {scope.from_routes && <Badge variant="secondary">From routes</Badge>}
+            <span className="wrap-anywhere">{revealHidden(parentLabel(scope.parent))}</span>
+            {scope.from_routes && <Badge variant="secondary">From IAP hosts</Badge>}
           </p>
+          <p className="wrap-anywhere text-xs text-muted-foreground">{revealHidden(`${scope.location} · ${scope.account ?? "gcloud's active account"}`)}</p>
           {used.length > 0 && <p className="wrap-anywhere text-xs text-muted-foreground">Used by {used.join(", ")}</p>}
           {scope.message && (
             <p role="alert" className="wrap-anywhere text-xs text-destructive">
@@ -114,7 +115,7 @@ export function AccessTabView({ now = Date.now(), overview, data, accounts, requ
           )}
         </div>
         {scope.id !== null && (
-          <Button size="sm" variant="ghost" aria-label={`Remove ${revealHidden(scopeLine(scope))}`} disabled={busy} onClick={() => onRemoveScope(scope.id!)}>
+          <Button size="sm" variant="ghost" className="cloud-scope-remove" aria-label={`Remove ${revealHidden(scopeLine(scope))}`} disabled={busy} onClick={() => onRemoveScope(scope.id!)}>
             Remove
           </Button>
         )}
@@ -131,19 +132,24 @@ export function AccessTabView({ now = Date.now(), overview, data, accounts, requ
       used.length > 0 ? `Used by ${used.join(", ")}` : null,
     ].filter((part): part is string => part !== null);
     return (
-      <li key={entitlementKey(row)} className="app-review-row">
+      <li key={entitlementKey(row)} className="cloud-access-row cloud-entitlement-row">
         <div className="min-w-0 space-y-1">
           <p className="wrap-anywhere text-sm font-medium">{revealHidden(row.entitlement)}</p>
           <p className="wrap-anywhere text-xs text-muted-foreground">
             {revealHidden([parentLabel(row.parent), row.location, row.account ?? "gcloud's active account"].join(" · "))}
           </p>
-          {row.roles.length > 0 && (
-            <p className="wrap-anywhere text-xs text-muted-foreground">{revealHidden(row.roles.map((role) => `${role.role} on ${role.resource}`).join(", "))}</p>
-          )}
           {details.length > 0 && <p className="wrap-anywhere text-xs text-muted-foreground">{details.join(" · ")}</p>}
+          {row.roles.length > 0 && (
+            <details className="cloud-role-details">
+              <summary>View {row.roles.length} {row.roles.length === 1 ? "role" : "roles"}</summary>
+              <div className="cloud-role-list">
+                {row.roles.map((role, index) => <p key={`${role.role}:${role.resource}:${index}`} className="wrap-anywhere">{revealHidden(`${role.role} on ${role.resource}`)}</p>)}
+              </div>
+            </details>
+          )}
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <span className={cn("wrap-anywhere max-w-xs text-sm", held && "text-primary")}>{revealHidden(grantStateOrMessage(row, now))}</span>
+        <div className="cloud-grant-action">
+          <span className={cn("cloud-grant-state wrap-anywhere text-sm", held && "is-active", row.state === "error" && "is-error")}>{revealHidden(grantStateOrMessage(row, now))}</span>
           <Button size="sm" variant="outline" aria-label={`Request grant for ${revealHidden(row.entitlement)}`} disabled={grantBusy(row, now)} onClick={() => onRequest(row)}>
             Request grant
           </Button>
@@ -155,40 +161,34 @@ export function AccessTabView({ now = Date.now(), overview, data, accounts, requ
   const body = () => {
     if (data.error !== null)
       return (
-        <p role="alert" className="text-sm text-destructive">
-          {revealHidden(data.error)}
+        <p className="text-sm text-muted-foreground">
+          Access grants are unavailable until this check succeeds.
         </p>
       );
     if (!data.data)
       return (
         <p role="status" className="text-sm text-muted-foreground">
-          Looking for entitlements…
+          Looking for access grants…
         </p>
       );
     if (data.data.entitlements.length === 0)
       return (
         <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-          No entitlement found. Add a scope where your Google account can request a grant, or require a grant in a host&apos;s Google Cloud options.
+          No access grants found. Add a project or scope above, or require a grant in an IAP host&apos;s Google Cloud options.
         </p>
       );
-    return <ul className="app-review-list min-w-0">{data.data.entitlements.map(entitlementRow)}</ul>;
+    return <ul className="cloud-access-list min-w-0">{data.data.entitlements.map(entitlementRow)}</ul>;
   };
 
   return (
     <>
       <FormSection
-        title="Entitlements"
-        description="Privileged Access Manager grants for your Google accounts. A grant gives its roles to every tool that uses the account until it ends; Lunport never ends one early."
-      >
-        {body()}
-      </FormSection>
-      <FormSection
-        title="Where Lunport looks"
-        description="The projects your routes use, and the projects, folders and organizations you add. Added scopes sync with the library."
+        title="Projects and scopes"
+        description="Lunport checks projects used by IAP hosts automatically. Add a project, folder, or organization to find more access grants. Added locations sync with your library."
         actions={
           <Button size="sm" variant="outline" disabled={busy} onClick={onOpenScope}>
             <Plus className="size-4" />
-            Add scope
+            Add project or scope
           </Button>
         }
       >
@@ -197,11 +197,19 @@ export function AccessTabView({ now = Date.now(), overview, data, accounts, requ
             {revealHidden(draftError)}
           </p>
         )}
-        {data.data && data.data.scopes.length > 0 ? (
-          <ul className="app-review-list min-w-0">{data.data.scopes.map(scopeRow)}</ul>
+        {data.error !== null ? (
+          <p role="alert" className="text-sm text-destructive">{revealHidden(data.error)}</p>
+        ) : data.data && data.data.scopes.length > 0 ? (
+          <ul className="cloud-access-list min-w-0">{data.data.scopes.map(scopeRow)}</ul>
         ) : (
-          <p className="text-sm text-muted-foreground">{data.data ? "Lunport looks nowhere yet." : "…"}</p>
+          <p className="text-sm text-muted-foreground">{data.data ? "No projects or scopes to check yet." : "Looking for projects and scopes…"}</p>
         )}
+      </FormSection>
+      <FormSection
+        title="Access grants"
+        description="Request temporary Google Cloud access for an account. Approved roles also apply to other tools using that account until the grant expires. Lunport cannot end a grant early."
+      >
+        {body()}
       </FormSection>
       {draft && <ScopeDialog draft={draft} error={draftError} busy={busy} accounts={accounts} onDraft={onDraft} onSave={onSaveScope} onClose={onCloseScope} />}
       {requesting && <EntitlementGrantDialog key={entitlementKey(requesting)} row={requesting} onClose={onCloseRequest} onRequested={(status) => onRequested(requesting, status)} />}
@@ -228,8 +236,8 @@ export function ScopeDialog({ draft, error, busy, accounts, onDraft, onSave, onC
     <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
       <TaskDialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Add a scope</DialogTitle>
-          <DialogDescription>Lunport asks Google which entitlements the account may request there. The scope syncs with the library.</DialogDescription>
+          <DialogTitle>Add a project or scope</DialogTitle>
+          <DialogDescription>Choose where Lunport should look for access grants. This location syncs with your library.</DialogDescription>
         </DialogHeader>
         <TaskDialogBody>
           <div className="space-y-3 text-sm">
@@ -247,12 +255,14 @@ export function ScopeDialog({ draft, error, busy, accounts, onDraft, onSave, onC
               <div className="space-y-1 sm:col-span-2">
                 <Label htmlFor={ids.id}>{draft.kind === "projects" ? "Project ID" : `${kind.label} number`}</Label>
                 <Input id={ids.id} autoFocus value={draft.id} placeholder={kind.placeholder} autoComplete="off" disabled={busy} onChange={(event) => onDraft({ ...draft, id: event.target.value })} />
+                {draft.kind === "projects" && <p className="text-xs text-muted-foreground">Use the project ID, not its display name.</p>}
               </div>
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="space-y-1">
-                <Label htmlFor={ids.location}>Location</Label>
+                <Label htmlFor={ids.location}>PAM location</Label>
                 <Input id={ids.location} value={draft.location} placeholder="global" autoComplete="off" disabled={busy} onChange={(event) => onDraft({ ...draft, location: event.target.value })} />
+                <p className="text-xs text-muted-foreground">Usually global.</p>
               </div>
               <div className="space-y-1 sm:col-span-2">
                 <Label htmlFor={ids.account}>Google account</Label>
@@ -268,6 +278,7 @@ export function ScopeDialog({ draft, error, busy, accounts, onDraft, onSave, onC
                 ) : (
                   <Input id={ids.account} value={draft.account} placeholder="gcloud's active account" autoComplete="off" disabled={busy} onChange={(event) => onDraft({ ...draft, account: event.target.value })} />
                 )}
+                <p className="text-xs text-muted-foreground">Leave as active to use this computer&apos;s gcloud account.</p>
               </div>
             </div>
             {(problem ?? error) && (
@@ -282,7 +293,7 @@ export function ScopeDialog({ draft, error, busy, accounts, onDraft, onSave, onC
             Cancel
           </Button>
           <Button disabled={!ready} onClick={() => onSave(draft)}>
-            {busy ? "Adding…" : "Add scope"}
+            {busy ? "Adding…" : "Add location"}
           </Button>
         </DialogFooter>
       </TaskDialogContent>
