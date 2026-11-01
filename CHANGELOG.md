@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.2](https://github.com/ysya/lunport/compare/v1.14.1...v1.14.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* restore MCP Auto-log with synced passwords and improve Google Cloud Access ([445a79e](https://github.com/ysya/lunport/commit/445a79eb9ebb758e047364c9cb234cb71515fd7b))
+
 ## [1.14.1](https://github.com/ysya/lunport/compare/v1.14.0...v1.14.1) (2026-10-28)
 
 
