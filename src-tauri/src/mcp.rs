@@ -242,7 +242,7 @@ impl McpRuntime {
         let last = self.last_client_at_ms.load(Ordering::Relaxed);
         McpStatus {
             noninteractive_credentials_supported: cfg!(windows),
-            noninteractive_credentials_notice: if cfg!(windows) { "Windows stored credentials support noninteractive Auto-log reads. Missing or locked credentials still require Ask." } else { "This platform cannot guarantee noninteractive credential reads. Credential-dependent requests require Ask." }.into(),
+            noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization. Credentials stay in Lunport and are never returned to the AI client.".into(),
             approval_mode: policy.approval_mode,
             audit_error: self.audit.lock().unwrap().error.clone(),
             enabled: policy.enabled,
@@ -1365,7 +1365,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log skips per-command approval but can request credentials through Lunport's native windows. Auto-log requires a verified server key. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
