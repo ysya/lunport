@@ -89,9 +89,9 @@ jobs:
           # the `darwin-universal` key when `darwin-{arch}` is absent.
           - platform: macos-latest
             args: --target universal-apple-darwin
-          - platform: ubuntu-22.04 # Linux x86_64
+          - platform: ubuntu-26.04 # Linux x86_64
             args: ""
-          - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
+          - platform: ubuntu-26.04-arm # Linux arm64 (free on public repos)
             args: ""
           - platform: windows-latest # Windows x86_64 (NSIS installer)
             # Bundles sshelter-cli.exe (step "Build the console helper") next to sshelter.exe. The JSON reaches tauri whole only because it
@@ -107,7 +107,7 @@ jobs:
         run: |
           sudo apt-get update
           # xdg-utils: the AppImage bundler needs xdg-open; the arm64 runner image lacks it.
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6.1.0
