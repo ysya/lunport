@@ -168,7 +168,7 @@ export function SettingsCategoryPane({
   return <>
     <DiagnosticsPane />
     {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
-      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Connection defaults alone never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Connection defaults alone never grant AI access. Both modes can request credentials through Lunport’s native windows for the current connection.</p>
     </Section> : <AdvancedPane />}
   </>;
 }
@@ -895,7 +895,7 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log command execution never opens authentication or trust windows. Use Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool, to review a server key. Missing credentials or 2FA require Ask.
+            Auto-log skips command review. Passwords, key passphrases and 2FA can still require authorization in Lunport’s native windows. Use Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool, to review a new or changed server key before Auto-log execution.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
