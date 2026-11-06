@@ -45,3 +45,9 @@ test("a stale lock or release manifest fails the cheap version gate", () => {
   assert.throws(() => validateVersions(path => path === "src-tauri/Cargo.lock" ? read(path).replace(/(name = "sshelter"\nversion = ")[^"]+/, '$10.0.0') : read(path)));
   assert.throws(() => validateVersions(path => path === ".release-please-manifest.json" ? '{".":"0.0.0"}' : read(path)));
 });
+
+test("terminal patches, workspace configuration and browser regressions run frontend checks", () => {
+  for (const path of ["patches/@wterm__dom@0.5.4.patch", "pnpm-workspace.yaml", "tests/browser/terminal-qa.mjs", "tests/browser/terminal-harness.ts", "tests/browser/terminal.html", "tests/browser/fixtures/ubuntu-vim-startup.json"]) {
+    assert.deepEqual(selectChecks([path], noRead), { ...unchanged, frontend: true }, path);
+  }
+});

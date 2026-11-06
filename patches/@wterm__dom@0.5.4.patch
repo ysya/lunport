@@ -1,0 +1,14 @@
+diff --git a/dist/input.js b/dist/input.js
+index 73bdd5a9d80279abd9dca374515b0b551e879449..bb996f0460b8bf11cbc532c72b4a7880788709f7 100644
+--- a/dist/input.js
++++ b/dist/input.js
+@@ -223,8 +223,7 @@ export class InputHandler {
+         this.textarea.focus({ preventScroll: true });
+     }
+     syncInputPosition() {
+-        if (this.composing || this.touchPrimary)
+-            this.positionTextarea();
++        this.positionTextarea();
+     }
+     destroy() {
+         this.accessibility.destroy();
