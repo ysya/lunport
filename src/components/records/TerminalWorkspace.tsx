@@ -48,6 +48,7 @@ export function SessionTabBar({ tabs, activeId, activate, requestClose, strip }:
 export function TerminalWorkspace({ children, renderHeader, openKeys }: { children: ReactNode; renderHeader?: (tabs: ReactNode) => ReactNode; openKeys?: () => void }) {
   const tabs = useTerminalStore((state) => state.tabs);
   const activeId = useTerminalStore((state) => state.activeId);
+  const settingsOpen = useUiStore((state) => state.settingsOpen);
   const activate = useTerminalStore((state) => state.activate);
   const [closing, setClosing] = useState<string | null>(null);
   const strip = useRef<HTMLElement>(null);
@@ -60,7 +61,7 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
   useEffect(() => { strip.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" }); }, [activeId, tabs.length]);
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (event.isComposing || event.defaultPrevented || event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+      if (useUiStore.getState().settingsOpen || event.isComposing || event.defaultPrevented || event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
       const current = useTerminalStore.getState();
       if (!current.tabs.length) return;
       const mac = /Mac/.test(navigator.platform);
@@ -81,7 +82,7 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
     {renderHeader ? renderHeader(tabBar) : tabBar}
     <div id="terminal-library" className="terminal-library" role={tabs.length ? "tabpanel" : undefined} aria-labelledby={tabs.length ? "terminal-tab-library" : undefined} hidden={!!activeId}>{children}</div>
     <Suspense fallback={activeId ? <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading terminal…</div> : null}>
-      {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id} openKeys={openKeys} />)}
+      {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id && !settingsOpen} openKeys={openKeys} />)}
     </Suspense>
     <Dialog open={closing !== null} onOpenChange={(open) => { if (!open) setClosing(null); }}>
       <DialogContent onCloseAutoFocus={(event) => {

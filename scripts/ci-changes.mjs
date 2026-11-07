@@ -42,7 +42,7 @@ export function selectChecks(files, readRevision, force = false) {
       }
     }
     if (versionOnly) continue;
-    if (/^(src\/|public\/|index\.html$|package\.json$|pnpm-lock\.yaml$|vite\.config\.|tsconfig)/.test(path)) checks.frontend = true;
+    if (/^(src\/|public\/|tests\/browser\/|patches\/|index\.html$|package\.json$|pnpm-(lock|workspace)\.yaml$|vite\.config\.|tsconfig)/.test(path)) checks.frontend = true;
     if (path.startsWith("src-tauri/") || /^scripts\/(validate-group-order-compat\.sh|compat\/|validate-windows-startup\.ps1)/.test(path)) checks.native = true;
     if (/^src-tauri\/(tauri.*\.json$|icons\/|installers\/)/.test(path) || path === "scripts/validate-linux-rebrand.py" || path === ".github/workflows/rebrand-package-check.yml") checks.packages = true;
     if (/^src-tauri\/(Cargo\.(toml|lock)$|build\.rs$|signing\/|src\/(macos_credential|secrets\.rs))/.test(path) || /^scripts\/.*macos/.test(path) || /^\.github\/workflows\/(macos-keychain-check|release|beta)\.yml$/.test(path)) checks.credentials = true;

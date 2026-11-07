@@ -6,9 +6,11 @@ Lunport is your SSH workspace for hosts, keys and Groups, formerly named SSHelte
 
 A new installation opens a Records workspace without requiring an SSH config or an existing data directory. The first save creates the local library. Add a host with its hostname, username and port, or use **Import** to review entries from OpenSSH files. Import copies the selected data and preserves the sources.
 
-Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation; use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. Use the **⋯** menu beside **New host** for **Import hosts** or **New group**. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
+Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation, Groups and tags. Open the hosts page title menu to switch between **All hosts**, **Recent** and **Needs attention**. When hosts need attention, a small alert count in the page header opens that view directly. You can also find connections with **⌘K / Ctrl+K**. Use the **⋯** menu beside **New host** for **Import hosts** or **New group**. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
 
 Host and key details open over the right side of the workspace, keeping the catalog width and scroll position unchanged. Drag the detail divider to resize it on wide windows. **Escape** or **Close details** returns to the selected item; narrow windows show details across the workspace without rebuilding the collection.
+
+**Settings** opens as a full-window page with category navigation and search. Use **Back** or **Escape** to return to your workspace; host selection, scroll position and terminal sessions are preserved. **⌘F / Ctrl+F** focuses settings search while the page is open. An unapplied SSH config path draft still requires confirmation before leaving.
 
 Drag a Group row within its current level to reorder it. Its **⋯** menu also offers **Move up / Move down**; with the Group focused, use **Alt+↑ / Alt+↓** (Option on macOS). **Groups → ⋯ → Sort groups by name** restores name sorting. Sorting preserves nesting and connection defaults, and newly added Groups follow manually ordered peers. With an account, order syncs to your computers; concurrent offline reorders converge through the existing sync rules. Older 1.2.0 clients continue using name sorting while retaining the additional encrypted metadata.
 
@@ -157,7 +159,7 @@ To change a host the client may use, it proposes `update_host` with `{"alias":"j
 
 Ask reviews the exact command and can request credentials through Lunport. Auto-log execution never prompts for credentials or silently trusts a new key; complete fingerprint verification first. Authentication answers and command output are not retained in the public audit log. This permission gate covers Lunport MCP requests; other local programs still have their own operating-system access.
 
-**Recent activity** shows the latest 10 public audit entries, retained across app restarts. **Requested** and **Completed** show the date and time, including seconds and this device's local time zone. Older entries show only the timestamps that were recorded; entries without a usable timestamp show **Time unavailable**.
+**Recent activity** shows the latest 10 public audit entries, retained across app restarts. Each entry shows the host, command, result and approval mode, with a compact local timestamp. Being allowed to run does not mean a command succeeded; missing exit results show **Result unavailable**. Expand **Details** for the full command, recorded outcome, request and host IDs, exit information and requester attribution. **Requested** and **Completed** in Details include seconds and this device's local time zone. Older entries show only the timestamps that were recorded; entries without a usable timestamp show **Time unavailable**.
 
 ## Existing Legacy workspaces
 

@@ -12,6 +12,7 @@ import { RecordField, selectClass } from "./form";
 import { revealHidden } from "@/lib/sync-approvals";
 import { errorMessage } from "@/lib/sync";
 import type { RecordOverview } from "@/lib/records";
+import { useNow } from "@/lib/use-now";
 import { grantHeld, pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";
 import { listTunnels, saveTunnel, deleteTunnel, startTunnel, stopTunnel, tunnelsKey, tunnelKinds, tunnelBusy, tunnelRoute, newTunnel, type TunnelRule, type TunnelView, type ForwardKind } from "@/lib/tunnels";
 
@@ -41,10 +42,11 @@ function firstHop(overview: RecordOverview, hostId: string): string | null {
  * place of whatever an earlier read found, as the details pane does.
  */
 function TunnelGrant({ hostId, pam }: { hostId: string; pam: PamCheck }) {
+  const now = useNow(1000);
   const read = useQuery(pamStatusQuery(hostId));
   const status = read.isError ? null : (read.data ?? null);
-  const line = revealHidden(status ? tunnelGrantLine(status, pam) : read.isError ? errorMessage(read.error) : "Checking the grant…");
-  const held = grantHeld(status);
+  const line = revealHidden(status ? tunnelGrantLine(status, pam, now) : read.isError ? errorMessage(read.error) : "Checking the grant…");
+  const held = grantHeld(status, now);
   return <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${held ? "text-primary" : "text-muted-foreground"}`} title={line}><LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate">{line}</span></span>;
 }
 

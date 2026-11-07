@@ -97,17 +97,22 @@ export type GoogleCloudPageViewProps = {
 /** The page apart from the tab it keeps: the tests call it, and find the open tab's content in what it draws. */
 export function GoogleCloudPageView({ overview, tab, onTab, accept, createIapHost, editHost }: GoogleCloudPageViewProps) {
   const routes = listedRoutes(overview).map(({ route }) => route);
+  const description = {
+    accounts: "Manage the Google accounts signed in on this computer.",
+    access: "Find and request temporary access to Google Cloud resources.",
+    hosts: "Manage hosts that connect through Google Cloud IAP.",
+  }[tab];
   return (
     <div className="transports-panel space-y-6">
       <PageHeader
         title="Google Cloud"
-        description="Google accounts, access grants and IAP hosts on this computer."
-        actions={
+        description={description}
+        actions={tab === "hosts" ? (
           <Button onClick={() => createIapHost()}>
             <Plus className="size-4" />
             New IAP host
           </Button>
-        }
+        ) : undefined}
       />
       <Tabs value={tab} onValueChange={(value) => onTab(value as GoogleCloudTab)}>
         <TabsList aria-label="Google Cloud">

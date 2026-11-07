@@ -1,10 +1,12 @@
 //! Records execution service shared by the OS-authenticated broker and native UI.
 use super::*;
 use crate::session::{
-    auth::{KeyStore, Owner, Reply},
+    auth::{KeyStore, Owner},
     connect::{CancelToken, Connector, HostKeyConfirmer, HostKeyQuestion},
-    protocol::{HostQuery, QuestionKind},
+    protocol::HostQuery,
 };
+#[cfg(test)]
+use crate::session::{auth::Reply, protocol::QuestionKind};
 use crate::ssh::{
     AuthMethod, AuthSource, ConnectError, Ended, HostKeyPolicy, Session, SshEngine, Target,
 };
@@ -108,46 +110,6 @@ impl ApprovedTarget {
             );
         }
         Ok(())
-    }
-}
-struct NoInteraction<'a> {
-    owner: &'a dyn Owner,
-    enabled: bool,
-    needed: AtomicBool,
-}
-impl Owner for NoInteraction<'_> {
-    fn ask(&self, k: QuestionKind, t: &str, e: bool, d: Option<Instant>) -> Reply {
-        if self.enabled {
-            self.needed.store(true, Ordering::SeqCst);
-            Reply::Cancelled
-        } else {
-            self.owner.ask(k, t, e, d)
-        }
-    }
-    fn ask_at(
-        &self,
-        h: &crate::ssh::HopRef,
-        k: QuestionKind,
-        t: &str,
-        e: bool,
-        d: Option<Instant>,
-    ) -> Reply {
-        if self.enabled {
-            self.needed.store(true, Ordering::SeqCst);
-            Reply::Cancelled
-        } else {
-            self.owner.ask_at(h, k, t, e, d)
-        }
-    }
-    fn host_key_notice(&self, t: &str) {
-        if !self.enabled {
-            self.owner.host_key_notice(t)
-        }
-    }
-    fn banner(&self, t: &str) {
-        if !self.enabled {
-            self.owner.banner(t)
-        }
     }
 }
 struct NoPin<'a> {
@@ -295,59 +257,6 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn request_grant(&self, need: &crate::session::directory::GrantNeed, justification: &str, duration_secs: u32, cancel: &CancelToken) -> Result<crate::session::directory::GrantReceipt, crate::session::directory::DirectoryError> {
         (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
         self.0.request_grant(need, justification, duration_secs, cancel)
-    }
-}
-fn credential_reason(error: &str) -> &'static str {
-    if error.contains("no verified noninteractive")
-        || error.contains("noninteractive vault access is unavailable")
-    {
-        "needs interaction: credential provider does not support noninteractive reads"
-    } else {
-        "needs interaction: stored credential or vault is missing, locked, or unavailable"
-    }
-}
-struct CredentialView<'a> {
-    source: &'a dyn crate::sync::env::Keychain,
-    reason: Mutex<Option<&'static str>>,
-}
-impl crate::sync::env::Keychain for CredentialView<'_> {
-    fn get(&self, account: &str) -> Result<Option<String>, AppError> {
-        let result = self.source.get_noninteractive(account);
-        if let Err(error) = &result {
-            *self.reason.lock().unwrap() = Some(credential_reason(&error.to_string()));
-        }
-        result
-    }
-    fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
-        Err(AppError::Other(
-            "needs interaction: credential writes are disabled".into(),
-        ))
-    }
-    fn delete(&self, _: &str) -> Result<(), AppError> {
-        Err(AppError::Other(
-            "needs interaction: credential deletion is disabled".into(),
-        ))
-    }
-}
-struct KeyView<'a> {
-    keys: &'a dyn KeyStore,
-    noninteractive: bool,
-    reason: Mutex<Option<&'static str>>,
-}
-impl KeyStore for KeyView<'_> {
-    fn key(&self, id: &str) -> Option<crate::session::auth::VaultKey> {
-        self.keys.key(id)
-    }
-    fn private_text(&self, id: &str) -> Result<Option<zeroize::Zeroizing<String>>, String> {
-        if self.noninteractive {
-            let result = self.keys.private_text_noninteractive(id);
-            if let Err(error) = &result {
-                *self.reason.lock().unwrap() = Some(credential_reason(error));
-            }
-            result
-        } else {
-            self.keys.private_text(id)
-        }
     }
 }
 
@@ -507,11 +416,6 @@ pub(super) fn execute_context(
                 }
             }
             check()?;
-            let owner = NoInteraction {
-                owner,
-                enabled: mode == ApprovalMode::AutoLog,
-                needed: AtomicBool::new(false),
-            };
             let confirmer = NoPin {
                 confirmer: connector.confirmer,
                 enabled: mode == ApprovalMode::AutoLog,
@@ -529,36 +433,21 @@ pub(super) fn execute_context(
                 inner: connector.engine,
                 check: &check_connected,
             };
-            let keys = KeyView {
-                keys: connector.keys,
-                noninteractive: mode == ApprovalMode::AutoLog,
-                reason: Mutex::new(None),
-            };
-            let noninteractive = CredentialView {
-                source: connector.keychain,
-                reason: Mutex::new(None),
-            };
-            let keychain = if mode == ApprovalMode::AutoLog {
-                &noninteractive as &dyn crate::sync::env::Keychain
-            } else {
-                connector.keychain
-            };
             let directory = PublicDirectory(connector.directory, &check, &check_resolved, Asker::Automation);
             let guarded = Connector {
                 engine: &engine,
                 confirmer: &confirmer,
-                keys: &keys,
-                keychain,
+                keys: connector.keys,
+                keychain: connector.keychain,
                 directory: &directory,
                 grants: connector.grants,
             };
             let interaction_reason = || {
-                (*keys.reason.lock().unwrap()).or(*noninteractive.reason.lock().unwrap())
-                    .or_else(||confirmer.needed.load(Ordering::SeqCst).then_some("needs interaction: host key confirmation is required"))
-                    .or_else(||owner.needed.load(Ordering::SeqCst).then_some("needs interaction: stored credentials are missing or authentication requires input"))
+                confirmer.needed.load(Ordering::SeqCst)
+                    .then_some("needs interaction: host key confirmation is required")
             };
             let connected = guarded
-                .connect(&query, &owner, cancel)
+                .connect(&query, owner, cancel)
                 .map_err(|e| interaction_reason().map(str::to_owned).unwrap_or(e.text))?;
             if let Some(reason) = interaction_reason() {
                 connected.session.close();
@@ -1180,48 +1069,146 @@ mod behavior_tests {
         assert_eq!(r.status().recent[0].outcome, "denied");
     }
     #[test]
-    fn all_auto_log_interactions_fail_without_asking_or_pinning() {
-        for (auth, pinned, login) in [
+    fn auto_log_requests_authentication_without_command_approval() {
+        for (auth, login, answer, kind) in [
             (
                 AuthMethod::Password,
-                true,
                 FakeLogin::Server(FakeMethods::password("secret")),
+                "secret",
+                QuestionKind::Password,
             ),
             (
                 AuthMethod::Key {
                     key_id: "k-enc".into(),
                 },
-                true,
-                FakeLogin::Accept,
+                FakeLogin::Server(FakeMethods::key()),
+                crate::session::testing::TEST_PASSPHRASE,
+                QuestionKind::Passphrase,
             ),
             (
                 AuthMethod::Interactive,
-                true,
                 FakeLogin::Server(FakeMethods::interactive("2FA:", "code")),
-            ),
-            (
-                AuthMethod::Key {
-                    key_id: "k-plain".into(),
-                },
-                false,
-                FakeLogin::Accept,
+                "code",
+                QuestionKind::Interactive,
             ),
         ] {
             let r = runtime(ApprovalMode::AutoLog);
             let e = FakeEngine::new().with_login(login);
-            let owner = FakeOwner::default();
-            let d = directory(auth, pinned);
-            let error = run(&r, &e, &d, &owner, &|_| {
+            let owner = FakeOwner::typing(&[answer]);
+            let d = directory(auth, true);
+            let result = run(&r, &e, &d, &owner, &|_| {
                 panic!("auto-log never asks approval")
             })
-            .unwrap_err();
-            assert!(error.starts_with("needs interaction:"), "{error}");
-            assert!(owner.asked().is_empty());
-            assert!(!e
+            .unwrap();
+            assert_eq!(result["exit_code"], 0);
+            assert_eq!(owner.asked().len(), 1);
+            assert_eq!(owner.asked()[0].kind, kind);
+            assert!(e
                 .events()
                 .iter()
                 .any(|e| matches!(e, FakeEvent::Exec { .. })));
+            assert_eq!(r.status().recent[0].mode, ApprovalMode::AutoLog);
         }
+    }
+    #[test]
+    fn auto_log_still_requires_a_pinned_host_before_requesting_credentials() {
+        let r = runtime(ApprovalMode::AutoLog);
+        let e = FakeEngine::new();
+        let owner = FakeOwner::typing(&["secret"]);
+        let d = directory(AuthMethod::Password, false);
+        let error = run(&r, &e, &d, &owner, &|_| {
+            panic!("auto-log never asks approval")
+        }).unwrap_err();
+        assert_eq!(error, "needs interaction: host key is not pinned");
+        assert!(owner.asked().is_empty());
+        assert!(e.events().is_empty());
+        assert!(crate::session::directory::HostDirectory::pinned(
+            &d, &crate::ssh::HostId::from("id-web")
+        ).unwrap().is_none());
+    }
+    #[test]
+    fn auto_log_authentication_cancellation_never_executes_a_command() {
+        for reply in [Reply::Cancelled, Reply::TimedOut, Reply::Gone] {
+            let r = runtime(ApprovalMode::AutoLog);
+            let e = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+            let owner = FakeOwner::answering(vec![reply]);
+            let result = run(
+                &r, &e, &directory(AuthMethod::Password, true), &owner, &|_| panic!()
+            );
+            assert!(result.is_err());
+            assert_eq!(owner.asked().len(), 1);
+            assert!(!e.events().iter().any(|event| matches!(event, FakeEvent::Exec { .. })));
+        }
+    }
+    #[test]
+    fn auto_log_rechecks_host_access_after_authentication() {
+        struct RevokingOwner<'a>(&'a McpRuntime);
+        impl Owner for RevokingOwner<'_> {
+            fn ask(&self, _: QuestionKind, _: &str, _: bool, _: Option<Instant>) -> Reply {
+                self.0.policy.lock().unwrap().allowed_hosts.clear();
+                Reply::Answer(zeroize::Zeroizing::new("secret".into()))
+            }
+            fn host_key_notice(&self, _: &str) {}
+            fn banner(&self, _: &str) {}
+        }
+        let r = runtime(ApprovalMode::AutoLog);
+        let e = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+        let d = directory(AuthMethod::Password, true);
+        let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
+            engine: &e,
+            directory: &d,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &FakeConfirmer::default(),
+        };
+        assert!(execute(
+            &r, &connector, "id-web", "uptime", 60, &CancelToken::default(),
+            &RevokingOwner(&r), &|_| panic!()
+        ).is_err());
+        assert!(!e.events().iter().any(|event| matches!(event, FakeEvent::Exec { .. })));
+    }
+    #[test]
+    fn auto_log_uses_the_request_scoped_native_authentication_window() {
+        use crate::session::auth_window::{AuthHub, AuthRequest, AuthSurface, NativeOwner};
+        struct AuthorizingSurface(Arc<AuthHub>);
+        impl AuthSurface for AuthorizingSurface {
+            fn changed(&self, requests: &[AuthRequest]) {
+                for request in requests {
+                    assert_eq!(request.request_id, "native-exec");
+                    assert_eq!(request.kind, "password");
+                    assert_eq!(request.hop.as_ref().unwrap().alias, "web");
+                    self.0.resolve(
+                        &request.id, Some(zeroize::Zeroizing::new("secret".into()))
+                    ).unwrap();
+                }
+            }
+        }
+        let r = runtime(ApprovalMode::AutoLog);
+        let e = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+        let d = directory(AuthMethod::Password, true);
+        let hub = Arc::new(AuthHub::default());
+        let cancel = CancelToken::default();
+        let owner = NativeOwner {
+            hub: Arc::clone(&hub),
+            surface: Arc::new(AuthorizingSurface(Arc::clone(&hub))),
+            request_id: "native-exec".into(),
+            cancel: cancel.clone(),
+        };
+        let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
+            engine: &e,
+            directory: &d,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &FakeConfirmer::default(),
+        };
+        let result = execute(
+            &r, &connector, "id-web", "uptime", 60, &cancel, &owner, &|_| panic!()
+        ).unwrap();
+        assert_eq!(result["exit_code"], 0);
+        assert!(hub.pending().is_empty());
+        assert!(!result.to_string().contains("secret"));
     }
     #[test]
     fn changed_target_after_approval_never_connects() {
@@ -1629,20 +1616,20 @@ mod identity_tests {
             .any(|e| matches!(e, FakeEvent::Exec { .. })));
     }
     #[test]
-    fn noninteractive_vault_and_credentials_never_fall_back_to_interactive_reads() {
-        struct LockedKeys(FakeKeys);
-        impl KeyStore for LockedKeys {
+    fn auto_log_reads_credentials_from_interactive_providers() {
+        struct ForegroundKeys(FakeKeys);
+        impl KeyStore for ForegroundKeys {
             fn key(&self, id: &str) -> Option<crate::session::auth::VaultKey> {
                 self.0.key(id)
             }
-            fn private_text(&self, _: &str) -> Result<Option<zeroize::Zeroizing<String>>, String> {
-                panic!("interactive vault read forbidden")
+            fn private_text(&self, id: &str) -> Result<Option<zeroize::Zeroizing<String>>, String> {
+                self.0.private_text(id)
             }
         }
-        struct LockedCredentials;
-        impl crate::sync::env::Keychain for LockedCredentials {
+        struct ForegroundCredentials;
+        impl crate::sync::env::Keychain for ForegroundCredentials {
             fn get(&self, _: &str) -> Result<Option<String>, AppError> {
-                panic!("interactive OS read forbidden")
+                Ok(Some("secret".into()))
             }
             fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
                 panic!()
@@ -1651,9 +1638,8 @@ mod identity_tests {
                 panic!()
             }
         }
-        let engine = FakeEngine::new();
-        let keys = LockedKeys(FakeKeys::new());
-        let keychain = LockedCredentials;
+        let keys = ForegroundKeys(FakeKeys::new());
+        let keychain = ForegroundCredentials;
         let r = McpRuntime::default();
         {
             let mut p = r.policy.lock().unwrap();
@@ -1667,6 +1653,13 @@ mod identity_tests {
             },
             AuthMethod::Password,
         ] {
+            let engine = FakeEngine::new().with_login(crate::ssh::fake::FakeLogin::Server(
+                if auth == AuthMethod::Password {
+                    crate::ssh::fake::FakeMethods::password("secret")
+                } else {
+                    crate::ssh::fake::FakeMethods::key()
+                },
+            ));
             let d = FakeDirectory::new()
                 .with_host("web", auth)
                 .with_pin("web", default_server_key());
@@ -1678,7 +1671,7 @@ mod identity_tests {
                 keychain: &keychain,
                 confirmer: &FakeConfirmer::default(),
             };
-            let error = execute(
+            let result = execute(
                 &r,
                 &c,
                 "id-web",
@@ -1688,11 +1681,8 @@ mod identity_tests {
                 &FakeOwner::default(),
                 &|_| panic!(),
             )
-            .unwrap_err();
-            assert!(
-                error.contains("provider does not support noninteractive"),
-                "{error}"
-            );
+            .unwrap();
+            assert_eq!(result["exit_code"], 0);
         }
         let _ = DirectoryError::Failed(String::new());
     }
