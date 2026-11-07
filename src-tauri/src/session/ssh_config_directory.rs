@@ -53,11 +53,13 @@ pub(super) const MAX_JUMPS: usize = 5;
 /// The lists of `IdentityFile` values that `ssh -G` prints for a host that names none, by OpenSSH version. OpenSSH adds its default key
 /// files when a host names no `IdentityFile`, and only then: a host with `IdentityFile ~/.ssh/id_ed25519` gets exactly that one line, and
 /// `IdentityFile none` gets `none`. So whether a host names a key is decided by the whole list `ssh -G` prints, never by the names of
-/// the files in it (`named_key_file`). The lists are what `fill_default_options` in readconf.c makes: 10.3p1 prints the first (measured on
-/// a machine with it), and each list was read in the sources at the tags named beside it; the versions between two tags are taken to
+/// the files in it (`named_key_file`). The lists are what `fill_default_options` in readconf.c makes: 10.5p1 prints the first and 10.3p1
+/// the second (measured on machines with them). The older lists were read at the tags named beside them; the versions between two tags are taken to
 /// print the list of the tag next to them. (A build without ECDSA support lacks the two ecdsa files; no such build is known.)
 const DEFAULT_IDENTITY_SEQUENCES: &[&[&str]] = &[
-    // 10.1 and later, no DSA and no XMSS any more: V_10_1_P1, V_10_2_P1.
+    // OpenSSH with MLDSA44-Ed25519, measured on 10.5p1 and documented in ssh_config.5's IdentityFile defaults.
+    &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_mldsa44_ed25519"],
+    // 10.1 and later without MLDSA44-Ed25519, no DSA or XMSS: V_10_1_P1, V_10_2_P1; measured on 10.3p1.
     &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk"],
     // 9.8 to 10.0, XMSS still there and DSA only in a build that asks for it: V_9_9_P2, V_10_0_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss"],
@@ -410,10 +412,11 @@ mod tests {
 
     /// What `ssh -G` prints for the key files of a host that names none, by OpenSSH version: OpenSSH adds its default key files when a host
     /// names no `IdentityFile`, and only then. These are the lists `fill_default_options` in readconf.c makes (see
-    /// `DEFAULT_IDENTITY_SEQUENCES` for the tags they were read at); the first is what the 10.3p1 of a development machine prints. They
+    /// `DEFAULT_IDENTITY_SEQUENCES` for the tags they were read at); the first two were measured on 10.5p1 and 10.3p1. They
     /// are written out here again, so that a slip in the table of the code is not copied into the test.
     const DEFAULT_LISTS: &[(&str, &[&str])] = &[
-        ("10.1 and later", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"]),
+        ("with MLDSA44-Ed25519 (10.5p1)", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_mldsa44_ed25519"]),
+        ("10.1 and later without MLDSA44-Ed25519", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"]),
         ("9.8 to 10.0 without DSA", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"]),
         ("8.9 to 9.7", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss", "id_dsa"]),
         ("8.2 to 8.8", &["id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"]),
@@ -438,7 +441,7 @@ mod tests {
     /// host to keyboard-interactive, instead of saying that its key is a file and not in Lunport.
     #[test]
     fn a_host_that_names_one_default_named_key_file_logs_in_with_a_key_file_and_is_refused() {
-        for name in ["id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"] {
+        for name in ["id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss", "id_mldsa44_ed25519"] {
             let answer = pairs(&format!("hostname old\nuser me\n{}", identity_lines(&[name])));
             for password_saved in [false, true] {
                 assert_eq!(
