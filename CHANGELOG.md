@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.14.3](https://github.com/ysya/lunport/compare/v1.14.2...v1.14.3) (2026-11-07)
+
+
+### Bug Fixes
+
+* **mcp:** allow native credential authorization in Auto-log ([#105](https://github.com/ysya/lunport/issues/105)) ([d402e91](https://github.com/ysya/lunport/commit/d402e919888eb47fb1763b16c057f4c39a73e227))
+* **terminal:** keep Vim visible after scrollback ([#104](https://github.com/ysya/lunport/issues/104)) ([655682e](https://github.com/ysya/lunport/commit/655682ebedf5a56b908e4358cc86ed8041a87e73))
+
+## [1.14.2](https://github.com/ysya/lunport/compare/v1.14.1...v1.14.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* restore MCP Auto-log with synced passwords and improve Google Cloud Access ([445a79e](https://github.com/ysya/lunport/commit/445a79eb9ebb758e047364c9cb234cb71515fd7b))
+
+## [1.14.1](https://github.com/ysya/lunport/compare/v1.14.0...v1.14.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* Expired PAM grants now show **Expired** and enable **Request grant** automatically in Access, host details and tunnel hints. ([#100](https://github.com/ysya/lunport/pull/100))
+* PAM status refreshes when the window becomes visible again; grant request results also update as time passes.
+
+## [1.14.0](https://github.com/ysya/lunport/compare/v1.13.0...v1.14.0) (2026-10-27)
+
+
+### Features
+
+* Settings now fills the window, with category search and Back navigation. Returning preserves the workspace and terminal sessions; unapplied SSH configuration drafts still require confirmation. ([#98](https://github.com/ysya/lunport/pull/98))
+* Recent and Needs attention move into the host page title menu. A compact alert count appears only when hosts need attention.
+* AI activity shows readable results, command summaries and compact timestamps. Expand Details for full timestamps, IDs, exit information and requester attribution. Permission to run alone never indicates command success.
+
+## [1.13.0](https://github.com/ysya/lunport/compare/v1.12.1...v1.13.0) (2026-10-27)
+
+
+### Features
+
+* Cloud section with gcloud account actions and standalone PAM access ([#96](https://github.com/ysya/lunport/issues/96)) ([55b63b4](https://github.com/ysya/lunport/commit/55b63b4224f90d285232f36e6b4c3664a640b123))
+* Connect via in the host editor, synced IAP routes, and grant status for hosts and tunnels ([#93](https://github.com/ysya/lunport/issues/93)) ([f33b292](https://github.com/ysya/lunport/commit/f33b292c007c590e659e1aae557681cac52edcad))
+* keep both devices' changes in a Catalog conflict ([#94](https://github.com/ysya/lunport/issues/94)) ([3b6d756](https://github.com/ysya/lunport/commit/3b6d7567af803bc8ef0b8b69d342635da0f2177b))
+
+
+### Bug Fixes
+
+* **gcp:** accept the bare host id in the PAM status and request commands ([adf108b](https://github.com/ysya/lunport/commit/adf108b0aa9fcbecb0831ca62304848dcab09a75))
+* **gcp:** accept the bare host id in the PAM status and request commands ([6bfea97](https://github.com/ysya/lunport/commit/6bfea97e6576793aa4b6c199ef348f524a0d247c))
+
 ## [1.12.1](https://github.com/ysya/lunport/compare/v1.12.0...v1.12.1) (2026-10-25)
 
 

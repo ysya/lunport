@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { revealHidden } from "@/lib/sync-approvals";
+import { useNow } from "@/lib/use-now";
 import { justificationAcceptable } from "@/lib/mcp-flow";
 import {
   parentLabel,
@@ -82,6 +83,7 @@ export type GrantRequestCardViewProps = {
 
 /** The dialog's content, apart from its state: rendered inside a `Dialog` (the tests render it in one without the portal). */
 export function GrantRequestCardView({ transport, entitlement: named, alias, subject, maxMinutes = MAX_MINUTES, justification, minutes, busy, result, error, onJustification, onMinutes, onRequest, onClose }: GrantRequestCardViewProps) {
+  const now = useNow(1000);
   const justificationId = useId();
   const minutesId = useId();
   const ready = !busy && result === null && grantRequestReady(justification, minutes, maxMinutes);
@@ -133,7 +135,7 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, sub
             />
           </div>
           {busy && <p role="status" className="text-xs text-muted-foreground">Requesting the grant and waiting for it to become active…</p>}
-          {result && <p role="status" className="text-xs">{result.state === "approval_awaited" ? AWAITING_APPROVER : pamStatusLine(result)}</p>}
+          {result && <p role="status" className="text-xs">{result.state === "approval_awaited" ? AWAITING_APPROVER : pamStatusLine(result, now)}</p>}
           {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         </div>
       </TaskDialogBody>

@@ -3,3 +3,7 @@
 allowBuilds:
   esbuild: true
   msw: false
+# Keep hidden input aligned when history is cleared or a TUI switches screens.
+# Upstream: https://github.com/vercel-labs/wterm/issues/245 (also present in 0.5.9).
+patchedDependencies:
+  '@wterm/dom@0.5.4': patches/@wterm__dom@0.5.4.patch
