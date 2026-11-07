@@ -63,6 +63,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
+      # Keep browser tooling out of application dependencies, as with the local QA harnesses.
+      - name: Install terminal browser test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/terminal-qa" --no-package-lock playwright@1.62.1
+          node "$RUNNER_TEMP/terminal-qa/node_modules/playwright/cli.js" install --with-deps chromium webkit
+      - name: Terminal full-screen and clear regression (Chromium and WebKit)
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/terminal-qa/node_modules/playwright/index.mjs
+        run: node tests/browser/terminal-qa.mjs
 
   macos:
     name: Rust and SSH (macOS)

@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@wterm/dom@0.5.4': 66eb7c06a4c532c296a39041d31bb7926531a5ba3f22cbb2b78910000e350095
+
 importers:
 
   .:
@@ -49,7 +52,7 @@ importers:
         version: 2.10.1
       '@wterm/dom':
         specifier: 0.5.4
-        version: 0.5.4
+        version: 0.5.4(patch_hash=66eb7c06a4c532c296a39041d31bb7926531a5ba3f22cbb2b78910000e350095)
       '@wterm/ghostty':
         specifier: 0.5.4
         version: 0.5.4
@@ -4746,7 +4749,7 @@ snapshots:
 
   '@wterm/core@0.5.4': {}
 
-  '@wterm/dom@0.5.4':
+  '@wterm/dom@0.5.4(patch_hash=66eb7c06a4c532c296a39041d31bb7926531a5ba3f22cbb2b78910000e350095)':
     dependencies:
       '@wterm/core': 0.5.4
 
