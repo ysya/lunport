@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.14.3](https://github.com/ysya/lunport/compare/v1.14.2...v1.14.3) (2026-11-07)
+
+
+### Bug Fixes
+
+* **mcp:** allow native credential authorization in Auto-log ([#105](https://github.com/ysya/lunport/issues/105)) ([d402e91](https://github.com/ysya/lunport/commit/d402e919888eb47fb1763b16c057f4c39a73e227))
+* **terminal:** keep Vim visible after scrollback ([#104](https://github.com/ysya/lunport/issues/104)) ([655682e](https://github.com/ysya/lunport/commit/655682ebedf5a56b908e4358cc86ed8041a87e73))
+
 ## [1.14.2](https://github.com/ysya/lunport/compare/v1.14.1...v1.14.2) (2026-11-01)
 
 
