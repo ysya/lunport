@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.14.4](https://github.com/ysya/lunport/compare/v1.14.3...v1.14.4) (2026-11-07)
+
+
+### Bug Fixes
+
+* **mcp:** audit policy-denied requests as denied, not canceled ([ecf1a2f](https://github.com/ysya/lunport/commit/ecf1a2f7d4dcb43f9ba93aa0b70093f9989f0566))
+* **ssh:** recognize the MLDSA44-Ed25519 default identity list ([02ae37d](https://github.com/ysya/lunport/commit/02ae37d36a9ee2e89bede718bfe8426d520e85d4))
+
 ## [1.14.3](https://github.com/ysya/lunport/compare/v1.14.2...v1.14.3) (2026-11-07)
 
 
