@@ -42,6 +42,8 @@ Rules sync as encrypted account metadata. **Running state stays on each device:*
 
 Tunnels keep running while switching pages, closing terminal tabs or closing the window. Quitting Lunport, reloading it or installing an update ends them. Reconnection is manual. Up to 16 tunnels can run on one device, each with up to 64 simultaneous TCP connections; up to 256 definitions can be saved.
 
+An AI client can also manage the tunnels of hosts it may use (see [AI access through MCP](#ai-access-through-mcp)). A tunnel it started says **Started by an AI client** while it runs, and stops by itself when you turn off the client's access to its host.
+
 ## Connect in Lunport or an external terminal
 
 The in-app terminal is available first on the **Beta** update channel in **Settings → Updates**.
@@ -150,10 +152,18 @@ The Records adapter uses an OS-authenticated local session broker. It can start 
 | `update_host` | Propose changes to a permitted host's public connection settings; Lunport shows each change as old → new and asks before saving. Changing the address clears the pinned server key, as the editor does. |
 | `set_transport` | Propose a permitted host's Google Cloud IAP route, or changes to it (a field given replaces that field only; `pam` sets or removes the grant check); Lunport asks before saving. |
 | `remove_transport` | Propose removing a permitted host's route, so it is reached at its saved address again; Lunport asks before saving. |
+| `list_tunnels` | List the tunnels through permitted hosts, with their state on this computer and where a running tunnel listens. |
+| `create_tunnel` | Propose a local, remote or SOCKS5 tunnel through a permitted host; Lunport shows who could reach its listener and asks before saving. |
+| `update_tunnel` | Propose changes to a tunnel (a field given replaces that field only); Lunport shows each change as old → new and asks before saving. A running tunnel must be stopped first. |
+| `delete_tunnel` | Propose deleting a tunnel; Lunport asks first. A running tunnel must be stopped first. |
+| `start_tunnel` | Start a saved tunnel under Ask or Auto-log, as `ssh_exec` connects, and answer where it listens. It keeps running until stopped; Lunport stops it when AI access to its host ends. |
+| `stop_tunnel` | Stop a running tunnel through a permitted host, including one you started, without asking. |
 
 For example, a client can propose `create_host` with `{"alias":"web","hostname":"server.example.com","user":"deploy","port":22}`. Review the settings in Lunport, then allow that host in AI access, or save it in an already allowed Group, before inspection, fingerprint verification or command execution. The native creation review shows whether existing Group permission applies. Creation fields cannot supply passwords, private keys, host-key pins or AI permission grants.
 
 To change a host the client may use, it proposes `update_host` with `{"alias":"web-1","hostname":"192.0.2.8"}`, and to reach it through IAP, `set_transport` with `{"alias":"web-1","project":"acme-prod-123456","zone":"asia-east1-b","instance":"jumpbox","pam":{"entitlements":["prod-operate"]}}`; each opens Lunport's approval window with the fields that would change, and nothing is saved without your click, in Auto-log mode too. Moving a host between Groups, its server key, passwords and private keys stay out of reach of these tools.
+
+To reach a database behind a server, a client proposes `create_tunnel` with `{"name":"Database","host":"web-1","port":15432,"target_host":"db.internal","target_port":5432}` and then `start_tunnel` with `{"tunnel":"Database"}`. Saving always opens the approval window, in Auto-log mode too. Starting opens it in Ask mode; Auto-log starts without it once the host's server key is verified. The answer names the address to connect to, such as `127.0.0.1:15432`. Tunnels are named by their ID or exact name, and only tunnels through hosts the client may use are listed or changed.
 
 `verify_host_key` accepts a host ID or exact alias; the client cannot supply a trust decision. You can also use **Edit host → Server identity → Verify server fingerprint**. Verification stops before destination login or remote commands. Jump hosts may need their own credentials. A matching saved fingerprint does not prompt again; a changed destination, route, permission or pin requires verification again.
 

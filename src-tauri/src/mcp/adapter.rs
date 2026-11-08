@@ -121,8 +121,8 @@ pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) 
         .err()
         .is_some_and(|e| e == "legacy_transport_required")
     {
-        // The tools only the records server has (creating, verifying and editing hosts) have no legacy counterpart.
-        if listed_in(&management::tool_definitions(), name) {
+        // The tools only the records server has (creating, verifying and editing hosts; tunnels) have no legacy counterpart.
+        if listed_in(&management::tool_definitions(), name) || listed_in(&tunnels::tool_definitions(), name) {
             return tool_error("This tool requires a Records workspace in the current Lunport version.".into());
         }
         call.legacy.store(true, Ordering::SeqCst);
@@ -179,6 +179,7 @@ mod tests {
         let listed = tools_for_mode("records");
         let names: Vec<&str> = listed.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"update_host") && names.contains(&"set_transport") && names.contains(&"remove_transport"), "{names:?}");
+        assert!(names.contains(&"start_tunnel") && names.contains(&"stop_tunnel") && names.contains(&"create_tunnel"), "{names:?}");
         for name in names {
             let answer = tool(&json!({"name": name, "arguments": {}}), "1", &McpClientInfo::default(), &call).to_string();
             assert!(!answer.contains("Unknown tool"), "{name} is listed but refused: {answer}");

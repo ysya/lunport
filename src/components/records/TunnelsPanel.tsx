@@ -1,7 +1,7 @@
 import "./tunnels.css";
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeftRight, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowLeftRight, Bot, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
@@ -105,7 +105,7 @@ export function TunnelsPanel({ overview }: { overview: RecordOverview }) {
           const changing = row.live.phase === "connecting" || row.live.phase === "stopping";
           const warning = row.removed ? "Deleted on another device. Stop this running tunnel to remove it here." : row.changed ? "The rule changed on another device. Stop and start again to apply it." : row.live.forwarding.error;
           return <tr key={row.rule.id} className="border-b last:border-0 hover:bg-muted/20">
-            <td className="max-w-60 px-4 py-3"><button className="block max-w-full truncate text-left font-medium hover:text-primary disabled:cursor-default" disabled={active || row.blocked || busy} onClick={() => edit(row.rule)}>{revealHidden(row.rule.name)}</button><span className="mt-1 block truncate text-xs text-muted-foreground">{tunnelKinds[row.rule.forward.kind]} · {host ? revealHidden(host.payload.alias) : "Host unavailable"}</span>{grantRoute?.kind.pam && <TunnelGrant hostId={grantRoute.host_id} pam={grantRoute.kind.pam} />}<span className="tunnel-route-compact mt-1 max-w-56 truncate font-mono text-xs text-muted-foreground" title={route}>{route}</span></td>
+            <td className="max-w-60 px-4 py-3"><button className="block max-w-full truncate text-left font-medium hover:text-primary disabled:cursor-default" disabled={active || row.blocked || busy} onClick={() => edit(row.rule)}>{revealHidden(row.rule.name)}</button><span className="mt-1 block truncate text-xs text-muted-foreground">{tunnelKinds[row.rule.forward.kind]} · {host ? revealHidden(host.payload.alias) : "Host unavailable"}</span>{grantRoute?.kind.pam && <TunnelGrant hostId={grantRoute.host_id} pam={grantRoute.kind.pam} />}{active && row.live.started_by && <span className="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground" title={`Requested by ${revealHidden(row.live.started_by)}`}><Bot className="size-3 shrink-0" aria-hidden="true" /><span className="truncate">Started by an AI client</span></span>}<span className="tunnel-route-compact mt-1 max-w-56 truncate font-mono text-xs text-muted-foreground" title={route}>{route}</span></td>
             <td className="tunnel-route-column max-w-80 px-4 py-3"><span className="block truncate font-mono text-xs" title={route}>{route}</span><span className="mt-1 block text-xs text-muted-foreground">{row.removed ? "Removed elsewhere" : row.synced ? "Synced rule" : "On this computer"}</span></td>
             <td className="whitespace-nowrap px-4 py-3"><span className="inline-flex items-center gap-1.5" title={warning ? revealHidden(warning) : undefined}>
               {changing ? <LoaderCircle className="size-3 animate-spin" /> : <span className={`size-1.5 rounded-full ${row.live.phase === "running" ? "bg-success" : row.live.phase === "error" ? "bg-destructive" : "bg-muted-foreground/50"}`} />}

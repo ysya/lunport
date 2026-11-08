@@ -28,6 +28,15 @@ const managementResults: Record<string, { label: string; succeeded: boolean }> =
   transport_removed: { label: "Route removed", succeeded: true },
   transport_not_set: { label: "Route not saved", succeeded: false },
   transport_not_removed: { label: "Route not removed", succeeded: false },
+  tunnel_created: { label: "Tunnel created", succeeded: true },
+  tunnel_updated: { label: "Tunnel updated", succeeded: true },
+  tunnel_deleted: { label: "Tunnel deleted", succeeded: true },
+  tunnel_started: { label: "Tunnel started", succeeded: true },
+  tunnel_stopped: { label: "Tunnel stopped", succeeded: true },
+  tunnel_not_created: { label: "Tunnel not created", succeeded: false },
+  tunnel_not_updated: { label: "Tunnel not updated", succeeded: false },
+  tunnel_not_deleted: { label: "Tunnel not deleted", succeeded: false },
+  tunnel_not_started: { label: "Tunnel not started", succeeded: false },
 };
 
 function activityResult(entry: McpAuditEntry) {
@@ -69,14 +78,15 @@ export function McpActivity({ entries }: { entries: McpAuditEntry[] }) {
       const Icon = result.icon;
       const completed = recordedDate(entry.completed_at_ms);
       const date = completed ?? recordedDate(entry.at_ms);
-      const management = entry.outcome.startsWith("host_") || entry.outcome.startsWith("transport_");
+      const tunnel = entry.outcome.startsWith("tunnel_");
+      const management = tunnel || entry.outcome.startsWith("host_") || entry.outcome.startsWith("transport_");
       return <li key={key} className="min-w-0 space-y-2.5 px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="min-w-0 break-all text-sm font-medium">{revealHidden(entry.alias)}</span>
           <Badge variant="outline" className={result.color}><Icon aria-hidden="true" />{result.label}</Badge>
         </div>
         {entry.command ? <pre className="rounded-md bg-muted/50 px-2.5 py-2 font-mono text-xs whitespace-pre-wrap break-all select-text"><code className="line-clamp-2">{revealHidden(entry.command)}</code></pre>
-          : <p className="text-xs text-muted-foreground">{management ? "Connection management · No remote command" : "Command not recorded"}</p>}
+          : <p className="text-xs text-muted-foreground">{tunnel ? "Tunnel · No remote command" : management ? "Connection management · No remote command" : "Command not recorded"}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span>{entry.mode === "auto_log" ? "Auto-log mode" : "Ask mode"}</span>
           {date ? <time dateTime={date.toISOString()} title={`${completed ? "Completed" : "Requested"}: ${date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "long" })}`}>

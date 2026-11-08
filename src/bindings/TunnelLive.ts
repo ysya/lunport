@@ -2,4 +2,9 @@
 import type { ForwardStatus } from "./ForwardStatus";
 import type { TunnelPhase } from "./TunnelPhase";
 
-export type TunnelLive = { phase: TunnelPhase, forwarding: ForwardStatus, };
+export type TunnelLive = { phase: TunnelPhase, forwarding: ForwardStatus,
+/**
+ * Who started the tunnel when an AI client started it through MCP (design 2026-11-08): the requester Lunport observed. `None`
+ * for a tunnel started in Lunport.
+ */
+started_by?: string | null, };

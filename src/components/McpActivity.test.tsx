@@ -52,6 +52,8 @@ describe("AI activity results", () => {
   it.each([
     ["host_created", "Host created"], ["host_key_not_verified", "Fingerprint not verified"],
     ["transport_set", "Route saved"], ["transport_not_removed", "Route not removed"],
+    ["tunnel_created", "Tunnel created"], ["tunnel_started", "Tunnel started"], ["tunnel_stopped", "Tunnel stopped"],
+    ["tunnel_not_started", "Tunnel not started"], ["tunnel_not_deleted", "Tunnel not deleted"],
   ])("shows connection management without invented command execution for %s", (outcome, label) => {
     const html = render({ outcome, command: "", ended: null });
     expect(html).toContain(label);

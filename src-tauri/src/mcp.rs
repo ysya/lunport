@@ -30,6 +30,7 @@ pub(crate) mod records;
 mod adapter;
 mod management;
 mod permissions;
+mod tunnels;
 pub use records::RequestContext;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -152,6 +153,11 @@ pub mod proposal_kinds {
     pub const UPDATE_HOST: &str = "update_host";
     pub const SET_TRANSPORT: &str = "set_transport";
     pub const REMOVE_TRANSPORT: &str = "remove_transport";
+    /// Tunnels (design 2026-11-08): saving one always asks; starting one asks in Ask mode.
+    pub const CREATE_TUNNEL: &str = "create_tunnel";
+    pub const UPDATE_TUNNEL: &str = "update_tunnel";
+    pub const DELETE_TUNNEL: &str = "delete_tunnel";
+    pub const START_TUNNEL: &str = "start_tunnel";
 }
 
 fn create_host_kind() -> String {
@@ -1365,7 +1371,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log skips per-command approval but can request credentials through Lunport's native windows. Auto-log requires a verified server key. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log skips per-command approval but can request credentials through Lunport's native windows. Auto-log requires a verified server key. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -1441,6 +1447,7 @@ fn tools_for_mode(mode: &str) -> Value {
         tools[2]["name"] = json!("ssh_exec");
         tools[2]["description"] = json!("Run a remote command under the current Lunport Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.");
         tools.as_array_mut().unwrap().extend(management::tool_definitions());
+        tools.as_array_mut().unwrap().extend(tunnels::tool_definitions());
     }
     tools
 }

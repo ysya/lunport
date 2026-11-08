@@ -32,6 +32,14 @@ describe("Tunnels", () => {
     expect(render([{ ...active, removed: false, changed: true }])).toContain("Restart to apply changes");
     expect(render([active])).toContain(">Stop</button>");
   });
+  it("names a running tunnel an AI client started, and only while it runs (design 2026-11-08)", () => {
+    const started = row({ live: { phase: "running", forwarding: { running: true, port: 15432, connections: 0, error: null }, started_by: "Terminal → claude" } });
+    const html = render([started]);
+    expect(html).toContain("Started by an AI client");
+    expect(html).toContain("Requested by Terminal → claude");
+    expect(render([row({ live: { phase: "stopped", forwarding: { running: false, port: 0, connections: 0, error: null }, started_by: "Terminal → claude" } })])).not.toContain("Started by an AI client");
+    expect(render([row()])).not.toContain("Started by an AI client");
+  });
   it("missing hosts disable Start while keeping rules visible", () => {
     const html = render([row()], false);
     expect(html).toContain("Host unavailable");
