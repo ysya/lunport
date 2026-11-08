@@ -22,9 +22,15 @@ export type McpApprovalCardViewProps = {
   onAnswer: (allow: boolean) => void;
 };
 
-/** The window's words for each kind of proposal (design 2026-10-26, AI edits): a new host, a changed host, a transport set or removed. */
+/**
+ * The window's words for each kind of proposal (design 2026-10-26, AI edits): a new host, a changed host, a transport set or removed;
+ * and a tunnel saved, changed, deleted or started (design 2026-11-08). `note` replaces the line under the rows.
+ */
 const EDIT_DESCRIPTION = "Review what would change before saving. Saving does not connect, trust a server key or change AI access. The MCP client cannot approve this request.";
-const PROPOSAL_WORDS: Record<string, { title: string; description: string; button: string; hostLine: (request: McpPendingRequest) => string }> = {
+const SAVE_NOTE = "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval.";
+const TUNNEL_SAVE_NOTE = "Tunnel rules hold no passwords or keys. Requests expire after 120 seconds; changed settings require fresh approval.";
+const hostId = (request: McpPendingRequest) => `ID: ${request.host_id ?? "Legacy alias"}`;
+const PROPOSAL_WORDS: Record<string, { title: string; description: string; button: string; hostLine: (request: McpPendingRequest) => string; note?: string }> = {
   create_host: {
     title: "Add this SSH host?",
     description: "Review these connection settings before saving. A host in an already allowed Group inherits AI access. Saving does not connect or trust a server key. The MCP client cannot approve this request.",
@@ -34,6 +40,28 @@ const PROPOSAL_WORDS: Record<string, { title: string; description: string; butto
   update_host: { title: "Change this SSH host?", description: EDIT_DESCRIPTION, button: "Save changes", hostLine: (request) => `ID: ${request.host_id ?? "Legacy alias"}` },
   set_transport: { title: "Change this host's transport?", description: EDIT_DESCRIPTION, button: "Save transport", hostLine: (request) => `ID: ${request.host_id ?? "Legacy alias"}` },
   remove_transport: { title: "Remove this host's transport?", description: EDIT_DESCRIPTION, button: "Remove transport", hostLine: (request) => `ID: ${request.host_id ?? "Legacy alias"}` },
+  create_tunnel: {
+    title: "Add this tunnel?",
+    description: "Review this tunnel and who could reach it before saving. Saving does not start it or connect. The MCP client cannot approve this request.",
+    button: "Add tunnel", hostLine: hostId, note: TUNNEL_SAVE_NOTE,
+  },
+  update_tunnel: {
+    title: "Change this tunnel?",
+    description: "Review what would change before saving. Saving does not start the tunnel or connect. The MCP client cannot approve this request.",
+    button: "Save tunnel", hostLine: hostId, note: TUNNEL_SAVE_NOTE,
+  },
+  delete_tunnel: {
+    title: "Delete this tunnel?",
+    description: "The saved tunnel is removed from this library. The MCP client cannot approve this request.",
+    button: "Delete tunnel", hostLine: hostId,
+    note: "Devices that run this tunnel keep it running until it is stopped there. Requests expire after 120 seconds.",
+  },
+  start_tunnel: {
+    title: "Start this tunnel?",
+    description: "Lunport will open this port forward through the host below. It keeps running until you or the client stop it, or AI access to the host ends. The MCP client cannot approve this request.",
+    button: "Start tunnel", hostLine: hostId,
+    note: "Check who can reach the listener before starting. Requests expire after 120 seconds; a changed route requires fresh approval.",
+  },
 };
 
 export function McpApprovalCardView({ request, busy, armed, expired = false, onAnswer }: McpApprovalCardViewProps) {
@@ -77,7 +105,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
           </pre>
         </div>}
         <p className="text-xs text-muted-foreground">
-          {words ? "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval." : "Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval."}
+          {words ? words.note ?? SAVE_NOTE : "Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval."}
         </p>
         {expired && <p role="alert" className="text-xs text-destructive">This request expired. Ask the client to start a fresh request.</p>}
       </TaskDialogBody>

@@ -96,7 +96,7 @@ fn key_label(state: &SyncStateV3, key_id: Option<&str>) -> String {
 }
 
 /// The chain a connection to `id` takes, hop by hop.
-fn route_label(state: &SyncStateV3, id: &str) -> Result<String, String> {
+pub(super) fn route_label(state: &SyncStateV3, id: &str) -> Result<String, String> {
     Ok(repo::resolve_host_chain(state, id)
         .map_err(|e| e.to_string())?
         .iter()
@@ -179,7 +179,7 @@ fn candidate(
     ))
 }
 
-struct Active<'a> {
+pub(super) struct Active<'a> {
     runtime: &'a McpRuntime,
     id: String,
 }
@@ -188,7 +188,7 @@ impl Drop for Active<'_> {
         self.runtime.records_active.lock().unwrap().remove(&self.id);
     }
 }
-fn active<'a>(
+pub(super) fn active<'a>(
     runtime: &'a McpRuntime,
     context: &mut RequestContext,
     host: &str,
@@ -210,7 +210,7 @@ fn active<'a>(
         id: context.id.clone(),
     })
 }
-fn live(runtime: &McpRuntime, mode: ApprovalMode, cancel: &CancelToken) -> Result<(), String> {
+pub(super) fn live(runtime: &McpRuntime, mode: ApprovalMode, cancel: &CancelToken) -> Result<(), String> {
     if cancel.is_cancelled() {
         return Err("MCP request was canceled.".into());
     }
@@ -419,7 +419,7 @@ impl UpdateInput {
 }
 
 /// The host `alias` names, by id or by exact alias, as `get_host` finds it.
-fn find_host(state: &SyncStateV3, alias: &str) -> Result<repo::HostView, String> {
+pub(super) fn find_host(state: &SyncStateV3, alias: &str) -> Result<repo::HostView, String> {
     repo::get_host(state, alias)
         .or_else(|_| repo::find_by_alias(state, alias))
         .map_err(|e| e.to_string())

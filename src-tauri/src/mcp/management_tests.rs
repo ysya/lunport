@@ -295,7 +295,13 @@ fn records_tool_inventory_is_explicit_and_legacy_tools_remain_compatible() {
             "verify_host_key",
             "update_host",
             "set_transport",
-            "remove_transport"
+            "remove_transport",
+            "list_tunnels",
+            "create_tunnel",
+            "update_tunnel",
+            "delete_tunnel",
+            "start_tunnel",
+            "stop_tunnel"
         ]
     );
     let legacy_value = tools_for_mode("legacy");

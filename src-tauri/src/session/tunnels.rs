@@ -1,4 +1,4 @@
-//! Human-started port forwards. Definitions sync; running state is device-local.
+//! Port forwards started in Lunport, or by an AI client through MCP (design 2026-11-08). Definitions sync; running state is device-local.
 use super::{
     auth::Owner,
     connect::{CancelToken, Connector},
@@ -38,7 +38,8 @@ pub enum TunnelPhase {
     Error,
 }
 impl TunnelPhase {
-    fn busy(&self) -> bool {
+    /// Connecting, running or stopping: the tunnel holds a connection or a listener here.
+    pub(crate) fn busy(&self) -> bool {
         matches!(self, Self::Connecting | Self::Running | Self::Stopping)
     }
 }
@@ -48,6 +49,10 @@ impl TunnelPhase {
 pub struct TunnelLive {
     pub phase: TunnelPhase,
     pub forwarding: ForwardStatus,
+    /// Who started the tunnel when an AI client started it through MCP (design 2026-11-08): the requester Lunport observed. `None`
+    /// for a tunnel started in Lunport.
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub started_by: Option<String>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -60,12 +65,45 @@ pub struct TunnelView {
     pub changed: bool,
     pub removed: bool,
 }
-struct Entry {
+/// One tunnel that was started here: the rule it runs, and its live state.
+pub(crate) struct Entry {
     rule: TunnelRule,
     account_id: Option<String>,
     cancel: CancelToken,
     live: Mutex<TunnelLive>,
+    /// Why Lunport itself stopped the tunnel, when it did for a reason of its own (an AI client's access ended): its error then.
+    ended_for: Mutex<Option<String>>,
 }
+impl Entry {
+    /// Its live state now.
+    pub(crate) fn live(&self) -> TunnelLive {
+        self.live.lock().unwrap().clone()
+    }
+    /// Stops it, as its Stop button does.
+    pub(crate) fn stop(&self) {
+        let mut live = self.live.lock().unwrap();
+        if live.phase.busy() {
+            live.phase = TunnelPhase::Stopping;
+            self.cancel.cancel();
+        }
+    }
+    /// Stops it for a reason of Lunport's own, which it then shows as its error, whether it was running or still connecting.
+    pub(crate) fn stop_because(&self, reason: String) {
+        *self.ended_for.lock().unwrap() = Some(reason);
+        self.stop();
+    }
+}
+
+#[cfg(test)]
+impl Entry {
+    /// Stands the tunnel in a state of its own without running it, for tests outside this module.
+    pub(crate) fn set_live(&self, live: TunnelLive) {
+        *self.live.lock().unwrap() = live;
+    }
+}
+
+/// What an edit or a delete of a running tunnel is refused with, in the panel and through MCP.
+pub(crate) const STOP_FIRST: &str = "Stop the tunnel before editing or deleting it.";
 #[derive(Default)]
 pub struct Tunnels {
     edits: Mutex<()>,
@@ -73,7 +111,7 @@ pub struct Tunnels {
     next: AtomicU64,
 }
 impl Tunnels {
-    fn list(&self, state: &crate::sync::records_v3::SyncStateV3) -> Vec<TunnelView> {
+    pub(crate) fn list(&self, state: &crate::sync::records_v3::SyncStateV3) -> Vec<TunnelView> {
         let saved = crate::sync::tunnel_rules::view(state);
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|id, entry| {
@@ -123,18 +161,29 @@ impl Tunnels {
         });
         views
     }
-    fn busy(&self, id: &str) -> bool {
+    pub(crate) fn busy(&self, id: &str) -> bool {
         self.entries
             .lock()
             .unwrap()
             .get(id)
             .is_some_and(|entry| entry.live.lock().unwrap().phase.busy())
     }
-    fn prepare(
+    /// Runs `save` under the edit lock, unless the tunnel `id` is active here: a running tunnel is not edited or deleted.
+    pub(crate) fn edit<T>(&self, id: &str, save: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let _edit = self.edits.lock().unwrap();
+        if self.busy(id) {
+            return Err(STOP_FIRST.into());
+        }
+        save()
+    }
+    /// The entry of `expected`, which must be the saved rule as it is now, ready to start: refused when the rule changed, needs a sync
+    /// review or runs already, or when 16 tunnels run. `started_by` names the AI client that starts it, if one does.
+    pub(crate) fn prepare(
         &self,
         state: &crate::sync::records_v3::SyncStateV3,
         expected: &TunnelRule,
         keys: Option<&crate::sync::crypto::ChainKeys>,
+        started_by: Option<String>,
     ) -> Result<(TunnelRule, Arc<Entry>, u64), String> {
         let rule = crate::sync::tunnel_rules::view(state)
             .into_iter()
@@ -172,20 +221,26 @@ impl Tunnels {
             cancel: CancelToken::default(),
             live: Mutex::new(TunnelLive {
                 phase: TunnelPhase::Connecting,
+                started_by,
                 ..Default::default()
             }),
+            ended_for: Mutex::new(None),
         });
         entries.insert(rule.id.clone(), Arc::clone(&entry));
         Ok((rule, entry, self.next.fetch_add(1, Ordering::Relaxed)))
     }
-    fn stop(&self, id: &str) {
+    pub(crate) fn stop(&self, id: &str) {
         if let Some(entry) = self.entries.lock().unwrap().get(id) {
-            let mut live = entry.live.lock().unwrap();
-            if live.phase.busy() {
-                live.phase = TunnelPhase::Stopping;
-                entry.cancel.cancel();
-            }
+            entry.stop();
         }
+    }
+    /// The entry of the tunnel `id` started here, if it was.
+    pub(crate) fn entry(&self, id: &str) -> Option<Arc<Entry>> {
+        self.entries.lock().unwrap().get(id).cloned()
+    }
+    /// How many tunnels are active here (connecting, running or stopping); `prepare` allows 16.
+    pub(crate) fn active_count(&self) -> usize {
+        self.entries.lock().unwrap().values().filter(|entry| entry.live.lock().unwrap().phase.busy()).count()
     }
 }
 
@@ -221,17 +276,36 @@ fn route_needs_grant(state: &SyncStateV3, host_id: &str) -> bool {
         .is_some_and(|route| matches!(route.kind, TransportKind::GcpIap { pam: Some(_), .. }))
 }
 
-/// Runs the tunnel until it is stopped or its connection ends. `account` reads the sync account's
-/// id (a change stops the tunnel); `needs_grant` reads whether a host's route has a PAM check, and
-/// is asked of the first hop only when the connection ended with its IAP tunnel, so any other
-/// ending reads no route.
+/// What may end a running tunnel besides its Stop and its connection. An AI client's start (design 2026-11-08) adds the last two.
+pub(crate) struct Watch<'a> {
+    /// The sync account's id now: a change stops the tunnel.
+    pub account: &'a dyn Fn() -> Option<String>,
+    /// Whether a host's route has a PAM check. It is asked of the first hop only when the connection ended with its IAP tunnel, so any
+    /// other ending reads no route.
+    pub needs_grant: &'a dyn Fn(&str) -> bool,
+    /// Checked once connected, before anything is forwarded: an AI client's start holds the connection to the route and keys it was
+    /// approved for.
+    pub connected: &'a dyn Fn(&crate::ssh::Target) -> Result<(), String>,
+}
+
+impl Watch<'_> {
+    /// What a tunnel started in Lunport watches: the account and the grant, nothing an AI client's start adds.
+    pub(crate) fn of_a_person<'a>(account: &'a dyn Fn() -> Option<String>, needs_grant: &'a dyn Fn(&str) -> bool) -> Watch<'a> {
+        Watch { account, needs_grant, connected: &|_| Ok(()) }
+    }
+}
+
+/// What a tunnel an AI client started says when Lunport stopped it because the client's access to its host ended (design 2026-11-08).
+pub(crate) const AI_ACCESS_ENDED: &str =
+    "AI access to this tunnel's host ended, so Lunport stopped the tunnel the AI client started.";
+
+/// Runs the tunnel until it is stopped or its connection ends, or until `watch` ends it.
 fn run(
     rule: &TunnelRule,
     entry: &Entry,
     connector: &Connector<'_>,
     owner: &dyn Owner,
-    account: &dyn Fn() -> Option<String>,
-    needs_grant: &dyn Fn(&str) -> bool,
+    watch: &Watch<'_>,
 ) -> Result<(), String> {
     let connected = connector
         .connect(&HostQuery::Id(rule.host_id.clone()), owner, &entry.cancel)
@@ -239,6 +313,10 @@ fn run(
     if entry.cancel.is_cancelled() {
         connected.session.close();
         return Ok(());
+    }
+    if let Err(error) = (watch.connected)(&connected.target) {
+        connected.session.close();
+        return Err(error);
     }
     let forwarding = match connected.session.forward(&rule.forward) {
         Ok(forwarding) => forwarding,
@@ -250,7 +328,7 @@ fn run(
     let mut account_check = std::time::Instant::now();
     loop {
         if account_check.elapsed() >= Duration::from_secs(1) {
-            if entry.account_id.is_some() && account() != entry.account_id {
+            if entry.account_id.is_some() && (watch.account)() != entry.account_id {
                 entry.cancel.cancel();
             }
             account_check = std::time::Instant::now();
@@ -282,7 +360,7 @@ fn run(
         // The first hop is the hop dialed first, the only one an IAP route applies to. Its route is
         // read only for an ended IAP tunnel: an ordinary ending takes no lock.
         let first_hop = connected.target.hops.first().map(|hop| hop.id.as_str());
-        let first_hop_needs_grant = tunnel_end.is_some() && first_hop.is_some_and(needs_grant);
+        let first_hop_needs_grant = tunnel_end.is_some() && first_hop.is_some_and(watch.needs_grant);
         Err(stop_reason(
             tunnel_end.as_ref(),
             first_hop_needs_grant,
@@ -290,17 +368,110 @@ fn run(
         ))
     }
 }
+
+/// What an AI client's start was approved for (design 2026-11-08), for `run_for_ai`.
+pub(crate) struct AiApproval<'a> {
+    /// The destination, route and keys the start was approved for, captured as `ssh_exec` captures them.
+    pub approved: &'a crate::mcp::records::ApprovedTarget,
+    /// Started in Auto-log mode: a new or changed server key is refused instead of asked about.
+    pub auto_log: bool,
+    /// The policy as it is now still allows the start: AI access on, the mode it was approved in, the host permitted.
+    pub allowed: &'a (dyn Fn() -> Result<(), String> + Sync),
+    /// Why the tunnel must stop now, if it must: the client's AI access ended. Asked every `REVOCATION_POLL` while it connects or runs.
+    pub revoked: &'a (dyn Fn() -> Option<String> + Sync),
+}
+
+/// How often an AI client's tunnel asks whether the client's access ended.
+const REVOCATION_POLL: Duration = Duration::from_millis(250);
+
+/// What an AI client's tunnel says when a new or changed server key would have needed a person's decision in Auto-log mode.
+const NEEDS_HOST_KEY_DECISION: &str = "needs interaction: host key confirmation is required";
+
+/// Runs `rule` for an AI client (design 2026-11-08) over `base` guarded as `ssh_exec` guards its connection: it connects only to the
+/// approved route with the approved keys while the policy still allows it, asks nobody for a Privileged Access Manager grant, and in
+/// Auto-log mode trusts no new server key. When `ai.revoked` says the client's access ended, the tunnel stops with that reason, while it
+/// still connects too, which withdraws the windows its connection opened.
+pub(crate) fn run_for_ai(
+    rule: &TunnelRule,
+    entry: &Entry,
+    base: &Connector<'_>,
+    owner: &dyn Owner,
+    ai: &AiApproval<'_>,
+    account: &dyn Fn() -> Option<String>,
+    needs_grant: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
+    use crate::mcp::records::{Asker, CheckedEngine, NoPin, PublicDirectory};
+    let query = HostQuery::Id(rule.host_id.clone());
+    let check = || -> Result<(), String> {
+        if entry.cancel.is_cancelled() {
+            return Err("The tunnel was stopped.".into());
+        }
+        (ai.allowed)()?;
+        ai.approved.check(base, &query)
+    };
+    let check_resolved = |target: &crate::ssh::Target| ai.approved.check_resolved(target, base.keys);
+    let check_connected = |target: &crate::ssh::Target| {
+        check()?;
+        ai.approved.check_connected(target, base.keys)
+    };
+    let engine = CheckedEngine { inner: base.engine, check: &check_connected };
+    let directory = PublicDirectory(base.directory, &check, &check_resolved, Asker::Automation);
+    let confirmer = NoPin::new(base.confirmer, ai.auto_log);
+    let guarded = Connector {
+        engine: &engine,
+        directory: &directory,
+        keys: base.keys,
+        keychain: base.keychain,
+        confirmer: &confirmer,
+        grants: base.grants,
+    };
+    let watch = Watch { account, needs_grant, connected: &check_connected };
+    struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut next = std::time::Instant::now();
+            while !done.load(Ordering::SeqCst) && !entry.cancel.is_cancelled() {
+                if std::time::Instant::now() >= next {
+                    if let Some(reason) = (ai.revoked)() {
+                        entry.stop_because(reason);
+                        break;
+                    }
+                    next = std::time::Instant::now() + REVOCATION_POLL;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
+        let _done = Done(&done);
+        run(rule, entry, &guarded, owner, &watch)
+    });
+    match result {
+        Err(_) if confirmer.needed() => Err(NEEDS_HOST_KEY_DECISION.into()),
+        other => other,
+    }
+}
 fn finish(entry: &Entry, result: Result<(), String>) {
+    // A reason of Lunport's own (an AI client's access ended) is the tunnel's error, however its run ended.
+    let ended_for = entry.ended_for.lock().unwrap().take();
     let mut live = entry.live.lock().unwrap();
     live.forwarding.running = false;
     live.forwarding.connections = 0;
-    if entry.cancel.is_cancelled() || result.is_ok() {
-        live.phase = TunnelPhase::Stopped;
-    } else {
-        live.phase = TunnelPhase::Error;
-        live.forwarding.error = result
-            .err()
-            .map(|e| super::auth::printable(&e).chars().take(512).collect());
+    let error = match (ended_for, result) {
+        (Some(reason), _) => Some(reason),
+        (None, _) if entry.cancel.is_cancelled() => None,
+        (None, result) => result.err(),
+    };
+    match error {
+        None => live.phase = TunnelPhase::Stopped,
+        Some(error) => {
+            live.phase = TunnelPhase::Error;
+            live.forwarding.error = Some(super::auth::printable(&error).chars().take(512).collect());
+        }
     }
 }
 fn main_only(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -339,27 +510,25 @@ fn edit(
     rule: Option<TunnelRule>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let _edit = state.session.tunnels.edits.lock().unwrap();
-    if state.session.tunnels.busy(id) {
-        return Err("Stop the tunnel before editing or deleting it.".into());
-    }
-    crate::sync::engine::with_env(app, |env| {
-        let keys = env.runtime.core.lock().unwrap().account_keys.clone();
-        crate::sync::record_commands::edit_records(env, |state, now| {
-            crate::sync::tunnel_rules::set(
-                state,
-                keys.as_ref(),
-                id,
-                expected.as_ref(),
-                rule.clone(),
-                now,
-            )
-            .map_err(|e| crate::error::AppError::Other(e.to_string()))
+    state.session.tunnels.edit(id, || {
+        crate::sync::engine::with_env(app, |env| {
+            let keys = env.runtime.core.lock().unwrap().account_keys.clone();
+            crate::sync::record_commands::edit_records(env, |state, now| {
+                crate::sync::tunnel_rules::set(
+                    state,
+                    keys.as_ref(),
+                    id,
+                    expected.as_ref(),
+                    rule.clone(),
+                    now,
+                )
+                .map_err(|e| crate::error::AppError::Other(e.to_string()))
+            })
         })
+        .map_err(|e| e.to_string())?
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     })
-    .map_err(|e| e.to_string())?
-    .map(|_| ())
-    .map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn tunnels_save(
@@ -392,6 +561,63 @@ pub async fn tunnels_delete(
     .await
     .map_err(|e| e.to_string())?
 }
+/// What runs a started tunnel on its worker thread: the rule and its entry, the broker's connector, the person's native windows as the
+/// owner, and what `Watch` reads of the app (the sync account, a host's PAM check).
+pub(crate) type Work = Box<
+    dyn FnOnce(&TunnelRule, &Entry, &Connector<'_>, &dyn Owner, &dyn Fn() -> Option<String>, &dyn Fn(&str) -> bool) -> Result<(), String>
+        + Send,
+>;
+
+/// Starts the saved tunnel `expected` on a worker thread of its own, registered with the broker so that quitting stops it, and answers
+/// its entry: the panel's Start, and an AI client's (design 2026-11-08), which names itself in `started_by` and guards the connection in
+/// `work`.
+pub(crate) fn launch(app: &tauri::AppHandle, expected: &TunnelRule, started_by: Option<String>, work: Work) -> Result<Arc<Entry>, String> {
+    // The credential window names the request: an AI client's tunnel says so.
+    let request = if started_by.is_some() { "mcp-tunnel" } else { "tunnel" };
+    super::app::start(app);
+    let (broker, rule, entry, generation) = {
+        let state = app.state::<AppState>();
+        if !matches!(*state.session.status.lock().unwrap(), super::app::BrokerStatus::Running) {
+            return Err("Could not start the SSH service. Quit other Lunport instances and try again.".into());
+        }
+        let broker = state.session.broker.lock().unwrap().clone().ok_or("The SSH service is unavailable.")?;
+        let _edit = state.session.tunnels.edits.lock().unwrap();
+        let (rule, entry, generation) =
+            state.session.tunnels.prepare(&snapshot(app)?, expected, state.sync.core.lock().unwrap().account_keys.as_ref(), started_by)?;
+        (broker, rule, entry, generation)
+    };
+    let activity = match broker.register_tunnel(entry.cancel.clone()) {
+        Ok(activity) => activity,
+        Err(error) => {
+            finish(&entry, Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let worker_entry = Arc::clone(&entry);
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("lunport-tunnel".into()).spawn(move || {
+        let owner = super::auth_window::NativeOwner {
+            hub: app.state::<AppState>().session.auth_questions.clone(),
+            surface: Arc::new(super::auth_window::TauriAuthSurface { app: app.clone() }),
+            request_id: format!("{request}-{}-{generation}", rule.id),
+            cancel: worker_entry.cancel.clone(),
+        };
+        let account = || {
+            app.state::<AppState>().sync.core.lock().unwrap().records.as_ref().and_then(|s| s.account.as_ref().map(|a| a.chain_id.clone()))
+        };
+        let needs_grant = |host_id: &str| {
+            app.state::<AppState>().sync.core.lock().unwrap().records.as_ref().is_some_and(|s| route_needs_grant(s, host_id))
+        };
+        let result = work(&rule, &worker_entry, &broker.connector(), &owner, &account, &needs_grant);
+        finish(&worker_entry, result);
+        drop(activity);
+    });
+    if let Err(error) = spawned {
+        finish(&entry, Err(error.to_string()));
+        return Err("Could not start the tunnel worker.".into());
+    }
+    Ok(entry)
+}
 #[tauri::command]
 pub async fn tunnels_start(
     app: tauri::AppHandle,
@@ -400,88 +626,10 @@ pub async fn tunnels_start(
 ) -> Result<(), String> {
     main_only(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
-        super::app::start(&app);
-        let (broker, rule, entry, generation) = {
-            let state = app.state::<AppState>();
-            if !matches!(
-                *state.session.status.lock().unwrap(),
-                super::app::BrokerStatus::Running
-            ) {
-                return Err(
-                    "Could not start the SSH service. Quit other Lunport instances and try again."
-                        .into(),
-                );
-            }
-            let broker = state
-                .session
-                .broker
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or("The SSH service is unavailable.")?;
-            let _edit = state.session.tunnels.edits.lock().unwrap();
-            let (rule, entry, generation) = state.session.tunnels.prepare(
-                &snapshot(&app)?,
-                &expected,
-                state.sync.core.lock().unwrap().account_keys.as_ref(),
-            )?;
-            (broker, rule, entry, generation)
-        };
-        let activity = match broker.register_tunnel(entry.cancel.clone()) {
-            Ok(activity) => activity,
-            Err(error) => {
-                finish(&entry, Err(error.clone()));
-                return Err(error);
-            }
-        };
-        let worker_entry = Arc::clone(&entry);
-        let spawned = std::thread::Builder::new()
-            .name("lunport-tunnel".into())
-            .spawn(move || {
-                let result = (|| {
-                    let owner = super::auth_window::NativeOwner {
-                        hub: app.state::<AppState>().session.auth_questions.clone(),
-                        surface: Arc::new(super::auth_window::TauriAuthSurface {
-                            app: app.clone(),
-                        }),
-                        request_id: format!("tunnel-{}-{generation}", rule.id),
-                        cancel: worker_entry.cancel.clone(),
-                    };
-                    run(
-                        &rule,
-                        &worker_entry,
-                        &broker.connector(),
-                        &owner,
-                        &|| {
-                            app.state::<AppState>()
-                                .sync
-                                .core
-                                .lock()
-                                .unwrap()
-                                .records
-                                .as_ref()
-                                .and_then(|s| s.account.as_ref().map(|a| a.chain_id.clone()))
-                        },
-                        &|host_id| {
-                            app.state::<AppState>()
-                                .sync
-                                .core
-                                .lock()
-                                .unwrap()
-                                .records
-                                .as_ref()
-                                .is_some_and(|s| route_needs_grant(s, host_id))
-                        },
-                    )
-                })();
-                finish(&worker_entry, result);
-                drop(activity);
-            });
-        if let Err(error) = spawned {
-            finish(&entry, Err(error.to_string()));
-            return Err("Could not start the tunnel worker.".into());
-        }
-        Ok(())
+        let work: Work = Box::new(|rule, entry, connector, owner, account, needs_grant| {
+            run(rule, entry, connector, owner, &Watch::of_a_person(account, needs_grant))
+        });
+        launch(&app, &expected, None, work).map(|_| ())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -553,9 +701,9 @@ mod tests {
             11,
         )
         .unwrap();
-        assert!(manager.prepare(&updated, &rule, None).is_err());
-        manager.prepare(&updated, &changed, None).unwrap();
-        assert!(manager.prepare(&updated, &changed, None).is_err());
+        assert!(manager.prepare(&updated, &rule, None, None).is_err());
+        manager.prepare(&updated, &changed, None, None).unwrap();
+        assert!(manager.prepare(&updated, &changed, None, None).is_err());
         assert!(matches!(
             Tunnels::default().list(&updated)[0].live.phase,
             TunnelPhase::Stopped
@@ -565,7 +713,7 @@ mod tests {
     fn remote_edits_do_not_mutate_a_running_listener_and_deletions_keep_stop_available() {
         let (state, rule) = saved();
         let manager = Tunnels::default();
-        let (_, entry, _) = manager.prepare(&state, &rule, None).unwrap();
+        let (_, entry, _) = manager.prepare(&state, &rule, None, None).unwrap();
         entry.live.lock().unwrap().phase = TunnelPhase::Running;
         let mut changed = rule.clone();
         changed.forward.target_port = 5433;
@@ -708,6 +856,7 @@ mod tests {
                 phase: TunnelPhase::Connecting,
                 ..Default::default()
             }),
+            ended_for: Mutex::new(None),
         };
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -726,8 +875,7 @@ mod tests {
                 &entry,
                 &connector,
                 &FakeOwner::default(),
-                &|| None,
-                needs_grant,
+                &Watch::of_a_person(&|| None, needs_grant),
             )
         })
     }
@@ -842,5 +990,223 @@ mod tests {
             engine.end_tunnel_now(not_authorized());
         };
         assert_eq!(run_until(&directory, "db", &|_| true, &stopped), Ok(()));
+    }
+
+    // ---- An AI client's tunnel (design 2026-11-08) ----
+
+    /// What a run of an AI client's tunnel came to: what `run_for_ai` returned, the tunnel as the worker left it (`finish`), whether it
+    /// ran, and the engine, for its events.
+    struct AiRun {
+        result: Result<(), String>,
+        live: TunnelLive,
+        ran: bool,
+        engine: FakeEngine,
+    }
+
+    /// `run_for_ai` for a tunnel to `host`, approved for the route `approved_from` resolves for it, over the fake engine and `directory`
+    /// (which may differ from what was approved), then `finish` as the worker does. Once the tunnel runs, `once_running` acts; it must
+    /// end the tunnel or make `revoked` end it, and must not panic (a panic there would leave `run_for_ai` running and the scope waiting).
+    #[allow(clippy::too_many_arguments)]
+    fn run_ai_until(
+        directory: &FakeDirectory,
+        approved_from: &FakeDirectory,
+        host: &str,
+        auto_log: bool,
+        confirmer: &FakeConfirmer,
+        allowed: &(dyn Fn() -> Result<(), String> + Sync),
+        revoked: &(dyn Fn() -> Option<String> + Sync),
+        once_running: &(dyn Fn(&Entry) + Sync),
+    ) -> AiRun {
+        let engine = FakeEngine::new();
+        let (keys, keychain, grants) = (FakeKeys::new(), MemKeychain::default(), GrantGates::default());
+        let connector = Connector { engine: &engine, directory, keys: &keys, keychain: &keychain, confirmer, grants: &grants };
+        let query = HostQuery::Id(format!("id-{host}"));
+        let approved = crate::mcp::records::ApprovedTarget::capture(
+            &crate::session::directory::HostDirectory::resolve_public(approved_from, &query).unwrap(),
+            &keys,
+        )
+        .unwrap();
+        let rule = TunnelRule { host_id: format!("id-{host}"), ..saved().1 };
+        let entry = Entry {
+            rule: rule.clone(),
+            account_id: None,
+            cancel: CancelToken::default(),
+            live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, started_by: Some("Claude".into()), ..Default::default() }),
+            ended_for: Mutex::new(None),
+        };
+        let ai = AiApproval { approved: &approved, auto_log, allowed, revoked };
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while matches!(entry.live.lock().unwrap().phase, TunnelPhase::Connecting) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if matches!(entry.live.lock().unwrap().phase, TunnelPhase::Running) {
+                    ran.store(true, Ordering::SeqCst);
+                    once_running(&entry);
+                }
+            });
+            let result = run_for_ai(&rule, &entry, &connector, &FakeOwner::default(), &ai, &|| None, &|_| false);
+            // The worker's ending, as `launch` does it; it also lets the watcher go when the tunnel never ran.
+            finish(&entry, result.clone());
+            watcher.join().unwrap();
+            result
+        });
+        AiRun { result, live: entry.live(), ran: ran.load(Ordering::SeqCst), engine }
+    }
+
+    fn pinned_db() -> FakeDirectory {
+        FakeDirectory::new().with_host("db", key()).with_pin("db", default_server_key())
+    }
+
+    /// A run that must not get as far as forwarding: if it does, it is stopped at once and the test sees `ran`.
+    fn stop_it(entry: &Entry) {
+        entry.stop();
+    }
+
+    /// The tunnel runs as approved; when the client's AI access ends it stops, and the panel says why.
+    #[test]
+    fn an_ai_clients_tunnel_stops_when_its_access_ends_and_says_why() {
+        let ended = std::sync::atomic::AtomicBool::new(false);
+        let revoked = || ended.load(Ordering::SeqCst).then(|| AI_ACCESS_ENDED.to_string());
+        let run = run_ai_until(&pinned_db(), &pinned_db(), "db", true, &FakeConfirmer::default(), &|| Ok(()), &revoked, &|_| ended.store(true, Ordering::SeqCst));
+        assert!(run.ran, "it ran");
+        assert_eq!(run.result, Ok(()), "Lunport stopped it");
+        assert!(matches!(run.live.phase, TunnelPhase::Error), "{:?}", run.live.phase);
+        assert_eq!(run.live.forwarding.error.as_deref(), Some(AI_ACCESS_ENDED));
+        assert!(!run.live.forwarding.running);
+    }
+
+    /// Stopped by the client or the person, it ends without an error.
+    #[test]
+    fn an_ai_clients_tunnel_stopped_in_lunport_has_no_error() {
+        let run = run_ai_until(&pinned_db(), &pinned_db(), "db", true, &FakeConfirmer::default(), &|| Ok(()), &|| None, &stop_it);
+        assert!(run.ran);
+        assert_eq!(run.result, Ok(()));
+        assert!(matches!(run.live.phase, TunnelPhase::Stopped), "{:?}", run.live.phase);
+        assert_eq!(run.live.forwarding.error, None);
+    }
+
+    /// The route changed after the approval (the host now goes through a jump host): nothing connects.
+    #[test]
+    fn an_ai_clients_tunnel_connects_only_to_the_route_it_was_approved_for() {
+        let now = FakeDirectory::new()
+            .with_host("bastion", key())
+            .with_host_via("db", key(), &["bastion"])
+            .with_pin("bastion", default_server_key())
+            .with_pin("db", default_server_key());
+        let run = run_ai_until(&now, &pinned_db(), "db", true, &FakeConfirmer::default(), &|| Ok(()), &|| None, &stop_it);
+        assert!(!run.ran);
+        assert!(run.result.as_ref().is_err_and(|error| error.contains("request approval again")), "{:?}", run.result);
+        assert!(!run.engine.events().iter().any(|event| matches!(event, crate::ssh::fake::FakeEvent::Connect { .. })), "nothing connected");
+        assert!(matches!(run.live.phase, TunnelPhase::Error));
+    }
+
+    /// The policy changed while the tunnel connected (AI access off, or another mode): it does not run.
+    #[test]
+    fn a_policy_change_while_an_ai_clients_tunnel_connects_stops_it() {
+        let run = run_ai_until(&pinned_db(), &pinned_db(), "db", false, &FakeConfirmer::default(), &|| Err("MCP policy changed; request approval again.".into()), &|| None, &stop_it);
+        assert!(!run.ran);
+        assert!(run.result.as_ref().is_err_and(|error| error.contains("MCP policy changed")), "{:?}", run.result);
+    }
+
+    /// Auto-log never asks about a server key: a host whose key is not verified needs the person first. Ask mode lets the person
+    /// decide in the host key window.
+    #[test]
+    fn auto_log_refuses_a_new_server_key_and_ask_mode_lets_the_person_decide() {
+        let unpinned = || FakeDirectory::new().with_host("db", key());
+        let nobody = FakeConfirmer::default();
+        let run = run_ai_until(&unpinned(), &unpinned(), "db", true, &nobody, &|| Ok(()), &|| None, &stop_it);
+        assert!(!run.ran);
+        assert_eq!(run.result, Err(NEEDS_HOST_KEY_DECISION.to_string()));
+        assert!(nobody.asked().is_empty(), "nobody was asked");
+        let person = FakeConfirmer::deciding(vec![crate::session::testing::Decision::Trust]);
+        let run = run_ai_until(&unpinned(), &unpinned(), "db", false, &person, &|| Ok(()), &|| None, &stop_it);
+        assert!(run.ran);
+        assert_eq!(run.result, Ok(()));
+        assert_eq!(person.asked().len(), 1);
+    }
+
+    /// The client's access ends while the tunnel still waits for the person's password: the window is withdrawn (the question is
+    /// cancelled) and the tunnel says why it stopped.
+    #[test]
+    fn an_ai_clients_tunnel_ended_while_it_connects_withdraws_its_windows() {
+        use crate::session::{auth::Reply, protocol::QuestionKind};
+        use crate::ssh::fake::{FakeLogin, FakeMethods};
+        /// A person who has the password window open and does not answer: it waits until the question is cancelled.
+        struct Waiting<'a> {
+            entry: &'a Entry,
+            asked: &'a std::sync::atomic::AtomicBool,
+            withdrawn: &'a std::sync::atomic::AtomicBool,
+        }
+        impl Owner for Waiting<'_> {
+            fn ask(&self, _: QuestionKind, _: &str, _: bool, _: Option<Instant>) -> Reply {
+                self.asked.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !self.entry.cancel.is_cancelled() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                self.withdrawn.store(self.entry.cancel.is_cancelled(), Ordering::SeqCst);
+                Reply::Cancelled
+            }
+            fn host_key_notice(&self, _: &str) {}
+            fn banner(&self, _: &str) {}
+        }
+        let directory = FakeDirectory::new().with_host("db", crate::ssh::AuthMethod::Password).with_pin("db", default_server_key());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+        let (keys, keychain, grants, confirmer) = (FakeKeys::new(), MemKeychain::default(), GrantGates::default(), FakeConfirmer::default());
+        let connector = Connector { engine: &engine, directory: &directory, keys: &keys, keychain: &keychain, confirmer: &confirmer, grants: &grants };
+        let approved = crate::mcp::records::ApprovedTarget::capture(
+            &crate::session::directory::HostDirectory::resolve_public(&directory, &HostQuery::Id("id-db".into())).unwrap(),
+            &keys,
+        )
+        .unwrap();
+        let rule = TunnelRule { host_id: "id-db".into(), ..saved().1 };
+        let entry = Entry {
+            rule: rule.clone(),
+            account_id: None,
+            cancel: CancelToken::default(),
+            live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
+            ended_for: Mutex::new(None),
+        };
+        let (asked, withdrawn) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+        // The access ends once the password window is open.
+        let revoked = || asked.load(Ordering::SeqCst).then(|| AI_ACCESS_ENDED.to_string());
+        let ai = AiApproval { approved: &approved, auto_log: false, allowed: &|| Ok(()), revoked: &revoked };
+        let owner = Waiting { entry: &entry, asked: &asked, withdrawn: &withdrawn };
+        let result = run_for_ai(&rule, &entry, &connector, &owner, &ai, &|| None, &|_| false);
+        finish(&entry, result);
+        assert!(withdrawn.load(Ordering::SeqCst), "the password window was withdrawn");
+        assert!(matches!(entry.live().phase, TunnelPhase::Error), "{:?}", entry.live().phase);
+        assert_eq!(entry.live().forwarding.error.as_deref(), Some(AI_ACCESS_ENDED));
+    }
+
+    /// The panel's Stop, its tunnels and an account change stay as they were: only a reason of Lunport's own becomes an error after a
+    /// stop.
+    #[test]
+    fn a_stop_is_an_error_only_when_lunport_gives_a_reason() {
+        let entry = |reason: Option<&str>| {
+            let entry = Entry {
+                rule: saved().1,
+                account_id: None,
+                cancel: CancelToken::default(),
+                live: Mutex::new(TunnelLive { phase: TunnelPhase::Running, ..Default::default() }),
+                ended_for: Mutex::new(None),
+            };
+            match reason {
+                Some(reason) => entry.stop_because(reason.into()),
+                None => entry.stop(),
+            }
+            entry
+        };
+        let stopped = entry(None);
+        finish(&stopped, Err("connection reset".into()));
+        assert!(matches!(stopped.live().phase, TunnelPhase::Stopped));
+        assert_eq!(stopped.live().forwarding.error, None);
+        let ended = entry(Some(AI_ACCESS_ENDED));
+        finish(&ended, Ok(()));
+        assert!(matches!(ended.live().phase, TunnelPhase::Error));
+        assert_eq!(ended.live().forwarding.error.as_deref(), Some(AI_ACCESS_ENDED));
     }
 }

@@ -139,4 +139,32 @@ describe("AI edit proposals", () => {
     expect(create).toContain("Add this SSH host?");
     expect(create).toContain("New record");
   });
+
+  it("titles, describes and labels each kind of tunnel proposal (design 2026-11-08)", () => {
+    const add = renderReview({ request: proposal("create_tunnel", [["Listens on", "127.0.0.1:15432 on this computer"], ["Reachable from", "This computer only"]]) });
+    expect(add).toContain("Add this tunnel?");
+    expect(add).toContain("Saving does not start it or connect");
+    expect(add).toContain("127.0.0.1:15432 on this computer");
+    expect(add).toContain("Tunnel rules hold no passwords or keys");
+    expect(add).not.toContain("New record");
+    expect(disabled(add, "Add tunnel")).toBe(false);
+    expect(disabled(renderReview({ request: proposal("create_tunnel", [["Name", "Database"]]), armed: false }), "Add tunnel")).toBe(true);
+    const change = renderReview({ request: proposal("update_tunnel", [["Listens on", "127.0.0.1:15432 → 127.0.0.1:25432"]]) });
+    expect(change).toContain("Change this tunnel?");
+    expect(change).toContain("127.0.0.1:15432 → 127.0.0.1:25432");
+    expect(disabled(change, "Save tunnel")).toBe(false);
+    const remove = renderReview({ request: proposal("delete_tunnel", [["Name", "Database"]]) });
+    expect(remove).toContain("Delete this tunnel?");
+    expect(remove).toContain("keep it running until it is stopped there");
+    expect(disabled(remove, "Delete tunnel")).toBe(false);
+    const start = renderReview({ request: proposal("start_tunnel", [["Route", "deploy@web-1.example.com:22 (web-1)"]]) });
+    expect(start).toContain("Start this tunnel?");
+    expect(start).toContain("AI access to the host ends");
+    expect(start).toContain("Check who can reach the listener");
+    expect(start).toContain("deploy@web-1.example.com:22 (web-1)");
+    expect(start).not.toContain("Passwords and private keys are not accepted");
+    expect(disabled(start, "Start tunnel")).toBe(false);
+    expect(disabled(start, "Deny")).toBe(false);
+    expect(start).toMatch(/<button[^>]*autofocus=""[^>]*>Deny</);
+  });
 });

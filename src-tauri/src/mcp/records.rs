@@ -112,10 +112,20 @@ impl ApprovedTarget {
         Ok(())
     }
 }
-struct NoPin<'a> {
+/// A host key confirmer that, when `enabled` (Auto-log), refuses every question instead of asking, and remembers that one was needed.
+pub(crate) struct NoPin<'a> {
     confirmer: &'a dyn HostKeyConfirmer,
     enabled: bool,
     needed: AtomicBool,
+}
+impl<'a> NoPin<'a> {
+    pub(crate) fn new(confirmer: &'a dyn HostKeyConfirmer, enabled: bool) -> Self {
+        Self { confirmer, enabled, needed: AtomicBool::new(false) }
+    }
+    /// Whether a question was refused.
+    pub(crate) fn needed(&self) -> bool {
+        self.needed.load(Ordering::SeqCst)
+    }
 }
 impl HostKeyConfirmer for NoPin<'_> {
     fn confirm(&self, q: &HostKeyQuestion, c: &CancelToken) -> Option<String> {
@@ -709,6 +719,12 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "update_host"
             | "set_transport"
             | "remove_transport"
+            | "list_tunnels"
+            | "create_tunnel"
+            | "update_tunnel"
+            | "delete_tunnel"
+            | "start_tunnel"
+            | "stop_tunnel"
     ) {
         Ok(())
     } else {
@@ -792,6 +808,49 @@ pub(crate) fn dispatch(
                         let _ = app.emit("mcp://approval-requested", request);
                     })
             })
+        })
+        .map_err(|e| e.to_string())?,
+        "list_tunnels" => crate::sync::engine::with_env(app, |env| super::tunnels::list(env, &state.mcp, &state.session.tunnels))
+            .map_err(|e| e.to_string())?,
+        "create_tunnel" | "update_tunnel" | "delete_tunnel" => crate::sync::engine::with_env(app, |env| {
+            let tool = match method {
+                "create_tunnel" => super::tunnels::create,
+                "update_tunnel" => super::tunnels::update,
+                _ => super::tunnels::delete,
+            };
+            tool(env, &state.mcp, &state.session.tunnels, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "start_tunnel" => crate::sync::engine::with_env(app, |env| {
+            super::tunnels::start(
+                env,
+                &state.mcp,
+                &state.session.tunnels,
+                connector,
+                params,
+                context,
+                cancel,
+                &|request| {
+                    state
+                        .mcp
+                        .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                            crate::show_main_window(app);
+                            let _ = app.emit("mcp://approval-requested", request);
+                        })
+                },
+                &super::tunnels::launcher(app),
+            )
+        })
+        .map_err(|e| e.to_string())?,
+        "stop_tunnel" => crate::sync::engine::with_env(app, |env| {
+            super::tunnels::stop(env, &state.mcp, &state.session.tunnels, params, context, cancel)
         })
         .map_err(|e| e.to_string())?,
         "verify_host_key" => {
