@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Beta update channel helpers for CI (spec: docs/superpowers/specs/2026-10-01-update-channels-design.md).
+// Beta update channel helpers for CI.
 //
 //   node scripts/beta-channel.mjs check-version <version>
 //     Fails unless <version> is X.Y.Z-N (numeric, within the Windows MSI field limits) and newer

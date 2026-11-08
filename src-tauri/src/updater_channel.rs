@@ -1,4 +1,4 @@
-//! Beta 更新頻道(spec:docs/superpowers/specs/2026-10-01-update-channels-design.md §3.2)。
+//! Beta 更新頻道。
 //! Stable 頻道沿用前端 `@tauri-apps/plugin-updater` 的 `check()`(讀 tauri.conf.json 的網址);
 //! 這裡只處理 Beta:以 `updater_builder().endpoints(...)` 改讀 `updater-beta` release 的清單。
 //! 簽章驗證與「遠端版本較新才更新(不降版)」沿用 plugin 預設。
