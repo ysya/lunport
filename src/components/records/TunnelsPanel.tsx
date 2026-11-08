@@ -9,8 +9,8 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } fr
 import { TaskDialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { RecordField, selectClass } from "./form";
-import { revealHidden } from "@/lib/sync-approvals";
-import { errorMessage } from "@/lib/sync";
+import { revealHidden } from "@/lib/reveal-hidden";
+import { errorMessage } from "@/lib/utils";
 import type { RecordOverview } from "@/lib/records";
 import { useNow } from "@/lib/use-now";
 import { grantHeld, pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";

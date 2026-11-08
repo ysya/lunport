@@ -1,5 +1,5 @@
 import type { TerminalStatus } from "./terminal-session";
-import { revealHidden } from "./sync-approvals";
+import { revealHidden } from "./reveal-hidden";
 
 /** The broker's existing host-error sentences distinguish unavailable key
  * material from network/authentication errors without changing its protocol. */

@@ -7,7 +7,6 @@ use crate::sync::{
         wire::WrapHeader,
     },
     env::Keychain,
-    fake_relay::FakeRelay,
     record_keys,
     slot_rules::test_keys,
     testkit::{MemKeychain, TestClock, TestDevice},
@@ -36,7 +35,7 @@ pub(in crate::sync) fn fixture() -> TestDevice {
         },
     )
     .unwrap()];
-    let device = TestDevice::new("central-local", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("central-local", &TestClock::new());
     record_runtime::save_active(&device.env().state_path, &state).unwrap();
     let probe = record_runtime::probe_startup(&device.env().state_path, "central-local");
     record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
@@ -169,7 +168,6 @@ fn offline_import_preserves_original_container_and_atomically_installs_protected
             serde_json::from_slice(&fs::read(&d.env().state_path).unwrap()).unwrap();
         assert_eq!(s, saved);
         assert!(pending_imports(&d.env()).unwrap().is_empty());
-        assert!(d.relay.calls().is_empty());
         for rendered in [
             serde_json::to_string(&s).unwrap(),
             fs::read_to_string(journal_path(&d, &receipt.import_id)).unwrap(),
@@ -213,7 +211,6 @@ fn expired_oauth_and_device_grants_do_not_prevent_offline_encrypted_local_creati
     d.runtime.core.lock().unwrap().central_session = Some(session);
     let receipt = create(&d, test_keys::plain());
     assert!(state(&d).local.keys.contains_key(&receipt.key_id));
-    assert!(d.relay.calls().is_empty());
 }
 #[test]
 fn missing_stale_or_absent_invocation_and_missing_os_identity_stop_before_destination_writes() {
@@ -759,7 +756,6 @@ fn offline_rename_captures_public_ciphertext_without_changing_private_draft_sour
             .unwrap();
         assert_eq!(entry.private_key, raw);
         assert!(crate::session::record_material::matches(&view, &entry));
-        assert!(d.relay.calls().is_empty());
         d.runtime.core.lock().unwrap().central_session = Some(expired_session(&d));
         rename(
             &d.env(),
@@ -865,7 +861,6 @@ fn offline_delete_captures_signed_tombstone_and_preserves_encrypted_sources() {
             .data,
         central::payload::Data::Deleted
     ));
-    assert!(d.relay.calls().is_empty());
     let probe = record_runtime::probe_startup(&d.env().state_path, "central-local");
     record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();
     assert_eq!(

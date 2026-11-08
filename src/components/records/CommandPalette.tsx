@@ -11,7 +11,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { useUiStore } from "@/stores/ui";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import type { RecordOverview } from "@/lib/records";
 import { selectHost } from "./editor";
 import { connectSavedHost } from "./operations";

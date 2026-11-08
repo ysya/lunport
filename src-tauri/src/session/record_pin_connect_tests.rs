@@ -1,32 +1,52 @@
-//! The real connection must continue after trust even when a sync round finishes during pinning.
+//! Trusting a host key through the confirmed pin persists it and the real connection continues to the destination.
 use super::*;
 use crate::session::{
     connect::Connector,
     format_directory::FormatDirectory,
     protocol::HostQuery,
     record_directory::{RecordDirectory, RecordSources},
-    testing::{Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner},
+    testing::{Decision, FakeConfirmer, FakeKeys, FakeOwner},
 };
 use crate::ssh::{
     russh_engine::{EngineOptions, RusshEngine},
     testing::{fixture::Server, harness::tools},
 };
 use crate::sync::{
-    records_v3::{AuthKind, KeySlotPayload, LocalKeyMetadata},
+    records_v3::{AuthKind, HostScope, KeySlotPayload, LocalKeyMetadata},
     slot_rules::test_keys,
-    testkit::{HookedConnector, Hooks},
+    testkit::{TestClock, TestDevice},
 };
 use std::{sync::Arc, time::Duration};
 
 const HOST: &str = "0000000000000001";
 const KEY: &str = "11111111111111111111111111111111";
 
+/// A records library with one host, `web`.
+fn library() -> Arc<TestDevice> {
+    let device = Arc::new(TestDevice::new("pin-connect", &TestClock::new()));
+    let env = device.env();
+    let probe = record_runtime::probe_startup(&env.state_path, "pin-connect");
+    record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
+    record_runtime::mutate_records(&env, |state| {
+        repo::create_host(
+            state,
+            HOST,
+            HostScope::Local,
+            serde_json::from_value(serde_json::json!({"schema":2,"alias":"web","hostname":"host.test","user":"ops","auth":"interactive"})).unwrap(),
+            3,
+        )
+        .map_err(failed)
+    })
+    .unwrap();
+    device
+}
+
 #[test]
-fn trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_background_sync() {
+fn trusting_an_unknown_or_changed_host_key_connects_to_openssh() {
     let Some(tools) = tools() else { return };
     for changed_key in [false, true] {
         let server = Server::start(&tools, &["LogLevel INFO"]);
-        let device = record_round::tests::pin_fixture();
+        let device = library();
         record_runtime::mutate_records(&device.env(), |state| {
             let mut next = state.clone();
             let public = ssh_key::PublicKey::from_openssh(&server.key.public_line).unwrap();
@@ -79,21 +99,6 @@ fn trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_backgr
             })
             .unwrap();
         }
-        let background = device.clone();
-        let relay = Arc::new(HookedConnector::new(
-            &device.relay,
-            Hooks {
-                before_pull: Some(Box::new(move || {
-                    assert!(background.runtime.lifecycle.try_lock().is_ok());
-                    let report = record_round::sync_once(&background.env()).unwrap();
-                    assert!(
-                        report.pushed > 0,
-                        "exercise actual background upload receipts"
-                    );
-                })),
-                ..Default::default()
-            },
-        ));
         let read = device.clone();
         let pin = device.clone();
         let records = RecordDirectory::new(RecordSources {
@@ -107,19 +112,13 @@ fn trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_backgr
             pin: Box::new(|_, _, _, _| panic!("use confirmed pin persistence")),
         })
         .with_confirmed_pin(Box::new(move |hop, previous, key, cancel, guard| {
-            let mut env = pin.env();
-            env.relays = relay.as_ref();
-            super::confirm(&env, hop, previous, key, env.keychain, cancel, guard)
+            super::confirm(&pin.env(), hop, previous, key, cancel, guard)
                 .map_err(|e| DirectoryError::Failed(e.to_string()))
         }));
         let mode = device.clone();
         let directory = FormatDirectory {
             lifecycle: device.runtime.lifecycle.clone(),
-            mode: Box::new(move || {
-                let core = mode.runtime.core.lock().unwrap();
-                (core.format, core.legacy_paused)
-            }),
-            legacy: Arc::new(FakeDirectory::new()),
+            mode: Box::new(move || mode.runtime.core.lock().unwrap().format),
             records: Arc::new(records),
         };
         let engine = RusshEngine::with_options(EngineOptions {

@@ -5,7 +5,6 @@ use crate::sync::{
         wire::WrapHeader,
     },
     env::Keychain,
-    fake_relay::FakeRelay,
     record_import::{self, with_test_step, PublishStep},
     record_repository,
     testkit::{MemKeychain, TestClock, TestDevice},
@@ -38,7 +37,7 @@ fn receiver() -> (TestDevice, String, crate::vault::store::VaultEntry) {
         },
     )
     .unwrap()];
-    let d = TestDevice::new("automatic-receive", &FakeRelay::new(), &TestClock::new());
+    let d = TestDevice::new("automatic-receive", &TestClock::new());
     record_runtime::save_active(&d.env().state_path, &state).unwrap();
     let probe = record_runtime::probe_startup(&d.env().state_path, "automatic-receive");
     record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();

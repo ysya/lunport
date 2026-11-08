@@ -10,7 +10,6 @@ use crate::sync::{
         trust::ControlProof,
     },
     env::Keychain,
-    fake_relay::FakeRelay,
     testkit::{TestClock, TestDevice},
 };
 use serde_json::{json, Value};
@@ -72,7 +71,7 @@ fn fixture_legacy(local: bool, empty_minimum: bool, legacy: bool) -> Fixture {
     .unwrap();
     crate::sync::record_import::central_stage::publish_initial(&first.env(), &prepared, &keys)
         .unwrap();
-    let peer = TestDevice::new("peer", &FakeRelay::new(), &TestClock::new());
+    let peer = TestDevice::new("peer", &TestClock::new());
     let env = peer.env();
     fs::create_dir_all(env.state_path.parent().unwrap()).unwrap();
     crate::sync::testkit::private_directory(env.state_path.parent().unwrap());

@@ -8,7 +8,6 @@ import {
   IN_APP_TERMINAL,
   clampTerminalFontSize,
   DEFAULT_TERMINAL_FONT_SIZE,
-  defaultLintRules,
   resolveTheme,
   systemPrefersDark,
   type ThemePref,
@@ -70,14 +69,6 @@ interface SettingsState {
   setTerminalFontSize: (size: number) => void;
   terminalCursorBlink: boolean;
   setTerminalCursorBlink: (enabled: boolean) => void;
-  /**
-   * Per-host terminal overrides (host alias → terminal id). A host's override
-   * wins over the global `terminalId`; no entry = use the global preference.
-   * Resolve with `resolveTerminal` from `@/lib/settings-logic`.
-   */
-  hostTerminals: Record<string, string>;
-  /** Set or clear (null deletes the entry) the terminal override for a host. */
-  setHostTerminal: (alias: string, id: string | null) => void;
   /** Root font-size in px (the whole UI is rem-based and scales with it). */
   fontSize: number;
   setFontSize: (px: number) => void;
@@ -111,42 +102,13 @@ interface SettingsState {
   /** Prefer opening connections in a new TAB (only honored by capable terminals). */
   newTabConnect: boolean;
   setNewTabConnect: (enabled: boolean) => void;
-  /** SSH config file to load (null = `~/.ssh/config`). */
-  configPath: string | null;
-  setConfigPath: (path: string | null) => void;
-  /** How many backups to keep (null = unlimited). Mirrored via `config_set_backup_retention`. */
-  backupRetention: number | null;
-  setBackupRetention: (limit: number | null) => void;
-  /** Discovery sources for the Discover dialog. */
-  discoverKnownHosts: boolean;
-  setDiscoverKnownHosts: (enabled: boolean) => void;
-  discoverTailscale: boolean;
-  setDiscoverTailscale: (enabled: boolean) => void;
-  /** Poll for on-disk drift automatically (in addition to focus checks). */
-  driftAutoCheck: boolean;
-  setDriftAutoCheck: (enabled: boolean) => void;
-  driftIntervalSec: number;
-  setDriftIntervalSec: (sec: number) => void;
-  /** Per-rule lint toggles, keyed by the backend's stable rule ids. */
-  lintRules: Record<string, boolean>;
-  setLintRule: (rule: string, enabled: boolean) => void;
-  /**
-   * User display aliases for source config files (full path → label), shown
-   * by sidebar group headers, the file-scope picker, and the Add-host target
-   * picker via `labelsFor`. No entry = the automatic `shortLabels` heuristic.
-   */
-  fileAliases: Record<string, string>;
-  /**
-   * Set or clear the display alias for a file. The label is trimmed; null or
-   * a blank string DELETES the entry, restoring the automatic label.
-   */
-  setFileAlias: (path: string, label: string | null) => void;
 }
 
 /**
  * All persistent *preferences* (the Settings window's backing store). Pure UI
- * state (selection, search, open dialogs) stays in `useUiStore`; backend data
- * stays in TanStack Query.
+ * state (search, open dialogs) stays in `useUiStore`; backend data stays in
+ * TanStack Query. Preferences of the retired Legacy workspace (config path,
+ * backups, discovery, drift, lint rules, file aliases) are dropped on read.
  */
 export const useSettingsStore = create<SettingsState>()(
   persist(
@@ -165,17 +127,6 @@ export const useSettingsStore = create<SettingsState>()(
       setTerminalFontSize: (size) => set({ terminalFontSize: clampTerminalFontSize(size) }),
       terminalCursorBlink: true,
       setTerminalCursorBlink: (terminalCursorBlink) => set({ terminalCursorBlink }),
-      hostTerminals: {},
-      setHostTerminal: (alias, id) =>
-        set((s) => {
-          if (id === null) {
-            if (!(alias in s.hostTerminals)) return {};
-            const next = { ...s.hostTerminals };
-            delete next[alias];
-            return { hostTerminals: next };
-          }
-          return { hostTerminals: { ...s.hostTerminals, [alias]: id } };
-        }),
       fontSize: DEFAULT_FONT_SIZE,
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
       motion: "system",
@@ -204,33 +155,6 @@ export const useSettingsStore = create<SettingsState>()(
       setGlobalHotkey: (globalHotkey) => set({ globalHotkey }),
       newTabConnect: false,
       setNewTabConnect: (newTabConnect) => set({ newTabConnect }),
-      configPath: null,
-      setConfigPath: (configPath) => set({ configPath }),
-      backupRetention: 20,
-      setBackupRetention: (backupRetention) => set({ backupRetention }),
-      discoverKnownHosts: true,
-      setDiscoverKnownHosts: (discoverKnownHosts) => set({ discoverKnownHosts }),
-      discoverTailscale: true,
-      setDiscoverTailscale: (discoverTailscale) => set({ discoverTailscale }),
-      driftAutoCheck: false,
-      setDriftAutoCheck: (driftAutoCheck) => set({ driftAutoCheck }),
-      driftIntervalSec: 30,
-      setDriftIntervalSec: (driftIntervalSec) => set({ driftIntervalSec }),
-      lintRules: defaultLintRules(),
-      setLintRule: (rule, enabled) =>
-        set((s) => ({ lintRules: { ...s.lintRules, [rule]: enabled } })),
-      fileAliases: {},
-      setFileAlias: (path, label) =>
-        set((s) => {
-          const trimmed = label?.trim() ?? "";
-          if (trimmed === "") {
-            if (!(path in s.fileAliases)) return {};
-            const next = { ...s.fileAliases };
-            delete next[path];
-            return { fileAliases: next };
-          }
-          return { fileAliases: { ...s.fileAliases, [path]: trimmed } };
-        }),
     }),
     { name: SETTINGS_STORAGE_KEY, version: SETTINGS_VERSION, migrate: migrateSettings },
   ),

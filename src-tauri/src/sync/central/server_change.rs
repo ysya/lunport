@@ -194,11 +194,10 @@ mod tests {
     #[test]
     fn an_unconfigured_workspace_has_no_distributor_server_or_sign_in_session() {
         use crate::sync::{
-            fake_relay::FakeRelay,
             record_runtime,
             testkit::{TestClock, TestDevice},
         };
-        let device = TestDevice::new("blank-service", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("blank-service", &TestClock::new());
         let env = device.env();
         let probe = record_runtime::probe_startup(&env.state_path, "test");
         record_runtime::activate_probe(&mut env.runtime.core.lock().unwrap(), probe).unwrap();

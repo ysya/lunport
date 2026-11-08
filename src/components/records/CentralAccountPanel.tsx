@@ -7,7 +7,7 @@ import { WorkspaceTransfer } from "./WorkspaceTransfer";
 import { CentralConflicts } from "./CentralConflicts";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import type { RecordOverview } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { syncSummary, syncProblem, newerCentralStatus } from "@/lib/central-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

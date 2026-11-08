@@ -53,7 +53,7 @@ or `handles`, and supply `baseline_ref`. Only that explicit comparison runs ten
 independent processes for each source; it does not run the full application suite.
 
 Keychain probes run only in their dedicated workflow on disposable macOS runners.
-The helper Rust job includes the native metadata probe and partition regression;
+The helper Rust job includes the partition regression;
 the separate identity job is reserved for `identity_only=true` or fork PRs without
 signing secrets. Ordinary releases verify and embed the frozen helper; they never
 rebuild it. `freeze_helper` remains an explicit candidate-generation operation.

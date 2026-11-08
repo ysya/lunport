@@ -212,9 +212,10 @@ pub trait HostDirectory: Send + Sync {
 }
 
 /// What a `pin` or a `replace_pin` has to do, given the key pinned now. The rules are the ones documented on those two methods. They are
-/// written down once, here, so that the pin file, the test fake and the later host records decide the same way (and say the same
+/// written down once, here, so that the test fake and the host records decide the same way (and say the same
 /// sentence); `check_the_pin_contract` (test builds) checks the outcome of any directory. The caller makes the decision while it holds
 /// its lock, between reading the pin and writing it.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PinDecision {
     /// The key asked for is the pinned one already: nothing is written and the call succeeds.
@@ -227,6 +228,7 @@ pub enum PinDecision {
 
 /// `pin(host, key)` when `pinned` is the fingerprint of the key pinned now (`None`: nothing is): write the key when nothing is pinned,
 /// accept it when it is the pinned one, refuse it when another key is.
+#[cfg(test)]
 pub fn decide_pin(host: &HostId, pinned: Option<&str>, key: &HostKey) -> PinDecision {
     match pinned {
         Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
@@ -237,6 +239,7 @@ pub fn decide_pin(host: &HostId, pinned: Option<&str>, key: &HostKey) -> PinDeci
 
 /// `replace_pin(host, previous, key)` when `pinned` is the fingerprint of the key pinned now (`None`: nothing is): accept `key` when it is
 /// the pinned one, write it when `previous` is the pinned one, refuse anything else (another key, or no pin at all).
+#[cfg(test)]
 pub fn decide_replace(host: &HostId, pinned: Option<&str>, previous: &HostKey, key: &HostKey) -> PinDecision {
     match pinned {
         Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,

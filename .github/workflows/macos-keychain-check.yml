@@ -49,12 +49,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-      - name: Placeholder frontend for the native metadata probe
+      - name: Placeholder frontend for the Rust test build
         run: |
           mkdir -p dist
           echo '<!doctype html>' > dist/index.html
       - name: Native metadata in a disposable keychain
-        run: bash scripts/validate-macos-keychain.sh --with-rust
+        run: bash scripts/validate-macos-keychain.sh
       - name: Prepare the pinned signing identity
         env:
           LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
@@ -108,7 +108,7 @@ jobs:
 
   identity:
     name: Keychain partition regression
-    # The full helper job already includes this probe with the Rust metadata test.
+    # The full helper job already includes this probe.
     needs: changes
     if: needs.changes.outputs.credentials == 'true' && (inputs.identity_only == true || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))
     runs-on: macos-latest

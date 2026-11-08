@@ -60,10 +60,7 @@ pub(crate) mod record_pin;
 pub(crate) mod deadline;
 pub(crate) mod os_identity;
 pub mod hostkey_window;
-pub mod pins;
 pub mod protocol;
 pub mod relay;
-pub mod ssh_config_directory;
-pub mod ssh_g;
 #[cfg(test)]
 pub mod testing;

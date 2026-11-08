@@ -593,11 +593,10 @@ mod tests {
     use super::*;
     use crate::sync::{
         env::Keychain,
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     fn source() -> TestDevice {
-        let device = TestDevice::new("archive", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("archive", &TestClock::new());
         let probe = record_runtime::probe_startup(&device.env().state_path, "archive");
         record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
         record_runtime::mutate_records(&device.env(), |records| {

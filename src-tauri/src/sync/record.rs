@@ -4,10 +4,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::AppError;
+#[cfg(test)]
 use crate::sync::crypto::ChainKeys;
 
-/// payload 的 `schema`(host/device/space/spacekey 皆為 1)與 v1 chain `meta` 的 `schema_version`。
+/// payload 的 `schema`(host/device/space/spacekey 皆為 1);test fixtures build space keys with it.
+#[cfg(test)]
 pub const SCHEMA_VERSION: u32 = 1;
 /// 帳戶 chain 的格式版本:`meta` `"account"` 的 `schema_version`(spec §4.1)。chain 上的值比它新 → 這台只讀。
 pub const ACCOUNT_SCHEMA_VERSION: u32 = 2;
@@ -15,9 +16,6 @@ pub const ACCOUNT_SCHEMA_VERSION: u32 = 2;
 pub const ACCOUNT_META_ID: &str = "account";
 /// 更換同步碼標記的 `meta` id 前綴,後接發起裝置的 device_id(spec §4.1、§7.5)。
 pub const ROTATION_META_PREFIX: &str = "rotation:";
-/// space0(v1 升級建立的第一個 space)的名稱與 slug(spec §5.2)。
-pub const SPACE0_NAME: &str = "Synced";
-pub const SPACE0_SLUG: &str = "synced";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -165,13 +163,6 @@ pub struct Envelope {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HostPayload {
-    pub schema: u32,
-    /// 整個 Host 區塊的原始文字(lossless)。
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DevicePayload {
     pub schema: u32,
     pub name: String,
@@ -217,19 +208,6 @@ pub struct SpacePayload {
     pub previous_id: Option<String>,
 }
 
-impl SpacePayload {
-    /// space0 的確定值(spec §5.2):兩台同時從 v1 升級的電腦寫出相同的 payload。
-    pub fn space0() -> Self {
-        Self {
-            schema: SCHEMA_VERSION,
-            name: SPACE0_NAME.to_string(),
-            slug: SPACE0_SLUG.to_string(),
-            created_at_ms: 0,
-            previous_id: None,
-        }
-    }
-}
-
 /// `spacekey` 記錄的 payload(帳戶 chain;id = space id):該 space 的權杖與金鑰,`enc_key` 為標準 base64
 /// (spec §4.1)。明文是祕密:只在記憶體解開,狀態檔只存帳戶金鑰加密的 envelope;`Debug` 不印出權杖與金鑰。
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -246,13 +224,9 @@ impl std::fmt::Debug for SpaceKeyPayload {
 }
 
 impl SpaceKeyPayload {
+    #[cfg(test)]
     pub fn from_keys(keys: &ChainKeys) -> Self {
         Self { schema: SCHEMA_VERSION, auth_token: keys.auth_token.clone(), enc_key: keys.enc_key_b64() }
-    }
-
-    /// 還原成這個 space 的 chain 金鑰;`space_id` = 記錄 id = chain id。格式不對 → Err(`ChainKeys::from_parts`)。
-    pub fn to_keys(&self, space_id: &str) -> Result<ChainKeys, AppError> {
-        ChainKeys::from_parts(space_id, &self.auth_token, &self.enc_key)
     }
 }
 
@@ -333,15 +307,6 @@ mod tests {
         assert_eq!(merge(Some(&mine), &rec("a", 10, "dev-z", true)), MergeOutcome::TakeRemote);
         let mine_deleted = local(rec("a", 10, "dev-z", true), false);
         assert_eq!(merge(Some(&mine_deleted), &rec("a", 10, "dev-a", false)), MergeOutcome::KeepLocal);
-    }
-
-    #[test]
-    fn payloads_serialize_with_schema() {
-        let p = HostPayload { schema: SCHEMA_VERSION, text: "Host a\n".into() };
-        let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["schema"], 1);
-        let back: HostPayload = serde_json::from_value(v).unwrap();
-        assert_eq!(back.text, "Host a\n");
     }
 
     #[test]
@@ -435,11 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn space0_payload_is_the_fixed_value_from_the_spec() {
-        assert_eq!(
-            serde_json::to_value(SpacePayload::space0()).unwrap(),
-            serde_json::json!({ "schema": 1, "name": "Synced", "slug": "synced", "created_at_ms": 0, "previous_id": null })
-        );
+    fn space_payload_without_previous_id_decodes_as_none() {
         // previous_id 缺席 = None(serde default)。
         let p: SpacePayload =
             serde_json::from_value(serde_json::json!({ "schema": 1, "name": "Work", "slug": "work", "created_at_ms": 5 })).unwrap();
@@ -463,15 +424,10 @@ mod tests {
     }
 
     #[test]
-    fn space_key_payload_round_trips_and_never_debug_prints_its_secrets() {
+    fn space_key_payload_never_debug_prints_its_secrets() {
         let keys = ChainKeys::generate().unwrap();
         let payload = SpaceKeyPayload::from_keys(&keys);
         assert_eq!(payload.schema, 1);
-        let back = payload.to_keys(&keys.chain_id).unwrap();
-        assert_eq!(back.auth_token, keys.auth_token);
-        assert_eq!(back.enc_key_b64(), keys.enc_key_b64());
-        // space id 就是 chain id:被竄改成路徑就拒絕。
-        assert!(payload.to_keys("../escape").is_err());
         let shown = format!("{payload:?}");
         assert!(!shown.contains(&keys.auth_token) && !shown.contains(&payload.enc_key), "{shown}");
     }

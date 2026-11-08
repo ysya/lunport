@@ -12,7 +12,7 @@ import { DetailPresence } from "@/components/app/DetailPresence";
 import { applyRecordOverview, recordKeyDestinationKey, renameRecordKey, deleteRecordKey, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
 import type { CentralStatus } from "@/lib/central-sync";
 import { syncSummary } from "@/lib/central-status";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
 import { clearKeyDraft, hasKeyImportSource, keyActionError, submitKeyDraft } from "./panel-actions";

@@ -6,7 +6,6 @@ use crate::ssh::{
 };
 use crate::sync::testkit::MemKeychain;
 use crate::sync::{
-    fake_relay::FakeRelay,
     testkit::{TestClock, TestDevice},
 };
 use std::sync::atomic::AtomicUsize;
@@ -16,7 +15,7 @@ fn device() -> TestDevice {
 }
 /// A device whose fresh records `edit` changes before they are activated.
 fn device_with(edit: impl FnOnce(SyncStateV3) -> SyncStateV3) -> TestDevice {
-    let d = TestDevice::new("management", &FakeRelay::new(), &TestClock::new());
+    let d = TestDevice::new("management", &TestClock::new());
     let record_runtime::StartupProbe::Records { mut state, .. } =
         record_runtime::probe_startup(&d.env().state_path, "management")
     else {
@@ -278,8 +277,8 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
     }
 }
 #[test]
-fn records_tool_inventory_is_explicit_and_legacy_tools_remain_compatible() {
-    let records_value = tools_for_mode("records");
+fn records_tool_inventory_is_explicit() {
+    let records_value = super::super::tool_definitions();
     let records = records_value.as_array().unwrap();
     let names: Vec<_> = records
         .iter()
@@ -304,31 +303,8 @@ fn records_tool_inventory_is_explicit_and_legacy_tools_remain_compatible() {
             "stop_tunnel"
         ]
     );
-    let legacy_value = tools_for_mode("legacy");
-    let legacy = legacy_value.as_array().unwrap();
-    assert_eq!(legacy.len(), 3);
-    assert!(!legacy.iter().any(|t| t["name"] == "create_host"));
 }
 
-#[test]
-fn changing_storage_during_approval_requires_a_new_proposal() {
-    let d = device();
-    let r = runtime(ApprovalMode::Ask);
-    let result = create(
-        &d.env(),
-        &r,
-        &input(),
-        RequestContext::default(),
-        &CancelToken::default(),
-        &|_| {
-            crate::sync::record_account::create_account(&d.env(), "management").unwrap();
-            record_library::enable(&d.env(), false).unwrap();
-            ApprovalDecision::Allow
-        },
-    );
-    assert!(result.unwrap_err().contains("storage changed"));
-    assert!(repo::list_hosts(&snapshot(&d)).unwrap().is_empty());
-}
 #[test]
 fn revoked_permission_or_cancel_during_trust_never_saves_a_pin() {
     use crate::session::connect::{HostKeyConfirmer, HostKeyQuestion};
@@ -406,7 +382,6 @@ fn native_creation_review_discloses_existing_group_access_and_rejects_stale_gran
         }
     }
 }
-
 
 // ---- update_host (design 2026-10-26, AI edits) ----
 
@@ -583,7 +558,6 @@ fn an_update_rejects_private_data_group_moves_and_a_loop_through_itself() {
     assert!(update(&d.env(), &r, &json!({"alias":"fixture-web","jump":[id]}), RequestContext::default(), &CancelToken::default(), &never).is_err());
     assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid");
 }
-
 
 // ---- set_transport / remove_transport (design 2026-10-26, AI edits) ----
 
@@ -808,7 +782,6 @@ fn transport_tools_need_the_hosts_ai_permission() {
     assert_eq!(remove_transport(&d.env(), &r, &json!({"alias":"fixture-web"}), RequestContext::default(), &CancelToken::default(), &never).unwrap_err(), sentence);
     assert!(transport_of(&d, &id).is_none());
 }
-
 
 /// A host whose Group inheritance is broken is not edited by any of the tools: the refusal is `metadata`'s, before any window, and
 /// the audit cannot contradict a save that happened (Review Focus 2).

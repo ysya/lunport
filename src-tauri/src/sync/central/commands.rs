@@ -1,7 +1,6 @@
 //! User-facing account commands. Browser authorization and all token exchange remain native.
 use super::{
     api::Api,
-    bootstrap::{self, RecoveryReveal},
     browser::BrowserLogin,
     controller::{self, Status},
     crypto,
@@ -188,51 +187,12 @@ pub async fn central_sign_out(app: AppHandle) -> Result<Status, AppError> {
         .await
         .map_err(engine::join_error)?
 }
-#[tauri::command]
-pub async fn central_prepare_vault(app: AppHandle) -> Result<Status, AppError> {
-    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, bootstrap::prepare)?)
-        .await
-        .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_reveal_recovery(app: AppHandle) -> Result<RecoveryReveal, AppError> {
-    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, bootstrap::reveal)?)
-        .await
-        .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_confirm_recovery(app: AppHandle, root: String) -> Result<Status, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| bootstrap::confirm(env, &root))?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
 
-#[tauri::command]
-pub async fn central_pairing_code(
-    app: AppHandle,
-) -> Result<super::devices::PairingReveal, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, super::devices::pairing_code)?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
 #[tauri::command]
 pub async fn central_devices(app: AppHandle) -> Result<super::devices::Registry, AppError> {
     tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::devices::registry)?)
         .await
         .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_approve_device(app: AppHandle, code: String) -> Result<Status, AppError> {
-    let code = zeroize::Zeroizing::new(code);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| super::devices::approve(env, &code))?
-    })
-    .await
-    .map_err(engine::join_error)?
 }
 
 #[tauri::command]
@@ -337,214 +297,8 @@ pub async fn central_revoke_account_device(
     .map_err(engine::join_error)?
 }
 
-#[tauri::command]
-pub async fn central_recovery_status(
-    app: AppHandle,
-) -> Result<super::recovery_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, super::recovery_flow::status)?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_begin_account_recovery(
-    app: AppHandle,
-    kit: Option<String>,
-) -> Result<super::recovery_flow::Progress, AppError> {
-    let kit = kit.map(zeroize::Zeroizing::new);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::recovery_flow::begin(env, kit.as_deref().map(String::as_str))
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_revalidate_account_recovery(
-    app: AppHandle,
-    kit: Option<String>,
-) -> Result<super::recovery_flow::Progress, AppError> {
-    let kit = kit.map(zeroize::Zeroizing::new);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::recovery_flow::revalidate(env, kit.as_deref().map(String::as_str))
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_advance_account_recovery(
-    app: AppHandle,
-) -> Result<super::recovery_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, super::recovery_flow::advance)?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub fn central_cancel_account_recovery(app: AppHandle) -> Result<(), AppError> {
-    controller::require_enabled()?;
-    engine::with_env(&app, |env| super::recovery_flow::cancel(env))?;
-    Ok(())
-}
-#[tauri::command]
-pub async fn central_reveal_new_recovery(app: AppHandle) -> Result<RecoveryReveal, AppError> {
-    controller::require_enabled()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, super::recovery_credentials::reveal)?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_confirm_account_recovery(
-    app: AppHandle,
-    operation: String,
-) -> Result<super::recovery_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| super::recovery_flow::confirm(env, &operation))?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
 
 // UI commands accept exact native invocation fences; convenience flow methods are not IPC APIs.
-#[tauri::command]
-pub async fn central_replacement_status(
-    app: AppHandle,
-) -> Result<super::replacement_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, super::replacement_flow::status)?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_reserve(
-    app: AppHandle,
-    route: super::replacement::Route,
-) -> Result<super::replacement_flow::Invocation, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::reserve_invocation(env, route)
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_start(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-    kit: Option<String>,
-) -> Result<super::replacement_flow::Progress, AppError> {
-    let kit = kit.map(zeroize::Zeroizing::new);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::start_invocation(
-                env,
-                &invocation,
-                kit.as_deref().map(String::as_str),
-            )
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_continue(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-    operation: String,
-) -> Result<super::replacement_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::continue_invocation(env, &invocation, &operation)
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_revalidate(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-    operation: String,
-    kit: Option<String>,
-) -> Result<super::replacement_flow::Progress, AppError> {
-    let kit = kit.map(zeroize::Zeroizing::new);
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::revalidate_invocation(
-                env,
-                &invocation,
-                &operation,
-                kit.as_deref().map(String::as_str),
-            )
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_cancel(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-) -> Result<super::replacement_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::cancel_invocation(env, &invocation)
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_reveal_pairing(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-    operation: String,
-) -> Result<super::devices::PairingReveal, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::reveal_pairing_invocation(env, &invocation, &operation)
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_reveal_kit(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-    operation: String,
-) -> Result<RecoveryReveal, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::reveal_kit_invocation(env, &invocation, &operation)
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
-#[tauri::command]
-pub async fn central_replacement_confirm(
-    app: AppHandle,
-    invocation: super::replacement_flow::Invocation,
-    operation: String,
-) -> Result<super::replacement_flow::Progress, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        engine::with_env(&app, |env| {
-            super::replacement_flow::confirm_invocation(env, &invocation, &operation)
-        })?
-    })
-    .await
-    .map_err(engine::join_error)?
-}
 
 #[tauri::command]
 pub async fn central_migration_status(

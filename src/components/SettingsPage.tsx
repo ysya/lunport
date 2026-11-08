@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Bot,
@@ -26,7 +25,7 @@ import {
 
 import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { useHostsQuery, useLoadConfig, usePlatform, useTerminals, useIsDevelopment } from "@/lib/queries";
+import { usePlatform, useTerminals, useIsDevelopment } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
 import { useUpdaterState, updateInProgress } from "@/lib/updater";
 import { UpdatesPane } from "@/components/UpdatesPane";
@@ -40,7 +39,6 @@ import {
 } from "@/lib/settings-io";
 import {
   FONT_SIZE_OPTIONS,
-  LINT_RULES,
   quickConnectLabel,
   terminalSupportsNewTab,
   IN_APP_TERMINAL,
@@ -48,7 +46,6 @@ import {
   type ThemePref,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
-import { isWildcardOnly } from "@/lib/host-display";
 import {
   useMcpStatus,
   useSetMcpEnabled,
@@ -76,9 +73,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { searchSettings, settingsDestinations, type SettingsMode } from "@/lib/settings-navigation";
+import { searchSettings, settingsDestinations } from "@/lib/settings-navigation";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { chooseMcpMode } from "@/lib/mcp-flow";
 import { McpActivity } from "@/components/McpActivity";
 import { groupPath, groupAncestors } from "@/components/records/group-tree";
@@ -95,13 +92,9 @@ export function SettingsCategoryPane({
   onOpenImport,
   onOpenDataTools,
   onOpenSync,
-  onConfigDirtyChange,
-  onConfigBusyChange,
 }: {
-  onConfigDirtyChange?: (dirty: boolean) => void;
-  onConfigBusyChange?: (busy: boolean) => void;
   category: SettingsCategory;
-  recordOverview?: RecordOverview;
+  recordOverview: RecordOverview;
   onOpenImport?: () => void;
   onOpenDataTools?: () => void;
   onOpenSync?: () => void;
@@ -112,17 +105,17 @@ export function SettingsCategoryPane({
   if (category === "appearance") return <AppearancePane />;
   if (category === "connection") return <ConnectionPane recordOverview={recordOverview} />;
   if (category === "files") return <>
-    {recordOverview ? <Section title="Library & workspace tools" description="Use the library locally without an account. Signing in and unlocking enables automatic encrypted sync, including saved SSH passwords and all managed SSH keys. Import copies settings and leaves the source files in place.">
+    <Section title="Library & workspace tools" description="Use the library locally without an account. Signing in and unlocking enables automatic encrypted sync, including saved SSH passwords and all managed SSH keys. Import copies settings and leaves the source files in place.">
       <SettingsGroup>
         <SettingsRow label="Import hosts and Groups" description="Review SSH configuration, host exports or saved workspaces before adding settings."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
         <SettingsRow label="Automatic sync" description="Manage your account, devices and self-hosted server in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
         <SettingsRow label="Host and Group settings" description="Export this library or choose a retained workspace. Passwords, SSH private keys and account credentials are excluded."><Button variant="outline" size="sm" onClick={onOpenDataTools}>Export / saved workspaces…</Button></SettingsRow>
       </SettingsGroup>
-    </Section> : <FilesPane onDirtyChange={onConfigDirtyChange} onBusyChange={onConfigBusyChange} />}
+    </Section>
     <PreferencesDataPane />
   </>;
   if (category === "ai")
-    return recordOverview ? (
+    return (
       <McpPane
         records
         generation={recordOverview.generation}
@@ -149,11 +142,9 @@ export function SettingsCategoryPane({
           })(),
         }))}
       />
-    ) : (
-      <LegacyMcpPane />
     );
   if (category === "sync")
-    return recordOverview ? (
+    return (
       <Section
         title="Encrypted sync"
         description="Manage your account, approved devices and sync server in the Sync workspace."
@@ -162,21 +153,17 @@ export function SettingsCategoryPane({
           Open sync workspace
         </Button>
       </Section>
-    ) : (
-      <p className="text-sm text-muted-foreground">Automatic sync is available in the local library. Import your OpenSSH configuration into the library to get started.</p>
     );
   return <>
     <DiagnosticsPane />
-    {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
+    <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
       <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Connection defaults alone never grant AI access. Both modes can request credentials through Lunport’s native windows for the current connection.</p>
-    </Section> : <AdvancedPane />}
+    </Section>
   </>;
 }
 
 /** Radix Select values must be non-empty; this sentinel round-trips to `null`. */
 const TERMINAL_DEFAULT = "__default__";
-/** Sentinel for "keep all backups" (backupRetention = null). */
-const RETENTION_ALL = "__all__";
 
 const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: TerminalSquare, files: FolderCog, ai: Bot, sync: RefreshCw, updates: RefreshCw, advanced: SlidersHorizontal, about: Info };
 
@@ -189,11 +176,11 @@ const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: Te
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
 export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync }: {
-  recordOverview?: RecordOverview;
+  recordOverview: RecordOverview;
   onOpenImport?: () => void;
   onOpenDataTools?: () => void;
   onOpenSync?: () => void;
-} = {}) {
+}) {
   const contentRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const open = useUiStore((s) => s.settingsOpen);
@@ -231,25 +218,21 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
 
   const updatePhase = useUpdaterState((state) => state.phase);
   const updateAttention = updatePhase === "available" || updateInProgress(updatePhase);
-  const mode: SettingsMode = recordOverview ? "records" : "legacy";
-  const categories = settingsDestinations(mode);
+  const categories = settingsDestinations();
   const active = categories.find((item) => item.id === category) ?? categories.find((item) => item.id === "files")!;
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [target, setTarget] = useState<string | null>(null);
   const [filesVisited, setFilesVisited] = useState(false);
-  const [configDirty, setConfigDirty] = useState(false);
-  const [configBusy, setConfigBusy] = useState(false);
-  const [confirmClose, setConfirmClose] = useState(false);
-  const results = searchSettings(search, mode);
+  const results = searchSettings(search);
   const searching = search.trim().length > 0;
 
   useEffect(() => {
     if (open && active.id === "files") setFilesVisited(true);
   }, [open, active.id]);
   useEffect(() => {
-    if (!open) { setSearch(""); setFilesVisited(false); setConfigDirty(false); setConfigBusy(false); setConfirmClose(false); }
+    if (!open) { setSearch(""); setFilesVisited(false); }
   }, [open]);
   useEffect(() => {
     if (!open || searching) return;
@@ -262,11 +245,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
     });
     return () => cancelAnimationFrame(frame);
   }, [active.id, open, searching, target]);
-  const close = (next: boolean) => {
-    if (!next && configBusy) return;
-    if (!next && configDirty) setConfirmClose(true);
-    else setOpen(next);
-  };
+  const close = (next: boolean) => setOpen(next);
   const navigate = (next: SettingsCategory) => { setSearch(""); setTarget(null); setCategory(next); };
   const jump = (next: SettingsCategory, anchor: string | null) => { navigate(next); setTarget(anchor ?? "settings-category-title"); };
 
@@ -279,9 +258,9 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
           if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(false); }
         }}>
         <header className="settings-page-header" data-tauri-drag-region>
-          <Button variant="ghost" size="sm" aria-label="Back to workspace" disabled={configBusy} onClick={() => close(false)}><ArrowLeft className="size-4" />Back</Button>
+          <Button variant="ghost" size="sm" aria-label="Back to workspace" onClick={() => close(false)}><ArrowLeft className="size-4" />Back</Button>
           <h1 id="settings-page-title">Settings</h1>
-          <p>{recordOverview ? "Records library" : "OpenSSH files"}</p>
+          <p>Records library</p>
         </header>
         <div className="settings-layout">
           <aside className="settings-navigation">
@@ -314,7 +293,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
           <div className="settings-detail">
             <header className="settings-category-header"><h2 id="settings-category-title" tabIndex={-1}>{searching ? "Search results" : active.label}</h2><p>{searching ? `${results.length} matching sections` : active.description}</p></header>
             <div className="settings-content" ref={scrollRef}>
-              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} onConfigDirtyChange={setConfigDirty} onConfigBusyChange={setConfigBusy} /></div>}
+              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} /></div>}
               {searching ? <div className="settings-results">
                 {results.length ? results.map((result) => <button key={`${result.category}-${result.title}`} type="button" onClick={() => jump(result.category, result.target)}>
                   <span><small>{result.categoryLabel}</small><strong>{result.title}</strong><span>{result.detail}</span></span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
@@ -325,11 +304,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
             </div>
           </div>
         </div>
-        {configBusy && <footer className="settings-window-footer" role="status">Loading SSH configuration… Keep this page open until loading finishes.</footer>}
       </main>
-    <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>
-      <AlertDialogContent onCloseAutoFocus={(event) => { if (open && configDirty) { event.preventDefault(); setCategory("files"); requestAnimationFrame(() => contentRef.current?.querySelector<HTMLInputElement>('input[aria-label="Config file path"]')?.focus()); } }}><AlertDialogHeader><AlertDialogTitle>Discard the config path draft?</AlertDialogTitle><AlertDialogDescription>The new path has not been applied. Your current SSH configuration stays loaded.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={() => { setConfirmClose(false); setOpen(false); }}>Discard draft</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
-    </AlertDialog>
   </>;
 }
 
@@ -638,7 +613,7 @@ function AppearancePane() {
   );
 }
 
-function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
+function ConnectionPane({ recordOverview }: { recordOverview: RecordOverview }) {
   const terminalId = useSettingsStore((s) => s.terminalId);
   const setTerminalId = useSettingsStore((s) => s.setTerminalId);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
@@ -708,116 +683,10 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
       </SettingsGroup>
       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Switching tabs keeps SSH connected. Closing a tab, reloading the workspace, quitting or installing an update ends its session. Reconnect starts a new shell.</p>
     </Section>
-    {recordOverview && <Section title="Known hosts" description="Inspect trusted server fingerprints and manage local OpenSSH host keys.">
+    <Section title="Known hosts" description="Inspect trusted server fingerprints and manage local OpenSSH host keys.">
       <SettingsGroup><SettingsRow label="Saved server identities" description="Review fingerprints, verify a server again, or forget an old identity."><KnownHostsManager overview={recordOverview} /></SettingsRow></SettingsGroup>
-    </Section>}</>
+    </Section></>
   );
-}
-
-function FilesPane({ onDirtyChange, onBusyChange }: { onDirtyChange?: (dirty: boolean) => void; onBusyChange?: (busy: boolean) => void }) {
-  const configPath = useSettingsStore((s) => s.configPath);
-  const setConfigPath = useSettingsStore((s) => s.setConfigPath);
-  const backupRetention = useSettingsStore((s) => s.backupRetention);
-  const setBackupRetention = useSettingsStore((s) => s.setBackupRetention);
-
-  const loadConfig = useLoadConfig();
-  const queryClient = useQueryClient();
-
-  const [draft, setDraft] = useState(configPath ?? "");
-  useEffect(() => setDraft(configPath ?? ""), [configPath]);
-  const dirty = (draft.trim() || "") !== (configPath ?? "");
-  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
-  useEffect(() => { onBusyChange?.(loadConfig.isPending); }, [loadConfig.isPending, onBusyChange]);
-
-  // Persist only on a SUCCESSFUL load so a broken path never sticks: on error
-  // the old working document (and persisted path) stay intact and the
-  // existing "Failed to load config" toast fires from useLoadConfig.
-  const applyPath = () => {
-    if (loadConfig.isPending) return;
-    const next = draft.trim() === "" ? null : draft.trim();
-    loadConfig.mutate(next, {
-      onSuccess: () => {
-        setConfigPath(next);
-        queryClient.invalidateQueries({ queryKey: ["config"] });
-        toast.success("Config loaded", {
-          description: next ?? "~/.ssh/config",
-        });
-      },
-    });
-  };
-
-  const onRetention = (v: string) => {
-    const limit = v === RETENTION_ALL ? null : Number(v);
-    setBackupRetention(limit);
-    tauriInvoke<void>("config_set_backup_retention", { limit }).catch((e) =>
-      toast.error("Could not update backup retention", { description: String(e) }),
-    );
-  };
-
-  return (
-    <>
-      <Section
-        title="Config file"
-        description="The ssh_config file Lunport edits. Leave empty for ~/.ssh/config."
-      >
-        <SettingsGroup>
-          <div className="flex items-center gap-1.5 px-3 py-2">
-            <Input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="~/.ssh/config"
-              aria-label="Config file path"
-              spellCheck={false}
-              className="h-7 flex-1 border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
-              onKeyDown={(e) => {
-                if (isImeKey(e)) return;
-                if (e.key === "Enter") applyPath();
-              }}
-            />
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="h-7 shrink-0"
-              onClick={applyPath}
-              disabled={loadConfig.isPending || (draft.trim() || "") === (configPath ?? "")}
-            >
-              {loadConfig.isPending ? "Loading…" : "Apply"}
-            </Button>
-          </div>
-        </SettingsGroup>
-      </Section>
-
-      <Section
-        title="Backups"
-        description="A backup is written before every change. Older backups beyond the limit are pruned."
-      >
-        <SettingsGroup>
-          <SettingsRow id="set-backup-retention" label="Backup retention">
-            <Select
-              value={backupRetention === null ? RETENTION_ALL : String(backupRetention)}
-              onValueChange={onRetention}
-            >
-              <SelectTrigger id="set-backup-retention" className="settings-select">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="10">Keep last 10</SelectItem>
-                <SelectItem value="20">Keep last 20</SelectItem>
-                <SelectItem value="50">Keep last 50</SelectItem>
-                <SelectItem value={RETENTION_ALL}>Keep all</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-    </>
-  );
-}
-
-function LegacyMcpPane() {
-  const query = useHostsQuery();
-  return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
 }
 
 export function McpPane({ hosts, groups = [], generation, records = false }: {
@@ -959,101 +828,6 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
     </>
   );
 }
-
-const DRIFT_INTERVALS = [15, 30, 60] as const;
-
-function AdvancedPane() {
-  const discoverKnownHosts = useSettingsStore((s) => s.discoverKnownHosts);
-  const setDiscoverKnownHosts = useSettingsStore((s) => s.setDiscoverKnownHosts);
-  const discoverTailscale = useSettingsStore((s) => s.discoverTailscale);
-  const setDiscoverTailscale = useSettingsStore((s) => s.setDiscoverTailscale);
-  const driftAutoCheck = useSettingsStore((s) => s.driftAutoCheck);
-  const setDriftAutoCheck = useSettingsStore((s) => s.setDriftAutoCheck);
-  const driftIntervalSec = useSettingsStore((s) => s.driftIntervalSec);
-  const setDriftIntervalSec = useSettingsStore((s) => s.setDriftIntervalSec);
-  const lintRules = useSettingsStore((s) => s.lintRules);
-  const setLintRule = useSettingsStore((s) => s.setLintRule);
-
-  return (
-    <>
-      <Section
-        title="Discovery sources"
-        description="Where the Discover dialog finds host candidates."
-      >
-        <SettingsGroup>
-          <SettingsRow id="set-discover-kh" label="known_hosts" mono>
-            <Switch
-              id="set-discover-kh"
-              checked={discoverKnownHosts}
-              onCheckedChange={setDiscoverKnownHosts}
-            />
-          </SettingsRow>
-          <SettingsRow id="set-discover-ts" label="Tailscale">
-            <Switch
-              id="set-discover-ts"
-              checked={discoverTailscale}
-              onCheckedChange={setDiscoverTailscale}
-            />
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
-      <Section
-        title="External changes"
-        description="Lunport always re-checks when the window regains focus."
-      >
-        <SettingsGroup>
-          <SettingsRow id="set-drift-auto" label="Check for external changes automatically">
-            <Switch
-              id="set-drift-auto"
-              checked={driftAutoCheck}
-              onCheckedChange={setDriftAutoCheck}
-            />
-          </SettingsRow>
-          <SettingsRow id="set-drift-interval" label="Check every">
-            <Select
-              value={String(driftIntervalSec)}
-              onValueChange={(v) => setDriftIntervalSec(Number(v))}
-              disabled={!driftAutoCheck}
-            >
-              <SelectTrigger id="set-drift-interval" className="settings-select">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {DRIFT_INTERVALS.map((sec) => (
-                  <SelectItem key={sec} value={String(sec)}>
-                    {sec} seconds
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
-      <Section
-        title="Lint rules"
-        description="Disabled rules are hidden from the lint report and the toolbar badge."
-      >
-        <SettingsGroup>
-          {LINT_RULES.map((rule) => (
-            <SettingsRow key={rule.id} id={`set-lint-${rule.id}`} label={rule.label}>
-              <Switch
-                id={`set-lint-${rule.id}`}
-                checked={lintRules[rule.id] !== false}
-                onCheckedChange={(v) => setLintRule(rule.id, v)}
-              />
-            </SettingsRow>
-          ))}
-        </SettingsGroup>
-      </Section>
-    </>
-  );
-}
-
-/* ------------------------------------------------------------------------- */
-/* Shared bits                                                               */
-/* ------------------------------------------------------------------------- */
 
 const THEME_OPTIONS: { value: ThemePref; label: string; icon: typeof Sun }[] = [
   { value: "system", label: "System", icon: Monitor },

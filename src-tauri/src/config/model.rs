@@ -1,7 +1,3 @@
-use std::path::PathBuf;
-
-use crate::fsutil::Fingerprint;
-
 /// keyword 與 value 之間的分隔（含周邊空白，原樣保存）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Separator {
@@ -44,41 +40,12 @@ pub struct HostBlock {
 #[derive(Debug, Clone)]
 pub struct MatchBlock {
     pub header: Directive, // the `Match ...` line
-    pub criteria: String,
     pub body: Vec<Item>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfigFile {
-    pub path: PathBuf,
-    pub items: Vec<Item>,
-    pub trailing_newline: bool,
-    pub fingerprint: Fingerprint,
-}
-
-#[derive(Debug, Clone)]
-pub struct SshConfigDoc {
-    pub files: Vec<ConfigFile>,
 }
 
 /// Helper: build an OpenSSH directive `Directive` from structured fields with `dirty=true`,
 /// for newly-created lines (raw is left empty; serialization will re-render because dirty).
 impl Directive {
-    pub fn new(keyword: &str, value: &str, indent: &str) -> Self {
-        Directive {
-            keyword: keyword.to_string(),
-            key: keyword.to_lowercase(),
-            // Strip CR/LF: a value must never inject extra physical lines on serialize.
-            value: value.replace(['\r', '\n'], ""),
-            separator: Separator::Space(" ".to_string()),
-            indent: indent.to_string(),
-            trailing_ws: String::new(),
-            inline_comment: None,
-            enabled: true,
-            raw: String::new(),
-            dirty: true,
-        }
-    }
 }
 
 impl Directive {

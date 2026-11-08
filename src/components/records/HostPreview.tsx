@@ -12,8 +12,8 @@ import {
 import { Button } from "@/components/ui/button";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { useNow } from "@/lib/use-now";
-import { errorMessage } from "@/lib/sync";
-import { revealHidden } from "@/lib/sync-approvals";
+import { errorMessage } from "@/lib/utils";
+import { revealHidden } from "@/lib/reveal-hidden";
 import {
   grantBusy,
   grantHeld,

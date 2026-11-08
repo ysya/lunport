@@ -19,8 +19,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 development-profile = []
 default = ["central-sync"]
 central-sync = []
-# Compatibility for scripts that explicitly enabled earlier preview builds.
-central-sync-preview = ["central-sync"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

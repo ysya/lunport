@@ -745,7 +745,6 @@ mod fault_tests {
         );
         let device = crate::sync::testkit::TestDevice::new(
             "public-only",
-            &crate::sync::fake_relay::FakeRelay::new(),
             &crate::sync::testkit::TestClock::new(),
         );
         let env = device.env();

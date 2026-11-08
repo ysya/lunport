@@ -1,10 +1,9 @@
 use super::*;
 use crate::sync::crypto::{self, ChainKeys};
-use crate::sync::record::{record_key, LocalRecord, Record, RecordKind, ACCOUNT_META_ID};
-use crate::sync::record_merge::{self, AccountGate};
+use crate::sync::record::{record_key, LocalRecord, Record, RecordKind};
+use crate::sync::record_merge;
 use crate::sync::records_v3::importer::{self, ImportOptions};
-use crate::sync::relay::{PullResponse, RelayApi};
-use crate::sync::state_v2::{AccountState, SealedRecord, SlotSource};
+use crate::sync::state_v2::SlotSource;
 use serde_json::{json, Value};
 use zeroize::Zeroize;
 
@@ -151,11 +150,6 @@ pub(super) fn snapshot(
         }
         match core.format {
             RuntimeFormat::Legacy => {
-                if !core.legacy_paused {
-                    return Err(failure(
-                        "legacy synchronization must be paused before migration",
-                    ));
-                }
                 if let Some(old) = &core.legacy {
                     let mut state =
                         fresh_from(env, &old.device_id, &old.device_name, &old.relay_url)?;
@@ -173,9 +167,6 @@ pub(super) fn snapshot(
                         .state
                         .clone()
                         .ok_or_else(|| failure("legacy migration source is unavailable"))?;
-                    if old.rotation.is_some() || old.frozen().is_some() {
-                        return Err(failure("account rotation prevents migration"));
-                    }
                     let mut state =
                         fresh_from(env, &old.device_id, &old.device_name, &old.relay_url)?;
                     state.relay_features = old.relay_features.clone();
@@ -225,19 +216,19 @@ pub(super) fn snapshot(
             ));
         }
     }
-    if v2
-        .as_ref()
-        .and_then(|s| s.account.as_ref())
-        .or(state.account.as_ref())
-        .is_some_and(|a| a.remote_schema_version.is_some_and(|n| n > 3))
+    // A Legacy workspace is imported from its local files: the account it may have joined lived on the chain relay retired in
+    // 1.11.4, so neither that account's sync code, its rotation nor its schema has a say any more.
+    let local_only = entered.is_none() && (v1.is_some() || v2.is_some());
+    if !local_only
+        && state
+            .account
+            .as_ref()
+            .is_some_and(|a| a.remote_schema_version.is_some_and(|n| n > 3))
     {
         return Err(failure(
             "a known newer account cannot be migrated by this version",
         ));
     }
-    let local_only = entered.is_none()
-        && (v1.as_ref().is_some_and(|s| s.chain_id.is_none())
-            || v2.as_ref().is_some_and(|s| s.account.is_none()));
     let code = if local_only {
         Zeroizing::new(String::new())
     } else {
@@ -314,124 +305,6 @@ fn fresh_from(env: &SyncEnv, id: &str, name: &str, url: &str) -> Result<SyncStat
     state.relay_url = url.into();
     Ok(*state)
 }
-fn full_pull(
-    relay: &dyn RelayApi,
-    keys: &ChainKeys,
-    min_seq: u64,
-    missing_ok: bool,
-) -> Result<(PullResponse, bool), AppError> {
-    let (pulled, missing) = match relay.pull(&keys.chain_id, &keys.auth_token, 0) {
-        Ok(p) => (p, false),
-        Err(crate::sync::relay::RelayError::NotFound) if missing_ok => (
-            PullResponse {
-                latest_seq: 0,
-                records: Vec::new(),
-            },
-            true,
-        ),
-        Err(_) => {
-            return Err(failure(
-                "migration full baseline could not be read; retry later",
-            ))
-        }
-    };
-    if pulled.latest_seq < min_seq
-        || pulled.latest_seq > 9_007_199_254_740_991
-        || pulled.records.len() > MAX_CHAIN_RECORDS
-    {
-        return Err(failure(
-            "migration full baseline is incomplete or exceeds capacity",
-        ));
-    }
-    let mut identities = BTreeSet::new();
-    let mut seqs = BTreeSet::new();
-    let mut size = 0usize;
-    for e in &pulled.records {
-        if e.seq == 0
-            || e.seq > pulled.latest_seq
-            || !seqs.insert(e.seq)
-            || !identities.insert((&e.kind, &e.id_hash))
-        {
-            return Err(failure("migration full baseline has invalid receipts"));
-        }
-        size = size
-            .checked_add(e.ciphertext.len() + e.nonce.len())
-            .ok_or_else(|| failure("migration capacity exceeded"))?;
-        open_public(keys, e)?;
-    }
-    if size > MAX_CHAIN_BYTES {
-        return Err(failure("migration source exceeds chain capacity"));
-    }
-    Ok((pulled, missing))
-}
-fn meta_row(keys: &ChainKeys, pull: &PullResponse) -> Result<Option<(Record, u64)>, AppError> {
-    for e in &pull.records {
-        if e.kind == "meta" && e.id_hash == crypto::id_hash(keys, "meta", ACCOUNT_META_ID) {
-            return Ok(open_public(keys, e)?.map(|r| (r, e.seq)));
-        }
-    }
-    Ok(None)
-}
-fn baseline_account(
-    keys: &ChainKeys,
-    pull: &PullResponse,
-    gate: &MigrationGate,
-    device_id: &str,
-    now: u64,
-) -> Result<(AccountState, u32), AppError> {
-    let actual = meta_row(keys, pull)?;
-    let schema = actual
-        .as_ref()
-        .and_then(|(r, _)| r.payload.get("schema_version").and_then(Value::as_u64))
-        .unwrap_or(0);
-    if schema > 3 {
-        return Err(failure("account uses a newer format; update Lunport"));
-    }
-    if actual.as_ref().is_some_and(|(r, _)| r.deleted) || (schema == 0 && !pull.records.is_empty())
-    {
-        return Err(failure("migration account metadata is invalid"));
-    }
-    let mut section = AccountState::new(&keys.chain_id);
-    let mut meta = actual.as_ref().map(|(r, _)| r.clone()).unwrap_or_else(|| {
-        row(
-            RecordKind::Meta,
-            ACCOUNT_META_ID,
-            device_id,
-            now,
-            Value::Null,
-        )
-    });
-    meta.version = meta
-        .version
-        .checked_add(1)
-        .ok_or_else(|| failure("migration record revision exhausted"))?;
-    meta.updated_at_ms = meta
-        .updated_at_ms
-        .max(now)
-        .checked_add(1)
-        .ok_or_else(|| failure("migration record timestamp exhausted"))?;
-    meta.payload = json!({"schema_version":3,"created_by_app_version":env!("CARGO_PKG_VERSION"),"migration":MigrationGate{phase:MigrationPhase::Active,..gate.clone()}});
-    section.records.insert(
-        record_key(RecordKind::Meta, ACCOUNT_META_ID),
-        LocalRecord {
-            record: meta,
-            seq: actual.as_ref().map_or(0, |(_, seq)| *seq),
-            dirty: false,
-        },
-    );
-    let merged = record_merge::merge_account(&section, keys, pull, 0);
-    if merged.gate != AccountGate::Compatible {
-        return Err(failure("migration account baseline is invalid"));
-    }
-    for diag in &merged.diagnostics {
-        if diag.code != record_merge::DiagnosticCode::Unsupported {
-            return Err(failure(
-                "migration account baseline cannot be fully decoded",
-            ));
-        }
-    }
-    Ok((merged.section, schema as u32))
-}
 fn stable_key_id(space: &str, value: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"sshelter-legacy-key-reference-v1");
@@ -491,398 +364,13 @@ pub(in crate::sync) fn key_options(
     }
     o
 }
-/// Full immutable baselines plus original local source identity; no writes or private-file reads.
+/// Full immutable baselines plus original local source identity; no writes or private-file reads. A source with a sync code
+/// belonged to a chain account, which needs the retired chain relay.
 pub(super) fn build(env: &SyncEnv, input: Input, id: &str) -> Result<PreparedMigration, AppError> {
-    if input.code.is_empty() {
-        return build_local(env, input, id);
+    if !input.code.is_empty() {
+        return Err(failure(super::CHAIN_RETIRED));
     }
-    let account_keys = crypto::derive_account(&input.code)
-        .map_err(|_| failure("migration sync code is invalid"))?;
-    let relay = env.relay(&input.state.relay_url)?;
-    let gate = MigrationGate {
-        id: id.into(),
-        source_digest: "0".repeat(64),
-        phase: MigrationPhase::AccountGated,
-    };
-    let min_account = input
-        .legacy_v2
-        .as_ref()
-        .and_then(|s| s.account.as_ref())
-        .or(input.state.account.as_ref())
-        .map_or(0, |a| a.cursor_seq);
-    let (account_pull, create_account) = full_pull(
-        &*relay,
-        &account_keys,
-        min_account,
-        input.legacy_v1.is_some(),
-    )?;
-    let (mut account, schema) = baseline_account(
-        &account_keys,
-        &account_pull,
-        &gate,
-        &input.state.device_id,
-        env.now(),
-    )?;
-    let mut candidate = input.state.clone();
-    candidate.account = Some(account.clone());
-    candidate.spaces.clear();
-    candidate.pending_account = None;
-    candidate.shared_writes_blocked = true;
-    candidate.migration_gate = Some(gate.clone());
-    let mut plans = BTreeMap::new();
-    let mut space_identities = BTreeMap::new();
-    let mut legacy_digests = BTreeMap::new();
-    let mut diagnostics = Vec::new();
-    let mut host_count = 0;
-    let home = env.home.clone().unwrap_or(crate::fsutil::home_dir()?);
-    let mut slot_names = BTreeMap::new();
-    if let Some(old) = &input.legacy_v2 {
-        for (id, slot) in &old.key_slots {
-            slot_names.insert(slot.file_name.clone(), id.clone());
-        }
-    }
-    // Metadata-only slot conversion. Heterogeneous Own slots retain their old row as a source.
-    for e in &account_pull.records {
-        if e.kind != "keyslot" {
-            continue;
-        }
-        let Some(r) = open_public(&account_keys, e)? else {
-            continue;
-        };
-        if r.deleted {
-            continue;
-        }
-        let n = r.payload.get("schema").and_then(Value::as_u64).unwrap_or(0);
-        if n == 1 {
-            let old: crate::sync::slot_rules::KeySlotPayload =
-                serde_json::from_value(r.payload.clone())
-                    .map_err(|_| failure("legacy key metadata is invalid"))?;
-            slot_names.insert(
-                crate::sync::slot_rules::slot_file_name(&old.name, &r.id),
-                r.id.clone(),
-            );
-            if old.mode == crate::sync::slot_rules::SlotMode::Synced {
-                let p = KeySlotPayload {
-                    schema: 2,
-                    name: old.name,
-                    public_key: old
-                        .public_key
-                        .ok_or_else(|| failure("legacy synced key public identity is missing"))?,
-                    fingerprint: old
-                        .fingerprint
-                        .ok_or_else(|| failure("legacy synced fingerprint is missing"))?,
-                    key_type: old
-                        .key_type
-                        .ok_or_else(|| failure("legacy synced key type is missing"))?,
-                    has_passphrase: old.has_passphrase.ok_or_else(|| {
-                        failure("legacy synced key encryption identity is missing")
-                    })?,
-                    created_at_ms: old.created_at_ms,
-                    origin_device_id: old.origin_device_id,
-                };
-                records_v3::validate_keyslot(&r.id, &p)
-                    .map_err(|_| failure("legacy synced key public identity is invalid"))?;
-                let mut converted = r.clone();
-                converted.version = converted
-                    .version
-                    .checked_add(1)
-                    .ok_or_else(|| failure("migration revision exhausted"))?;
-                converted.payload = serde_json::to_value(p)
-                    .map_err(|_| failure("migration key metadata cannot be encoded"))?;
-                account.records.insert(
-                    record_key(RecordKind::KeySlot, &r.id),
-                    LocalRecord {
-                        record: converted.clone(),
-                        seq: e.seq,
-                        dirty: false,
-                    },
-                );
-                plans
-                    .entry(account_keys.chain_id.clone())
-                    .or_insert_with(|| {
-                        ChainPlan::new(&account_keys, account_pull.records.clone(), create_account)
-                    })
-                    .items
-                    .push(record_merge::encode_record(
-                        &account_keys,
-                        &converted,
-                        e.seq,
-                    )?);
-            } else {
-                diagnostics.push(diag("own_key_requires_local_material", None, None));
-            }
-        } else if n != 2 {
-            return Err(failure("legacy key metadata uses an unsupported schema"));
-        }
-    }
-    let mut selected: BTreeSet<String> = input
-        .legacy_v2
-        .as_ref()
-        .map(|s| {
-            s.spaces
-                .iter()
-                .filter(|(_, s)| s.selected)
-                .map(|(id, _)| id.clone())
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            input
-                .state
-                .spaces
-                .iter()
-                .filter(|(_, s)| s.selected)
-                .map(|(id, _)| id.clone())
-                .collect()
-        });
-    if matches!(input.kind.as_str(), "new_join" | "pending_join") {
-        selected.extend(
-            account
-                .records
-                .values()
-                .filter(|r| r.record.kind == RecordKind::Space && !r.record.deleted)
-                .map(|r| r.record.id.clone()),
-        );
-    }
-    let mut v1_rows = Vec::new();
-    if let Some(v1) = &input.legacy_v1 {
-        if v1.chain_id.is_some() {
-            let keys = crypto::derive_keys(&input.code)?;
-            let (pull, _) = full_pull(&*relay, &keys, v1.cursor_seq, false)?;
-            for e in &pull.records {
-                if e.kind == "host" {
-                    let r = open_public(&keys, e)?
-                        .ok_or_else(|| failure("legacy host source is invalid"))?;
-                    v1_rows.push(r);
-                    legacy_digests.insert(
-                        format!("{}:{}", keys.chain_id, e.id_hash),
-                        digest(&serde_json::to_vec(e).unwrap()),
-                    );
-                }
-            }
-        }
-        let space0 = crypto::derive_space0(&input.code)?;
-        selected.insert(space0.chain_id.clone());
-        if !account
-            .records
-            .contains_key(&record_key(RecordKind::Space, &space0.chain_id))
-        {
-            let space = row(
-                RecordKind::Space,
-                &space0.chain_id,
-                &candidate.device_id,
-                env.now(),
-                serde_json::to_value(crate::sync::record::SpacePayload::space0()).unwrap(),
-            );
-            account.records.insert(
-                record_key(RecordKind::Space, &space0.chain_id),
-                LocalRecord {
-                    record: space.clone(),
-                    seq: 0,
-                    dirty: false,
-                },
-            );
-            let key = row(
-                RecordKind::SpaceKey,
-                &space0.chain_id,
-                &candidate.device_id,
-                env.now(),
-                json!({"schema":1,"auth_token":space0.auth_token,"enc_key":space0.enc_key_b64()}),
-            );
-            let sealed = record_merge::seal_secret_record(&account_keys, key, 0)?;
-            account.sealed.insert(
-                sealed.key(),
-                SealedRecord {
-                    dirty: false,
-                    ..sealed.clone()
-                },
-            );
-            let chain = plans
-                .entry(account_keys.chain_id.clone())
-                .or_insert_with(|| {
-                    ChainPlan::new(&account_keys, account_pull.records.clone(), create_account)
-                });
-            chain
-                .items
-                .push(record_merge::encode_record(&account_keys, &space, 0)?);
-            chain.items.push(sealed.push_item());
-        }
-    }
-    for space_id in selected {
-        let keys = if input.legacy_v1.is_some()
-            && crypto::derive_space0(&input.code)?.chain_id == space_id
-        {
-            crypto::derive_space0(&input.code)?
-        } else {
-            record_merge::space_keys(&account, &account_keys, &space_id)?
-                .ok_or_else(|| failure("selected space encryption identity is unavailable"))?
-        };
-        let minimum = input
-            .legacy_v2
-            .as_ref()
-            .and_then(|s| s.spaces.get(&space_id))
-            .map_or(0, |s| s.cursor_seq);
-        space_identities.insert(space_id.clone(), space_identity(&keys));
-        let (pull, create) = full_pull(&*relay, &keys, minimum, input.legacy_v1.is_some())?;
-        let mut space = record_merge::merge_space(
-            &SpaceStateV3 {
-                selected: true,
-                ..Default::default()
-            },
-            &keys,
-            &pull,
-            0,
-            &AccountGate::Compatible,
-        );
-        if space.gate != AccountGate::Compatible
-            || space
-                .diagnostics
-                .iter()
-                .any(|d| d.code != record_merge::DiagnosticCode::Unsupported)
-        {
-            return Err(failure("selected space full baseline cannot be decoded"));
-        }
-        let mut old = Vec::new();
-        for e in &pull.records {
-            if e.kind != "host" {
-                return Err(failure(
-                    "selected space contains an unsupported record kind",
-                ));
-            }
-            let r = open_public(&keys, e)?
-                .ok_or_else(|| failure("legacy host source cannot be decoded"))?;
-            match r.payload.get("schema").and_then(Value::as_u64) {
-                Some(1) => {
-                    legacy_digests.insert(
-                        format!("{}:{}", keys.chain_id, e.id_hash),
-                        digest(&serde_json::to_vec(e).unwrap()),
-                    );
-                    old.push(r);
-                }
-                Some(2) => {}
-                _ if r.deleted && r.payload.is_null() => {}
-                _ => return Err(failure("selected space has an unsupported host schema")),
-            }
-        }
-        if input.legacy_v1.is_some() {
-            old.extend(v1_rows.clone());
-        }
-        let options = key_options(&home, &space_id, &old, &slot_names);
-        let preview = importer::preview_legacy_records(&old, &space_id, &options)
-            .map_err(|_| failure("legacy host conversion requires source review"))?;
-        let mut chain = ChainPlan::new(&keys, pull.records.clone(), create);
-        for host in preview.candidates {
-            host_count += 1;
-            let cache = record_key(RecordKind::Host, &host.id);
-            if space.section.records.contains_key(&cache) {
-                diagnostics.push(diag(
-                    "existing_record_preserved",
-                    Some(host.id.clone()),
-                    Some(space_id.clone()),
-                ));
-                continue;
-            }
-            let record = row(
-                RecordKind::Host,
-                &host.id,
-                &candidate.device_id,
-                env.now(),
-                serde_json::to_value(&host.payload).unwrap(),
-            );
-            let item = record_merge::encode_record(&keys, &record, 0)?;
-            if pull.records.iter().any(|e| e.id_hash == item.id_hash) {
-                return Err(failure(
-                    "migration host identity collides with an existing source",
-                ));
-            }
-            space.section.records.insert(
-                cache,
-                LocalRecord {
-                    record,
-                    seq: 0,
-                    dirty: false,
-                },
-            );
-            chain.items.push(item);
-        }
-        preserve_dirty(
-            env,
-            &input,
-            &space_id,
-            &old,
-            &options,
-            &mut candidate,
-            &mut diagnostics,
-        )?;
-        candidate.spaces.insert(space_id.clone(), space.section);
-        plans.insert(space_id, chain);
-    }
-    candidate.account = Some(account);
-    add_vault_metadata(env, &input, &mut candidate, &mut diagnostics)?;
-    let local_source_digest = local_sources(env, &input, &mut candidate, &mut diagnostics)?;
-    let pins_digest = add_pins(
-        env,
-        &input,
-        &mut candidate,
-        &mut plans,
-        &account_keys,
-        &mut diagnostics,
-    )?;
-    let source_digest=digest(&serde_json::to_vec(&json!({"state":input.state_digest,"local":local_source_digest,"pins":pins_digest,"account":account_pull.records,"legacy":legacy_digests,"spaces":plans.iter().filter(|(id,_)|*id!=&account_keys.chain_id).map(|(id,p)|(id,&p.original)).collect::<BTreeMap<_,_>>()})).unwrap());
-    candidate.migration_gate.as_mut().unwrap().source_digest = source_digest.clone();
-    for chain in plans.values() {
-        capacity(chain)?;
-    }
-    let preview = MigrationPreview {
-        source_digest: source_digest.clone(),
-        source_kind: input.kind.clone(),
-        account_schema: schema,
-        selected_space_ids: candidate.spaces.keys().cloned().collect(),
-        host_count,
-        key_count: candidate.local.keys.len(),
-        diagnostics,
-        can_confirm: true,
-    };
-    let account_plan = plans
-        .entry(account_keys.chain_id.clone())
-        .or_insert_with(|| {
-            ChainPlan::new(&account_keys, account_pull.records.clone(), create_account)
-        });
-    let mut gated = account_plan.clone();
-    let meta = candidate
-        .account
-        .as_ref()
-        .unwrap()
-        .records
-        .get(&record_key(RecordKind::Meta, ACCOUNT_META_ID))
-        .unwrap();
-    let mut gate_record = meta.record.clone();
-    gate_record.payload = json!({"schema_version":3,"created_by_app_version":env!("CARGO_PKG_VERSION"),"migration":candidate.migration_gate});
-    gated.items.push(record_merge::encode_record(
-        &account_keys,
-        &gate_record,
-        meta.seq,
-    )?);
-    capacity(&gated)?;
-    records_v3::validate_state(&candidate)
-        .map_err(|_| failure("migration candidate is invalid"))?;
-    let documents = input.documents.clone();
-    let original_state_bytes = input.original.clone();
-    Ok(PreparedMigration {
-        preview,
-        input,
-        plan: MigrationPlan {
-            migration_id: id.into(),
-            source_digest,
-            candidate,
-            chains: plans,
-            legacy_digests,
-            local_source_digest,
-            pins_digest,
-            space_identities,
-            original_state_bytes,
-            documents,
-        },
-    })
+    build_local(env, input, id)
 }
 fn row(kind: RecordKind, id: &str, device: &str, now: u64, payload: Value) -> Record {
     Record {
@@ -901,76 +389,6 @@ fn diag(code: &str, host_id: Option<String>, space_id: Option<String>) -> Migrat
         host_id,
         space_id,
     }
-}
-fn preserve_dirty(
-    _env: &SyncEnv,
-    input: &Input,
-    space: &str,
-    remote: &[Record],
-    options: &ImportOptions,
-    candidate: &mut SyncStateV3,
-    diagnostics: &mut Vec<MigrationDiagnostic>,
-) -> Result<(), AppError> {
-    let dirty: Vec<_> = input
-        .legacy_v2
-        .as_ref()
-        .and_then(|s| s.spaces.get(space))
-        .map(|s| {
-            s.records
-                .values()
-                .filter(|r| r.dirty)
-                .map(|r| r.record.clone())
-                .collect()
-        })
-        .or_else(|| {
-            input.legacy_v1.as_ref().map(|s| {
-                s.records
-                    .values()
-                    .filter(|r| r.dirty && r.record.kind == RecordKind::Host)
-                    .map(|r| r.record.clone())
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
-    for mut r in dirty {
-        if remote
-            .iter()
-            .any(|old| old.id == r.id && old.payload == r.payload)
-        {
-            continue;
-        }
-        let alias = r.id.clone();
-        let local_space =
-            digest(format!("local-review:{}:{space}", input.state.device_id).as_bytes());
-        let mut preview =
-            importer::preview_legacy_records(std::slice::from_ref(&r), &local_space, options)
-                .map_err(|_| failure("dirty legacy source requires review"))?;
-        for host in &mut preview.candidates {
-            host.scope = records_v3::HostScope::Local;
-            diagnostics.push(diag(
-                "dirty_legacy_copy_retained",
-                Some(host.id.clone()),
-                Some(space.into()),
-            ));
-            r = row(
-                RecordKind::Host,
-                &host.id,
-                &input.state.device_id,
-                0,
-                serde_json::to_value(&host.payload).unwrap(),
-            );
-            candidate.local.hosts.insert(
-                record_key(RecordKind::Host, &host.id),
-                LocalRecord {
-                    record: r.clone(),
-                    seq: 0,
-                    dirty: false,
-                },
-            );
-        }
-        let _ = alias;
-    }
-    Ok(())
 }
 fn add_vault_metadata(
     env: &SyncEnv,
@@ -1378,174 +796,62 @@ fn home_slot(env: &SyncEnv, file: &str) -> Result<PathBuf, AppError> {
         .join(crate::sync::slot_rules::SLOT_DIR)
         .join(file))
 }
+/// The OpenSSH configuration files the migration reads (the main file and its Include files, as the importer resolves them), kept
+/// as the journal's evidence copies. The retired Legacy editor could also hand over unsaved edits; nothing edits these files any
+/// more, so the copy is the file on disk.
 fn documents(env: &SyncEnv) -> Result<Vec<DocumentSource>, AppError> {
-    let doc = env.doc.lock().unwrap().clone();
+    let main = env.ssh_dir.join("config");
+    if !main.exists() {
+        return Ok(Vec::new());
+    }
+    let options = ImportOptions::new(env.home.clone().unwrap_or(crate::fsutil::home_dir()?));
+    let preview = importer::preview_file(&main, &options)
+        .map_err(|_| failure("local configuration source requires review"))?;
+    if preview.provenance.len() > 128 {
+        return Err(failure("legacy document source exceeds the file limit"));
+    }
     let mut out = Vec::new();
     let mut total = 0usize;
-    if let Some(doc) = doc {
-        if doc.files.len() > 128 {
-            return Err(failure("legacy document source exceeds the file limit"));
+    for file in &preview.provenance {
+        let bytes = read_optional(&file.path, MAX_LOCAL_SOURCE_BYTES)?
+            .ok_or_else(|| failure("local configuration source changed; preview it again"))?;
+        let text = String::from_utf8(bytes.to_vec())
+            .map_err(|_| failure("local configuration source is not text"))?;
+        total = total.saturating_add(text.len());
+        if total as u64 > MAX_LOCAL_SOURCE_BYTES || text.contains("PRIVATE KEY-----") {
+            return Err(failure(
+                "legacy document source is oversized or contains private material",
+            ));
         }
-        for f in doc.files {
-            let text = crate::config::serialize::serialize_items(&f.items, f.trailing_newline);
-            total = total.saturating_add(text.len());
-            if total as u64 > MAX_LOCAL_SOURCE_BYTES || text.contains("PRIVATE KEY-----") {
-                return Err(failure(
-                    "legacy document source is oversized or contains private material",
-                ));
-            }
-            let disk = read_optional(&f.path, MAX_LOCAL_SOURCE_BYTES)?;
-            out.push(DocumentSource {
-                source: f.path.to_string_lossy().into_owned(),
-                disk_digest: digest(disk.as_ref().map_or(&[][..], |b| b.as_slice())),
-                memory_digest: digest(text.as_bytes()),
-                text,
-            });
-        }
+        let text_digest = digest(text.as_bytes());
+        out.push(DocumentSource {
+            source: file.path.to_string_lossy().into_owned(),
+            disk_digest: text_digest.clone(),
+            memory_digest: text_digest,
+            text,
+        });
     }
     Ok(out)
 }
+/// A journal keeps a document's digest, not its text: a resumed migration copies the file again, which must still be the one the
+/// preview read. A journal from an older build may name unsaved editor edits; they are gone, so it needs review.
 pub(super) fn document_text(
-    env: &SyncEnv,
+    _env: &SyncEnv,
     source: &str,
     expected: &str,
 ) -> Result<String, AppError> {
-    let doc = env.doc.lock().unwrap().clone();
-    let text=doc.and_then(|d|d.files.into_iter().find(|f|f.path.to_string_lossy()==source)).map(|f|crate::config::serialize::serialize_items(&f.items,f.trailing_newline)).ok_or_else(||failure("unsaved migration document source is unavailable; retained journal requires review"))?;
+    let bytes = read_optional(Path::new(source), MAX_LOCAL_SOURCE_BYTES)?.ok_or_else(|| {
+        failure("unsaved migration document source is unavailable; retained journal requires review")
+    })?;
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        failure("unsaved migration document source changed; retained journal requires review")
+    })?;
     if digest(text.as_bytes()) != expected {
         return Err(failure(
             "unsaved migration document source changed; retained journal requires review",
         ));
     }
     Ok(text)
-}
-fn add_pins(
-    env: &SyncEnv,
-    input: &Input,
-    state: &mut SyncStateV3,
-    plans: &mut BTreeMap<String, ChainPlan>,
-    account_keys: &ChainKeys,
-    diagnostics: &mut Vec<MigrationDiagnostic>,
-) -> Result<String, AppError> {
-    if !legacy_input(input) {
-        return Ok(digest(&[]));
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Pins {
-        version: u32,
-        pins: BTreeMap<String, Pin>,
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Pin {
-        algorithm: String,
-        public_key: String,
-        fingerprint: String,
-        pinned_at_ms: u64,
-    }
-    let bytes = read_optional(
-        &env.state_path.with_file_name("host-pins.json"),
-        MAX_LOCAL_SOURCE_BYTES,
-    )?;
-    let pin_digest = digest(bytes.as_ref().map_or(&[][..], |b| b.as_slice()));
-    let Some(bytes) = bytes else {
-        return Ok(pin_digest);
-    };
-    let pins: Pins = serde_json::from_slice(&bytes)
-        .map_err(|_| failure("original host pins cannot be safely read; they were retained"))?;
-    if pins.version != 1 {
-        return Err(failure(
-            "original host pins use an unsupported version; they were retained",
-        ));
-    }
-    let options = ImportOptions::new(env.home.clone().unwrap_or(crate::fsutil::home_dir()?));
-    let source = importer::preview_file(&env.ssh_dir.join("config"), &options)
-        .map_err(|_| failure("original pin endpoint correspondence cannot be proven"))?;
-    let mut counts = BTreeMap::<String, usize>::new();
-    for r in state
-        .spaces
-        .values()
-        .flat_map(|s| s.records.values())
-        .chain(state.local.hosts.values())
-    {
-        if let Some(alias) = r.record.payload.get("alias").and_then(Value::as_str) {
-            *counts.entry(alias.into()).or_default() += 1;
-        }
-    }
-    for (space_id, space) in &mut state.spaces {
-        let keys = if input.legacy_v1.is_some()
-            && crate::sync::crypto::derive_space0(&input.code)?.chain_id == *space_id
-        {
-            crate::sync::crypto::derive_space0(&input.code)?
-        } else {
-            record_merge::space_keys(state.account.as_ref().unwrap(), account_keys, space_id)?
-                .ok_or_else(|| failure("pin target space identity is unavailable"))?
-        };
-        for r in space.records.values_mut() {
-            let alias = r
-                .record
-                .payload
-                .get("alias")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let Some(pin) = pins.pins.get(&alias) else {
-                continue;
-            };
-            let Some(chain) = plans.get_mut(space_id) else {
-                continue;
-            };
-            let hash = crate::sync::crypto::id_hash(&keys, "host", &r.record.id);
-            let Some(item) = chain
-                .items
-                .iter_mut()
-                .find(|i| i.kind == "host" && i.id_hash == hash)
-            else {
-                continue;
-            };
-            let matching: Vec<_> = source
-                .candidates
-                .iter()
-                .filter(|h| h.payload.alias == alias)
-                .collect();
-            if counts.get(&alias) != Some(&1)
-                || matching.len() != 1
-                || r.record.payload.get("hostname").and_then(Value::as_str)
-                    != Some(&matching[0].payload.hostname)
-                || r.record
-                    .payload
-                    .get("port")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(22)
-                    != matching[0].payload.port as u64
-            {
-                diagnostics.push(diag(
-                    "pin_source_requires_review",
-                    Some(r.record.id.clone()),
-                    Some(space_id.clone()),
-                ));
-                continue;
-            }
-            r.record.payload["host_key"] = serde_json::to_value(records_v3::StoredHostKey {
-                algorithm: pin.algorithm.clone(),
-                public_key: pin.public_key.clone(),
-                fingerprint: pin.fingerprint.clone(),
-                pinned_at_ms: pin.pinned_at_ms,
-                pinned_by_device_id: state.device_id.clone(),
-            })
-            .unwrap();
-            records_v3::decode_host(
-                &r.record,
-                records_v3::HostScope::Space {
-                    space_id: space_id.clone(),
-                },
-            )
-            .map_err(|_| failure("original pin identity is invalid; its source was retained"))?;
-            *item = record_merge::encode_record(&keys, &r.record, item.base_seq)?;
-        }
-    }
-    Ok(pin_digest)
 }
 
 fn build_local(env: &SyncEnv, input: Input, id: &str) -> Result<PreparedMigration, AppError> {

@@ -3,8 +3,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { HostKeyAnswer } from "@/bindings/HostKeyAnswer";
 import type { HostKeyRequest } from "@/bindings/HostKeyRequest";
 import { tauriInvoke } from "@/lib/ipc";
-import { errorMessage } from "@/lib/sync";
-import { revealHidden } from "@/lib/sync-approvals";
+import { errorMessage } from "@/lib/utils";
+import { revealHidden } from "@/lib/reveal-hidden";
 
 /**
  * The host key window of Lunport's own SSH client (own-ssh spec §10, §14): a host key is confirmed here, never in a terminal. The

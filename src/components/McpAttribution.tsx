@@ -1,5 +1,5 @@
 import type { McpClientInfo } from "@/bindings/McpClientInfo";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 
 /** clientInfo is never an identity claim; limit again at the app display boundary. */
 const clientText = (value: string | null) =>

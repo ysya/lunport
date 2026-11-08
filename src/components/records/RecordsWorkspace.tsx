@@ -55,7 +55,7 @@ import { usePlatform, useTerminals } from "@/lib/queries";
 import { effectiveNewTab, IN_APP_TERMINAL, terminalSupportsNewTab } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
 import { cn } from "@/lib/utils";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { useLastNonNull } from "@/lib/use-last-non-null";
 import { RecordHostList } from "./HostList";
 import { RecordHostEditor } from "./HostEditor";

@@ -2,12 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // ASKPASS always takes precedence: an SSH challenge that happens to match an
-    // internal option must still go through the helper's refusal rules.
-    if std::env::var_os("SSHELTER_ASKPASS").is_some() {
-        sshelter_lib::askpass::run();
-    }
-
     // Internal, disposable CoreAudio child: no Tauri, keychain, broker or GUI initialization.
     #[cfg(target_os = "macos")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--coreaudio-probe")) {

@@ -85,7 +85,6 @@ export const recordsStatus = (
   p: Partial<RecordsStatus> = {},
 ): RecordsStatus => ({
   format: "records",
-  legacy_paused: false,
   blocked_reason: null,
   overview: recordOverview(),
   ...p,

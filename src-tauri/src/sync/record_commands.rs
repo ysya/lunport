@@ -9,7 +9,7 @@ use crate::sync::record_runtime::{self, RuntimeFormat};
 use crate::sync::records_v3::{GroupPayload, HostPayload, HostScope, KeySlotPayload, SyncStateV3};
 use crate::sync::transports::RouteChange;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,7 +154,6 @@ pub struct RecordOverview {
     library_enabled: bool,
     library_scope: Option<HostScope>,
     pending_changes: usize,
-    conflicts: Vec<crate::sync::record_conflicts::ConflictView>,
     /// Host routes (Google Cloud IAP), one per host at most: the library's when it holds one, else the one saved on this device.
     transports: Vec<crate::sync::transports::HostTransport>,
     /// For each route in `transports`, whether it syncs with its host.
@@ -175,7 +174,6 @@ pub struct GroupOrderView {
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordStatus {
     format: RuntimeFormat,
-    legacy_paused: bool,
     blocked_reason: Option<String>,
     overview: Option<RecordOverview>,
 }
@@ -312,7 +310,6 @@ pub fn overview_from(
         key_scope: crate::sync::record_import::central_local::invocation(state).map(|scope| scope.with_generation(generation)),
         central_mode: state.local.central.as_ref().is_some_and(|owner| owner.control.cutover),
         syncing: false,
-        conflicts: crate::sync::record_conflicts::views(state)?,
         generation: generation.to_string(),
         group_deletion_token,
         relay_url: state.relay_url.clone(),
@@ -436,7 +433,6 @@ pub fn status(app: &AppHandle) -> Result<RecordStatus, AppError> {
         .transpose()?;
     Ok(RecordStatus {
         format: core.format,
-        legacy_paused: core.legacy_paused,
         blocked_reason: core.save_blocked.clone(),
         overview,
     })
@@ -462,18 +458,11 @@ pub(crate) fn edit_records(
     if proposed.spaces != before.spaces {
         crate::sync::record_round::require_no_pending_migration(env)?;
     }
-    // Routine library edits save to the cache offline. Transport still performs a
-    // fresh authenticated format check before any upload. Format upgrades require
-    // an online check here because they also modify account metadata.
-    if proposed.spaces != before.spaces
-        && (!crate::sync::record_library::enabled(&before) || proposed.account != before.account)
-    {
-        crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
-        if crate::sync::records_v3::account_writes_blocked(&record_runtime::snapshot(env)?.0) {
-            return Err(AppError::Other(
-                "Shared writes are blocked until the pending account operation completes.".into(),
-            ));
-        }
+    // Routine library edits save to the cache offline; a pending account operation blocks shared writes.
+    if proposed.spaces != before.spaces && crate::sync::records_v3::account_writes_blocked(&before) {
+        return Err(AppError::Other(
+            "Shared writes are blocked until the pending account operation completes.".into(),
+        ));
     }
     record_runtime::mutate_records(env, |s| transform(s, now))?;
     drop(lifecycle);
@@ -730,27 +719,6 @@ pub async fn records_host_group(
     .await
 }
 #[tauri::command]
-pub async fn records_use_legacy(app: AppHandle) -> Result<(), AppError> {
-    tauri::async_runtime::spawn_blocking(move || crate::sync::engine::resume_legacy(&app))
-        .await
-        .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_pause_legacy(app: AppHandle) -> Result<RecordStatus, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, record_runtime::pause_legacy_workspace)??;
-        let state = app.state::<crate::state::AppState>();
-        state.agent.prompts.deny_all();
-        state.agent.broker.clear();
-        let result = status(&app)?;
-        app.emit("records://status", &result)
-            .map_err(|_| AppError::Other("cannot publish the paused workspace status".into()))?;
-        Ok(result)
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
 pub fn records_sync_now() {
     crate::sync::engine::wake();
 }
@@ -783,152 +751,6 @@ pub async fn records_connect(
     .await
     .map_err(crate::sync::engine::join_error)?
 }
-#[tauri::command]
-pub async fn records_set_relay_url(
-    app: AppHandle,
-    url: String,
-) -> Result<RecordOverview, AppError> {
-    let normalized = crate::sync::relay::validate_url(&url)?;
-    edit(app, move |s, _| {
-        if s.relay_url != normalized && (s.account.is_some() || s.pending_account.is_some()) {
-            return Err(AppError::Other(
-                "Finish the pending operation or leave the account before changing relays.".into(),
-            ));
-        }
-        let mut next = s.clone();
-        next.relay_url = normalized.clone();
-        next.relay_features = None;
-        next.last_error = None;
-        Ok(next)
-    })
-    .await
-}
-/// User-requested code display: never a query-cache field or status event.
-pub fn account_words(env: &SyncEnv) -> Result<zeroize::Zeroizing<String>, AppError> {
-    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let (state, _) = record_runtime::snapshot(env)?;
-    let account = state
-        .account
-        .as_ref()
-        .ok_or_else(|| AppError::Other("Join or create a sync chain first.".into()))?;
-    let code = zeroize::Zeroizing::new(
-        env.keychain
-            .get(crate::sync::state::MNEMONIC_ACCOUNT)
-            .map_err(|_| AppError::Other("The sync code cannot be read from this device.".into()))?
-            .ok_or_else(|| {
-                AppError::Other("The sync code is unavailable on this device.".into())
-            })?,
-    );
-    let keys = crate::sync::crypto::derive_account(&code)
-        .map_err(|_| AppError::Other("The stored sync code is invalid.".into()))?;
-    if keys.chain_id != account.chain_id {
-        return Err(AppError::Other(
-            "The stored sync code belongs to a different chain; finish account recovery.".into(),
-        ));
-    }
-    Ok(code)
-}
-#[tauri::command]
-pub async fn records_account_words(app: AppHandle) -> Result<String, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            account_words(env).map(|words| words.to_string())
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[derive(Serialize)]
-pub struct AccountSetupReply {
-    words: String,
-    overview: RecordOverview,
-    complete: bool,
-    pending_error: Option<String>,
-    operation_id: String,
-}
-#[tauri::command]
-pub async fn records_account_create(
-    app: AppHandle,
-    device_name: String,
-    upgrade_confirmed: Option<bool>,
-) -> Result<AccountSetupReply, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            let mut result = crate::sync::record_account::create_account(env, &device_name)?;
-            if result.complete {
-                if let Err(error) =
-                    crate::sync::record_library::enable(env, upgrade_confirmed.unwrap_or(false))
-                {
-                    result.complete = false;
-                    result.pending_error = Some(format!(
-                        "The sync chain was created. Finish library sync setup: {error}"
-                    ));
-                }
-            }
-            Ok(AccountSetupReply {
-                words: result.code.to_string(),
-                overview: overview(env)?,
-                complete: result.complete,
-                pending_error: result.pending_error,
-                operation_id: result.operation_id,
-            })
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_account_join(
-    app: AppHandle,
-    words: String,
-    device_name: String,
-    upgrade_confirmed: Option<bool>,
-) -> Result<RecordOverview, AppError> {
-    let words = zeroize::Zeroizing::new(words);
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_account::join_account(env, &words, &device_name)?;
-            crate::sync::record_library::enable(env, upgrade_confirmed.unwrap_or(false))?;
-            overview(env)
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_account_resume(
-    app: AppHandle,
-    words: Option<String>,
-) -> Result<RecordOverview, AppError> {
-    let words = words.map(zeroize::Zeroizing::new);
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_account::resume_pending(env, words.as_ref().map(|w| w.as_str()))?;
-            overview(env)
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_library_preview(
-    app: AppHandle,
-) -> Result<
-    crate::sync::record_library::review::LibraryPreview,
-    crate::sync::record_library::review::LibraryFailure,
-> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, crate::sync::record_library::prepare)?
-    })
-    .await
-    .map_err(|_| {
-        crate::sync::record_library::review::LibraryFailure::new(
-            "unavailable",
-            "Library sync could not finish checking this workspace. Retry when it is available.",
-        )
-    })?
-}
-
 #[derive(Serialize)]
 pub struct HostKeyVerificationReply {
     identity: crate::session::verify::VerifiedHostKey,
@@ -969,94 +791,6 @@ pub async fn records_host_verify_key(
         .map_err(error)?;
         let overview = crate::sync::engine::with_env(&app, overview)??;
         Ok(HostKeyVerificationReply { identity, overview })
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_library_enable(
-    app: AppHandle,
-    upgrade_confirmed: bool,
-    review: Option<crate::sync::record_library::review::LibraryReview>,
-) -> Result<RecordOverview, crate::sync::record_library::review::LibraryFailure> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_library::enable_reviewed(env, upgrade_confirmed, review.as_ref())?;
-            overview(env).map_err(Into::into)
-        })?
-    })
-    .await
-    .map_err(|_| {
-        crate::sync::record_library::review::LibraryFailure::new(
-            "unavailable",
-            "Library sync could not finish updating this workspace. Retry when it is available.",
-        )
-    })?
-}
-#[tauri::command]
-pub async fn records_space_create(
-    app: AppHandle,
-    name: String,
-) -> Result<RecordOverview, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_account::create_space(env, &name)?;
-            overview(env)
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[derive(Serialize)]
-pub struct LeaveReply {
-    receipt: crate::sync::record_leave::LeaveReceipt,
-    overview: RecordOverview,
-}
-#[tauri::command]
-pub async fn records_account_leave(app: AppHandle) -> Result<LeaveReply, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            let receipt = crate::sync::record_leave::leave_account(env)?;
-            Ok(LeaveReply {
-                receipt,
-                overview: overview(env)?,
-            })
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_account_rotate(
-    app: AppHandle,
-    device_name: String,
-) -> Result<AccountSetupReply, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            let result = crate::sync::record_rotation::start_rotation(env, &device_name)?;
-            Ok(AccountSetupReply {
-                words: result.code.to_string(),
-                overview: overview(env)?,
-                complete: result.complete,
-                pending_error: result.pending_error,
-                operation_id: result.operation_id,
-            })
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-#[tauri::command]
-pub async fn records_space_select(
-    app: AppHandle,
-    space_id: String,
-    selected: bool,
-) -> Result<RecordOverview, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_account::select_space(env, &space_id, selected)?;
-            overview(env)
-        })?
     })
     .await
     .map_err(crate::sync::engine::join_error)?
@@ -1177,79 +911,6 @@ pub async fn records_key_delete(
     .map_err(crate::sync::engine::join_error)?
 }
 
-#[tauri::command]
-pub async fn records_key_download(
-    app: AppHandle,
-    key_id: String,
-) -> Result<RecordOverview, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_account::download_key(env, &key_id)?;
-            overview(env)
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
-/// Read only under lifecycle/vault. No repair, import or private-file fallback is permitted.
-fn material_for_sync(
-    env: &SyncEnv,
-    id: &str,
-) -> Result<(KeySlotPayload, zeroize::Zeroizing<String>), AppError> {
-    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-    {
-        let core = env.runtime.core.lock().unwrap();
-        if record_runtime::active_state(&core)?.local.central.as_ref().is_some_and(|owner| owner.control.cutover) {
-            return Err(AppError::Other("Keys synchronize automatically in central account mode.".into()));
-        }
-    }
-    crate::sync::record_round::require_no_pending_migration(env)?;
-    let _vault = env.runtime.vault.lock().unwrap();
-    let (state, _) = record_runtime::snapshot(env)?;
-    let key = repo::resolve_key(&state, id).map_err(error)?;
-    let vault_id = key
-        .vault_id
-        .as_ref()
-        .ok_or_else(|| AppError::Other("This key has no material on this device.".into()))?;
-    let vault = crate::vault::store::read_vault(
-        &crate::vault::store::vault_path(&env.state_path),
-        env.keychain,
-    )
-    .map_err(|_| {
-        AppError::Other("The vault is unavailable; its original file was retained.".into())
-    })?;
-    let entry = vault
-        .get(vault_id)
-        .map_err(|_| AppError::Other("The vault key cannot be read.".into()))?
-        .ok_or_else(|| AppError::Other("The key material is unavailable on this device.".into()))?;
-    crate::session::record_material::verify(&key, &entry)
-        .map_err(|message| AppError::Other(message.into()))?;
-    Ok((
-        key.public
-            .ok_or_else(|| AppError::Other("The key has no public identity.".into()))?,
-        zeroize::Zeroizing::new(entry.private_key.clone()),
-    ))
-}
-#[tauri::command]
-pub async fn records_key_sync(
-    app: AppHandle,
-    key_id: String,
-    enabled: bool,
-) -> Result<RecordOverview, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            if enabled {
-                let (public, private) = material_for_sync(env, &key_id)?;
-                crate::sync::record_account::publish_key(env, &key_id, public, private)?;
-            } else {
-                crate::sync::record_account::unpublish_key(env, &key_id)?;
-            }
-            overview(env)
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
-}
 struct CachedPreview {
     created: std::time::Instant,
     prepared: crate::sync::record_import::PreparedImport,
@@ -1441,11 +1102,6 @@ fn migration_reply(
     app: &AppHandle,
     receipt: crate::sync::record_migration::MigrationReceipt,
 ) -> Result<MigrationReply, AppError> {
-    if receipt.complete {
-        let state = app.state::<crate::state::AppState>();
-        state.agent.prompts.deny_all();
-        state.agent.broker.clear();
-    }
     let status = status(app)?;
     crate::sync::engine::with_env(app, |env| {
         env.events.status();
@@ -1516,30 +1172,13 @@ pub async fn records_migration_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::env::Keychain;
-    use crate::sync::fake_relay::FakeRelay;
     use crate::sync::record::{record_key, RecordKind};
     use crate::sync::records_v3::validate_state;
     use crate::sync::testkit::{TestClock, TestDevice};
     use crate::sync::transports::{self, tests as fixtures};
-    struct ForbiddenKeyIo;
-    impl Keychain for ForbiddenKeyIo {
-        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
-            panic!("manual central key actions cannot read credentials")
-        }
-        fn get_noninteractive(&self, _: &str) -> Result<Option<String>, AppError> {
-            panic!("manual central key actions cannot read credentials")
-        }
-        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
-            panic!("manual central key actions cannot write credentials")
-        }
-        fn delete(&self, _: &str) -> Result<(), AppError> {
-            panic!("manual central key actions cannot delete credentials")
-        }
-    }
     #[test]
     fn central_key_policy_is_public_and_legacy_actions_stop_before_material_or_network_access() {
-        let d = device("central-key-actions", &FakeRelay::new(), &TestClock::new());
+        let d = device("central-key-actions", &TestClock::new());
         let (state, _, _, id, entry) = crate::sync::central::material_fixture_for_test();
         let view = overview_from(&state, 1, None).unwrap();
         assert!(view.central_mode);
@@ -1553,16 +1192,6 @@ mod tests {
             .unwrap()
             .contains(&entry.private_key));
         d.runtime.core.lock().unwrap().records = Some(state.clone());
-        let mut env = d.env();
-        env.keychain = &ForbiddenKeyIo;
-        assert!(material_for_sync(&env, &id)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("automatically"));
-        assert!(crate::sync::record_account::download_key(&env, &id).is_err());
-        assert!(crate::sync::record_account::unpublish_key(&env, &id).is_err());
-        assert!(d.relay.calls().is_empty());
         let mut configured = state;
         configured.local.central_projection = None;
         let control = &mut configured.local.central.as_mut().unwrap().control;
@@ -1572,7 +1201,7 @@ mod tests {
     }
     #[test]
     fn pending_migration_blocks_account_effects_but_keeps_local_edits_available() {
-        let d = device("pending", &FakeRelay::new(), &TestClock::new());
+        let d = device("pending", &TestClock::new());
         let id = "e".repeat(32);
         let directory = d
             .env()
@@ -1587,8 +1216,6 @@ mod tests {
             r#"{"phase":"prepared","host_count":1,"key_count":0}"#,
         )
         .unwrap();
-        assert!(crate::sync::record_account::create_account(&d.env(), "pending").is_err());
-        assert!(d.relay.calls().is_empty());
         assert!(d
             .keychain
             .entry(crate::sync::state::MNEMONIC_ACCOUNT)
@@ -1600,12 +1227,8 @@ mod tests {
         .unwrap();
         assert_eq!(overview(&d.env()).unwrap().hosts.len(), 1);
     }
-    fn device(
-        name: &str,
-        relay: &std::sync::Arc<FakeRelay>,
-        clock: &std::sync::Arc<TestClock>,
-    ) -> TestDevice {
-        let device = TestDevice::new(name, relay, clock);
+    fn device(name: &str, clock: &std::sync::Arc<TestClock>) -> TestDevice {
+        let device = TestDevice::new(name, clock);
         let record_runtime::StartupProbe::Records { mut state, .. } =
             record_runtime::probe_startup(&device.env().state_path, name)
         else {
@@ -1621,86 +1244,6 @@ mod tests {
         )
         .unwrap();
         device
-    }
-    #[test]
-    fn two_devices_share_hosts_and_only_explicitly_selected_private_material() {
-        let relay = FakeRelay::new();
-        let clock = TestClock::new();
-        let a = device("first", &relay, &clock);
-        let b = device("second", &relay, &clock);
-        let created = crate::sync::record_account::create_account(&a.env(), "first").unwrap();
-        assert!(created.complete);
-        let local = crate::sync::record_keys::generate_local(
-            &a.env(),
-            "work",
-            crate::vault::generate::KeyAlgorithm::Ed25519,
-            "fixture",
-            None,
-        )
-        .unwrap();
-        let local_view = overview(&a.env()).unwrap();
-        assert_eq!(local_view.keys[0].synced, Some(false));
-        assert_eq!(local_view.keys[0].authority, "local");
-        let space = crate::sync::record_account::create_space(&a.env(), "work").unwrap();
-        let payload: HostPayload = serde_json::from_value(serde_json::json!({"schema":2,"alias":"web","hostname":"example.test","auth":"key","key_id":local.key_id})).unwrap();
-        let created_at = a.env().now();
-        record_runtime::mutate_records(&a.env(), |s| {
-            repo::create_host(
-                s,
-                "0123456789abcdef",
-                HostScope::Space {
-                    space_id: space.clone(),
-                },
-                payload,
-                created_at,
-            )
-            .map_err(error)
-        })
-        .unwrap();
-        // Publication requires an explicit key choice; the first round cannot copy its private text.
-        crate::sync::record_round::sync_once(&a.env()).unwrap();
-        crate::sync::record_account::join_account(&b.env(), &created.code, "second").unwrap();
-        crate::sync::record_account::select_space(&b.env(), &space, true).unwrap();
-        crate::sync::record_round::sync_once(&b.env()).unwrap();
-        let before = overview(&b.env()).unwrap();
-        assert_eq!(before.hosts.len(), 1);
-        assert_eq!(before.hosts[0].readiness.kind, "needs_key");
-        assert!(material_for_sync(&b.env(), &local.key_id).is_err());
-        let (public, private) = material_for_sync(&a.env(), &local.key_id).unwrap();
-        crate::sync::record_account::publish_key(&a.env(), &local.key_id, public, private).unwrap();
-        crate::sync::record_round::sync_once(&b.env()).unwrap();
-        assert_eq!(overview(&b.env()).unwrap().keys[0].status, "needs_material");
-        crate::sync::record_account::download_key(&b.env(), &local.key_id).unwrap();
-        let after = overview(&b.env()).unwrap();
-        assert_eq!(after.hosts[0].readiness.kind, "ready");
-        assert_eq!(after.keys[0].synced, Some(true));
-        let (public, private) = material_for_sync(&b.env(), &local.key_id).unwrap();
-        assert_eq!(public, local.public);
-        let rendered = serde_json::to_string(&after).unwrap();
-        assert!(!rendered.contains("BEGIN OPENSSH PRIVATE KEY"));
-        assert!(!rendered.contains(private.lines().nth(1).unwrap()));
-        assert!(!rendered.contains(&*created.code));
-        assert_eq!(&*account_words(&b.env()).unwrap(), &*created.code);
-        for device in [&a, &b] {
-            assert_eq!(
-                std::fs::read_to_string(device.ssh_dir().join("config")).unwrap(),
-                "# main\n"
-            );
-            assert!(!device.ssh_dir().join("sshelter").exists());
-        }
-    }
-    #[test]
-    fn code_display_rejects_mismatched_credentials_without_exposing_them() {
-        let d = device("a", &FakeRelay::new(), &TestClock::new());
-        assert!(account_words(&d.env()).is_err());
-        let created = crate::sync::record_account::create_account(&d.env(), "a").unwrap();
-        let other = crate::sync::crypto::generate_mnemonic().unwrap();
-        d.keychain
-            .set(crate::sync::state::MNEMONIC_ACCOUNT, &other)
-            .unwrap();
-        let error = account_words(&d.env()).unwrap_err().to_string();
-        assert!(error.contains("different chain"));
-        assert!(!error.contains(&other) && !error.contains(&*created.code));
     }
     #[test]
     fn webview_new_hosts_cannot_pretrust_a_server_key() {
@@ -1756,7 +1299,7 @@ mod tests {
 
     #[test]
     fn creating_a_host_with_an_invalid_route_saves_neither() {
-        let d = device("invalid-route", &FakeRelay::new(), &TestClock::new());
+        let d = device("invalid-route", &TestClock::new());
         let id = new_host_id().unwrap();
         let mut invalid = fixtures::iap(&id);
         let transports::TransportKind::GcpIap { project, .. } = &mut invalid.kind;
@@ -1809,7 +1352,7 @@ mod tests {
     /// R16: a route that is not the one the editor displayed refuses the whole save, and the person reads the route's own sentence.
     #[test]
     fn a_route_that_changed_meanwhile_refuses_the_whole_save_in_its_own_sentence() {
-        let d = device("stale-route", &FakeRelay::new(), &TestClock::new());
+        let d = device("stale-route", &TestClock::new());
         let id = new_host_id().unwrap();
         let first = first_route(&id);
         edit_records(&d.env(), |s, now| create_host_with_route(s, &id, &HostScope::Local, &web("web"), false, Some(&first), now)).unwrap();
@@ -1953,10 +1496,4 @@ mod tests {
         let none = overview_from(&bare_state(), 1, None).unwrap();
         assert!(none.transport_sync.is_empty() && none.grant_memory.is_empty());
     }
-}
-
-#[tauri::command]
-pub async fn records_conflict_resolve(app: AppHandle, space_id: Option<String>, key: String, token: String, choice: crate::sync::record_conflicts::Resolution, copy_alias: Option<String>) -> Result<RecordOverview, AppError> {
-    tauri::async_runtime::spawn_blocking(move || crate::sync::engine::with_env(&app, |env| crate::sync::record_conflicts::resolve_saved(env, space_id.as_deref(), &key, &token, choice, copy_alias.as_deref()))?)
-        .await.map_err(crate::sync::engine::join_error)?
 }

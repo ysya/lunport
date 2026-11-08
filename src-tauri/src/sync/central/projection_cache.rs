@@ -327,7 +327,6 @@ mod tests {
         assert!(cache.key_storage.is_empty());
         let device = crate::sync::testkit::TestDevice::new(
             "public-cache",
-            &crate::sync::fake_relay::FakeRelay::new(),
             &crate::sync::testkit::TestClock::new(),
         );
         let crate::sync::record_runtime::StartupProbe::Records { mut state, .. } =

@@ -819,7 +819,6 @@ pub(super) mod tests {
         let cache = Cache::initial(&plan, 100, &BTreeMap::new()).unwrap();
         let device = crate::sync::testkit::TestDevice::new(
             "projection-ledger",
-            &crate::sync::fake_relay::FakeRelay::new(),
             &crate::sync::testkit::TestClock::new(),
         );
         let crate::sync::record_runtime::StartupProbe::Records { mut state, .. } =
@@ -1353,7 +1352,6 @@ pub(super) mod tests {
         let (state, _, _) = initial();
         let device = crate::sync::testkit::TestDevice::new(
             "projection-fence",
-            &crate::sync::fake_relay::FakeRelay::new(),
             &crate::sync::testkit::TestClock::new(),
         );
         let env = device.env();

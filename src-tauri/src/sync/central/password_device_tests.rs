@@ -12,7 +12,7 @@ const HOST: &str = "000000000000b001";
 const SSH_PASSWORD: &str = " synthetic SSH password ∎ with spaces ";
 #[inline(never)]
 fn device(name: &str) -> Box<TestDevice> {
-    let d = Box::new(TestDevice::new(name, &FakeRelay::new(), &TestClock::new()));
+    let d = Box::new(TestDevice::new(name, &TestClock::new()));
     d.keychain
         .windows_credentials
         .store(true, std::sync::atomic::Ordering::SeqCst);

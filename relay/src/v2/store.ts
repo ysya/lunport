@@ -616,8 +616,9 @@ export class VaultStore extends DurableObject<Env> {
         observed.rekey
       )
         return { status: 409 };
+      // The chain transport is retired: a new library starts from an empty source list, so there
+      // is no fence to confirm here (`migrationSources` still guards journals committed before that).
       if (manifest.body.sources.length) return { status: 410 };
-      if (!(await this.migrationSources(manifest))) return { status: 503 };
       return this.ctx.storage.transactionSync(() => {
         const current = this.load();
         if (!this.allowed(current, actor)) return { status: 403 };

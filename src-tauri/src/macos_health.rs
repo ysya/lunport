@@ -15,7 +15,6 @@ pub(crate) enum Surface {
     Main,
     Authentication,
     HostKey,
-    Approval,
     Diagnostics,
     Reload(String),
     Terminated(String),
@@ -180,7 +179,6 @@ fn still_needed(app: &tauri::AppHandle, surface: &Surface) -> bool {
     match surface {
         Surface::Authentication => !state.session.auth_questions.pending().is_empty(),
         Surface::HostKey => !state.session.host_keys.pending().is_empty(),
-        Surface::Approval => !state.agent.prompts.pending().is_empty(),
         Surface::Reload(label) => app.get_webview_window(label).is_some(),
         _ => true,
     }
@@ -191,7 +189,6 @@ fn present(app: &tauri::AppHandle, surface: Surface) {
         Surface::Main => crate::show_main_window_now(app),
         Surface::Authentication => crate::session::auth_window::present(app),
         Surface::HostKey => crate::session::hostkey_window::present(app),
-        Surface::Approval => crate::agent::prompt::present(app),
         Surface::Reload(label) => {
             // A user can authorize one reload per window per app lifetime. No
             // automatic recovery loop, including when the reload immediately dies.
@@ -222,7 +219,6 @@ fn deny_interactions(app: &tauri::AppHandle) {
 fn deny_pending(state: &crate::state::AppState) {
     state.session.auth_questions.deny_all();
     state.session.host_keys.deny_all();
-    state.agent.prompts.deny_all();
 }
 
 fn diagnostics(app: &tauri::AppHandle, result: &str) {
@@ -491,8 +487,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_windows_cancel_auth_and_refuse_host_and_key_approvals() {
-        use crate::agent::prompt::{AgentApprovalRequest, PromptSurface};
+    fn unavailable_windows_cancel_auth_and_refuse_host_key_approvals() {
         use crate::session::auth::{Owner, Reply};
         use crate::session::auth_window::{AuthRequest, AuthSurface, NativeOwner};
         use crate::session::connect::CancelToken;
@@ -505,9 +500,6 @@ mod tests {
         }
         impl HostKeySurface for Silent {
             fn changed(&self, _: &[HostKeyRequest]) {}
-        }
-        impl PromptSurface for Silent {
-            fn changed(&self, _: &[AgentApprovalRequest]) {}
         }
         let state = Arc::new(crate::state::AppState::default());
         let owner = NativeOwner {
@@ -536,31 +528,9 @@ mod tests {
                 &CancelToken::default(),
             )
         });
-        let key_state = state.clone();
-        let key = std::thread::spawn(move || {
-            key_state.agent.prompts.ask(
-                &Silent,
-                AgentApprovalRequest {
-                    id: String::new(),
-                    key_name: "fixture".into(),
-                    key_fingerprint: "SHA256:fixture".into(),
-                    program_chain: vec![],
-                    user: None,
-                    host: None,
-                    host_fingerprint: None,
-                    rememberable: true,
-                    remember_minutes: 60,
-                    needs_passphrase: false,
-                    passphrase_error: None,
-                    preapproved: false,
-                },
-                Duration::from_secs(5),
-            )
-        });
         let end = Instant::now() + Duration::from_secs(3);
         while state.session.auth_questions.pending().is_empty()
             || state.session.host_keys.pending().is_empty()
-            || state.agent.prompts.pending().is_empty()
         {
             assert!(Instant::now() < end);
             std::thread::sleep(POLL);
@@ -569,16 +539,12 @@ mod tests {
         deny_pending(&state);
         assert!(matches!(auth.join().unwrap(), Reply::Cancelled));
         assert!(!host.join().unwrap().unwrap().trust);
-        let answer = key.join().unwrap().unwrap();
-        assert!(!answer.allow && !answer.remember && !answer.remember_passphrase);
         assert!(state
             .session
             .auth_questions
             .resolve(&auth_id, None)
             .is_err());
         assert!(state.session.host_keys.pending().is_empty());
-        assert!(state.agent.prompts.pending().is_empty());
-        assert!(state.doc.lock().unwrap().is_none());
     }
 
     #[test]

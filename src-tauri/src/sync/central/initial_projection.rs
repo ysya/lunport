@@ -415,7 +415,6 @@ pub(in crate::sync) mod tests {
             migration_verify::{Page, Verifier},
             payload::{Catalog, Collection, Data, Identity},
         },
-        fake_relay::FakeRelay,
         record::{record_key, LocalRecord, Record, RecordKind},
         record_runtime::{self, StartupProbe},
         records_v3::HostScope,
@@ -475,7 +474,7 @@ pub(in crate::sync) mod tests {
             verifier.admit(&plan, &keys, page).unwrap();
         }
         let committed = verifier.finish(&plan, &keys).unwrap();
-        let device = TestDevice::new("initial-projection", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("initial-projection", &TestClock::new());
         let StartupProbe::Records { mut state, .. } =
             record_runtime::probe_startup(&device.env().state_path, "initial")
         else {
@@ -620,7 +619,7 @@ pub(in crate::sync) mod tests {
     }
     /// The candidate the initial publication saves for `initial`, which reads back a Vault holding no material.
     fn finished(initial: &Candidate, keys: &VaultKeys) -> SyncStateV3 {
-        let device = TestDevice::new("initial-readback", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("initial-readback", &TestClock::new());
         let vault = crate::vault::store::read_vault(
             &crate::vault::store::vault_path(&device.env().state_path),
             &device.keychain,

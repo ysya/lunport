@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cancelRecordDeploy, confirmRecordDeploy, previewRecordDeploy, type RecordDeployPreview, type RecordDeployResult, type RecordOverview } from "@/lib/records";
 import { deploymentMessage } from "@/lib/records-deploy";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { RecordField, selectClass } from "./form";
 
 export function RecordsDeployKeyDialog({ overview, keyId, onClose }: {

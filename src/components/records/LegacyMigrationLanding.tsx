@@ -1,39 +1,22 @@
 import { Button } from "@/components/ui/button";
 import { usePendingRecordMigrations } from "@/lib/records";
-export function LegacyMigrationLanding({
-  useLegacy,
-  previewMigration,
-  retry,
-  busy,
-}: {
-  useLegacy: () => void;
-  previewMigration: () => void;
-  retry: () => void;
-  busy: boolean;
-}) {
+
+/** The page a saved OpenSSH workspace opens on: Legacy mode is retired, the migration review is the way into the library. */
+export function LegacyMigrationLanding({ previewMigration, retry }: { previewMigration: () => void; retry: () => void }) {
   const pending = usePendingRecordMigrations();
   return (
     <div className="app-shell flex h-screen items-center justify-center overflow-y-auto p-8">
       <div className="max-w-lg space-y-4 text-center">
         <h1 className="app-inspector-title">Your existing workspace</h1>
         <p className="text-sm text-muted-foreground">
-          Review the saved workspace before switching to records. You can
-          preview migration without opening the legacy configuration editor.
+          Lunport now keeps hosts, keys and Groups in its own library. Review the saved OpenSSH
+          workspace and copy the hosts and keys you still use; the original files stay where they are.
         </p>
-        <Button disabled={busy} onClick={previewMigration}>
-          {(pending.data ?? []).length > 0
-            ? "Review pending migrations"
-            : "Preview migration"}
+        <Button onClick={previewMigration}>
+          {(pending.data ?? []).length > 0 ? "Review pending migrations" : "Preview migration"}
         </Button>
-        <p className="text-sm text-muted-foreground">
-          Using the existing workspace enables its SSH configuration editor and
-          local editing.
-        </p>
         <div className="flex flex-wrap justify-center gap-2">
-          <Button variant="outline" disabled={busy} onClick={useLegacy}>
-            Use existing SSH configuration
-          </Button>
-          <Button variant="outline" disabled={busy} onClick={retry}>
+          <Button variant="outline" onClick={retry}>
             Retry
           </Button>
         </div>

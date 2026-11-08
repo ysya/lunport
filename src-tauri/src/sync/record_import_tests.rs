@@ -1,6 +1,5 @@
 use super::*;
 use crate::sync::env::Keychain;
-use crate::sync::fake_relay::FakeRelay;
 use crate::sync::record_runtime::{probe_startup, RuntimeFormat, StartupProbe};
 use crate::sync::slot_rules::test_keys;
 use crate::sync::testkit::{MemKeychain, TestClock, TestDevice};
@@ -43,9 +42,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let relay = FakeRelay::new();
         let clock = TestClock::new();
-        let device = TestDevice::new("import", &relay, &clock);
+        let device = TestDevice::new("import", &clock);
         let env = device.env();
         let StartupProbe::Records { state, .. } = probe_startup(&env.state_path, "Import test")
         else {
@@ -927,9 +925,9 @@ fn atomic_state_receipt_supersedes_an_older_journal_phase_and_unavailable_source
 #[test]
 fn saved_host_settings_recover_into_a_new_account_without_old_authority_or_credentials() {
     let f=Fixture::new();
-    let old=crate::sync::record_round::tests::pin_fixture();
-    let mut source=crate::sync::record_runtime::snapshot(&old.env()).unwrap().0;
-    for space in source.spaces.values_mut() { space.missing=true;space.selected=false; }
+    // A library that belonged to an old account: its export must carry neither that account nor any credential.
+    let mut source=crate::sync::record_repository::create_host(&f.state(),"0000000000000001",HostScope::Local,serde_json::from_value(serde_json::json!({"schema":2,"alias":"web","hostname":"host.test","user":"ops","auth":"interactive"})).unwrap(),3).unwrap();
+    source.account=Some(crate::sync::state_v2::AccountState::new(&crate::sync::crypto::ChainKeys::generate().unwrap().chain_id));
     let path=f.device.home.path().join("sync-state.json");
     let (json,count,_)=crate::sync::records_v3::importer::saved_hosts::export_state(&source).unwrap();
     assert_eq!(count,1);

@@ -18,7 +18,6 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 - **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Managed private keys are included when you approve encrypted library sync.
 - **Encrypted library sync** — create an email-named account on your own server (no email verification or email recovery), sign in with a Passkey and set a sync unlock password. Enter the same password once on each new device; hosts, Groups, tunnel rules, saved SSH passwords and managed SSH private keys then sync automatically with end-to-end encryption. Saved passwords remain bound to their host identity and never enter public settings exports. Cloudflare and Docker self-hosting are supported; OIDC is optional.
 - **AI access through MCP** — add Codex, Claude Code, Claude Desktop, Cursor or VS Code from Settings, or export configuration for another local agent. Allow individual hosts or Groups, review proposed connections and choose Ask or explicitly acknowledged Auto-log for remote commands. Both modes can request credentials through Lunport’s native windows; Auto-log skips command review and requires a previously verified server key. Review request and completion times, including seconds and your local time zone, in **Recent activity**.
-- **A home for existing OpenSSH setups** — Legacy mode edits your local SSH configuration while preserving comments, ordering and unknown directives. Migration into the Records library requires an explicit review.
 - **Consistent preferences** — searchable settings, six built-in color palettes with independent light/dark/system modes, reduced motion, an animated collapsible sidebar and signed Stable/Beta updates. **Settings → About** collects the installed version, project links and license.
 
 ## Install
@@ -41,7 +40,7 @@ xattr -dr com.apple.quarantine /Applications/Lunport.app
 
 For the historical SSHelter 1.0.0 app, use `/Applications/SSHelter.app` instead. Subsequent in-app updates do not require this step again.
 
-**Windows:** the installer is not code-signed, so SmartScreen may show a warning. Choose **More info → Run anyway** to proceed. In-app sessions work directly in Lunport. External connections use the installed console helper and Windows Terminal when available, otherwise Command Prompt. See [Windows integrations](docs/usage.md#windows-integrations) for OpenSSH deployment and Git/agent setup.
+**Windows:** the installer is not code-signed, so SmartScreen may show a warning. Choose **More info → Run anyway** to proceed. In-app sessions work directly in Lunport. External connections use the installed console helper and Windows Terminal when available, otherwise Command Prompt. See [Windows integrations](docs/usage.md#windows-integrations).
 
 ## Get started
 
@@ -53,7 +52,7 @@ The in-app terminal ships first on the **Beta** channel. Choose **Settings → U
 4. Select the host's login key, verify its server fingerprint against a trusted source and double-click the host to connect. Choose **Lunport (in app)** in **Settings → Connections** to use session tabs; existing terminal preferences are preserved.
 5. Optionally open **Sync** to connect your devices, or **Settings → AI access → Connect an AI tool** to add your agent and allow selected hosts.
 
-Existing Legacy workspaces keep their OpenSSH files. Use the offered migration review when you are ready to move them into the Records library.
+An installation that still holds a workspace from an older Lunport, which edited your OpenSSH files directly, opens on a migration review. It copies the hosts and keys you choose into the library and leaves the original files in place.
 
 ## Self-host sync
 
@@ -70,7 +69,7 @@ Before enabling central sync in production:
 
 ## Learn more
 
-- [User guide](docs/usage.md) — connections, keys, sync, MCP and Legacy mode.
+- [User guide](docs/usage.md) — connections, keys, sync, MCP and moving an older workspace into the library.
 - [Development and release workflow](docs/development.md) — local setup, profile isolation, checks and publishing.
 - [Self-host encrypted sync](docs/central-server-configuration.md) — Cloudflare Workers or Docker Compose. The server URL starts blank; use your own deployment.
 - [Release notes](https://github.com/ysya/lunport/releases) and [changelog](CHANGELOG.md).

@@ -12,7 +12,7 @@ use super::auth::{KeyStore, Owner, Reply, VaultKey};
 use super::connect::{CancelToken, HostKeyConfirmer, HostKeyQuestion};
 use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
 use super::protocol::{HostQuery, QuestionKind};
-use super::ssh_config_directory::MAX_JUMPS;
+use crate::sync::records_v3::MAX_JUMPS;
 use crate::ssh::fake::FakeEngine;
 use crate::ssh::{AuthMethod, AuthSource, ConnectError, DisconnectReason, ExecResult, Hop, HostId, HostKey, HostKeyPolicy, Pty, Session, SessionError, ShellChannel, SshEngine, Target};
 use crate::sync::slot_rules::test_keys;

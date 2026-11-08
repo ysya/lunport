@@ -113,8 +113,6 @@ export type RecordKeyView = {
   public: KeySlotPayload | null;
   status: "available" | "needs_material" | "conflict" | "deleted";
 };
-export type ConflictVersion = { seq: string; deleted: boolean; record: { kind: string; id: string; updated_at_ms: number; device_id: string; payload: unknown } | null };
-export type RecordConflict = { space_id: string | null; key: string; token: string; label: string; base: ConflictVersion | null; local: ConflictVersion; remote: ConflictVersion[]; can_copy_remote: boolean };
 export type RecordKeyInvocation = {
   generation: string;
   profile: string;
@@ -135,7 +133,6 @@ export type RecordOverview = {
   /** Native cutover policy; account setup alone does not enable automatic sharing. */
   central_mode?: boolean;
   key_scope?: RecordKeyInvocation;
-  conflicts?: RecordConflict[];
   /** Host routes (Google Cloud IAP), one per host at most: the library's when it holds one, else the one saved on this computer; absent in older backend fixtures. */
   transports?: import("@/bindings/HostTransport").HostTransport[];
   /** For each route in `transports`, whether it syncs with its host or stays on this computer; absent in older backend fixtures. */
@@ -188,7 +185,6 @@ export type RecordOverview = {
 };
 export type RecordsStatus = {
   format: "records" | "legacy" | "blocked";
-  legacy_paused: boolean;
   blocked_reason: string | null;
   overview: RecordOverview | null;
 };
@@ -312,9 +308,6 @@ export async function connectRecordHost(
 ): Promise<void> {
   return tauriInvoke("records_connect", { hostId, terminalId, newTab });
 }
-export async function useLegacyWorkspace(): Promise<void> {
-  return tauriInvoke("records_use_legacy");
-}
 export async function previewRecordImport(
   source: string,
 ): Promise<ImportPreviewResult> {
@@ -351,41 +344,6 @@ export async function renameRecordKey(keyId: string, expected: KeySlotPayload, n
 export async function deleteRecordKey(keyId: string, expected: KeySlotPayload, snapshotToken: string, force: boolean, generation: string, invocation?: RecordKeyInvocation): Promise<RecordOverview> {
   return tauriInvoke("records_key_delete", { keyId, expected, snapshotToken, force, generation, ...(invocation ? { invocation } : {}) });
 }
-export async function createRecordAccount(
-  deviceName: string,
-  upgradeConfirmed?: boolean,
-): Promise<AccountSetupResult> {
-  return tauriInvoke("records_account_create", {
-    deviceName,
-    ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
-  });
-}
-export async function joinRecordAccount(
-  words: string,
-  deviceName: string,
-  upgradeConfirmed?: boolean,
-): Promise<RecordOverview> {
-  return tauriInvoke("records_account_join", {
-    words,
-    deviceName,
-    ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
-  });
-}
-export type LibraryRename = { kind: "host" | "group"; id: string; name: string };
-export type LibrarySyncPreview = {
-  token: string;
-  conflicts: Array<{
-    kind: "host" | "group";
-    id: string;
-    current_name: string;
-    suggested_name: string;
-  }>;
-  local_hosts: number;
-  local_groups: number;
-};
-export function previewLibrarySync(): Promise<LibrarySyncPreview> {
-  return tauriInvoke("records_library_preview");
-}
 export type VerifiedServerIdentity = {
   host_id: string;
   alias: string;
@@ -398,15 +356,6 @@ export type VerifiedServerIdentity = {
 export function verifyRecordHostKey(id: string): Promise<{ identity: VerifiedServerIdentity; overview: RecordOverview }> {
   return tauriInvoke("records_host_verify_key", { id });
 }
-export function enableLibrarySync(
-  upgradeConfirmed: boolean,
-  review?: { token: string; renames: LibraryRename[] },
-): Promise<RecordOverview> {
-  return tauriInvoke("records_library_enable", {
-    upgradeConfirmed,
-    ...(review ? { review } : {}),
-  });
-}
 export function setRecordHostGroup(
   id: string,
   revision: RecordRevision,
@@ -414,25 +363,6 @@ export function setRecordHostGroup(
 ): Promise<RecordOverview> {
   return tauriInvoke("records_host_group", { id, revision, groupId });
 }
-export async function createRecordSpace(name: string): Promise<RecordOverview> {
-  return tauriInvoke("records_space_create", { name });
-}
-export async function selectRecordSpace(
-  spaceId: string,
-  selected: boolean,
-): Promise<RecordOverview> {
-  return tauriInvoke("records_space_select", { spaceId, selected });
-}
-export async function setRecordKeySync(
-  keyId: string,
-  enabled: boolean,
-): Promise<RecordOverview> {
-  return tauriInvoke("records_key_sync", { keyId, enabled });
-}
-export async function syncRecordsNow(): Promise<void> {
-  return tauriInvoke("records_sync_now");
-}
-
 export type PendingRecordImport = {
   import_id: string;
   phase: string;
@@ -458,31 +388,6 @@ export function usePendingRecordImports() {
     retry: false,
   });
 }
-export async function downloadRecordKey(
-  keyId: string,
-): Promise<RecordOverview> {
-  return tauriInvoke("records_key_download", { keyId });
-}
-
-export type AccountSetupResult = {
-  words: string;
-  overview: RecordOverview;
-  complete: boolean;
-  pending_error: string | null;
-  operation_id: string;
-};
-export async function resumeRecordAccount(
-  words?: string,
-): Promise<RecordOverview> {
-  return tauriInvoke("records_account_resume", { words: words ?? null });
-}
-export async function recordAccountWords(): Promise<string> {
-  return tauriInvoke("records_account_words");
-}
-export async function setRecordRelayUrl(url: string): Promise<RecordOverview> {
-  return tauriInvoke("records_set_relay_url", { url });
-}
-
 export type MigrationPreview = {
   source_digest: string;
   source_kind: string;
@@ -561,34 +466,6 @@ export function usePendingRecordMigrations() {
   });
 }
 
-export async function pauseLegacyWorkspace(): Promise<RecordsStatus> {
-  return tauriInvoke("records_pause_legacy");
-}
-
-export type AccountLeaveReceipt = {
-  operation_id: string;
-  complete: boolean;
-  copied_hosts: number;
-  mappings: Array<{
-    source_space_id: string;
-    source_host_id: string;
-    local_host_id: string;
-    alias: string;
-  }>;
-  pending_error: string | null;
-};
-export type AccountLeaveResult = {
-  receipt: AccountLeaveReceipt;
-  overview: RecordOverview;
-};
-export async function leaveRecordAccount(): Promise<AccountLeaveResult> {
-  return tauriInvoke("records_account_leave");
-}
-export async function rotateRecordAccount(
-  deviceName: string,
-): Promise<AccountSetupResult> {
-  return tauriInvoke("records_account_rotate", { deviceName });
-}
 
 export async function createRecordGroup(
   scope: HostScope,
@@ -674,10 +551,6 @@ export const confirmRecordDeploy = (previewId: string, authorized: boolean) =>
   });
 export const cancelRecordDeploy = (previewId: string) =>
   tauriInvoke<void>("records_deploy_cancel", { previewId });
-
-export async function resolveRecordConflict(conflict: RecordConflict, choice: "local" | "remote" | "copy_remote", copyAlias?: string): Promise<RecordOverview> {
-  return tauriInvoke("records_conflict_resolve", { spaceId: conflict.space_id, key: conflict.key, token: conflict.token, choice, copyAlias: copyAlias ?? null });
-}
 
 export function exportRecordHosts(previousWorkspace = false, workspace?: string): Promise<{ path: string; hosts: number; groups: number } | null> {
   return tauriInvoke("records_hosts_export", { previousWorkspace, workspace: workspace ?? null });

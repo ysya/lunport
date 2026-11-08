@@ -3,9 +3,6 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
 use crate::error::AppError;
 
 /// Validate a write against the immutable build profile (injected only by unit fixtures).
@@ -329,60 +326,6 @@ pub fn prune_backups(target: &Path, keep: usize) -> Result<usize, AppError> {
     Ok(deleted)
 }
 
-/// 檔案指紋：用於偵測 SSH config 被外部工具（ssh CLI、其他編輯器）改動。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
-pub struct Fingerprint {
-    /// 修改時間（unix 毫秒；取不到時為 0）
-    #[cfg_attr(test, ts(type = "number"))]
-    pub mtime_ms: u64,
-    /// 檔案內容的小寫 hex SHA-256
-    pub sha256: String,
-}
-
-/// 內容的指紋(不讀檔):`file_fingerprint` 的內容那一半,修改時間不知道 → 0。寫入已經落地、之後重讀指紋卻失敗時,拿剛寫的位元組算一個頂替。
-/// `has_changed` 只比內容雜湊,但有三處把整個 `Fingerprint`(含 `mtime_ms`)一起比:`config::commands::load_wakes_sync`、`files::prepare_files`(`include_changed`)與
-/// `files::apply_and_commit_space`(讀檔時的指紋)。所以頂替的指紋(`mtime_ms` = 0)和之後重載同一份內容算出來的不相等 —— 代價最多多一次重掃或喚醒:下一次
-/// `config_load` 多發一次喚醒,或一輪看到 `Applied::FileChanged` 多重跑一次;重載之後 doc 裡就是真的指紋,不會再有。
-pub fn fingerprint_of(bytes: &[u8]) -> Fingerprint {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Fingerprint {
-        mtime_ms: 0,
-        sha256: hex_lower(&hasher.finalize()),
-    }
-}
-
-pub fn file_fingerprint(path: &Path) -> Result<Fingerprint, AppError> {
-    let bytes = fs::read(path)?;
-    let sha256 = fingerprint_of(&bytes).sha256;
-
-    let mtime_ms = fs::metadata(path)?
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    Ok(Fingerprint { mtime_ms, sha256 })
-}
-
-/// 檔案目前內容雜湊是否與快照不同（內容導向，比 mtime 可靠）。
-pub fn has_changed(path: &Path, snapshot: &Fingerprint) -> Result<bool, AppError> {
-    let current = file_fingerprint(path)?;
-    Ok(current.sha256 != snapshot.sha256)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,44 +517,6 @@ mod tests {
         assert!(!mirror.join("config.200.bak").exists());
     }
 
-    #[test]
-    fn fingerprint_is_stable_for_same_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("config");
-        fs::write(&p, b"v1").unwrap();
-        let a = file_fingerprint(&p).unwrap();
-        let b = file_fingerprint(&p).unwrap();
-        assert_eq!(a.sha256, b.sha256);
-    }
-
-    #[test]
-    fn a_fingerprint_built_from_the_written_bytes_stands_in_for_the_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("config");
-        fs::write(&p, b"v1").unwrap();
-        let stand_in = fingerprint_of(b"v1");
-        assert_eq!(stand_in.sha256, file_fingerprint(&p).unwrap().sha256);
-        assert!(
-            !has_changed(&p, &stand_in).unwrap(),
-            "same content: not changed"
-        );
-        fs::write(&p, b"v2").unwrap();
-        assert!(
-            has_changed(&p, &stand_in).unwrap(),
-            "someone else wrote it afterwards: changed"
-        );
-    }
-
-    #[test]
-    fn has_changed_detects_modification() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("config");
-        fs::write(&p, b"v1").unwrap();
-        let snap = file_fingerprint(&p).unwrap();
-        assert!(!has_changed(&p, &snap).unwrap());
-        fs::write(&p, b"v2").unwrap();
-        assert!(has_changed(&p, &snap).unwrap());
-    }
 }
 
 #[cfg(test)]
@@ -688,4 +593,43 @@ mod backup_boundary_tests {
         });
         assert_eq!(fs::read(outside).unwrap(), b"keep");
     }
+}
+
+/// The user's `~/.ssh` directory. Errors if the home directory is unknown.
+pub fn ssh_dir() -> Result<PathBuf, AppError> {
+    Ok(home_dir()?.join(".ssh"))
+}
+
+/// Create `dir` (and its parents) so that only its owner can enter it: Unix 0700, Windows an owner-only DACL.
+pub fn ensure_private_dir(dir: &Path) -> Result<(), AppError> {
+    check_write(dir)?;
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    crate::sync::slot_files_windows::restrict_to_owner(dir, true)?;
+    Ok(())
+}
+
+/// Atomically write a private file: a temporary file in the same directory (Unix 0600 before writing), fsync, rename over
+/// the target; on Windows the result gets an explicit owner-only DACL.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    use std::io::Write;
+    check_write(path)?;
+    let dir = path.parent().ok_or_else(|| AppError::Other(format!("{} has no parent directory", path.display())))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| AppError::Io(e.error))?;
+    #[cfg(windows)]
+    crate::sync::slot_files_windows::restrict_to_owner(path, false)?;
+    Ok(())
 }

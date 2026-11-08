@@ -10,7 +10,6 @@ use super::{
     wire::RecordHeader,
 };
 use crate::sync::{
-    fake_relay::FakeRelay,
     record_runtime,
     testkit::{TestClock, TestDevice},
 };
@@ -296,7 +295,7 @@ fn fresh_sign_in_repairs_local_backoff_but_cannot_bypass_server_retry_after() {
     use super::{api::Reply, round};
     use std::time::{Duration, Instant};
     let mut service = Service::new();
-    let d = TestDevice::new("sign-in-cooldown", &FakeRelay::new(), &TestClock::new());
+    let d = TestDevice::new("sign-in-cooldown", &TestClock::new());
     service.login(&d);
     let before = record_runtime::snapshot(&d.env()).unwrap().0;
     let sign_in = || controller::establish(
@@ -796,10 +795,9 @@ fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<
 fn two_device_approval_binds_request_and_mac_then_acquires_the_same_keys_without_publishing_a_library(
 ) {
     let mut service = Service::new();
-    let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let first = Arc::new(TestDevice::new("first", &relay, &clock));
-    let peer = Arc::new(TestDevice::new("peer", &relay, &clock));
+    let first = Arc::new(TestDevice::new("first", &clock));
+    let peer = Arc::new(TestDevice::new("peer", &clock));
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -1185,10 +1183,9 @@ fn stage_ciphertext_checks(
 #[test]
 fn revoke_intent_survives_lost_response_restart_and_omission_until_verified_barriers_finish() {
     let service = Service::new();
-    let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let first = TestDevice::new("first", &relay, &clock);
-    let peer = TestDevice::new("peer", &relay, &clock);
+    let first = TestDevice::new("first", &clock);
+    let peer = TestDevice::new("peer", &clock);
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -1322,10 +1319,9 @@ fn native_rotation_resumes_the_same_plan_after_lost_stage_and_commit_responses_a
         rotation, rotation_runtime, round, wire,
     };
     let service = Service::new();
-    let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let first = TestDevice::new("first", &relay, &clock);
-    let peer = TestDevice::new("peer", &relay, &clock);
+    let first = TestDevice::new("first", &clock);
+    let peer = TestDevice::new("peer", &clock);
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -1333,9 +1329,9 @@ fn native_rotation_resumes_the_same_plan_after_lost_stage_and_commit_responses_a
     service.login(&peer);
     let code = devices::pairing_code(&peer.env()).unwrap();
     devices::approve(&first.env(), &code.code).unwrap();
-    let second = TestDevice::new("second", &relay, &clock);
-    let offline = TestDevice::new("offline", &relay, &clock);
-    let late = TestDevice::new("late", &relay, &clock);
+    let second = TestDevice::new("second", &clock);
+    let offline = TestDevice::new("offline", &clock);
+    let late = TestDevice::new("late", &clock);
     for d in [&second, &offline, &late] {
         service.login(d);
         let code = devices::pairing_code(&d.env()).unwrap();
@@ -1803,7 +1799,7 @@ fn native_rotation_resumes_the_same_plan_after_lost_stage_and_commit_responses_a
 #[test]
 fn refused_device_grant_retains_only_account_access_and_can_be_retried_without_resetting_trust() {
     let mut service = Service::new();
-    let first = TestDevice::new("first", &FakeRelay::new(), &TestClock::new());
+    let first = TestDevice::new("first", &TestClock::new());
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -1882,10 +1878,9 @@ fn account_only_revoke_binds_fresh_subject_target_and_epoch_preserves_intent_and
         *device.runtime.central_login.lock().unwrap() = Some(("synthetic-step-up".into(), None));
     }
     let service = Service::new();
-    let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let first = TestDevice::new("first", &relay, &clock);
-    let peer = TestDevice::new("peer", &relay, &clock);
+    let first = TestDevice::new("first", &clock);
+    let peer = TestDevice::new("peer", &clock);
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -2065,10 +2060,9 @@ fn recovery_fixture_with_source(
     use super::{payload, rekey, wire};
     use crate::sync::records_v3::HostScope;
     let service = Service::new();
-    let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let first = Arc::new(TestDevice::new("original", &relay, &clock));
-    let peer = Arc::new(TestDevice::new("recovered", &relay, &clock));
+    let first = Arc::new(TestDevice::new("original", &clock));
+    let peer = Arc::new(TestDevice::new("recovered", &clock));
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -2311,9 +2305,8 @@ fn offline_kit_recovery_handles_a_second_loss_before_the_prior_barrier_or_conten
         "submitted"
     );
     assert!(service.state.lock().unwrap().barrier_pending);
-    let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let another = TestDevice::new("second-loss", &relay, &clock);
+    let another = TestDevice::new("second-loss", &clock);
     service.login(&another);
     service.state.lock().unwrap().hold_barrier = false;
     let second = recovery_flow::begin(&another.env(), Some(&replacement.kit)).unwrap();
@@ -2510,7 +2503,7 @@ fn offline_kit_recovery_revalidation_requires_the_current_source_kit_but_keeps_i
     let (service, peer, kit, _) = recovery_fixture(1);
     let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
     let future = recovery_credentials::reveal(&peer.env()).unwrap();
-    let other = TestDevice::new("other-recovery", &peer.relay, &peer.clock);
+    let other = TestDevice::new("other-recovery", &peer.clock);
     service.login(&other);
     let another = recovery_flow::begin(&other.env(), Some(&kit.kit)).unwrap();
     let current = recovery_credentials::reveal(&other.env()).unwrap();
@@ -2557,7 +2550,7 @@ fn offline_kit_recovery_revalidation_keeps_the_previous_durable_attempt_on_cance
 fn selected_replacement_identity_is_used_for_sign_in_and_background_resume_without_default_fallback() {
     use super::{client_state::State, credentials::DeviceIdentity, workspace::Workspace};
     use crate::sync::env::Keychain;
-    let service=Service::new(); let peer=TestDevice::new("selected",&FakeRelay::new(),&TestClock::new());
+    let service=Service::new(); let peer=TestDevice::new("selected",&TestClock::new());
     service.login(&peer);
     let mut records=record_runtime::snapshot(&peer.env()).unwrap().0;
     let old=records.local.central.as_ref().unwrap();
@@ -2574,7 +2567,7 @@ fn selected_replacement_identity_is_used_for_sign_in_and_background_resume_witho
     // Fixture for a previously authorized on-disk selection. Ordinary publication cannot seed it.
     records.local.central=Some(selected);
     std::fs::write(&peer.env().state_path,serde_json::to_vec(&records).unwrap()).unwrap();
-    let trusted=TestDevice::new("trusted-selector",&peer.relay,&peer.clock);
+    let trusted=TestDevice::new("trusted-selector",&peer.clock);
     service.login(&trusted);
     bootstrap::prepare(&trusted.env()).unwrap(); let kit=bootstrap::reveal(&trusted.env()).unwrap();
     bootstrap::confirm(&trusted.env(),&kit.root).unwrap();
@@ -2822,7 +2815,7 @@ fn staged_replacement_uses_one_core_and_independent_recovery_authorities_through
         recovery_state::PreparedRecovery,replacement::{self,Route}};
     use crate::sync::env::Keychain;
     for fail_after_rename in [false,true] {
-    let service=Service::new();let d=TestDevice::new("replace-same-machine",&FakeRelay::new(),&TestClock::new());
+    let service=Service::new();let d=TestDevice::new("replace-same-machine",&TestClock::new());
     service.login(&d);bootstrap::prepare(&d.env()).unwrap();let reveal=bootstrap::reveal(&d.env()).unwrap();
     bootstrap::confirm(&d.env(),&reveal.root).unwrap();
     let original=record_runtime::snapshot(&d.env()).unwrap().0;
@@ -2982,8 +2975,8 @@ fn staged_replacement_uses_one_core_and_independent_recovery_authorities_through
 fn trusted_replacement_requires_the_protected_oob_secret_and_exact_selected_session() {
     use super::{api::{Api,Control},credentials::DeviceIdentity,owner::OwnerPath,replacement::{self,Route}};
     use crate::sync::env::Keychain;
-    let service=Service::new();let relay=FakeRelay::new();let clock=TestClock::new();
-    let d=TestDevice::new("old-owner",&relay,&clock);let trusted=TestDevice::new("trusted",&relay,&clock);
+    let service=Service::new();let clock=TestClock::new();
+    let d=TestDevice::new("old-owner",&clock);let trusted=TestDevice::new("trusted",&clock);
     service.login(&d);bootstrap::prepare(&d.env()).unwrap();let kit=bootstrap::reveal(&d.env()).unwrap();bootstrap::confirm(&d.env(),&kit.root).unwrap();
     service.login(&trusted);let code=devices::pairing_code(&trusted.env()).unwrap();devices::approve(&d.env(),&code.code).unwrap();controller::refresh(&trusted.env()).unwrap();
     let old=controller::context(&d.env()).unwrap();let profile=old.profile.profile().unwrap();let saved=d.keychain.entry(&profile.slot("device"));
@@ -3477,10 +3470,9 @@ fn automatic_password_setup_commits_only_ciphertext_before_cleanup_and_new_devic
     use super::{automatic, unlock_flow};
     let service = Service::automatic();
     super::api::with_test_transport(&service.origin, &service.server.url(), || {
-        let relay = FakeRelay::new();
         let clock = TestClock::new();
-        let first = TestDevice::new("automatic-first", &relay, &clock);
-        let peer = TestDevice::new("automatic-peer", &relay, &clock);
+        let first = TestDevice::new("automatic-first", &clock);
+        let peer = TestDevice::new("automatic-peer", &clock);
         first.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
         peer.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
         service.login(&first);
@@ -3562,10 +3554,9 @@ fn automatic_unlock_resumes_a_committed_join_after_lost_reply_and_process_restar
     use super::{automatic, unlock_flow};
     let service = Service::automatic();
     super::api::with_test_transport(&service.origin, &service.server.url(), || {
-        let relay = FakeRelay::new();
         let clock = TestClock::new();
-        let first = TestDevice::new("automatic-a", &relay, &clock);
-        let peer = TestDevice::new("automatic-b", &relay, &clock);
+        let first = TestDevice::new("automatic-a", &clock);
+        let peer = TestDevice::new("automatic-b", &clock);
         service.login(&first);
         automatic::start(&first.env()).unwrap();
         let password = "synthetic recovery password";
@@ -3593,10 +3584,9 @@ fn automatic_fresh_library_publishes_and_second_device_materializes_hosts_withou
     use super::automatic;
     let service = Service::automatic();
     super::api::with_test_transport(&service.origin, &service.server.url(), || {
-        let relay = FakeRelay::new();
         let clock = TestClock::new();
-        let first = TestDevice::new("automatic-library-a", &relay, &clock);
-        let peer = TestDevice::new("automatic-library-b", &relay, &clock);
+        let first = TestDevice::new("automatic-library-a", &clock);
+        let peer = TestDevice::new("automatic-library-b", &clock);
         first.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
         peer.keychain.windows_credentials.store(true, std::sync::atomic::Ordering::SeqCst);
         service.login(&first);
@@ -3682,7 +3672,7 @@ fn automatic_empty_library_resumes_after_signout_before_cutover() {
     for prepared_steps in [0, 2] {
         let service = Service::automatic();
         super::api::with_test_transport(&service.origin, &service.server.url(), || {
-            let first = TestDevice::new("resume-empty", &FakeRelay::new(), &TestClock::new());
+            let first = TestDevice::new("resume-empty", &TestClock::new());
             service.login(&first);
             crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
             automatic::start(&first.env()).unwrap();
@@ -3720,7 +3710,7 @@ fn password_device_recovery_reuses_one_library_and_survives_a_committed_join_res
     for lost_identity in [false, true] {
         let service = Service::automatic();
         super::api::with_test_transport(&service.origin, &service.server.url(), || {
-            let first = TestDevice::new("password-reconnect", &FakeRelay::new(), &TestClock::new());
+            let first = TestDevice::new("password-reconnect", &TestClock::new());
             service.login(&first);
             crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
             automatic::start(&first.env()).unwrap();
@@ -3785,7 +3775,7 @@ fn password_device_recovery_preserves_hosts_groups_keys_and_an_unsent_edit_throu
     use crate::sync::{env::Keychain, records_v3::{HostScope, HostPayload, GroupPayload}};
     // Keep large native test runtimes out of the data/reconciliation driver's stack frame.
     #[inline(never)]
-    fn device(name: &str) -> Box<TestDevice> { Box::new(TestDevice::new(name, &FakeRelay::new(), &TestClock::new())) }
+    fn device(name: &str) -> Box<TestDevice> { Box::new(TestDevice::new(name, &TestClock::new())) }
     struct NoPrompt<'a>(&'a dyn Keychain);
     impl Keychain for NoPrompt<'_> {
         fn get(&self, _: &str) -> Result<Option<String>, crate::error::AppError> { panic!("interactive recovery credential read") }
@@ -3904,7 +3894,7 @@ fn password_device_recovery_rejects_corrupt_or_rolled_back_history_without_switc
     for rollback in [false, true] {
         let service = Service::automatic();
         super::api::with_test_transport(&service.origin, &service.server.url(), || {
-            let first = TestDevice::new("reconnect-bad-history", &FakeRelay::new(), &TestClock::new());
+            let first = TestDevice::new("reconnect-bad-history", &TestClock::new());
             service.login(&first);
             crate::sync::testkit::private_directory(first.env().state_path.parent().unwrap());
             let payload: crate::sync::records_v3::HostPayload = serde_json::from_value(json!({"schema":2,"alias":"must-survive","hostname":"preserve.invalid","auth":"password"})).unwrap();

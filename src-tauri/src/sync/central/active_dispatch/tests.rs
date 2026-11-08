@@ -426,18 +426,6 @@ impl crate::sync::env::SyncEvents for AssertUnlocked<'_> {
             "status callback cannot hold Core"
         );
     }
-    fn applied(&self, _: usize) {
-        self.status();
-    }
-    fn conflict(&self, _: &[crate::sync::dto::SyncConflict]) {
-        self.status();
-    }
-    fn approval(&self, _: &[crate::sync::dto::ApprovalNotice]) {
-        self.status();
-    }
-    fn notice(&self, _: &crate::sync::state_v2::SyncNotice) {
-        self.status();
-    }
     fn wake(&self) {}
 }
 #[test]

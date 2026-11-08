@@ -8,7 +8,6 @@ import {
   confirmMigrationDraft,
   resumeMigrationDraft,
   applyMigrationStatus,
-  pauseLegacyForMigration,
   discardMigrationPreview,
   type MigrationDraft,
 } from "./migration-actions";
@@ -22,13 +21,13 @@ const result = (complete = false): api.MigrationResult => ({
   },
   status: complete
     ? recordsStatus()
-    : recordsStatus({ format: "legacy", legacy_paused: true, overview: null }),
+    : recordsStatus({ format: "legacy", overview: null }),
 });
 const client = () => {
   const cache = new QueryClient();
   cache.setQueryData(
     api.recordsStatusKey,
-    recordsStatus({ format: "legacy", legacy_paused: true, overview: null }),
+    recordsStatus({ format: "legacy", overview: null }),
   );
   return cache;
 };
@@ -182,44 +181,6 @@ describe("component-only migration draft", () => {
       ],
     ]);
   });
-  it("requires saved-edits acknowledgment before stopping the legacy writer", async () => {
-    const cache = client();
-    const paused = recordsStatus({
-      format: "legacy",
-      legacy_paused: true,
-      overview: null,
-    });
-    const calls = stubBackend(async () => paused);
-    expect(await pauseLegacyForMigration(cache, false)).toBe(false);
-    expect(calls).toEqual([]);
-    expect(await pauseLegacyForMigration(cache, true)).toBe(true);
-    expect(calls).toEqual([["records_pause_legacy", {}]]);
-    expect(cache.getQueryData(api.recordsStatusKey)).toEqual(paused);
-  });
-  it("cancels a status reply captured before pausing so it cannot remount Legacy", async () => {
-    const cache = client();
-    const unpaused = recordsStatus({
-      format: "legacy",
-      legacy_paused: false,
-      overview: null,
-    });
-    const paused = { ...unpaused, legacy_paused: true };
-    cache.setQueryData(api.recordsStatusKey, unpaused);
-    let resolve!: (value: api.RecordsStatus) => void;
-    stubBackend(async (command) =>
-      command === "records_status"
-        ? new Promise<api.RecordsStatus>((complete) => {
-            resolve = complete;
-          })
-        : paused,
-    );
-    const hook = renderHook(cache, api.useRecordsStatus);
-    const inFlight = hook.refetch();
-    await pauseLegacyForMigration(cache, true);
-    resolve(unpaused);
-    await inFlight;
-    expect(cache.getQueryData(api.recordsStatusKey)).toEqual(paused);
-  });
   it("disposes a preview with only the memory-cache cancellation RPC", async () => {
     const cache = client();
     const current = cache.getQueryData(api.recordsStatusKey);
@@ -237,7 +198,6 @@ describe("component-only migration draft", () => {
     const cache = client();
     const legacy = recordsStatus({
       format: "legacy",
-      legacy_paused: false,
       overview: null,
     });
     cache.setQueryData(api.recordsStatusKey, legacy);

@@ -636,12 +636,11 @@ impl Directory {
 mod tests {
     use super::*;
     use crate::sync::{
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     use std::fs;
     fn device() -> TestDevice {
-        TestDevice::new("source-files", &FakeRelay::new(), &TestClock::new())
+        TestDevice::new("source-files", &TestClock::new())
     }
     fn write(path: &Path, value: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

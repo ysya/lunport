@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { copyText } from "@/lib/clipboard";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { transportFor } from "@/lib/transports";
 import { applyCollectionAction } from "./collection-actions";
 import { selectGroup } from "./group-tree";

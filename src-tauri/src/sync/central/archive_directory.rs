@@ -388,7 +388,6 @@ impl ArchiveDirectory {
 mod tests {
     use super::*;
     use crate::sync::{
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     use std::{
@@ -398,7 +397,6 @@ mod tests {
     fn device() -> TestDevice {
         TestDevice::new(
             "source-archive-directory",
-            &FakeRelay::new(),
             &TestClock::new(),
         )
     }

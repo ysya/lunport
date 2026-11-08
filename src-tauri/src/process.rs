@@ -6,7 +6,7 @@
 //! intentionally *inside a terminal* must not use this helper.
 
 use std::ffi::OsStr;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command};
 use std::sync::{PoisonError, RwLock};
 
 /// Build a background command that never creates a console window on Windows.
@@ -49,12 +49,6 @@ pub fn spawn(command: &mut Command) -> std::io::Result<Child> {
     command.spawn()
 }
 
-/// 同 `command.output()`(stdin 接 null、stdout 與 stderr 收下來),spawn 經過 `spawn`;等子程序結束時不拿鎖。
-pub fn output(command: &mut Command) -> std::io::Result<Output> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    spawn(command)?.wait_with_output()
-}
-
 /// 執行 `f`,期間沒有經過 `spawn` 的 spawn 在進行,也不會開始。`f` 不能 spawn(會鎖死),也不該等太久(spawn 都在等它)。
 pub fn without_spawns<T>(f: impl FnOnce() -> T) -> T {
     let _quiet = SPAWNING.write().unwrap_or_else(PoisonError::into_inner);
@@ -95,12 +89,4 @@ mod tests {
         assert!(spawner.join().unwrap().success());
     }
 
-    /// `output` 同 `Command::output`:收下 stdout 與 stderr,stdin 是空的。
-    #[cfg(unix)]
-    #[test]
-    fn output_captures_both_streams_and_gives_an_empty_stdin() {
-        let out = output(Command::new("sh").args(["-c", "cat; printf out; printf err >&2"])).unwrap();
-        assert!(out.status.success());
-        assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (&b"out"[..], &b"err"[..]));
-    }
 }

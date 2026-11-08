@@ -19,7 +19,7 @@ import {
   type CentralStatus,
   type CentralDeviceRegistry,
 } from "@/lib/central-sync";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 const stateLabel = {
   approved: "Approved",
   pending: "Waiting for password unlock",

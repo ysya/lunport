@@ -1,5 +1,4 @@
 import type { TerminalInfo } from "@/bindings/TerminalInfo";
-import type { LintIssue } from "@/bindings/LintIssue";
 
 export const IN_APP_TERMINAL = "lunport";
 export const DEFAULT_TERMINAL_FONT_SIZE = 14;
@@ -50,40 +49,6 @@ export function clampFontSize(value: unknown): number {
     : DEFAULT_FONT_SIZE;
 }
 
-/**
- * The lint rules the backend emits, with stable kebab-case ids (mirrors
- * `LintIssue.rule`) and human-readable labels for the Settings switches.
- */
-export const LINT_RULES = [
-  { id: "duplicate-directive", label: "Duplicate directives" },
-  { id: "shadowed-host", label: "Shadowed host aliases" },
-  { id: "missing-identity-file", label: "Missing identity files" },
-  { id: "insecure-strict-host-key-checking", label: "Insecure StrictHostKeyChecking" },
-  { id: "undefined-proxy-jump", label: "Undefined ProxyJump hops" },
-] as const;
-
-/** All known lint rules enabled — the store default. */
-export function defaultLintRules(): Record<string, boolean> {
-  return Object.fromEntries(LINT_RULES.map((r) => [r.id, true]));
-}
-
-/**
- * Keep only issues whose rule is enabled. Unknown rule ids stay visible (fail
- * open) so issues from rules the backend adds later are never silently hidden.
- */
-export function filterLintIssues<T extends Pick<LintIssue, "rule">>(
-  issues: T[],
-  rules: Record<string, boolean>,
-): T[] {
-  return issues.filter((issue) => rules[issue.rule] !== false);
-}
-
-/**
- * The global quick-connect accelerator for a platform, in the global-shortcut
- * plugin's hotkey syntax. NOTE: the underlying parser (`global-hotkey` crate)
- * does NOT accept "Meta" — the macOS command key is spelled "Super" (or
- * "Command"). Pure — testable.
- */
 export function quickConnectShortcut(platform: string | undefined): string {
   return platform === "macos" ? "Alt+Super+K" : "Ctrl+Alt+K";
 }
@@ -91,23 +56,6 @@ export function quickConnectShortcut(platform: string | undefined): string {
 /** Human-readable label for {@link quickConnectShortcut} (shown in Settings). */
 export function quickConnectLabel(platform: string | undefined): string {
   return platform === "macos" ? "⌥⌘K" : "Ctrl+Alt+K";
-}
-
-/**
- * The terminal id to launch a connection to `alias` into: the host's override
- * (from the settings store's `hostTerminals`) wins; otherwise the global
- * preference; otherwise `null` = system default / first detected. Pass the
- * result BOTH as `terminalOverride` and into `effectiveNewTab` — new-tab
- * gating must follow the terminal that will actually launch.
- */
-export function resolveTerminal(
-  alias: string,
-  hostTerminals: Record<string, string>,
-  globalTerminalId: string | null,
-): string | null {
-  const override = hostTerminals[alias];
-  if (override !== undefined && override !== "") return override;
-  return globalTerminalId ?? null;
 }
 
 /**
@@ -124,8 +72,11 @@ export function terminalSupportsNewTab(
 }
 
 /**
- * The `newTab` value to actually send to `connect_launch`: the user's
- * preference, gated on the resolved terminal supporting tabs at all.
+ * The terminal id to launch a connection to `alias` into: the host's override
+ * (from the settings store's `hostTerminals`) wins; otherwise the global
+ * preference; otherwise `null` = system default / first detected. Pass the
+ * result BOTH as `terminalOverride` and into `effectiveNewTab` — new-tab
+ * gating must follow the terminal that will actually launch.
  */
 export function effectiveNewTab(
   newTabConnect: boolean,

@@ -1,7 +1,6 @@
 use super::*;
 use crate::sync::{
     central::inventory_keys::Snapshot,
-    fake_relay::FakeRelay,
     testkit::{TestClock, TestDevice},
 };
 struct Fixture {
@@ -12,7 +11,7 @@ struct Fixture {
     operation: String,
 }
 fn fixture(copy: bool) -> Fixture {
-    let device = TestDevice::new("import-inventory", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("import-inventory", &TestClock::new());
     let env = device.env();
     let probe = record_runtime::probe_startup(&env.state_path, "import-inventory");
     record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();

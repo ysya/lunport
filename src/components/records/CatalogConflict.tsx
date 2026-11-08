@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import type { CatalogCollision, CatalogReview } from "@/lib/central-sync";
 import type { RecordOverview } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { iapTarget, parentLabel } from "@/lib/transports";
 import { tunnelRoute } from "@/lib/tunnels";
 

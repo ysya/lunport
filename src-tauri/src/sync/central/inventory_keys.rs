@@ -247,7 +247,6 @@ mod tests {
     use crate::{
         sync::{
             central::{migration_files::Files, migration_materials::Materials},
-            fake_relay::FakeRelay,
             testkit::{MemKeychain, TestClock, TestDevice},
         },
         vault::{material, store::Vault},
@@ -270,7 +269,7 @@ mod tests {
     }
     #[test]
     fn captured_decryptors_restore_exact_vault_images_without_the_original_os_items() {
-        let device = TestDevice::new("vault-decryptors", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("vault-decryptors", &TestClock::new());
         let env = device.env();
         let root = env.state_path.parent().unwrap();
         fs::create_dir_all(root).unwrap();

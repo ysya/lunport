@@ -15,7 +15,7 @@ import {
   type ImportPreviewResult,
   type ImportResult,
 } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { submitImportConsent, resumeImport } from "./panel-actions";
 import { RecordField } from "./form";
 export function ImportReview({

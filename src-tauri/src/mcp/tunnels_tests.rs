@@ -8,10 +8,7 @@ use crate::ssh::{
     AuthMethod, Hop, HostId,
 };
 use crate::sync::testkit::MemKeychain;
-use crate::sync::{
-    fake_relay::FakeRelay,
-    testkit::{TestClock, TestDevice},
-};
+use crate::sync::testkit::{TestClock, TestDevice};
 use std::sync::atomic::AtomicUsize;
 
 fn device() -> TestDevice {
@@ -19,7 +16,7 @@ fn device() -> TestDevice {
 }
 /// A device whose fresh records `edit` changes before they are activated.
 fn device_with(edit: impl FnOnce(SyncStateV3) -> SyncStateV3) -> TestDevice {
-    let d = TestDevice::new("tunnels", &FakeRelay::new(), &TestClock::new());
+    let d = TestDevice::new("tunnels", &TestClock::new());
     let record_runtime::StartupProbe::Records { mut state, .. } = record_runtime::probe_startup(&d.env().state_path, "tunnels") else {
         panic!("fresh records")
     };

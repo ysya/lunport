@@ -86,9 +86,4 @@ grep -Eq 'partition ACL count: [1-9][0-9]*$' "$probe_dir/partition.txt"
 cp "$probe_dir/version-2" "$probe_dir/current"
 "$probe_dir/current" denied "$original_default" "$service" "$partition_account"
 echo 'Reproduced: a cdhash-restricted existing item rejects a rebuilt executable with the same certificate and designated requirement.'
-if [[ ${1:-} == --with-rust ]]; then
-  security default-keychain -d user -s "$keychain"
-  SSHELTER_CI_KEYCHAIN_PROBE_ACCOUNT="$account" cargo test --locked --manifest-path "$repo_dir/src-tauri/Cargo.toml" --lib -- \
-    --ignored --exact secrets::tests::native_metadata_probe --nocapture
-fi
 echo 'Unrestricted fixture retained stable-signer access; cdhash-restricted fixture needs new authorization; unrelated signer denied.'

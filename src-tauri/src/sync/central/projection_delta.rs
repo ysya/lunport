@@ -527,7 +527,6 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         sync::{
-            fake_relay::FakeRelay,
             testkit::{TestClock, TestDevice},
         },
         vault::store::{self, Vault},
@@ -607,7 +606,7 @@ pub(super) mod tests {
         super::super::wire::number(value, false).unwrap()
     }
     fn empty_finish(delta: Delta) -> Verified {
-        let device = TestDevice::new("delta-readback", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("delta-readback", &TestClock::new());
         let vault = store::read_vault(
             &store::vault_path(&device.env().state_path),
             &device.keychain,
@@ -822,7 +821,7 @@ pub(super) mod tests {
         state.local.keys.clear();
         let delta = Delta::prepare(&state, &keys, 200).unwrap();
         assert_eq!(delta.required_material(), &BTreeSet::from([id.clone()]));
-        let device = TestDevice::new("delta-protected", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("delta-protected", &TestClock::new());
         let path = store::vault_path(&device.env().state_path);
         let protected_id = "e".repeat(32);
         let empty = store::read_vault(&path, &device.keychain).unwrap();
@@ -1121,7 +1120,6 @@ mod material_tests {
     use super::*;
     use crate::{
         sync::{
-            fake_relay::FakeRelay,
             testkit::{TestClock, TestDevice},
         },
         vault::store::{self, EntryOrigin, Vault, VaultEntry},
@@ -1171,7 +1169,7 @@ mod material_tests {
                 payload::PrivateMaterial::new(zeroize::Zeroizing::new(private)).unwrap(),
             ),
         );
-        let device = TestDevice::new("delta-key-C", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("delta-key-C", &TestClock::new());
         let path = store::vault_path(&device.env().state_path);
         let destination = "e".repeat(32);
         let mut vault = Vault::open(&path, &device.keychain, 1).unwrap();
@@ -1246,7 +1244,7 @@ mod material_tests {
             },
             payload::Data::Keyslot(slot),
         );
-        let device = TestDevice::new("delta-rename", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("delta-rename", &TestClock::new());
         let path = store::vault_path(&device.env().state_path);
         let mut vault = Vault::open(&path, &device.keychain, 1).unwrap();
         vault
@@ -1276,7 +1274,7 @@ mod material_tests {
         let (mut state, keys, _, id, entry) = material_fixture();
         state.local.keys.clear();
         let old = Delta::prepare(&state, &keys, 200).unwrap();
-        let device = TestDevice::new("delta-late-B", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("delta-late-B", &TestClock::new());
         let path = store::vault_path(&device.env().state_path);
         let destination = "e".repeat(32);
         let mut vault = Vault::open(&path, &device.keychain, 1).unwrap();
@@ -1336,7 +1334,7 @@ mod material_tests {
             .issues()
             .iter()
             .any(|issue| issue.kind == super::super::projection::IssueKind::ReferenceHasMaterial));
-        let device = TestDevice::new("delta-reference", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("delta-reference", &TestClock::new());
         let empty = store::read_vault(
             &store::vault_path(&device.env().state_path),
             &device.keychain,

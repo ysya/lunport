@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { useUiStore } from "@/stores/ui";
 import { CLOUD_PROVIDERS } from "@/lib/cloud";
 import { Disclosure } from "@/components/app/Disclosure";

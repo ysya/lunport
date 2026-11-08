@@ -1,7 +1,6 @@
 use super::*;
 use crate::sync::{
     env::Keychain,
-    fake_relay::FakeRelay,
     testkit::{MemKeychain, TestClock, TestDevice},
 };
 use std::{
@@ -9,7 +8,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 fn fixture() -> (TestDevice, Workspace) {
-    let device = TestDevice::new("source-cursor", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("source-cursor", &TestClock::new());
     fs::create_dir_all(device.env().state_path.parent().unwrap()).unwrap();
     let (owner, _, _) = crate::sync::central::migration_history::tests::initial();
     (device, owner)

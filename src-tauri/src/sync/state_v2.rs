@@ -1,30 +1,54 @@
-//! Sync v2 的本機狀態(spec §4.4):`sync-state.json` 升為 `version: 2`(0600,`atomic_write`),路徑同 v1
-//! (`state::state_path`)。只保存帳戶、這台勾選的 space 與這台的金鑰插槽;space 的權杖與金鑰、同步的私鑰只以帳戶金鑰
-//! 加密的 envelope 落地(`AccountState::sealed`),在記憶體解開。讀到 `version: 1` 的檔案 → `LoadedState::Legacy`
-//! (交給 v1 升級,spec §7.6),不解析成 v2。
+//! The retired Legacy workspace's Sync v2 state (`sync-state.json`, `version: 2`): the account, the spaces this device chose and
+//! its key slots, with space keys and synced private keys only as envelopes sealed with the account key
+//! (`AccountState::sealed`). Decode-only: the migration review, central's source capture and the records state (whose
+//! `AccountState` is this one) read it; nothing writes a v2 file any more.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::fsutil;
-use crate::sync::approval::ApprovalSignature;
 use crate::sync::crypto::ChainKeys;
 use crate::sync::reconcile::{decode, encode};
 use crate::sync::record::{Envelope, LocalRecord, Record, RotationMarkerPayload, ACCOUNT_SCHEMA_VERSION};
 use crate::sync::relay::{PushItem, RelayInfo};
-use crate::sync::slot_files::LinkKind;
 use crate::sync::slot_rules::KeySlotPayload;
-use crate::sync::state::{SyncState as LegacyState, DEFAULT_RELAY_URL};
+use crate::sync::state::DEFAULT_RELAY_URL;
 
 pub const STATE_VERSION_V2: u32 = 2;
-/// 更換同步碼時新同步碼暫存的 keychain account(spec §7.5);現行的同步碼在 `state::MNEMONIC_ACCOUNT`。
-pub const NEXT_MNEMONIC_ACCOUNT: &str = "sync:mnemonic-next";
-/// v1 狀態檔在升級時的備份(spec §7.6 第 5 步),與 `sync-state.json` 同目錄。
-pub const LEGACY_BACKUP_FILE: &str = "sync-state.v1-backup.json";
+/// 一行受管制的設定(the retired Legacy workspace's approval signatures; kept to decode old state files).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct GatedDirective {
+    /// keyword 小寫,例如 `proxycommand`。
+    pub keyword: String,
+    /// keyword 之後的整段文字(含解析器當成行尾註解的部分),去頭尾空白。
+    pub value: String,
+}
+
+/// 核准簽章:兩份文字的簽章相同,代表受管制的設定與它們適用的主機範圍都沒變。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct ApprovalSignature {
+    /// `Host` 那一行 keyword 之後的整段文字,去頭尾空白:所有 pattern 依原順序,連同行尾註解。
+    pub host: String,
+    /// 受管制的 directive,依出現順序。
+    pub gated: Vec<GatedDirective>,
+}
+
+/// 插槽連到本機金鑰的方式(the Legacy key slots' link kinds; kept to decode old state files).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKind {
+    /// Unix:指向原檔路徑的 symlink。
+    Symlink,
+    /// Windows:hard link。
+    HardLink,
+    /// 建不了連結時的複製。
+    Copy,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SyncStateV2 {
@@ -535,92 +559,9 @@ impl RotationProgress {
     }
 }
 
-/// `load` 的結果。
-#[derive(Debug)]
-pub enum LoadedState {
-    /// 檔案不存在。
-    Missing,
-    /// `version: 1`:v1 的狀態檔,以 v1 型別解析,交給 v1 升級(spec §7.6)。
-    Legacy(Box<LegacyState>),
-    Current(Box<SyncStateV2>),
-}
-
-fn unreadable(e: serde_json::Error) -> AppError {
-    AppError::Other(format!("sync state is unreadable: {e}"))
-}
-
-/// 狀態檔的 `version`。只看這個欄位:新版的欄位不該讓整個反序列化失敗、給出誤導的訊息。
-fn state_version(bytes: &[u8]) -> Result<u32, AppError> {
-    #[derive(Deserialize)]
-    struct Probe {
-        version: u32,
-    }
-    serde_json::from_slice::<Probe>(bytes).map(|probe| probe.version).map_err(unreadable)
-}
-
-/// 讀 `sync-state.json`。錯誤分類沿用 v1 的(spec §4.4、v1 §6):讀不到
-/// (I/O)→ `AppError::Io`(檔案留在原地、這個 session 不寫狀態);內容讀不懂、版本不認得或比本 app 新 →
-/// `AppError::Other`(改名保留、之後照常存新狀態)。
-pub fn load(path: &Path) -> Result<LoadedState, AppError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(LoadedState::Missing),
-        Err(e) => return Err(AppError::Io(e)),
-    };
-    match state_version(&bytes)? {
-        1 => serde_json::from_slice(&bytes).map(|s| LoadedState::Legacy(Box::new(s))).map_err(unreadable),
-        STATE_VERSION_V2 => serde_json::from_slice(&bytes).map(|s| LoadedState::Current(Box::new(s))).map_err(unreadable),
-        v if v > STATE_VERSION_V2 => Err(AppError::Other(format!(
-            "sync state was written by a newer Lunport (version {v}); update the app"
-        ))),
-        v => Err(AppError::Other(format!("sync state has an unknown version ({v})"))),
-    }
-}
-
-/// 寫入狀態檔(0600)。明文的記錄區有祕密種類的記錄 → 錯誤,什麼都不寫(`refuse_plaintext_secrets`)。
-pub fn save(path: &Path, state: &SyncStateV2) -> Result<(), AppError> {
-    refuse_plaintext_secrets(state)?;
-    if let Some(dir) = path.parent() {
-        fsutil::ensure_dir_secure(dir)?;
-    }
-    let bytes = serde_json::to_vec_pretty(state).map_err(|e| AppError::Other(format!("cannot serialize sync state: {e}")))?;
-    fsutil::atomic_write(path, &bytes, 0o600)
-}
-
-/// 狀態檔不含明文祕密(spec §3、§4.4):`spacekey`(與 v1 預留的 `key`、`password`,`RecordKind::is_secret`)只能以
-/// `SealedRecord` 落地。明文的記錄區 —— 帳戶與每個 space 的 `records`、每一筆 `pending_approvals` —— 出現這類記錄一定是
-/// bug:拒絕寫入,訊息只說種類,絕不帶 payload。
-fn refuse_plaintext_secrets(state: &SyncStateV2) -> Result<(), AppError> {
-    let account = state.account.iter().flat_map(|a| a.records.values().map(|local| &local.record));
-    let spaces = state.spaces.values().flat_map(|space| {
-        space.records.values().map(|local| &local.record).chain(space.pending_approvals.values().map(|p| &p.record))
-    });
-    match account.chain(spaces).find(|record| record.kind.is_secret()) {
-        Some(record) => Err(AppError::Other(format!(
-            "refusing to write a {} record into the sync state in plaintext",
-            record.kind.as_str()
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// v1 升級第 5 步(spec §7.6):v1 狀態檔原樣複製成同目錄的 `sync-state.v1-backup.json`(0600),回傳檔名
-/// (記在 `legacy_v1_backup`)。在 v2 狀態寫進 `state_path` 之前呼叫。來源不是 `version: 1`(例如已經寫成 v2)→ 錯誤、
-/// 不寫備份:v1 的備份不能被別的東西蓋掉。
-pub fn back_up_legacy(state_path: &Path) -> Result<String, AppError> {
-    let bytes = std::fs::read(state_path)?;
-    let version = state_version(&bytes)?;
-    if version != 1 {
-        return Err(AppError::Other(format!("refusing to back up a sync state that is not version 1 (version {version})")));
-    }
-    fsutil::atomic_write(&state_path.with_file_name(LEGACY_BACKUP_FILE), &bytes, 0o600)?;
-    Ok(LEGACY_BACKUP_FILE.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::approval::signature;
     use crate::sync::record::{record_key, RecordKind, SpaceKeyPayload};
     use crate::sync::slot_rules::SlotMode;
 
@@ -719,8 +660,11 @@ mod tests {
                 record: host("web", incoming),
                 seq: 4,
                 text: incoming.to_string(),
-                applied: signature("Host web\n  HostName 10.0.0.1\n"),
-                incoming: signature(incoming),
+                applied: ApprovalSignature { host: "web".to_string(), gated: Vec::new() },
+                incoming: ApprovalSignature {
+                    host: "web".to_string(),
+                    gated: vec![GatedDirective { keyword: "proxycommand".to_string(), value: "nc %h 22".to_string() }],
+                },
                 from_device: "MacBook-B".to_string(),
             },
         );
@@ -742,7 +686,7 @@ mod tests {
             features: vec!["pull-batch".to_string(), "freeze".to_string()],
             checked_at_ms: 50,
         });
-        s.legacy_v1_backup = Some(LEGACY_BACKUP_FILE.to_string());
+        s.legacy_v1_backup = Some("sync-state.v1-backup.json".to_string());
         // 三種插槽來源都有,`LocalSlot` 的每個欄位在其中一筆裡都不是預設值(`parked` 只有連結的記錄用得到,`local_only` 只有保管庫的記錄用得到)。
         s.key_slots.insert(
             "3fa2c1d90123456789abcdef01234567".to_string(),
@@ -829,15 +773,13 @@ mod tests {
         assert!(space.declined.is_empty() && space.republish.is_empty() && !space.missing && space.rename_blocked.is_none());
     }
 
+    /// What an old build wrote decodes back unchanged: the migration review and central's source capture read these files.
     #[test]
-    fn a_v2_state_round_trips_through_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
+    fn a_v2_state_decodes_back_from_its_file_contents() {
         let s = full_state();
-        save(&path, &s).unwrap();
-        match load(&path).unwrap() {
-            LoadedState::Current(back) => assert_eq!(*back, s),
-            other => panic!("expected a v2 state, got {other:?}"),
+        match crate::sync::records_v3::decode_state(&serde_json::to_string_pretty(&s).unwrap()).unwrap() {
+            crate::sync::records_v3::DecodedState::V2(back) => assert_eq!(*back, s),
+            _ => panic!("expected a v2 state"),
         }
     }
 
@@ -856,7 +798,7 @@ mod tests {
                 file_name: "id_mac-3fa2c1d9".into(),
                 source: Some(SlotSource::Linked {
                     path: "/home/f/.ssh/id_mac".into(),
-                    link: crate::sync::slot_files::LinkKind::Symlink,
+                    link: LinkKind::Symlink,
                     fingerprint: None,
                     origin: true,
                 }),
@@ -914,67 +856,47 @@ mod tests {
     #[test]
     fn notices_of_a_kind_this_version_does_not_know_are_skipped_not_fatal() {
         // 較新版本寫的提示種類(或讀不懂的一則):降版之後狀態檔照樣讀得回來,只略過那幾則。
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
         let mut json = serde_json::to_value(SyncStateV2::fresh("A").unwrap()).unwrap();
         json["notices"] = serde_json::json!([
             { "kind": "from_a_newer_version", "detail": 1 },
             { "kind": "new_sync_code" },
             { "kind": "space_deleted", "name": "Work" }
         ]);
-        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-        match load(&path).unwrap() {
-            LoadedState::Current(back) => assert_eq!(back.notices, vec![SyncNotice::NewSyncCode]),
-            other => panic!("expected a v2 state, got {other:?}"),
-        }
+        let back: SyncStateV2 = serde_json::from_value(json).unwrap();
+        assert_eq!(back.notices, vec![SyncNotice::NewSyncCode]);
     }
 
     #[test]
     fn an_upgraded_notice_written_before_moved_files_existed_still_loads() {
         // 舊版寫的 `upgraded` 提示沒有 `moved_files`:缺欄位 = 空,提示照樣讀得回來(讀不懂的提示會被整則略過,使用者就看不到升級說明了)。
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
         let mut json = serde_json::to_value(SyncStateV2::fresh("A").unwrap()).unwrap();
         json["notices"] = serde_json::json!([
             { "kind": "upgraded", "kept_file": "/home/me/.ssh/sshelter-v1-kept.config", "kept_hosts": ["jump"] }
         ]);
-        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-        match load(&path).unwrap() {
-            LoadedState::Current(back) => assert_eq!(
-                back.notices,
-                vec![SyncNotice::Upgraded {
-                    kept_file: Some("/home/me/.ssh/sshelter-v1-kept.config".to_string()),
-                    kept_hosts: vec!["jump".to_string()],
-                    moved_files: Vec::new(),
-                }]
-            ),
-            other => panic!("expected a v2 state, got {other:?}"),
-        }
+        let back: SyncStateV2 = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.notices,
+            vec![SyncNotice::Upgraded {
+                kept_file: Some("/home/me/.ssh/sshelter-v1-kept.config".to_string()),
+                kept_hosts: vec!["jump".to_string()],
+                moved_files: Vec::new(),
+            }]
+        );
     }
 
     #[test]
-    fn a_v1_state_file_is_reported_as_legacy_not_parsed_into_v2() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
+    fn a_v1_state_file_is_decoded_as_v1_not_parsed_into_v2() {
         let mut v1 = crate::sync::state::SyncState::fresh("Box").unwrap();
         v1.chain_id = Some("ab".repeat(32));
         v1.cursor_seq = 9;
-        std::fs::write(&path, serde_json::to_vec_pretty(&v1).unwrap()).unwrap();
-        match load(&path).unwrap() {
-            LoadedState::Legacy(back) => assert_eq!(*back, v1),
-            other => panic!("expected the v1 state, got {other:?}"),
+        match crate::sync::records_v3::decode_state(&serde_json::to_string_pretty(&v1).unwrap()).unwrap() {
+            crate::sync::records_v3::DecodedState::V1(back) => assert_eq!(*back, v1),
+            _ => panic!("expected the v1 state"),
         }
     }
 
     #[test]
-    fn missing_unreadable_and_newer_files_are_classified_like_v1() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(load(&dir.path().join("nope.json")).unwrap(), LoadedState::Missing));
-        let path = dir.path().join("sync-state.json");
-        std::fs::write(&path, b"{ not json").unwrap();
-        assert!(matches!(load(&path), Err(AppError::Other(m)) if m.contains("unreadable")));
-        std::fs::write(&path, br#"{"version": 2}"#).unwrap();
-        assert!(matches!(load(&path), Err(AppError::Other(m)) if m.contains("unreadable")), "v2 without its fields");
+    fn a_minimal_v2_file_decodes_with_defaults() {
         // 只有必要欄位的 v2 檔案(較舊的版本寫的;之後才加的欄位都不在):讀得回來,缺的欄位是預設值。
         let minimal = format!(
             r#"{{"version": 2, "device_id": "d", "device_name": "A", "relay_url": "https://relay.example.com",
@@ -986,8 +908,7 @@ mod tests {
             b = "b".repeat(64),
             c = "c".repeat(64)
         );
-        std::fs::write(&path, minimal).unwrap();
-        let LoadedState::Current(s) = load(&path).unwrap() else { panic!("expected a v2 state") };
+        let s: SyncStateV2 = serde_json::from_str(&minimal).unwrap();
         assert!(!s.phrase_cleanup_pending && s.legacy_v1_backup.is_none() && s.last_sync_ms.is_none() && s.last_error.is_none());
         assert!(s.notices.is_empty());
         let account = s.account.as_ref().unwrap();
@@ -1004,91 +925,6 @@ mod tests {
         assert!(rotation.paused_until_ms.is_none());
         let features = s.relay_features.as_ref().unwrap();
         assert!(features.version.is_none() && features.features.is_empty());
-        std::fs::write(&path, br#"{"version": 3}"#).unwrap();
-        assert!(matches!(load(&path), Err(AppError::Other(m)) if m.contains("newer")));
-        std::fs::write(&path, br#"{"version": 0}"#).unwrap();
-        assert!(matches!(load(&path), Err(AppError::Other(_))));
-        // 讀不到(這裡是目錄):I/O 錯誤,呼叫端把檔案留在原地。
-        assert!(matches!(load(dir.path()), Err(AppError::Io(_))));
-    }
-
-    #[test]
-    fn space_keys_are_only_ever_stored_sealed() {
-        let account = ChainKeys::generate().unwrap();
-        let space = ChainKeys::generate().unwrap();
-        let record = spacekey_record(&space);
-        let sealed = SealedRecord::seal(&account, &record, 0).unwrap();
-        assert!(sealed.dirty);
-        assert_eq!(sealed.key(), sealed_key("spacekey", &crate::sync::crypto::id_hash(&account, "spacekey", &space.chain_id)));
-        let mut s = SyncStateV2::fresh("A").unwrap();
-        let mut section = AccountState::new(&account.chain_id);
-        section.sealed.insert(sealed.key(), sealed.clone());
-        s.account = Some(section);
-        let text = serde_json::to_string(&s).unwrap();
-        assert!(!text.contains(&space.auth_token), "the space token never reaches the state file");
-        assert!(!text.contains(&space.enc_key_b64()), "the space key never reaches the state file");
-        // 在記憶體解開;上傳的就是存著的密文,base_seq = envelope.seq。
-        assert_eq!(sealed.open(&account).unwrap(), record);
-        assert!(sealed.open(&space).is_err());
-        let item = sealed.push_item();
-        assert_eq!((item.ciphertext.as_str(), item.base_seq, item.kind.as_str()), (sealed.envelope.ciphertext.as_str(), 0, "spacekey"));
-        assert_eq!(sealed_key("spacekey", "ab"), "spacekey:ab");
-        // tombstone(刪除 space)以 relay 序號 5 封存:上傳項目就是存著的密文,kind、id_hash、nonce、deleted、base_seq 全對得上。
-        let mut tombstone = spacekey_record(&space);
-        tombstone.deleted = true;
-        tombstone.version = 2;
-        let gone = SealedRecord::seal(&account, &tombstone, 5).unwrap();
-        assert!(gone.dirty);
-        assert_eq!(gone.envelope.seq, 5);
-        assert_eq!(
-            gone.push_item(),
-            PushItem {
-                id_hash: crate::sync::crypto::id_hash(&account, "spacekey", &space.chain_id),
-                kind: "spacekey".to_string(),
-                nonce: gone.envelope.nonce.clone(),
-                ciphertext: gone.envelope.ciphertext.clone(),
-                deleted: true,
-                base_seq: 5,
-            }
-        );
-        assert_ne!(gone.envelope.nonce, sealed.envelope.nonce);
-        assert_eq!(gone.open(&account).unwrap(), tombstone);
-        // 明文的記錄區出現祕密種類(B3 的 bug):帳戶的 records、space 的 records、pending_approvals 都一樣 —— save 拒絕、
-        // 什麼都不寫,訊息不帶 payload。
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        let plaintext = LocalRecord { record: record.clone(), seq: 1, dirty: true };
-        let mut in_account = s.clone();
-        in_account.account.as_mut().unwrap().records.insert(record_key(RecordKind::SpaceKey, &space.chain_id), plaintext.clone());
-        let mut in_space = s.clone();
-        let mut space_section = SpaceState::new("work-3fa2c1d9.config");
-        space_section.records.insert(record_key(RecordKind::SpaceKey, &space.chain_id), plaintext);
-        in_space.spaces.insert(space.chain_id.clone(), space_section);
-        let mut pending = s.clone();
-        let mut pending_section = SpaceState::new("work-3fa2c1d9.config");
-        pending_section.pending_approvals.insert(
-            "web".to_string(),
-            PendingApproval {
-                record: record.clone(),
-                seq: 1,
-                text: String::new(),
-                applied: ApprovalSignature::default(),
-                incoming: ApprovalSignature::default(),
-                from_device: "MacBook-B".to_string(),
-            },
-        );
-        pending.spaces.insert(space.chain_id.clone(), pending_section);
-        let mut password = s.clone();
-        let mut secret = host("web", "x");
-        secret.kind = RecordKind::Password;
-        password.account.as_mut().unwrap().records.insert(record_key(RecordKind::Password, "web"), LocalRecord { record: secret, seq: 1, dirty: false });
-        for leak in [in_account, in_space, pending, password] {
-            let error = save(&path, &leak).unwrap_err().to_string();
-            assert!(error.contains("in plaintext"), "{error}");
-            assert!(!error.contains(&space.auth_token) && !error.contains(&space.enc_key_b64()), "{error}");
-            assert!(!path.exists(), "nothing was written");
-        }
-        save(&path, &s).unwrap();
     }
 
     #[test]
@@ -1149,45 +985,5 @@ mod tests {
             assert_eq!(r.cancellable(), cancellable, "{step:?}");
         }
         assert_eq!(serde_json::to_string(&RotationStep::LocalChangesSent).unwrap(), "\"local_changes_sent\"");
-    }
-
-    #[test]
-    fn the_v1_backup_is_a_private_copy_next_to_the_state_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        std::fs::write(&path, br#"{"version": 1}"#).unwrap();
-        assert_eq!(back_up_legacy(&path).unwrap(), LEGACY_BACKUP_FILE);
-        // 檔名跨版本沿用(升級後的版本靠它找到備份),不能改。
-        assert_eq!(LEGACY_BACKUP_FILE, "sync-state.v1-backup.json");
-        let backup = dir.path().join(LEGACY_BACKUP_FILE);
-        assert_eq!(std::fs::read(&backup).unwrap(), br#"{"version": 1}"#);
-        // 來源不是 v1(已經寫成 v2、讀不懂):錯誤,原本的 v1 備份不被蓋掉。
-        save(&path, &SyncStateV2::fresh("A").unwrap()).unwrap();
-        assert!(back_up_legacy(&path).is_err());
-        std::fs::write(&path, b"{ not json").unwrap();
-        assert!(back_up_legacy(&path).is_err());
-        assert_eq!(std::fs::read(&backup).unwrap(), br#"{"version": 1}"#);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_state_file_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        save(&path, &SyncStateV2::fresh("A").unwrap()).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-    }
-
-    #[test]
-    fn the_next_sync_code_has_its_own_keychain_entry() {
-        assert_ne!(NEXT_MNEMONIC_ACCOUNT, crate::sync::state::MNEMONIC_ACCOUNT);
-        // keychain 的 account 名稱跨版本沿用(中斷的更換靠它接續),不能改。
-        assert_eq!(NEXT_MNEMONIC_ACCOUNT, "sync:mnemonic-next");
     }
 }

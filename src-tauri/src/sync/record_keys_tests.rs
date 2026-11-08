@@ -1,12 +1,11 @@
 use super::*;
-use crate::sync::fake_relay::FakeRelay;
 use crate::sync::record_runtime::{probe_startup, RuntimeFormat, StartupProbe};
 use crate::sync::slot_rules::test_keys;
 use crate::sync::testkit::{TestClock, TestDevice};
 use crate::vault::store::{read_vault, vault_path};
 use std::fs;
 fn device() -> TestDevice {
-    let device = TestDevice::new("keyrecord", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("keyrecord", &TestClock::new());
     let StartupProbe::Records { state, .. } = probe_startup(&device.env().state_path, "Key test")
     else {
         panic!("fresh records")

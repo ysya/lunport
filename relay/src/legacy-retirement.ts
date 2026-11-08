@@ -97,7 +97,10 @@ export function sameSnapshot(a: LegacySnapshot, b: LegacySnapshot): boolean {
   );
 }
 
-/** Separate namespace: no alarm, TTL, deletion, reset or public HTTP endpoint. */
+/**
+ * Separate namespace: no alarm, TTL, deletion, reset or public HTTP endpoint. Fences were written while the
+ * chain transport existed; they are now only read, to finish migrations committed before the retirement.
+ */
 export class LegacyRetirementStore extends DurableObject<Env> {
   private matches(chain: string): boolean {
     try {
@@ -109,55 +112,6 @@ export class LegacyRetirementStore extends DurableObject<Env> {
     } catch {
       return false;
     }
-  }
-  async check(
-    chain: string,
-    tokenHash: string,
-    write: boolean,
-  ): Promise<LegacyGate> {
-    if (!this.matches(chain) || !HEX64.test(tokenHash)) return 503;
-    const value: unknown = await this.ctx.storage.get("fence");
-    if (value === undefined) return 200;
-    if (!validFence(value)) return 503;
-    if (value.tokenHash !== tokenHash) return 404;
-    if (value.phase === "retired") return 410;
-    return write ? 409 : 200;
-  }
-  /** Called only after ChainStore has durably fenced and snapshotted its source. */
-  async freeze(
-    chain: string,
-    tokenHash: string,
-    scope: LegacyMigrationScope,
-    snapshot: LegacySnapshot,
-  ): Promise<LegacyGate> {
-    if (
-      !this.matches(chain) ||
-      !HEX64.test(tokenHash) ||
-      !validScope(scope) ||
-      !validSnapshot(snapshot)
-    )
-      return 503;
-    return this.ctx.blockConcurrencyWhile(async () => {
-      const value: unknown = await this.ctx.storage.get("fence");
-      if (value !== undefined) {
-        if (!validFence(value)) return 503;
-        if (value.tokenHash !== tokenHash) return 404;
-        if (
-          !sameMigration(value.scope, scope) ||
-          !sameSnapshot(value.snapshot, snapshot)
-        )
-          return 409;
-        return value.phase === "retired" ? 410 : 200;
-      }
-      await this.ctx.storage.put("fence", {
-        version: 1,
-        phase: "frozen",
-        tokenHash,
-        scope,
-        snapshot,
-      } satisfies Fence);
-      return 200;
-    });
   }
   async confirmFrozen(
     chain: string,

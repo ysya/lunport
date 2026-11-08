@@ -490,13 +490,12 @@ mod tests {
     use super::*;
     use crate::sync::{
         env::Keychain,
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     use std::sync::atomic::Ordering;
     fn setup() -> (TestDevice, Workspace, PreparedRecovery, RecoveryKit) {
         let (before, prepared, _, old) = super::super::recovery_state::tests::prepared(false);
-        let d = TestDevice::new("recovery", &FakeRelay::new(), &TestClock::new());
+        let d = TestDevice::new("recovery", &TestClock::new());
         let env = d.env();
         let probe = record_runtime::probe_startup(&env.state_path, "recovery");
         record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();
@@ -733,7 +732,7 @@ mod tests {
     #[test]
     fn protected_orphan_pins_the_complete_epoch_prefix_as_well_as_the_content_checkpoint() {
         let (before, prepared, _, old) = super::super::recovery_state::tests::prepared(true);
-        let d = TestDevice::new("protected-epoch", &FakeRelay::new(), &TestClock::new());
+        let d = TestDevice::new("protected-epoch", &TestClock::new());
         let env = d.env();
         let probe = record_runtime::probe_startup(&env.state_path, "protected-epoch");
         record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();

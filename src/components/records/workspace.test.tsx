@@ -16,106 +16,54 @@ describe("records workspace mode boundary", () => {
     );
   };
   const render = (status?: ReturnType<typeof recordsStatus>, error = false) => {
-    const legacy = vi.fn(() => <p>Legacy mounted</p>);
+    const legacyImport = vi.fn(() => <p>Import landing</p>);
     const records = vi.fn(() => <p>Records mounted</p>);
     const html = withQueries(
-      <WorkspaceGate
-        status={status}
-        error={error}
-        retry={() => {}}
-        useLegacy={() => {}}
-        legacy={legacy}
-        records={records}
-      />,
+      <WorkspaceGate status={status} error={error} retry={() => {}} legacyImport={legacyImport} records={records} />,
     );
-    return { html, legacy, records };
+    return { html, legacyImport, records };
   };
   it("mounts only the records callback for an active records state", () => {
     const result = render(recordsStatus());
-    expect(result.legacy).not.toHaveBeenCalled();
+    expect(result.legacyImport).not.toHaveBeenCalled();
     expect(result.records).toHaveBeenCalledOnce();
     expect(text(result.html)).toContain("Records mounted");
   });
-  it("never falls through to legacy while loading or failed", () => {
+  it("mounts nothing while loading or after a failed status", () => {
     for (const error of [false, true]) {
       const result = render(undefined, error);
-      expect(result.legacy).not.toHaveBeenCalled();
+      expect(result.legacyImport).not.toHaveBeenCalled();
       expect(result.records).not.toHaveBeenCalled();
     }
   });
-  it("refuses cached legacy on a failed status refresh", () => {
-    const result = render(
-      recordsStatus({ format: "legacy", overview: null, legacy_paused: false }),
-      true,
-    );
-    expect(result.legacy).not.toHaveBeenCalled();
+  it("refuses a cached old workspace on a failed status refresh", () => {
+    const result = render(recordsStatus({ format: "legacy", overview: null }), true);
+    expect(result.legacyImport).not.toHaveBeenCalled();
     expect(result.records).not.toHaveBeenCalled();
   });
-  it("requires explicit use-existing choice for paused legacy and refuses blocked state", () => {
-    const paused = render(
-      recordsStatus({ format: "legacy", overview: null, legacy_paused: true }),
-    );
-    expect(paused.legacy).not.toHaveBeenCalled();
-    expect(text(paused.html)).toContain("Use existing SSH configuration");
-    const blocked = render(
-      recordsStatus({
-        format: "blocked",
-        overview: null,
-        blocked_reason: "Invalid state",
-      }),
-    );
-    expect(blocked.legacy).not.toHaveBeenCalled();
-    expect(text(blocked.html)).toContain("Invalid state");
-    expect(text(blocked.html)).not.toContain("Use existing SSH configuration");
+  it("opens a saved OpenSSH workspace on the import landing, never on an editor", () => {
+    const result = render(recordsStatus({ format: "legacy", overview: null }));
+    expect(result.legacyImport).toHaveBeenCalledOnce();
+    expect(result.records).not.toHaveBeenCalled();
+    expect(text(result.html)).toContain("Import landing");
+    expect(text(result.html)).not.toContain("Use existing SSH configuration");
   });
-  it("offers the updater when workspace state is blocked", () => {
-    const blocked = render(recordsStatus({
-      format: "blocked",
-      overview: null,
-      blocked_reason: "Invalid state",
-    }));
-    expect(blocked.html).toContain("Invalid state");
+  it("refuses a blocked state and offers the updater", () => {
+    const blocked = render(recordsStatus({ format: "blocked", overview: null, blocked_reason: "Invalid state" }));
+    expect(blocked.legacyImport).not.toHaveBeenCalled();
+    expect(blocked.records).not.toHaveBeenCalled();
+    expect(text(blocked.html)).toContain("Invalid state");
     expect(blocked.html).toContain('aria-label="Software update"');
     expect(blocked.html).toContain("Check for updates");
-    expect(blocked.legacy).not.toHaveBeenCalled();
-    expect(blocked.records).not.toHaveBeenCalled();
   });
   it("keeps a manual update check available when workspace status fails", () => {
     const failed = render(undefined, true);
     expect(failed.html).toContain("The workspace status is unavailable.");
     expect(failed.html).toContain("Check for updates");
   });
-  it("renders the paused migration callback without evaluating legacy config hooks", () => {
-    const legacy = vi.fn(() => <p>Legacy mounted</p>);
-    const paused = vi.fn(() => <p>Migration landing</p>);
-    const html = withQueries(
-      <WorkspaceGate
-        status={recordsStatus({
-          format: "legacy",
-          legacy_paused: true,
-          overview: null,
-        })}
-        retry={vi.fn()}
-        useLegacy={vi.fn()}
-        legacy={legacy}
-        records={vi.fn()}
-        pausedLegacy={paused}
-      />,
-    );
-    expect(paused).toHaveBeenCalledOnce();
-    expect(legacy).not.toHaveBeenCalled();
-    expect(text(html)).toContain("Migration landing");
-  });
-  it("mounts legacy only after its explicit in-memory pause is cleared", () => {
-    const result = render(
-      recordsStatus({ format: "legacy", overview: null, legacy_paused: false }),
-    );
-    expect(result.legacy).toHaveBeenCalledOnce();
-    expect(result.records).not.toHaveBeenCalled();
-  });
   it("does not mount records when its snapshot is missing", () => {
     const result = render(recordsStatus({ overview: null }));
-    expect(result.legacy).not.toHaveBeenCalled();
+    expect(result.legacyImport).not.toHaveBeenCalled();
     expect(result.records).not.toHaveBeenCalled();
     expect(text(result.html)).toContain("unavailable");
   });

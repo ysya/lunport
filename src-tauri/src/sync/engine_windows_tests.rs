@@ -76,8 +76,9 @@ fn concurrent_app_handles_preserve_native_event_loop() {
 #[test]
 #[ignore = "requires a Windows desktop and its own native event loop; run separately in CI"]
 fn synced_library_startup_and_concurrent_tray_updates() {
+    // The name stays: CI and scripts/validate-windows-startup.ps1 select it. The fixture is a saved, grouped records library.
     let _native_fault_trace = NativeFaultTrace::install();
-    let device = crate::sync::testkit::synced_library_fixture();
+    let device = crate::sync::testkit::grouped_library_fixture();
     let config_before = std::fs::read(device.main_path()).unwrap();
     let state_before = std::fs::read(&device.env().state_path).unwrap();
     // The CI-only GUI smoke script starts the real Development executable from this public,
@@ -86,7 +87,7 @@ fn synced_library_startup_and_concurrent_tray_updates() {
         std::fs::write(path, &state_before).unwrap();
     }
 
-    // Restart from the saved, grouped, opted-in library rather than a synthetic menu alone.
+    // Restart from the saved, grouped library rather than a synthetic menu alone.
     let app_state = AppState::default();
     {
         let probe = record_runtime::probe_startup(&device.env().state_path, "Windows restart");
@@ -139,7 +140,7 @@ fn synced_library_startup_and_concurrent_tray_updates() {
                 .unwrap()
                 .extend([watchdog_thread, controller]);
             // Race the first background status with the same initial publication used by setup.
-            crate::tray::rebuild_tray(app.handle(), &[])?;
+            crate::tray::rebuild_empty(app.handle())?;
             Ok(())
         })
         .build(context)
@@ -167,7 +168,7 @@ fn synced_library_startup_and_concurrent_tray_updates() {
         std::panic::resume_unwind(panic);
     }
     assert_eq!(std::fs::read(device.main_path()).unwrap(), config_before);
-    let saved = record_runtime::probe_startup(&device.env().state_path, "after sync");
+    let saved = record_runtime::probe_startup(&device.env().state_path, "after the tray updates");
     assert!(matches!(
         saved,
         record_runtime::StartupProbe::Records { .. }
@@ -199,13 +200,6 @@ fn exercise(app: &AppHandle, device: &crate::sync::testkit::TestDevice) {
             })
         })
         .collect();
-    for _ in 0..10 {
-        let report = crate::sync::record_round::sync_once(&env).unwrap();
-        assert_eq!(
-            report.gate,
-            Some(crate::sync::record_merge::AccountGate::Compatible)
-        );
-    }
     for worker in workers {
         worker.join().unwrap();
     }
@@ -233,7 +227,7 @@ fn exercise(app: &AppHandle, device: &crate::sync::testkit::TestDevice) {
         user_after <= user_before + 8,
         "USER objects grew from {user_before} to {user_after}"
     );
-    println!("Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications {before} -> {}; USER objects {user_before} -> {user_after}; SSH config unchanged", crate::tray::test_publications(app));
+    println!("Windows native startup: 17 hosts + inherited Group; 300 concurrent status/visibility pairs; menu publications {before} -> {}; USER objects {user_before} -> {user_after}; SSH config unchanged", crate::tray::test_publications(app));
 }
 
 // Test-process diagnostics only. Capture symbolized native-fault stacks on the disposable

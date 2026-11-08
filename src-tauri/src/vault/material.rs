@@ -85,7 +85,7 @@ pub fn unsupported_cipher(private_key: &str) -> Option<String> {
 }
 
 /// 解析私鑰原文,不解密(加密的金鑰解析得了,私鑰段還是密文)。`ssh-key` 讀不懂、但只是沒有加密的 ECDSA 金鑰純量短了的,由 `short_scalar` 補零再讀;
-/// 其他讀不懂的回 None。保管庫裡讀私鑰的地方(`open`、`export::export_text`)都走這裡,免得一把金鑰 agent 簽得了、匯出卻說讀不懂。
+/// 其他讀不懂的回 None。保管庫裡讀私鑰的地方(`open`)都走這裡。
 pub fn parse(private_key: &str) -> Option<PrivateKey> {
     PrivateKey::from_openssh(private_key).ok().or_else(|| short_scalar::parse(private_key))
 }

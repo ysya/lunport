@@ -6,13 +6,13 @@ import { checkForUpdates } from "@/lib/updater";
 import { useSettingsStore } from "@/stores/settings";
 
 /**
- * Sends the CURRENT backend-affecting preferences (tray visibility,
- * close-to-tray, backup retention) to the backend. Fire-and-forget: failures
+ * Sends the CURRENT backend-affecting preferences (tray visibility and
+ * close-to-tray) to the backend. Fire-and-forget: failures
  * are logged, never toasted — the app is fully usable without them. Used by
  * the launch sync below and after a settings import replaces the store.
  */
 export function pushBackendSettings(): void {
-  const { trayVisible, closeToTray, backupRetention } = useSettingsStore.getState();
+  const { trayVisible, closeToTray } = useSettingsStore.getState();
   const warn = (cmd: string) => (e: unknown) =>
     console.warn(`[settings] backend sync: ${cmd} failed:`, e);
 
@@ -22,15 +22,12 @@ export function pushBackendSettings(): void {
   tauriInvoke<void>("app_set_close_to_tray", { enabled: closeToTray }).catch(
     warn("app_set_close_to_tray"),
   );
-  tauriInvoke<void>("config_set_backup_retention", { limit: backupRetention }).catch(
-    warn("config_set_backup_retention"),
-  );
 }
 
 /**
  * Re-sends the persisted preferences the BACKEND also needs on every launch.
  * The backend resets to its own defaults at startup (tray visible, close-to-tray
- * off, retention unlimited), so the frontend re-applies the persisted values
+ * off), so the frontend re-applies the persisted values
  * once on mount.
  */
 export function useSyncBackendSettings(): void {

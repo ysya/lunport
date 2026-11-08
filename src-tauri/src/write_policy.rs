@@ -81,6 +81,13 @@ impl WritePolicy {
     }
 }
 
+/// The check every guarded file write in the app runs, against the profile this library was built with: unrestricted in
+/// Production, confined to the development data root in Development.
+pub fn check_current_profile(path: &Path) -> io::Result<()> {
+    crate::fsutil::check_write_io(path)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,35 +7,30 @@ vi.mock("@/lib/queries", async (load) => {
   const original = await load<typeof import("@/lib/queries")>();
   return {
     ...original,
-    useHostsQuery: vi.fn(() => {
-      throw new Error("Legacy config hook mounted");
-    }),
     usePlatform: () => ({ data: "linux" }),
     useTerminals: () => ({ data: [] }),
   };
 });
 import App from "@/App";
-import { useHostsQuery } from "@/lib/queries";
-describe("App records boundary", () => {
-  it("does not mount config hooks in records, paused legacy or blocked mode", () => {
-    for (const status of [
-      recordsStatus(),
-      recordsStatus({ format: "legacy", legacy_paused: true, overview: null }),
-      recordsStatus({
-        format: "blocked",
-        blocked_reason: "Invalid state",
-        overview: null,
-      }),
-    ]) {
-      const client = new QueryClient();
-      client.setQueryData(recordsStatusKey, status);
-      const html = renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <App />
-        </QueryClientProvider>,
-      );
-      expect(html).not.toContain("Legacy config hook mounted");
-    }
-    expect(useHostsQuery).not.toHaveBeenCalled();
+describe("App workspace boundary", () => {
+  const render = (status: ReturnType<typeof recordsStatus>) => {
+    const client = new QueryClient();
+    client.setQueryData(recordsStatusKey, status);
+    return renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <App />
+      </QueryClientProvider>,
+    );
+  };
+  it("opens a saved OpenSSH workspace on the import landing, with no way back into the retired editor", () => {
+    const html = render(recordsStatus({ format: "legacy", overview: null }));
+    expect(html).toContain("Your existing workspace");
+    expect(html).toContain("Preview migration");
+    expect(html).not.toContain("Use existing SSH configuration");
+  });
+  it("shows a blocked workspace's reason instead of any workspace", () => {
+    const html = render(recordsStatus({ format: "blocked", blocked_reason: "Invalid state", overview: null }));
+    expect(html).toContain("Invalid state");
+    expect(html).not.toContain("Your existing workspace");
   });
 });

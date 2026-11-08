@@ -35,7 +35,7 @@ import { isImeKey } from "@/lib/ime";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 import { useSettingsStore } from "@/stores/settings";
 import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { iapTarget, transportFor } from "@/lib/transports";
 import { cn } from "@/lib/utils";
 import { CollectionActions } from "./CollectionActions";

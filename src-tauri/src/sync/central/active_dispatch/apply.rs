@@ -45,15 +45,11 @@ pub(in crate::sync::central) fn once(env: &SyncEnv) -> Result<Report, AppError> 
     super::super::controller::require_enabled()?;
     let background = Background(env.keychain);
     let safe = SyncEnv {
-        doc: env.doc,
-        backed_up: env.backed_up,
-        retention: env.retention,
         runtime: env.runtime,
         ssh_dir: env.ssh_dir.clone(),
         state_path: env.state_path.clone(),
         home: env.home.clone(),
         keychain: &background,
-        relays: env.relays,
         events: env.events,
         clock: env.clock,
         platform: env.platform,

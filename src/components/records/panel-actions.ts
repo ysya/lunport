@@ -6,8 +6,6 @@ import {
   importRecordKey,
   importRecordKeyFile,
   generateRecordKey,
-  createRecordAccount,
-  joinRecordAccount,
   confirmRecordImport,
   resumeRecordImport,
   type ImportPreviewResult,
@@ -23,29 +21,11 @@ export type KeyDraft = {
   busy: boolean;
   error: string | null;
 };
-export type AccountDraft = {
-  deviceName: string;
-  words: string;
-  createdWords: string;
-  migrationOffered: boolean;
-  busy: boolean;
-  error: string | null;
-};
 export function clearKeyDraft(): KeyDraft {
   return { name: "", source: "file", path: null, privateText: "", busy: false, error: null };
 }
 export function hasKeyImportSource(state: KeyDraft): boolean {
   return state.source === "file" ? !!state.path?.trim() : !!state.privateText.trim();
-}
-export function clearAccountDraft(): AccountDraft {
-  return {
-    deviceName: "",
-    words: "",
-    createdWords: "",
-    migrationOffered: false,
-    busy: false,
-    error: null,
-  };
 }
 /** Secret arguments/results bypass QueryClient mutation variables and data. Only public overview is cached. */
 export async function submitKeyDraft(
@@ -83,56 +63,6 @@ export async function submitKeyDraft(
     return false;
   } finally {
     if (!fence || fence.current()) update({ busy: false });
-  }
-}
-export async function submitAccountDraft(
-  client: QueryClient,
-  state: AccountDraft,
-  update: (patch: Partial<AccountDraft>) => void,
-  create: boolean,
-  upgradeConfirmed?: boolean,
-): Promise<boolean> {
-  if (
-    state.busy ||
-    !state.deviceName.trim() ||
-    (!create && !state.words.trim())
-  )
-    return false;
-  update({ busy: true, error: null, migrationOffered: false });
-  try {
-    if (create) {
-      const result = await createRecordAccount(
-        state.deviceName,
-        upgradeConfirmed,
-      );
-      update({
-        words: "",
-        createdWords: result.words,
-        error: result.complete
-          ? null
-          : (result.pending_error ??
-            "Sync setup is pending. Save the code and retry setup."),
-      });
-      applyRecordOverview(client, result.overview);
-    } else {
-      const overview = await joinRecordAccount(
-        state.words,
-        state.deviceName,
-        upgradeConfirmed,
-      );
-      update({ words: "", createdWords: "" });
-      applyRecordOverview(client, overview);
-    }
-    return true;
-  } catch {
-    update({
-      migrationOffered: !create,
-      error:
-        "Could not set up sync. Check the sync code and workspace, then retry or resume a pending setup.",
-    });
-    return false;
-  } finally {
-    update({ busy: false });
   }
 }
 export async function submitImportConsent(

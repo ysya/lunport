@@ -363,11 +363,10 @@ mod tests {
     use super::*;
     use crate::sync::{
         env::Keychain,
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     fn source() -> TestDevice {
-        let d = TestDevice::new("replacement", &FakeRelay::new(), &TestClock::new());
+        let d = TestDevice::new("replacement", &TestClock::new());
         let env = d.env();
         let probe = record_runtime::probe_startup(&env.state_path, "replacement");
         record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();

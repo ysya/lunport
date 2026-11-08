@@ -18,7 +18,6 @@ use crate::fsutil;
 use crate::sync::crypto::{open_raw, seal_raw};
 use crate::sync::env::Keychain;
 use crate::sync::runtime::SyncRuntime;
-use crate::sync::slot_files;
 
 pub const VAULT_FILE: &str = "vault.json";
 /// 計畫 1 的保管庫(檔頭沒有 `key_account`)把金鑰放在這個 keychain 帳戶。
@@ -433,7 +432,7 @@ impl Vault {
             // 資料夾不存在才建立,而且只有擁有者能進去(Unix 0700;同 `state_v2::save`);已經存在的不動。
             fsutil::ensure_dir_secure(dir)?;
         }
-        slot_files::write_private(&self.path, &bytes)?;
+        fsutil::write_private(&self.path, &bytes)?;
         // 盡力而為:rename 只改了資料夾裡的項目,把資料夾也 fsync,斷電之後新的檔案才一定在(同 `fsutil::atomic_write`);失敗不影響結果。
         #[cfg(unix)]
         {

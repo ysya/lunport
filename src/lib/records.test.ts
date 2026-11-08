@@ -103,7 +103,6 @@ describe("records native client", () => {
     await api.previewRecordImport("/fixture/config");
     await api.confirmRecordImport("verified-token", ["a".repeat(32)]);
     await api.resumeRecordImport("receipt-id");
-    await api.useLegacyWorkspace();
     expect(calls).toEqual([
       ["records_import_preview", { source: "/fixture/config" }],
       [
@@ -111,7 +110,6 @@ describe("records native client", () => {
         { token: "verified-token", copyKeyIds: ["a".repeat(32)] },
       ],
       ["records_import_resume", { importId: "receipt-id" }],
-      ["records_use_legacy", {}],
     ]);
   });
   it("does not replace a newer public cache with late snapshots or mutate the old data", () => {
@@ -172,13 +170,9 @@ describe("records native client", () => {
     expect(await api.fetchRecordsStatus()).toEqual(status);
     expect(calls).toEqual([["records_status", {}]]);
   });
-  it("uses direct secret/account/key/space calls and sends only public overview to cache", async () => {
+  it("uses direct secret key calls and sends only public overview to cache", async () => {
     const overview = recordOverview();
-    const calls = stubBackend(async (command) =>
-      command === "records_account_create"
-        ? { words: "private-fixture-code", overview }
-        : overview,
-    );
+    const calls = stubBackend(async () => overview);
     const client = new QueryClient();
     client.setQueryData(api.recordsStatusKey, recordsStatus());
     api.applyRecordOverview(
@@ -186,28 +180,12 @@ describe("records native client", () => {
       await api.importRecordKey("Work", "private-fixture-key"),
     );
     await api.generateRecordKey("Generated");
-    const created = await api.createRecordAccount("Laptop");
-    api.applyRecordOverview(client, created.overview);
-    await api.joinRecordAccount("private-fixture-code", "Laptop");
-    await api.createRecordSpace("Production");
-    await api.selectRecordSpace("a".repeat(64), true);
-    await api.setRecordKeySync("a".repeat(32), true);
-    await api.syncRecordsNow();
     expect(calls).toEqual([
       [
         "records_key_import",
         { name: "Work", privateText: "private-fixture-key" },
       ],
       ["records_key_generate", { name: "Generated" }],
-      ["records_account_create", { deviceName: "Laptop" }],
-      [
-        "records_account_join",
-        { words: "private-fixture-code", deviceName: "Laptop" },
-      ],
-      ["records_space_create", { name: "Production" }],
-      ["records_space_select", { spaceId: "a".repeat(64), selected: true }],
-      ["records_key_sync", { keyId: "a".repeat(32), enabled: true }],
-      ["records_sync_now", {}],
     ]);
     expect(
       JSON.stringify(
@@ -219,23 +197,13 @@ describe("records native client", () => {
     ).not.toContain("private-fixture");
     expect(client.getMutationCache().getAll()).toEqual([]);
   });
-  it("uses public recovery identifiers, explicit code reveal, key download and relay update", async () => {
+  it("cancels and lists pending imports by their public identifiers", async () => {
     const calls = stubBackend(async () => null);
     await api.cancelRecordImport("token");
     await api.pendingRecordImports();
-    await api.downloadRecordKey("a".repeat(32));
-    await api.resumeRecordAccount();
-    await api.resumeRecordAccount("private-code");
-    await api.recordAccountWords();
-    await api.setRecordRelayUrl("https://relay.fixture.invalid");
     expect(calls).toEqual([
       ["records_import_cancel", { token: "token" }],
       ["records_import_pending", {}],
-      ["records_key_download", { keyId: "a".repeat(32) }],
-      ["records_account_resume", { words: null }],
-      ["records_account_resume", { words: "private-code" }],
-      ["records_account_words", {}],
-      ["records_set_relay_url", { url: "https://relay.fixture.invalid" }],
     ]);
   });
   it("retains authenticated sync intent and saved sync diagnostics from public DTOs", async () => {

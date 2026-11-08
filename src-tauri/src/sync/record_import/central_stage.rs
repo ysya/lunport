@@ -770,14 +770,13 @@ mod tests {
     use super::*;
     use crate::sync::{
         central::{crypto::VaultKeys, material_fixture_for_test},
-        fake_relay::FakeRelay,
         record_runtime,
         testkit::{TestClock, TestDevice},
     };
     pub(super) fn fixture() -> (TestDevice, VaultKeys, String, VaultEntry) {
         let (mut state, keys, _, id, entry) = material_fixture_for_test();
         state.local.keys.clear();
-        let device = TestDevice::new("central-stage", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("central-stage", &TestClock::new());
         record_runtime::save_active(&device.env().state_path, &state).unwrap();
         let probe = record_runtime::probe_startup(&device.env().state_path, "central-stage");
         record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
