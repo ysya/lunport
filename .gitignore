@@ -48,5 +48,8 @@ pnpm-debug.log*
 # Design audit / screenshot harness (local-only; not part of the app)
 .design/
 
+# Internal reviews and handoff notes (local-only; the repository is public)
+docs/archive/
+
 relay/node_modules
 relay/.wrangler

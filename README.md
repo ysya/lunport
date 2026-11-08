@@ -32,7 +32,7 @@ If the workspace cannot open, use the update controls on the error screen to che
 | Windows x64 | `.exe` installer |
 | Linux x64 or ARM64 | `.AppImage`, `.deb` or `.rpm` for your architecture |
 
-**macOS:** builds use a fixed project signing certificate and a fixed **Lunport Credential Helper** for protected credentials. Ordinary App updates retain the same helper. The first use of existing credentials can require **Always Allow** for the helper; a deliberate helper update or changed Keychain policy can require authorization again. See the [Keychain details](docs/2026-10-18-keychain-partition-followup.md). This is not an Apple Developer ID; builds are not yet notarized. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
+**macOS:** builds use a fixed project signing certificate and a fixed **Lunport Credential Helper** for protected credentials. Ordinary App updates retain the same helper. The first use of existing credentials can require **Always Allow** for the helper; a deliberate helper update or changed Keychain policy can require authorization again. This is not an Apple Developer ID; builds are not yet notarized. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Lunport.app

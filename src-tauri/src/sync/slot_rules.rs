@@ -1,4 +1,4 @@
-//! SP3 金鑰插槽的純函式與型別(spec `docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md` §4、§5、§6.2):
+//! SP3 金鑰插槽的純函式與型別:
 //! 帳戶記錄的 payload、插槽 id/名稱/檔名規則、OpenSSH 私鑰的檢查(不需要 passphrase、不寫任何檔案),以及
 //! `IdentityFile` 值的解析。這裡不碰檔案系統與同步狀態。
 
