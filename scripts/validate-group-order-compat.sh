@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-test "$(git -C "$repo_dir" rev-parse 'v1.2.0^{commit}')" = cc3ce196cad26775ddf5d3cbd9c8d189a8b79fa8
+test "$(git -C "$repo_dir" rev-parse 'v1.2.0^{commit}')" = 50f8ab3d2bec0a02d4314bce42a178db835dc7c9
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/lunport-group-order-compat.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 git -C "$repo_dir" archive v1.2.0 | tar -xf - -C "$scratch"
