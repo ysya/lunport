@@ -1,7 +1,6 @@
 name: CI - macOS credentials
 on:
   pull_request:
-    paths: ["scripts/*macos*", "scripts/ci-changes*.mjs", "src-tauri/signing/**", "!src-tauri/signing/**/*.md", "src-tauri/src/macos_credential*", "src-tauri/src/secrets.rs", "src-tauri/build.rs", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:
     inputs:
       identity_only:

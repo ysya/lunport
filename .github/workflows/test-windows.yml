@@ -18,7 +18,6 @@ name: CI - Windows
 
 on:
   pull_request:
-    paths: ["src-tauri/**", "scripts/ci-changes*.mjs", "scripts/set-app-version.mjs", "scripts/beta-channel.mjs", "scripts/validate-windows-startup.ps1", ".github/workflows/test-windows.yml"]
   workflow_dispatch:
     inputs:
       native_probe:
