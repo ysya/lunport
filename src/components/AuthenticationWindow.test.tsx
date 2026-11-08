@@ -8,6 +8,7 @@ const grant: AuthRequest = {
   id: "g1", request_id: "terminal-7", hop: null, kind: "grant", echo: true, remaining_ms: 300000,
   text: "No active Privileged Access Manager grant for prod-operate on acme-prod-123456.",
   grant: { project: "acme-prod-123456", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
+  ai: null,
 };
 const render = (over: Partial<Parameters<typeof AuthenticationCardView>[0]> = {}) =>
   renderToStaticMarkup(
@@ -57,5 +58,30 @@ describe("the Request-a-grant window", () => {
     expect(html).toContain("SSH authentication");
     expect(html).toContain("Server prompt");
     expect(html).toMatch(/>Submit</);
+  });
+});
+
+describe("a question an AI client's request asks", () => {
+  const password = { ...grant, kind: "password", grant: null, text: "deploy@web's password: ", echo: false };
+  it("names the AI client on the grant form, and in Auto-log says its commands then run without review", () => {
+    const html = render({ request: { ...grant, ai: { client: "claude → node", unreviewed: "command" } } });
+    expect(html).toContain("Asked by claude → node, an AI client using Lunport AI access.");
+    expect(html).toContain("Auto-log is on: while the grant lasts, the AI client’s commands run without per-command review.");
+  });
+  it("says a tunnel starts once the grant is active", () => {
+    expect(render({ request: { ...grant, ai: { client: "claude", unreviewed: "tunnel" } } })).toContain(
+      "Auto-log is on: once the grant is active, the tunnel the AI client asked for starts right away, without review.",
+    );
+  });
+  it("names the AI client on a server's question too, with its Auto-log note", () => {
+    const html = render({ request: { ...password, ai: { client: "claude", unreviewed: "command" } }, answer: "" });
+    expect(html).toContain("Asked by claude, an AI client using Lunport AI access.");
+    expect(html).toContain("Auto-log is on: once you answer, the AI client’s command runs right away, without per-command review.");
+  });
+  it("names the client without an Auto-log note in Ask mode, and nobody for a person's question", () => {
+    const ask = render({ request: { ...password, ai: { client: "claude", unreviewed: null } }, answer: "" });
+    expect(ask).toContain("Asked by claude");
+    expect(ask).not.toContain("Auto-log");
+    expect(render()).not.toContain("Asked by");
   });
 });

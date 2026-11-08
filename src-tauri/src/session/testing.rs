@@ -348,6 +348,87 @@ impl HostDirectory for FakeDirectory {
     }
 }
 
+/// The grant `host` needs in the tests (design 2026-10-25, PAM grant requests): `prod-operate` on `project`, 30 minutes, with the
+/// justification given last time. Each test gives a project of its own: `GrantGates::for_tests` is shared by every test, and connections
+/// that need the same grant ask once.
+pub fn grant_need(host: &str, project: &str) -> super::directory::GrantNeed {
+    super::directory::GrantNeed {
+        host: HostId::from(format!("id-{host}")),
+        account: None,
+        project: project.into(),
+        location: "global".into(),
+        entitlement: "prod-operate".into(),
+        entitlements: vec!["prod-operate".into()],
+        duration_secs: 1800,
+        justification: Some("restart app-api".into()),
+    }
+}
+
+/// `inner`, where every target needs `need`'s grant until one is requested through it; then the target is prepared as a grant given
+/// moments ago. It notes each request (justification, seconds).
+pub struct NeedsGrant<'a> {
+    inner: &'a FakeDirectory,
+    need: super::directory::GrantNeed,
+    requested: Mutex<Vec<(String, u32)>>,
+}
+
+impl<'a> NeedsGrant<'a> {
+    pub fn new(inner: &'a FakeDirectory, need: super::directory::GrantNeed) -> NeedsGrant<'a> {
+        NeedsGrant { inner, need, requested: Mutex::new(Vec::new()) }
+    }
+
+    /// The grants requested so far: justification and seconds.
+    pub fn requested(&self) -> Vec<(String, u32)> {
+        locked(&self.requested).clone()
+    }
+}
+
+impl HostDirectory for NeedsGrant<'_> {
+    fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+        self.inner.resolve(query)
+    }
+    fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.inner.pinned(host)
+    }
+    fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.inner.pinned_for(hop)
+    }
+    fn saved_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.inner.saved_for(hop)
+    }
+    fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
+        self.inner.pin(host, key)
+    }
+    fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+        self.inner.replace_pin(host, previous, key)
+    }
+    fn password_account(&self, host: &HostId) -> String {
+        self.inner.password_account(host)
+    }
+    fn prepare(&self, _: &Target, _: &dyn Fn(&str) -> Option<String>, _: &CancelToken) -> Result<super::directory::Prepared, DirectoryError> {
+        if locked(&self.requested).is_empty() {
+            return Err(DirectoryError::GrantNeeded(Box::new(self.need.clone())));
+        }
+        Ok(super::directory::Prepared { recent_grant: true, granted_at: Some(std::time::SystemTime::now()) })
+    }
+    fn request_grant(
+        &self,
+        need: &super::directory::GrantNeed,
+        justification: &str,
+        duration_secs: u32,
+        _: &CancelToken,
+    ) -> Result<super::directory::GrantReceipt, DirectoryError> {
+        locked(&self.requested).push((justification.to_string(), duration_secs));
+        let now = std::time::SystemTime::now();
+        Ok(super::directory::GrantReceipt { entitlement: need.entitlement.clone(), granted_at: now, active_until: now + Duration::from_secs(1800) })
+    }
+}
+
+/// A person's answer in the Request-a-grant window: `minutes` and `justification`, as the window encodes them.
+pub fn grant_answer(minutes: u32, justification: &str) -> String {
+    super::protocol::GrantAnswer { minutes, justification: justification.into() }.encode()
+}
+
 /// What the person does in the fake host key window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {

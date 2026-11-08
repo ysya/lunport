@@ -734,7 +734,7 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
         </SettingsGroup>
       } />
 
-      {records ? (
+      {records && (
         <Section
           title="Command approval"
           description="Ask reviews each complete command before execution. Switching mode cancels active requests."
@@ -764,16 +764,12 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log skips command review. Passwords, key passphrases and 2FA can still require authorization in Lunport’s native windows. A server key Lunport has not verified opens the trust window before the AI client connects. A changed key is refused until you review it with Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool.
+            Auto-log only skips command review. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
           </p>
         </Section>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          Legacy uses Ask: each command requires Allow once. Auto-log is available in Records workspaces.
-        </p>
       )}
       <AlertDialog
         open={riskOpen}

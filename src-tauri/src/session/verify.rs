@@ -33,6 +33,9 @@ struct ProbeDirectory<'a> {
     inner: &'a dyn HostDirectory,
     expected: Target,
     query: &'a HostQuery,
+    /// Whether a Privileged Access Manager grant the route needs is asked for (an AI client's verification, design 2026-11-09) or is the
+    /// refusal (the person's fingerprint check, design 2026-10-25).
+    asks_for_grant: bool,
 }
 impl ProbeDirectory<'_> {
     fn checked(&self) -> Result<Target, DirectoryError> {
@@ -102,8 +105,25 @@ impl HostDirectory for ProbeDirectory<'_> {
         self.inner.password_account(id)
     }
     fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<super::directory::Prepared, DirectoryError> {
-        // A fingerprint check asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
-        self.inner.prepare(target, public_key, cancel).map_err(DirectoryError::for_automation)
+        let prepared = self.inner.prepare(target, public_key, cancel);
+        if self.asks_for_grant {
+            prepared
+        } else {
+            // The person's fingerprint check asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
+            prepared.map_err(DirectoryError::for_automation)
+        }
+    }
+    /// Only an AI client's verification gets here (`asks_for_grant`): the grant the person asked for is requested from the directory the
+    /// probe checks against, while the route is still the one being verified.
+    fn request_grant(
+        &self,
+        need: &super::directory::GrantNeed,
+        justification: &str,
+        duration_secs: u32,
+        cancel: &CancelToken,
+    ) -> Result<super::directory::GrantReceipt, DirectoryError> {
+        self.checked()?;
+        self.inner.request_grant(need, justification, duration_secs, cancel)
     }
 }
 
@@ -221,6 +241,27 @@ pub fn verify(
     owner: &dyn Owner,
     cancel: &CancelToken,
 ) -> Result<VerifiedHostKey, String> {
+    verify_with(connector, query, owner, cancel, false)
+}
+
+/// `verify` for an AI client's request (design 2026-11-09, native windows for AI requests): a Privileged Access Manager grant the route
+/// needs is asked for in Lunport's window, through `owner`, instead of being the refusal.
+pub fn verify_for_ai(
+    connector: &Connector<'_>,
+    query: &HostQuery,
+    owner: &dyn Owner,
+    cancel: &CancelToken,
+) -> Result<VerifiedHostKey, String> {
+    verify_with(connector, query, owner, cancel, true)
+}
+
+fn verify_with(
+    connector: &Connector<'_>,
+    query: &HostQuery,
+    owner: &dyn Owner,
+    cancel: &CancelToken,
+    asks_for_grant: bool,
+) -> Result<VerifiedHostKey, String> {
     if cancel.is_cancelled() {
         return Err("Server identity verification was canceled.".into());
     }
@@ -234,6 +275,7 @@ pub fn verify(
         inner: connector.directory,
         expected,
         query,
+        asks_for_grant,
     };
     let guard = || {
         if cancel.is_cancelled() {

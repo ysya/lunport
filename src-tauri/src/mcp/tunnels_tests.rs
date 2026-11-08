@@ -886,7 +886,50 @@ fn a_start_whose_rule_changed_during_the_window_starts_nothing() {
     assert!(launches.given().is_empty());
 }
 
-/// A server key that needs the person's decision reaches the client in `ssh_exec`'s words.
+/// While the tunnel's connection has a window open for the person (a changed server key, a password, a grant), `start_tunnel` keeps
+/// waiting past its own limit and answers once the tunnel runs (design 2026-11-09, native windows for AI requests); with no window open
+/// it answers at its limit that the tunnel is still connecting.
+#[test]
+fn a_start_waits_while_the_tunnels_connection_asks_the_person() {
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    host(&d, &r, "web-1", true);
+    let id = created(&d, &r, &tunnels);
+    let connecting = || {
+        let rule = saved(&d).into_iter().find(|rule| rule.id == id).unwrap();
+        tunnels.prepare(&snapshot(&d), &rule, None, Some("claude".into())).unwrap().1
+    };
+    let entry = connecting();
+    let (opened, answered) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let worker = Arc::clone(&entry);
+    let window = thread::spawn(move || {
+        worker.while_asking(|| {
+            opened.0.send(()).unwrap();
+            answered.1.recv().unwrap();
+        });
+        worker.set_live(running(15432, Some("claude".into())));
+    });
+    opened.1.recv().unwrap();
+    // The person answers well after the limit the start waits by itself.
+    let late = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        answered.0.send(()).unwrap();
+    });
+    let seen = wait_for_start(&entry, &CancelToken::default(), Duration::from_millis(50)).unwrap();
+    assert!(matches!(seen.phase, TunnelPhase::Running), "{:?}", seen.phase);
+    late.join().unwrap();
+    window.join().unwrap();
+    entry.set_live(TunnelLive { phase: TunnelPhase::Stopped, ..Default::default() });
+
+    let idle = connecting();
+    let seen = wait_for_start(&idle, &CancelToken::default(), Duration::from_millis(50)).unwrap();
+    assert!(matches!(seen.phase, TunnelPhase::Connecting), "{:?}", seen.phase);
+    idle.stop();
+}
+
+/// An error of the tunnel's connection that needs the person (`needs interaction:`) reaches the client in `ssh_exec`'s words, without the
+/// "could not start" prefix.
 #[test]
 fn a_start_that_needs_the_person_says_so_as_ssh_exec_does() {
     let d = device();
@@ -895,10 +938,11 @@ fn a_start_that_needs_the_person_says_so_as_ssh_exec_does() {
     let web = host(&d, &r, "web-1", true);
     created(&d, &r, &tunnels);
     let route = Route::to(&web, true);
-    let refused = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some("needs interaction: the server key of web-1 changed; ask the user to review it with verify_host_key. Nothing was trusted.".into()), ..Default::default() }, started_by: None };
+    let needs = "needs interaction: unlock credentials in the Development app";
+    let refused = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some(needs.into()), ..Default::default() }, started_by: None };
     let launches = Launches::new(&d, &tunnels, Some(refused));
     let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
-    assert_eq!(error, "needs interaction: the server key of web-1 changed; ask the user to review it with verify_host_key. Nothing was trusted.");
+    assert_eq!(error, needs);
 }
 
 /// What the app's worker asks while an AI client's tunnel connects and runs, over the real permission rules: turning AI access off

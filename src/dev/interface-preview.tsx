@@ -403,12 +403,12 @@ else {
       useTerminalStore.getState().open({ host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
       return () => useTerminalStore.getState().reset();
     }, []);
-    if (scenario === "hostkey" || scenario === "hostkey-changed" || scenario === "hostkey-saved") return <HostKeyCard
-      request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null, saved: scenario === "hostkey-saved" ? { fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
+    if (scenario === "hostkey" || scenario === "hostkey-changed" || scenario === "hostkey-saved" || scenario === "hostkey-ai") return <HostKeyCard
+      request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" || scenario === "hostkey-ai" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null, saved: scenario === "hostkey-saved" ? { fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null, ai: scenario === "hostkey-ai" ? { client: "claude → node", unreviewed: "command" } : null }}
       busy={false} onAnswer={() => {}}
     />;
-    if (scenario === "authentication" || scenario === "authentication-expired") return <AuthenticationCardView
-      request={{ id: "fixture-question", request_id: "fixture-connection", hop: { alias: "Production web", host_id: "0000000000000001", hostname: "web.example.com", user: "deploy", port: 22 }, kind: "password", text: "Password for deploy@web.example.com:", echo: false, remaining_ms: 90000, grant: null }}
+    if (scenario === "authentication" || scenario === "authentication-expired" || scenario === "authentication-ai") return <AuthenticationCardView
+      request={{ id: "fixture-question", request_id: "fixture-connection", hop: { alias: "Production web", host_id: "0000000000000001", hostname: "web.example.com", user: "deploy", port: 22 }, kind: "password", text: "Password for deploy@web.example.com:", echo: false, remaining_ms: 90000, grant: null, ai: scenario === "authentication-ai" ? { client: "claude → node", unreviewed: "command" } : null }}
       busy={false} armed remainingMs={scenario === "authentication-expired" ? 0 : 90000} answer={answer} onChange={setAnswer} onAnswer={() => setAnswer("")}
     />;
     return <>

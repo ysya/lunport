@@ -288,7 +288,7 @@ fn execute(
     cancel: &CancelToken,
     current: &(dyn Fn() -> Result<(), String> + Sync),
 ) -> DeployResult {
-    use crate::mcp::records::{Asker, CheckedEngine, PublicDirectory};
+    use crate::mcp::records::{CheckedEngine, PublicDirectory};
     let check = || review.check(connector, cancel, current);
     let invalid = || {
         if cancel.is_cancelled() {
@@ -325,7 +325,7 @@ fn execute(
         check: &check_connected,
     };
     // A person drives a deployment: a needed grant is asked of them (design 2026-10-25, PAM grant requests).
-    let directory = PublicDirectory(connector.directory, &check, &check_resolved, Asker::Person);
+    let directory = PublicDirectory(connector.directory, &check, &check_resolved);
     let guarded = Connector {
         engine: &engine,
         directory: &directory,
@@ -494,6 +494,7 @@ pub async fn records_deploy_confirm(
             Err(_) => return Ok(Outcome::Canceled.into()),
         };
         let owner = super::auth_window::NativeOwner {
+            ai: None,
             hub: state.session.auth_questions.clone(),
             surface: Arc::new(super::auth_window::TauriAuthSurface { app: app.clone() }),
             request_id: preview_id.clone(),

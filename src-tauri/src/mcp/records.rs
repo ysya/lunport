@@ -3,7 +3,7 @@ use super::*;
 use crate::session::{
     auth::{KeyStore, Owner},
     connect::{CancelToken, Connector, HostKeyConfirmer, HostKeyDecision, HostKeyQuestion},
-    protocol::HostQuery,
+    protocol::{AiAsker, HostQuery, Unreviewed},
 };
 #[cfg(test)]
 use crate::session::{auth::Reply, protocol::QuestionKind};
@@ -120,8 +120,6 @@ pub(crate) enum KeyOutcome {
     Refused { alias: String, changed: bool },
     /// Nobody answered the window before it gave up.
     Unanswered { alias: String, changed: bool },
-    /// Auto-log met a key that differs from the saved one, and asked nobody.
-    Changed(String),
 }
 
 impl KeyOutcome {
@@ -130,9 +128,6 @@ impl KeyOutcome {
         let tail = stopped.map(|stopped| format!(" and {stopped}")).unwrap_or_default();
         let key = |alias: &str, changed: bool| format!("{}server key of {alias}", if changed { "changed " } else { "" });
         match self {
-            KeyOutcome::Changed(alias) => format!(
-                "needs interaction: the server key of {alias} changed; ask the user to review it with verify_host_key. Nothing was trusted{tail}."
-            ),
             KeyOutcome::Refused { alias, changed } => {
                 format!("The {} was denied in Lunport's trust window; nothing was saved{tail}.", key(alias, *changed))
             }
@@ -148,18 +143,35 @@ impl KeyOutcome {
 /// What `ssh_exec` says when a server key question stopped it.
 const COMMAND_STOPPED: &str = "the command did not run";
 
-/// Lunport's host key window as an AI client's call asks it (design 2026-11-09): every question goes to the window, except that Auto-log
-/// refuses, without asking, a changed key. The connect path asks a key that differs from the one another device saved for the host (a pin
-/// this device has not approved yet) as a changed key too. It remembers the first question that ended without trust, for the client's
-/// answer.
+/// The AI client as Lunport observed it (the requester chain), never what the client says of itself: who started a tunnel in the Tunnels
+/// panel, and who asks in Lunport's windows (design 2026-11-09, native windows for AI requests).
+pub(crate) fn client_label(context: &RequestContext) -> String {
+    let observed: Vec<&str> = context.requested_by.iter().map(String::as_str).filter(|name| *name != "Unknown").collect();
+    if observed.is_empty() {
+        "An unidentified AI client".into()
+    } else {
+        observed.join(" → ")
+    }
+}
+
+/// Who asks in Lunport's windows for an AI client's request in `mode`: the client, and in Auto-log what goes ahead without per-command
+/// review once the person agrees (`then`).
+pub(crate) fn asker(context: &RequestContext, mode: ApprovalMode, then: Unreviewed) -> AiAsker {
+    AiAsker { client: client_label(context), unreviewed: (mode == ApprovalMode::AutoLog).then_some(then) }
+}
+
+/// Lunport's host key window as an AI client's call asks it (design 2026-11-09): every question goes to the window, a changed key in
+/// Auto-log too (native windows for AI requests), and names the client (`asker`). The connect path asks a key that differs from the one
+/// another device saved for the host (a pin this device has not approved yet) as a changed key. It remembers the first question that ended
+/// without trust, for the client's answer.
 pub(crate) struct ClientConfirmer<'a> {
     window: &'a dyn HostKeyConfirmer,
-    auto_log: bool,
+    asker: AiAsker,
     outcome: Mutex<Option<KeyOutcome>>,
 }
 impl<'a> ClientConfirmer<'a> {
-    pub(crate) fn new(window: &'a dyn HostKeyConfirmer, auto_log: bool) -> Self {
-        Self { window, auto_log, outcome: Mutex::new(None) }
+    pub(crate) fn new(window: &'a dyn HostKeyConfirmer, asker: AiAsker) -> Self {
+        Self { window, asker, outcome: Mutex::new(None) }
     }
     /// The client's answer when a question ended without trust (`stopped`: what did not happen); `None` when none did.
     pub(crate) fn answer(&self, stopped: Option<&str>) -> Option<String> {
@@ -178,12 +190,9 @@ impl HostKeyConfirmer for ClientConfirmer<'_> {
     }
     fn decide(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> HostKeyDecision {
         let alias = crate::session::auth::printable(&question.alias).replace(['\n', '\t'], "?");
-        if self.auto_log && question.changed.is_some() {
-            self.note(KeyOutcome::Changed(alias));
-            return HostKeyDecision::Refused;
-        }
         let changed = question.changed.is_some();
-        let decision = self.window.decide(question, cancel);
+        let asked = HostKeyQuestion { ai: Some(self.asker.clone()), ..question.clone() };
+        let decision = self.window.decide(&asked, cancel);
         match decision {
             HostKeyDecision::Trusted(_) => {}
             HostKeyDecision::Refused => self.note(KeyOutcome::Refused { alias, changed }),
@@ -220,7 +229,7 @@ pub(crate) fn verify_route(
         approved.check_resolved(&current, connector.keys)
     };
     let check_resolved = |target: &Target| approved.check_resolved(target, connector.keys);
-    let directory = PublicDirectory(connector.directory, &check, &check_resolved, Asker::Automation);
+    let directory = PublicDirectory(connector.directory, &check, &check_resolved);
     let probe = Connector {
         directory: &directory,
         engine: connector.engine,
@@ -230,7 +239,7 @@ pub(crate) fn verify_route(
         grants: connector.grants,
     };
     check()?;
-    let verified = crate::session::verify::verify(&probe, query, owner, cancel)?;
+    let verified = crate::session::verify::verify_for_ai(&probe, query, owner, cancel)?;
     check()?;
     Ok(verified)
 }
@@ -256,7 +265,7 @@ pub(crate) fn trust_entry(context: &RequestContext, host_id: &str, alias: &str, 
 /// Before an AI client's call connects through a hop whose server key this device has not verified (design 2026-11-09), the person
 /// decides on it in Lunport's host key window, as `verify_host_key` asks: no credential for the destination is asked before that. The
 /// hops are those of `target`, the route the request was approved for, and their keys are looked at as they are now (the person may
-/// have verified one while an approval was open). The decision is audited. Auto-log connects only once every hop is verified.
+/// have verified one while an approval was open). The decision is audited.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_unverified(
     runtime: &McpRuntime,
@@ -286,9 +295,8 @@ pub(crate) fn verify_unverified(
     let verified = verify_route(connector, query, target, owner, cancel, guard, confirmer);
     runtime.record(trust_entry(context, destination.id.as_str(), &destination.alias, mode, verified.is_ok()));
     verified.map_err(|error| confirmer.answer(Some(stopped)).unwrap_or(error))?;
-    if mode == ApprovalMode::AutoLog && unverified()? {
-        return Err("needs interaction: host key is not pinned".into());
-    }
+    // A key that is not verified by the time the call connects (another device changed the pin in between) is the connection's to ask
+    // about, in its own window, in both modes (design 2026-11-09, native windows for AI requests).
     Ok(())
 }
 pub(crate) struct CheckedEngine<'a> {
@@ -307,20 +315,13 @@ impl SshEngine for CheckedEngine<'_> {
     }
 }
 
-/// Who drives the connection a `PublicDirectory` serves (design 2026-10-25, PAM grant requests): a person may be asked for a
-/// Privileged Access Manager grant; automation (an AI's request) gets the refusal that names the gcloud command instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Asker {
-    Person,
-    Automation,
-}
-
-/// Uses public resolution; private material is verified by KeyStore immediately before authentication.
+/// Uses public resolution; private material is verified by KeyStore immediately before authentication. A Privileged Access Manager grant
+/// the target needs is passed on, so that the connection asks for it in Lunport's window, for an AI client's request too (design
+/// 2026-11-09, native windows for AI requests).
 pub(crate) struct PublicDirectory<'a>(
     pub(crate) &'a dyn crate::session::directory::HostDirectory,
     pub(crate) &'a (dyn Fn() -> Result<(), String> + Sync),
     pub(crate) &'a (dyn Fn(&Target) -> Result<(), String> + Sync),
-    pub(crate) Asker,
 );
 impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn resolve_host_key(
@@ -420,12 +421,7 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         self.0.password_account(h)
     }
     fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &CancelToken) -> Result<crate::session::directory::Prepared, crate::session::directory::DirectoryError> {
-        let prepared = self.0.prepare(target, public_key, cancel);
-        match self.3 {
-            // An AI request asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
-            Asker::Automation => prepared.map_err(crate::session::directory::DirectoryError::for_automation),
-            Asker::Person => prepared,
-        }
+        self.0.prepare(target, public_key, cancel)
     }
     fn request_grant(&self, need: &crate::session::directory::GrantNeed, justification: &str, duration_secs: u32, cancel: &CancelToken) -> Result<crate::session::directory::GrantReceipt, crate::session::directory::DirectoryError> {
         (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
@@ -589,7 +585,7 @@ pub(super) fn execute_context(
                 }
             }
             check()?;
-            let confirmer = ClientConfirmer::new(connector.confirmer, mode == ApprovalMode::AutoLog);
+            let confirmer = ClientConfirmer::new(connector.confirmer, asker(&context, mode, Unreviewed::Command));
             verify_unverified(runtime, connector, &query, &target, owner, cancel, &check, &confirmer, (&context, mode), COMMAND_STOPPED)?;
             let check_resolved = |actual: &Target| approved.check_resolved(actual, connector.keys);
             let check_connected = |actual: &Target| {
@@ -600,7 +596,7 @@ pub(super) fn execute_context(
                 inner: connector.engine,
                 check: &check_connected,
             };
-            let directory = PublicDirectory(connector.directory, &check, &check_resolved, Asker::Automation);
+            let directory = PublicDirectory(connector.directory, &check, &check_resolved);
             let guarded = Connector {
                 engine: &engine,
                 confirmer: &confirmer,
@@ -708,61 +704,58 @@ pub(super) fn execute_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::directory::{DirectoryError, GrantNeed, HostDirectory, Prepared};
     use crate::session::grants::GrantGates;
     use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
     use crate::ssh::{
         fake::{default_server_key, FakeEngine, FakeEvent},
-        AuthMethod, Ended, ExecResult, HostId, HostKey,
+        AuthMethod, Ended, ExecResult,
     };
     use crate::sync::testkit::MemKeychain;
 
-    /// A directory whose every target needs a Privileged Access Manager grant (design 2026-10-25, PAM grant requests).
-    struct NeedsGrant<'a>(&'a FakeDirectory);
-
-    fn need() -> GrantNeed {
-        GrantNeed {
-            host: HostId::from("id-web"),
-            account: None,
-            project: "acme-prod-123456".into(),
-            location: "global".into(),
-            entitlement: "prod-operate".into(),
-            entitlements: vec!["prod-operate".into()],
-            duration_secs: 1800,
-            justification: None,
-        }
-    }
-
-    impl HostDirectory for NeedsGrant<'_> {
-        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
-            self.0.resolve(query)
-        }
-        fn pinned(&self, host: &HostId) -> Result<Option<crate::session::directory::PinnedKey>, DirectoryError> {
-            self.0.pinned(host)
-        }
-        fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
-            self.0.pin(host, key)
-        }
-        fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
-            self.0.replace_pin(host, previous, key)
-        }
-        fn password_account(&self, host: &HostId) -> String {
-            self.0.password_account(host)
-        }
-        fn prepare(&self, _target: &Target, _public_key: &dyn Fn(&str) -> Option<String>, _cancel: &CancelToken) -> Result<Prepared, DirectoryError> {
-            Err(DirectoryError::GrantNeeded(Box::new(need())))
-        }
-    }
-
-    /// An AI's request asks nobody for a grant (design 2026-10-25): it gets the refusal that names the gcloud command, and nothing connects.
+    /// An AI request that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window, in both modes (design
+    /// 2026-11-09, native windows for AI requests): the grant is requested with the person's justification and length, and the command
+    /// runs once it is active.
     #[test]
-    fn an_ai_request_never_asks_for_a_grant_and_gets_the_refusal() {
+    fn an_ai_request_asks_for_a_grant_in_lunports_window_and_runs_once_it_is_active() {
+        use crate::session::testing::{grant_answer, grant_need, NeedsGrant};
+        for mode in [ApprovalMode::Ask, ApprovalMode::AutoLog] {
+            let runtime = McpRuntime::default();
+            {
+                let mut policy = runtime.policy.lock().unwrap();
+                policy.enabled = true;
+                policy.approval_mode = mode;
+                policy.allowed_hosts.insert("id-web".into());
+            }
+            let engine = FakeEngine::new();
+            let inner = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+            let directory = NeedsGrant::new(&inner, grant_need("web", "acme-exec-302030"));
+            let owner = FakeOwner::typing(&[&grant_answer(45, "restart app-api after the deploy")]);
+            let connector = Connector {
+                engine: &engine,
+                directory: &directory,
+                keys: &FakeKeys::new(),
+                keychain: &MemKeychain::default(),
+                confirmer: &FakeConfirmer::default(),
+                grants: GrantGates::for_tests(),
+            };
+            let output = execute(&runtime, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow).unwrap();
+            assert_eq!(output["ended"], "exited", "{mode:?}");
+            assert_eq!(owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), [QuestionKind::Grant], "{mode:?}");
+            assert_eq!(directory.requested(), [("restart app-api after the deploy".to_string(), 45 * 60)], "{mode:?}");
+        }
+    }
+
+    /// Cancel in the Request-a-grant window, or no answer, ends an AI request with the refusal that names the gcloud command: no grant is
+    /// requested and nothing connects.
+    #[test]
+    fn a_grant_the_person_does_not_request_ends_an_ai_request_with_the_refusal() {
+        use crate::session::testing::{grant_need, NeedsGrant};
         let runtime = McpRuntime::default();
         runtime.policy.lock().unwrap().enabled = true;
         runtime.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
         let engine = FakeEngine::new();
         let inner = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
-        let directory = NeedsGrant(&inner);
+        let directory = NeedsGrant::new(&inner, grant_need("web", "acme-cancel-302040"));
         let owner = FakeOwner::default();
         let connector = Connector {
             engine: &engine,
@@ -773,24 +766,10 @@ mod tests {
             grants: GrantGates::for_tests(),
         };
         let error = execute(&runtime, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow).unwrap_err();
-        assert_eq!(error, need().refusal_sentence());
-        assert!(owner.asked().is_empty(), "nobody was asked");
+        assert_eq!(error, grant_need("web", "acme-cancel-302040").refusal_sentence());
+        assert_eq!(owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), [QuestionKind::Grant]);
+        assert!(directory.requested().is_empty(), "no grant was requested");
         assert!(!engine.events().iter().any(|event| matches!(event, FakeEvent::Connect { .. })), "nothing connected");
-    }
-
-    /// The public directory a person's deployment connects through passes a needed grant on, so that the person is asked; the one an AI
-    /// request connects through turns it into the refusal.
-    #[test]
-    fn a_persons_public_directory_passes_a_needed_grant_on_and_automations_refuses() {
-        let inner = FakeDirectory::new().with_host("web", AuthMethod::Password);
-        let needing = NeedsGrant(&inner);
-        let fine = || Ok(());
-        let fine_target = |_: &Target| Ok(());
-        let target = inner.resolve(&HostQuery::Alias("web".into())).unwrap();
-        let person = PublicDirectory(&needing, &fine, &fine_target, Asker::Person);
-        assert!(matches!(person.prepare(&target, &|_| None, &CancelToken::default()), Err(DirectoryError::GrantNeeded(_))));
-        let automation = PublicDirectory(&needing, &fine, &fine_target, Asker::Automation);
-        assert!(matches!(automation.prepare(&target, &|_| None, &CancelToken::default()), Err(DirectoryError::Denied(text)) if text == need().refusal_sentence()));
     }
 
     #[test]
@@ -969,8 +948,10 @@ pub(crate) fn dispatch(
         })
         .map_err(|e| e.to_string())?,
         "start_tunnel" => crate::sync::engine::with_env(app, |env| {
-            // Lunport's native windows for what verifying the route's server keys may ask (a jump host's login).
+            // Lunport's native windows for what verifying the route's server keys may ask (a jump host's login, a grant), naming the AI
+            // client (design 2026-11-09).
             let owner = crate::session::auth_window::NativeOwner {
+                ai: Some(asker(&context, policy.approval_mode, Unreviewed::Tunnel)),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -1011,6 +992,8 @@ pub(crate) fn dispatch(
                 return Err("verify_host_key accepts only an AI-approved host ID or alias; it never accepts a trust answer from the client.".into());
             }
             let owner = crate::session::auth_window::NativeOwner {
+                // Nothing runs after a verification: the windows only name the AI client.
+                ai: Some(AiAsker { client: client_label(&context), unreviewed: None }),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -1059,6 +1042,7 @@ pub(crate) fn dispatch(
                     .ok_or("timeout_seconds must be an integer from 1 to 300")?,
             };
             let owner = crate::session::auth_window::NativeOwner {
+                ai: Some(asker(&context, policy.approval_mode, Unreviewed::Command)),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -1383,6 +1367,7 @@ mod behavior_tests {
         let hub = Arc::new(AuthHub::default());
         let cancel = CancelToken::default();
         let owner = NativeOwner {
+            ai: None,
             hub: Arc::clone(&hub),
             surface: Arc::new(AuthorizingSurface(Arc::clone(&hub))),
             request_id: "native-exec".into(),
@@ -1696,7 +1681,6 @@ mod behavior_tests {
     fn other_key() -> crate::ssh::HostKey {
         crate::ssh::HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap()
     }
-    const CHANGED: &str = "needs interaction: the server key of web changed; ask the user to review it with verify_host_key. Nothing was trusted and the command did not run.";
 
     /// Auto-log asks Lunport's trust window about a server key this device has not verified, and the same call runs the command once the
     /// person trusts it: the key is pinned and no command approval is asked. The trust decision is audited before the command.
@@ -1791,71 +1775,142 @@ mod behavior_tests {
         }
     }
 
-    /// A changed server key: Auto-log refuses it without a window and keeps the saved key; Ask mode warns about it in the window, where
-    /// the person may accept it.
+    /// A changed server key opens the warning window in both modes (design 2026-11-09, native windows for AI requests): after Accept new
+    /// key the same call replaces the saved key and runs the command; a refusal or no answer says the key had changed, keeps the saved key
+    /// and runs nothing.
     #[test]
-    fn a_changed_server_key_is_refused_in_auto_log_and_warned_about_in_ask_mode() {
+    fn a_changed_server_key_opens_the_warning_window_in_both_modes() {
+        for mode in [ApprovalMode::AutoLog, ApprovalMode::Ask] {
+            let r = runtime(mode);
+            let e = FakeEngine::new();
+            let d = directory(AuthMethod::Password, false).with_pin("web", other_key());
+            let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+            run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap();
+            let asked = window.asked();
+            assert_eq!(asked.len(), 1, "{mode:?}");
+            assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.clone()), Some(other_key().fingerprint), "{mode:?}");
+            assert_eq!(pin_of(&d), Some(default_server_key()), "{mode:?}");
+            assert!(executed(&e), "{mode:?}");
+
+            for (decision, sentence) in [
+                (Decision::Refuse, "The changed server key of web was denied in Lunport's trust window; nothing was saved and the command did not run."),
+                (
+                    Decision::Unanswered,
+                    "Lunport's trust window for the changed server key of web timed out after 2 minutes; nothing was saved and the command did not run.",
+                ),
+            ] {
+                let r = runtime(mode);
+                let e = FakeEngine::new();
+                let d = directory(AuthMethod::Password, false).with_pin("web", other_key());
+                let window = FakeConfirmer::deciding(vec![decision]);
+                let error = run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap_err();
+                assert_eq!(error, sentence, "{mode:?}");
+                assert_eq!(window.asked().len(), 1, "{mode:?}");
+                assert_eq!(pin_of(&d), Some(other_key()), "the saved key stays ({mode:?})");
+                assert!(!executed(&e), "{mode:?}");
+            }
+        }
+    }
+
+    /// A key the verification step trusted is not refused afterwards by a check of Auto-log's own (design 2026-11-09, native windows for
+    /// AI requests): the connection decides with its own window, as in Ask mode. Here this device's approval never shows (`pinned_for`
+    /// says nothing, as when another device keeps changing the pin), and the connection, which meets the pinned key, runs the command.
+    #[test]
+    fn auto_log_leaves_a_key_still_unverified_after_the_verification_to_the_connection() {
+        use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey};
+        struct NoApproval<'a>(&'a FakeDirectory);
+        impl HostDirectory for NoApproval<'_> {
+            fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+                self.0.resolve(query)
+            }
+            fn pinned(&self, host: &crate::ssh::HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+                self.0.pinned(host)
+            }
+            fn pinned_for(&self, _: &crate::ssh::HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+                Ok(None)
+            }
+            fn saved_for(&self, hop: &crate::ssh::HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+                self.0.saved_for(hop)
+            }
+            fn pin(&self, host: &crate::ssh::HostId, key: &crate::ssh::HostKey) -> Result<(), DirectoryError> {
+                self.0.pin(host, key)
+            }
+            fn replace_pin(&self, host: &crate::ssh::HostId, previous: &crate::ssh::HostKey, key: &crate::ssh::HostKey) -> Result<(), DirectoryError> {
+                self.0.replace_pin(host, previous, key)
+            }
+            fn password_account(&self, host: &crate::ssh::HostId) -> String {
+                self.0.password_account(host)
+            }
+        }
         let r = runtime(ApprovalMode::AutoLog);
         let e = FakeEngine::new();
-        let d = directory(AuthMethod::Password, false).with_pin("web", other_key());
+        let d = directory(AuthMethod::Password, false);
         let window = FakeConfirmer::deciding(vec![Decision::Trust]);
-        let error = run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| panic!("auto-log never asks approval")).unwrap_err();
-        assert_eq!(error, CHANGED);
-        assert!(window.asked().is_empty(), "no window");
-        assert_eq!(pin_of(&d), Some(other_key()), "the saved key stays");
-        assert!(!executed(&e));
-
-        let r = runtime(ApprovalMode::Ask);
-        let e = FakeEngine::new();
-        let d = directory(AuthMethod::Password, false).with_pin("web", other_key());
-        let window = FakeConfirmer::deciding(vec![Decision::Trust]);
-        run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap();
-        let asked = window.asked();
-        assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.clone()), Some(other_key().fingerprint));
-        assert_eq!(pin_of(&d), Some(default_server_key()));
+        let value = run_with(&r, &e, &NoApproval(&d), &FakeOwner::typing(&["secret"]), &window, &|_| panic!("auto-log never asks approval")).unwrap();
+        assert_eq!(value["exit_code"], 0);
+        assert_eq!(window.asked().len(), 1, "the verification asked; the connection met the pinned key");
         assert!(executed(&e));
+    }
 
-        // Refused there, the answer says the key had changed.
-        let r = runtime(ApprovalMode::Ask);
-        let e = FakeEngine::new();
-        let d = directory(AuthMethod::Password, false).with_pin("web", other_key());
-        let window = FakeConfirmer::deciding(vec![Decision::Refuse]);
-        let error = run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap_err();
-        assert_eq!(error, "The changed server key of web was denied in Lunport's trust window; nothing was saved and the command did not run.");
-        assert_eq!(pin_of(&d), Some(other_key()), "the saved key stays");
-        assert!(!executed(&e));
+    /// Every host key window an AI request opens names the AI client as Lunport observed it, and in Auto-log says that the command runs
+    /// without per-command review once the key is trusted (design 2026-11-09, native windows for AI requests).
+    #[test]
+    fn the_host_key_window_names_the_ai_client_and_says_what_runs_unreviewed() {
+        use crate::session::protocol::{AiAsker, Unreviewed};
+        for (mode, requested_by, asker) in [
+            (
+                ApprovalMode::AutoLog,
+                vec!["claude".to_string(), "node".to_string()],
+                AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command) },
+            ),
+            (ApprovalMode::Ask, vec!["claude".to_string()], AiAsker { client: "claude".into(), unreviewed: None }),
+            (ApprovalMode::AutoLog, vec![], AiAsker { client: "An unidentified AI client".into(), unreviewed: Some(Unreviewed::Command) }),
+        ] {
+            let r = runtime(mode);
+            let e = FakeEngine::new();
+            let d = directory(AuthMethod::Password, false);
+            let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+            let (keys, keychain) = (FakeKeys::new(), MemKeychain::default());
+            let connector = Connector {
+                grants: crate::session::grants::GrantGates::for_tests(),
+                engine: &e,
+                directory: &d,
+                keys: &keys,
+                keychain: &keychain,
+                confirmer: &window,
+            };
+            let context = RequestContext { requested_by, ..Default::default() };
+            let owner = FakeOwner::typing(&["secret"]);
+            execute_context(&r, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow, context, &ensure_allowed)
+                .unwrap();
+            assert_eq!(window.asked().into_iter().map(|question| question.ai).collect::<Vec<_>>(), [Some(asker)], "{mode:?}");
+        }
     }
 
     /// A key that differs from the one another device saved for the host (a pin this device has not approved) is a changed key, as the
-    /// connect path asks it (design 2026-11-09, saved pins): Auto-log refuses it without a window, and Ask mode warns about it in the window,
-    /// with the saved key. The very key another device saved is asked about as new, says when it was saved, and is trusted here in both
-    /// modes.
+    /// connect path asks it (design 2026-11-09, saved pins): both modes warn about it in the window, with the saved key, and the call goes
+    /// on after Accept new key. The very key another device saved is asked about as new, says when it was saved, and is trusted here in
+    /// both modes.
     #[test]
     fn a_key_that_differs_from_another_devices_saved_key_is_a_changed_key_in_both_modes() {
         let web = crate::ssh::HostId::from("id-web");
-        let r = runtime(ApprovalMode::AutoLog);
-        let e = FakeEngine::new();
-        let d = directory(AuthMethod::Password, false).with_saved_pin("web", other_key());
-        let window = FakeConfirmer::deciding(vec![Decision::Trust]);
-        let error = run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| panic!("auto-log never asks approval")).unwrap_err();
-        assert_eq!(error, CHANGED);
-        assert!(window.asked().is_empty(), "no window");
-        assert_eq!(pin_of(&d), Some(other_key()), "the saved key stays");
-        assert!(!d.approved(&web));
-        assert!(!executed(&e));
-
-        let r = runtime(ApprovalMode::Ask);
-        let e = FakeEngine::new();
-        let d = directory(AuthMethod::Password, false).with_saved_pin("web", other_key());
-        let window = FakeConfirmer::deciding(vec![Decision::Trust]);
-        run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap();
-        let asked = window.asked();
-        assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.clone()), Some(other_key().fingerprint), "warned about as changed");
-        assert_eq!(pin_of(&d), Some(default_server_key()));
-        assert!(d.approved(&web));
-        assert!(executed(&e));
+        for mode in [ApprovalMode::AutoLog, ApprovalMode::Ask] {
+            let r = runtime(mode);
+            let e = FakeEngine::new();
+            let d = directory(AuthMethod::Password, false).with_saved_pin("web", other_key());
+            let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+            run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap();
+            let asked = window.asked();
+            assert_eq!(asked.len(), 1, "{mode:?}");
+            assert_eq!(
+                asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.clone()),
+                Some(other_key().fingerprint),
+                "warned about as changed ({mode:?})"
+            );
+            assert_eq!(pin_of(&d), Some(default_server_key()), "{mode:?}");
+            assert!(d.approved(&web), "{mode:?}");
+            assert!(executed(&e), "{mode:?}");
+        }
 
         for mode in [ApprovalMode::AutoLog, ApprovalMode::Ask] {
             let r = runtime(mode);

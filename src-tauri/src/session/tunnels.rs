@@ -73,8 +73,27 @@ pub(crate) struct Entry {
     live: Mutex<TunnelLive>,
     /// Why Lunport itself stopped the tunnel, when it did for a reason of its own (an AI client's access ended): its error then.
     ended_for: Mutex<Option<String>>,
+    /// How many of Lunport's windows its connection has open for the person (design 2026-11-09, native windows for AI requests):
+    /// `start_tunnel` keeps waiting while one is.
+    asking: std::sync::atomic::AtomicUsize,
 }
 impl Entry {
+    /// Whether its connection has one of Lunport's windows open for the person now.
+    pub(crate) fn asking(&self) -> bool {
+        self.asking.load(Ordering::SeqCst) > 0
+    }
+    /// `ask`, counted as a window its connection has open for as long as it runs.
+    pub(crate) fn while_asking<T>(&self, ask: impl FnOnce() -> T) -> T {
+        struct Answered<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Answered<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.asking.fetch_add(1, Ordering::SeqCst);
+        let _answered = Answered(&self.asking);
+        ask()
+    }
     /// Its live state now.
     pub(crate) fn live(&self) -> TunnelLive {
         self.live.lock().unwrap().clone()
@@ -225,6 +244,7 @@ impl Tunnels {
                 ..Default::default()
             }),
             ended_for: Mutex::new(None),
+            asking: Default::default(),
         });
         entries.insert(rule.id.clone(), Arc::clone(&entry));
         Ok((rule, entry, self.next.fetch_add(1, Ordering::Relaxed)))
@@ -373,8 +393,8 @@ fn run(
 pub(crate) struct AiApproval<'a> {
     /// The destination, route and keys the start was approved for, captured as `ssh_exec` captures them.
     pub approved: &'a crate::mcp::records::ApprovedTarget,
-    /// Started in Auto-log mode: a changed server key is refused instead of asked about (design 2026-11-09).
-    pub auto_log: bool,
+    /// Who asks in the windows the tunnel's connection opens (design 2026-11-09, native windows for AI requests).
+    pub asker: crate::session::protocol::AiAsker,
     /// The policy as it is now still allows the start: AI access on, the mode it was approved in, the host permitted.
     pub allowed: &'a (dyn Fn() -> Result<(), String> + Sync),
     /// Why the tunnel must stop now, if it must: the client's AI access ended. Asked every `REVOCATION_POLL` while it connects or runs.
@@ -385,10 +405,10 @@ pub(crate) struct AiApproval<'a> {
 const REVOCATION_POLL: Duration = Duration::from_millis(250);
 
 /// Runs `rule` for an AI client (design 2026-11-08) over `base` guarded as `ssh_exec` guards its connection: it connects only to the
-/// approved route with the approved keys while the policy still allows it, asks nobody for a Privileged Access Manager grant, and asks
-/// server key questions as `ssh_exec` asks them (design 2026-11-09: the window, but no window for a changed key in Auto-log). When
-/// `ai.revoked` says the client's access ended, the tunnel stops with that reason, while it still connects too, which withdraws the
-/// windows its connection opened.
+/// approved route with the approved keys while the policy still allows it, and asks what `ssh_exec` asks in Lunport's windows, naming
+/// the client (design 2026-11-09, native windows for AI requests): a new or changed server key, credentials, a Privileged Access Manager
+/// grant. The windows count on the entry while they wait for the person. When `ai.revoked` says the client's access ended, the tunnel
+/// stops with that reason, while it still connects too, which withdraws the windows its connection opened.
 pub(crate) fn run_for_ai(
     rule: &TunnelRule,
     entry: &Entry,
@@ -398,7 +418,7 @@ pub(crate) fn run_for_ai(
     account: &dyn Fn() -> Option<String>,
     needs_grant: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
-    use crate::mcp::records::{Asker, CheckedEngine, ClientConfirmer, PublicDirectory};
+    use crate::mcp::records::{CheckedEngine, ClientConfirmer, PublicDirectory};
     let query = HostQuery::Id(rule.host_id.clone());
     let check = || -> Result<(), String> {
         if entry.cancel.is_cancelled() {
@@ -413,8 +433,12 @@ pub(crate) fn run_for_ai(
         ai.approved.check_connected(target, base.keys)
     };
     let engine = CheckedEngine { inner: base.engine, check: &check_connected };
-    let directory = PublicDirectory(base.directory, &check, &check_resolved, Asker::Automation);
-    let confirmer = ClientConfirmer::new(base.confirmer, ai.auto_log);
+    let directory = PublicDirectory(base.directory, &check, &check_resolved);
+    // The windows the connection opens count on the entry while they wait for the person (design 2026-11-09): `start_tunnel` waits for
+    // the person instead of answering that the tunnel is still connecting.
+    let window = CountedWindow { inner: base.confirmer, entry };
+    let owner = CountedOwner { inner: owner, entry };
+    let confirmer = ClientConfirmer::new(&window, ai.asker.clone());
     let guarded = Connector {
         engine: &engine,
         directory: &directory,
@@ -446,11 +470,52 @@ pub(crate) fn run_for_ai(
             }
         });
         let _done = Done(&done);
-        run(rule, entry, &guarded, owner, &watch)
+        run(rule, entry, &guarded, &owner, &watch)
     });
     // `start_tunnel` passes a "needs interaction:" answer on as it is and prefixes the others with "The tunnel could not start".
     result.map_err(|error| confirmer.answer(None).unwrap_or(error))
 }
+/// The owner of an AI client's tunnel, counted on its entry while it asks the person (design 2026-11-09, native windows for AI requests).
+struct CountedOwner<'a> {
+    inner: &'a dyn Owner,
+    entry: &'a Entry,
+}
+impl Owner for CountedOwner<'_> {
+    fn ask(&self, kind: super::protocol::QuestionKind, text: &str, echo: bool, deadline: Option<std::time::Instant>) -> super::auth::Reply {
+        self.entry.while_asking(|| self.inner.ask(kind, text, echo, deadline))
+    }
+    fn ask_at(
+        &self,
+        hop: &crate::ssh::HopRef,
+        kind: super::protocol::QuestionKind,
+        text: &str,
+        echo: bool,
+        deadline: Option<std::time::Instant>,
+    ) -> super::auth::Reply {
+        self.entry.while_asking(|| self.inner.ask_at(hop, kind, text, echo, deadline))
+    }
+    fn host_key_notice(&self, text: &str) {
+        self.inner.host_key_notice(text)
+    }
+    fn banner(&self, text: &str) {
+        self.inner.banner(text)
+    }
+}
+
+/// The host key window of an AI client's tunnel, counted on its entry while it asks the person.
+struct CountedWindow<'a> {
+    inner: &'a dyn super::connect::HostKeyConfirmer,
+    entry: &'a Entry,
+}
+impl super::connect::HostKeyConfirmer for CountedWindow<'_> {
+    fn confirm(&self, question: &super::connect::HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+        self.entry.while_asking(|| self.inner.confirm(question, cancel))
+    }
+    fn decide(&self, question: &super::connect::HostKeyQuestion, cancel: &CancelToken) -> super::connect::HostKeyDecision {
+        self.entry.while_asking(|| self.inner.decide(question, cancel))
+    }
+}
+
 fn finish(entry: &Entry, result: Result<(), String>) {
     // A reason of Lunport's own (an AI client's access ended) is the tunnel's error, however its run ended.
     let ended_for = entry.ended_for.lock().unwrap().take();
@@ -565,11 +630,12 @@ pub(crate) type Work = Box<
 >;
 
 /// Starts the saved tunnel `expected` on a worker thread of its own, registered with the broker so that quitting stops it, and answers
-/// its entry: the panel's Start, and an AI client's (design 2026-11-08), which names itself in `started_by` and guards the connection in
-/// `work`.
-pub(crate) fn launch(app: &tauri::AppHandle, expected: &TunnelRule, started_by: Option<String>, work: Work) -> Result<Arc<Entry>, String> {
+/// its entry: the panel's Start, and an AI client's (design 2026-11-08), which names the client in `ai` (who started it, and who asks in
+/// the windows its connection opens, design 2026-11-09) and guards the connection in `work`.
+pub(crate) fn launch(app: &tauri::AppHandle, expected: &TunnelRule, ai: Option<crate::session::protocol::AiAsker>, work: Work) -> Result<Arc<Entry>, String> {
     // The credential window names the request: an AI client's tunnel says so.
-    let request = if started_by.is_some() { "mcp-tunnel" } else { "tunnel" };
+    let request = if ai.is_some() { "mcp-tunnel" } else { "tunnel" };
+    let started_by = ai.as_ref().map(|asker| asker.client.clone());
     super::app::start(app);
     let (broker, rule, entry, generation) = {
         let state = app.state::<AppState>();
@@ -593,6 +659,7 @@ pub(crate) fn launch(app: &tauri::AppHandle, expected: &TunnelRule, started_by: 
     let app = app.clone();
     let spawned = std::thread::Builder::new().name("lunport-tunnel".into()).spawn(move || {
         let owner = super::auth_window::NativeOwner {
+            ai,
             hub: app.state::<AppState>().session.auth_questions.clone(),
             surface: Arc::new(super::auth_window::TauriAuthSurface { app: app.clone() }),
             request_id: format!("{request}-{}-{generation}", rule.id),
@@ -853,6 +920,7 @@ mod tests {
                 ..Default::default()
             }),
             ended_for: Mutex::new(None),
+            asking: Default::default(),
         };
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -1029,8 +1097,9 @@ mod tests {
             cancel: CancelToken::default(),
             live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, started_by: Some("Claude".into()), ..Default::default() }),
             ended_for: Mutex::new(None),
+            asking: Default::default(),
         };
-        let ai = AiApproval { approved: &approved, auto_log, allowed, revoked };
+        let ai = AiApproval { approved: &approved, asker: claude(auto_log), allowed, revoked };
         let ran = std::sync::atomic::AtomicBool::new(false);
         let result = std::thread::scope(|scope| {
             let watcher = scope.spawn(|| {
@@ -1054,6 +1123,14 @@ mod tests {
 
     fn pinned_db() -> FakeDirectory {
         FakeDirectory::new().with_host("db", key()).with_pin("db", default_server_key())
+    }
+
+    /// The AI client the tests' tunnels were started by, in Auto-log or Ask mode.
+    fn claude(auto_log: bool) -> crate::session::protocol::AiAsker {
+        crate::session::protocol::AiAsker {
+            client: "Claude".into(),
+            unreviewed: auto_log.then_some(crate::session::protocol::Unreviewed::Tunnel),
+        }
     }
 
     /// A run that must not get as far as forwarding: if it does, it is stopped at once and the test sees `ran`.
@@ -1127,24 +1204,149 @@ mod tests {
         }
     }
 
-    /// Auto-log refuses a changed server key in an AI client's tunnel without a window; Ask mode warns about it in the window.
+    /// A changed server key in an AI client's tunnel opens the warning window in both modes (design 2026-11-09, native windows for AI
+    /// requests); the window names the client and, in Auto-log, says the tunnel starts without review. After Accept new key the tunnel
+    /// runs; a refusal says the key had changed and nothing runs.
     #[test]
-    fn an_ai_clients_tunnel_refuses_a_changed_server_key_in_auto_log() {
+    fn an_ai_clients_tunnel_warns_about_a_changed_server_key_in_both_modes() {
         use crate::session::testing::Decision;
         let other = crate::ssh::HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap();
         let changed = || FakeDirectory::new().with_host("db", key()).with_pin("db", other.clone());
-        let window = FakeConfirmer::deciding(vec![Decision::Trust]);
-        let run = run_ai_until(&changed(), &changed(), "db", true, &window, &|| Ok(()), &|| None, &stop_it);
-        assert!(!run.ran);
-        assert_eq!(
-            run.result,
-            Err("needs interaction: the server key of db changed; ask the user to review it with verify_host_key. Nothing was trusted.".to_string())
-        );
-        assert!(window.asked().is_empty(), "no window");
-        let person = FakeConfirmer::deciding(vec![Decision::Trust]);
-        let run = run_ai_until(&changed(), &changed(), "db", false, &person, &|| Ok(()), &|| None, &stop_it);
-        assert!(run.ran);
-        assert_eq!(person.asked().iter().map(|q| q.changed.as_ref().map(|pinned| pinned.fingerprint.clone())).collect::<Vec<_>>(), [Some(other.fingerprint.clone())]);
+        for auto_log in [true, false] {
+            let person = FakeConfirmer::deciding(vec![Decision::Trust]);
+            let run = run_ai_until(&changed(), &changed(), "db", auto_log, &person, &|| Ok(()), &|| None, &stop_it);
+            assert!(run.ran, "auto_log: {auto_log}");
+            let asked = person.asked();
+            assert_eq!(
+                asked.iter().map(|q| (q.changed.as_ref().map(|pinned| pinned.fingerprint.clone()), q.ai.clone())).collect::<Vec<_>>(),
+                [(Some(other.fingerprint.clone()), Some(claude(auto_log)))],
+                "auto_log: {auto_log}"
+            );
+
+            let refusing = FakeConfirmer::deciding(vec![Decision::Refuse]);
+            let run = run_ai_until(&changed(), &changed(), "db", auto_log, &refusing, &|| Ok(()), &|| None, &stop_it);
+            assert!(!run.ran, "auto_log: {auto_log}");
+            assert_eq!(run.result, Err("The changed server key of db was denied in Lunport's trust window; nothing was saved.".to_string()));
+        }
+    }
+
+    /// While a window the tunnel's connection opened waits for the person (its server key, its password), its entry says so, so that
+    /// `start_tunnel` keeps waiting for the person (design 2026-11-09, native windows for AI requests); once answered, it does not.
+    #[test]
+    fn an_ai_clients_tunnel_counts_the_windows_its_connection_has_open() {
+        use crate::session::{
+            auth::Reply,
+            connect::{HostKeyConfirmer, HostKeyQuestion},
+            protocol::QuestionKind,
+        };
+        use crate::ssh::fake::{FakeLogin, FakeMethods};
+        /// The host key window: trusts the key, noting whether the entry counted it as open.
+        struct Window<'a> {
+            entry: &'a Entry,
+            seen: Mutex<Vec<bool>>,
+        }
+        impl HostKeyConfirmer for Window<'_> {
+            fn confirm(&self, question: &HostKeyQuestion, _: &CancelToken) -> Option<String> {
+                self.seen.lock().unwrap().push(self.entry.asking());
+                Some(question.fingerprint.clone())
+            }
+        }
+        /// The password window: answers, noting the same.
+        struct Person<'a> {
+            entry: &'a Entry,
+            seen: Mutex<Vec<bool>>,
+        }
+        impl Owner for Person<'_> {
+            fn ask(&self, _: QuestionKind, _: &str, _: bool, _: Option<Instant>) -> Reply {
+                self.seen.lock().unwrap().push(self.entry.asking());
+                Reply::Answer(zeroize::Zeroizing::new("secret".into()))
+            }
+            fn host_key_notice(&self, _: &str) {}
+            fn banner(&self, _: &str) {}
+        }
+        let directory = FakeDirectory::new().with_host("db", crate::ssh::AuthMethod::Password);
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+        let (keys, keychain, grants) = (FakeKeys::new(), MemKeychain::default(), GrantGates::default());
+        let approved = crate::mcp::records::ApprovedTarget::capture(
+            &crate::session::directory::HostDirectory::resolve_public(&directory, &HostQuery::Id("id-db".into())).unwrap(),
+            &keys,
+        )
+        .unwrap();
+        let rule = TunnelRule { host_id: "id-db".into(), ..saved().1 };
+        let entry = Entry {
+            rule: rule.clone(),
+            account_id: None,
+            cancel: CancelToken::default(),
+            live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
+            ended_for: Mutex::new(None),
+            asking: Default::default(),
+        };
+        let window = Window { entry: &entry, seen: Mutex::new(Vec::new()) };
+        let person = Person { entry: &entry, seen: Mutex::new(Vec::new()) };
+        let connector = Connector { engine: &engine, directory: &directory, keys: &keys, keychain: &keychain, confirmer: &window, grants: &grants };
+        let ai = AiApproval { approved: &approved, asker: claude(true), allowed: &|| Ok(()), revoked: &|| None };
+        let result = std::thread::scope(|scope| {
+            // Once it runs, stop it: the test is about how it got there.
+            scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while matches!(entry.live().phase, TunnelPhase::Connecting) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                entry.stop();
+            });
+            run_for_ai(&rule, &entry, &connector, &person, &ai, &|| None, &|_| false)
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(*window.seen.lock().unwrap(), [true], "the host key window counted as open");
+        assert_eq!(*person.seen.lock().unwrap(), [true], "the password window counted as open");
+        assert!(!entry.asking(), "nothing open once answered");
+    }
+
+    /// An AI client's tunnel through a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window
+    /// (design 2026-11-09, native windows for AI requests), and runs once the grant is active.
+    #[test]
+    fn an_ai_clients_tunnel_asks_for_the_grant_its_host_needs() {
+        use crate::session::{
+            protocol::QuestionKind,
+            testing::{grant_answer, grant_need, NeedsGrant},
+        };
+        let inner = pinned_db();
+        let directory = NeedsGrant::new(&inner, grant_need("db", "acme-tunnel-302020"));
+        let engine = FakeEngine::new();
+        let (keys, keychain, grants, confirmer) = (FakeKeys::new(), MemKeychain::default(), GrantGates::default(), FakeConfirmer::default());
+        let connector = Connector { engine: &engine, directory: &directory, keys: &keys, keychain: &keychain, confirmer: &confirmer, grants: &grants };
+        let approved = crate::mcp::records::ApprovedTarget::capture(
+            &crate::session::directory::HostDirectory::resolve_public(&directory, &HostQuery::Id("id-db".into())).unwrap(),
+            &keys,
+        )
+        .unwrap();
+        let rule = TunnelRule { host_id: "id-db".into(), ..saved().1 };
+        let entry = Entry {
+            rule: rule.clone(),
+            account_id: None,
+            cancel: CancelToken::default(),
+            live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
+            ended_for: Mutex::new(None),
+            asking: Default::default(),
+        };
+        let owner = FakeOwner::typing(&[&grant_answer(60, "open the database tunnel")]);
+        let ai = AiApproval { approved: &approved, asker: claude(true), allowed: &|| Ok(()), revoked: &|| None };
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while matches!(entry.live().phase, TunnelPhase::Connecting) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ran.store(matches!(entry.live().phase, TunnelPhase::Running), Ordering::SeqCst);
+                entry.stop();
+            });
+            run_for_ai(&rule, &entry, &connector, &owner, &ai, &|| None, &|_| false)
+        });
+        assert_eq!(result, Ok(()));
+        assert!(ran.load(Ordering::SeqCst), "it ran");
+        assert_eq!(owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), [QuestionKind::Grant]);
+        assert_eq!(directory.requested(), [("open the database tunnel".to_string(), 3600)]);
     }
 
     /// The client's access ends while the tunnel still waits for the person's password: the window is withdrawn (the question is
@@ -1188,11 +1390,12 @@ mod tests {
             cancel: CancelToken::default(),
             live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
             ended_for: Mutex::new(None),
+            asking: Default::default(),
         };
         let (asked, withdrawn) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
         // The access ends once the password window is open.
         let revoked = || asked.load(Ordering::SeqCst).then(|| AI_ACCESS_ENDED.to_string());
-        let ai = AiApproval { approved: &approved, auto_log: false, allowed: &|| Ok(()), revoked: &revoked };
+        let ai = AiApproval { approved: &approved, asker: claude(false), allowed: &|| Ok(()), revoked: &revoked };
         let owner = Waiting { entry: &entry, asked: &asked, withdrawn: &withdrawn };
         let result = run_for_ai(&rule, &entry, &connector, &owner, &ai, &|| None, &|_| false);
         finish(&entry, result);
@@ -1212,6 +1415,7 @@ mod tests {
                 cancel: CancelToken::default(),
                 live: Mutex::new(TunnelLive { phase: TunnelPhase::Running, ..Default::default() }),
                 ended_for: Mutex::new(None),
+                asking: Default::default(),
             };
             match reason {
                 Some(reason) => entry.stop_because(reason.into()),

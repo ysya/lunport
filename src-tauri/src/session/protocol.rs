@@ -285,6 +285,31 @@ impl GrantPrompt {
     }
 }
 
+/// The AI client whose request asks a question in one of Lunport's windows (design 2026-11-09, native windows for AI requests): the host
+/// key window and the authentication window name it, and in Auto-log say what goes ahead without per-command review once the person
+/// agrees.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct AiAsker {
+    /// The AI client as Lunport observed it (the requester chain the Tunnels panel shows), never what the client says of itself.
+    pub client: String,
+    /// What goes ahead without per-command review once the person agrees (Auto-log); `None` in Ask mode and for `verify_host_key`.
+    pub unreviewed: Option<Unreviewed>,
+}
+
+/// What an Auto-log request does without per-command review once the person has agreed in a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/", rename_all = "snake_case"))]
+pub enum Unreviewed {
+    /// `ssh_exec` runs its command.
+    Command,
+    /// `start_tunnel` starts its tunnel.
+    Tunnel,
+}
+
 /// The longest grant the window lets a person ask for, in minutes, and the longest justification: the limits of the grant memory
 /// (`sync::transports`), so that what the person answers can always be remembered on this computer.
 pub const MAX_GRANT_MINUTES: u32 = 480;

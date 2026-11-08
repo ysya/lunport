@@ -187,6 +187,7 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
         let app = app.clone();
         let hub = Arc::clone(&app.state::<AppState>().session.auth_questions);
         Arc::new(move |id, cancel| Arc::new(super::auth_window::NativeOwner {
+            ai: None,
             hub: Arc::clone(&hub),
             surface: Arc::new(super::auth_window::TauriAuthSurface { app: app.clone() }),
             request_id: format!("terminal-{id}"),

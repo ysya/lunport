@@ -21,6 +21,7 @@ import {
   type AuthenticationSnapshot,
 } from "@/lib/authentication";
 import { revealHidden } from "@/lib/reveal-hidden";
+import { askedBy, unreviewedNote } from "@/lib/ai-asker";
 import { useApplyTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +50,8 @@ export function AuthenticationCardView({
   // A grant question (design 2026-10-25, PAM grant requests) is Lunport's own, not a server's prompt: it gets the Request-a-grant form.
   const grant = request.kind === "grant" ? request.grant : null;
   const isGrant = grant !== null;
+  // An AI client's request (design 2026-11-09, native windows for AI requests): who asked, and what then runs unreviewed in Auto-log.
+  const unreviewed = request.ai && unreviewedNote(request.ai, isGrant ? "grant" : "question");
   useEffect(() => { setShown(false); }, [request.id]);
   useEffect(() => { (isGrant ? justification.current : cancel.current)?.focus(); }, [request.id, isGrant]);
   const expired = remainingMs <= 0;
@@ -152,6 +155,12 @@ export function AuthenticationCardView({
       </section>
       )}
     >
+        {request.ai && (
+          <section aria-label="AI request" className="space-y-1 text-xs leading-relaxed">
+            <p className="text-muted-foreground">{askedBy(request.ai)}</p>
+            {unreviewed && <p className="font-medium">{unreviewed}</p>}
+          </section>
+        )}
         {isGrant ? (
           <section aria-label="Grant context" className="space-y-1 text-sm">
             <p>{revealHidden(request.text)}</p>

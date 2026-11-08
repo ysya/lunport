@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use super::auth::{label, printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
 use super::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, Prepared};
 use super::grants::{Entry, GateKey, GrantGates};
-use super::protocol::{kinds, GrantAnswer, GrantPrompt, HostQuery, QuestionKind};
+use super::protocol::{kinds, AiAsker, GrantAnswer, GrantPrompt, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
 use crate::sync::env::Keychain;
 
@@ -78,6 +78,8 @@ pub struct HostKeyQuestion {
     /// For a key this device has not approved that is the very key saved for the host (`HostDirectory::saved_for`): when it was saved.
     /// The person still decides; `None` for any other key.
     pub saved: Option<PinnedSummary>,
+    /// The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` when a person's connection asks.
+    pub ai: Option<AiAsker>,
 }
 
 /// Lunport's host key window, for the broker. It blocks until the person decides, the question times out or `cancel` is set, and returns
@@ -547,6 +549,7 @@ impl Connector<'_> {
         }
         owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in Lunport.", label(&hop.alias)));
         let question = HostKeyQuestion {
+            ai: None,
             host: hop.id.clone(),
             user: hop.user.clone(),
             alias: hop.alias.clone(),
@@ -738,6 +741,7 @@ mod tests {
         assert_eq!(
             asked[0],
             HostKeyQuestion {
+                ai: None,
                 host: HostId::from("id-web"),
                 user: "deploy".into(),
                 alias: "web".into(),

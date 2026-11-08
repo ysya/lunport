@@ -775,6 +775,7 @@ pub async fn records_host_verify_key(
         let cancel = crate::session::connect::CancelToken::default();
         let _active = broker.register_deployment(cancel.clone()).map_err(error)?;
         let owner = crate::session::auth_window::NativeOwner {
+            ai: None,
             hub: state.session.auth_questions.clone(),
             surface: std::sync::Arc::new(crate::session::auth_window::TauriAuthSurface {
                 app: app.clone(),
