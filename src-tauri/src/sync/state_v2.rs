@@ -18,8 +18,6 @@ use crate::sync::state::DEFAULT_RELAY_URL;
 pub const STATE_VERSION_V2: u32 = 2;
 /// 一行受管制的設定(the retired Legacy workspace's approval signatures; kept to decode old state files).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct GatedDirective {
     /// keyword 小寫,例如 `proxycommand`。
     pub keyword: String,
@@ -29,8 +27,6 @@ pub struct GatedDirective {
 
 /// 核准簽章:兩份文字的簽章相同,代表受管制的設定與它們適用的主機範圍都沒變。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct ApprovalSignature {
     /// `Host` 那一行 keyword 之後的整段文字,去頭尾空白:所有 pattern 依原順序,連同行尾註解。
     pub host: String,
@@ -401,8 +397,6 @@ pub struct DeclinedVersion {
 
 /// 要讓使用者看到、看過才清掉的提示(`SyncStateV2::notices`;同時以 `sync://notice` 發出)。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SyncNotice {
     /// v1 升級完成(spec §7.6、§8):space「Synced」可改名、其他電腦也要更新;含 `Include` 的區塊留在 `kept_file`;使用者自己放在
@@ -488,8 +482,6 @@ impl RelayFeatures {
 
 /// 更換同步碼走到哪一步(spec §7.5 的編號)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 #[serde(rename_all = "snake_case")]
 pub enum RotationStep {
     /// 第 1 步完成:新同步碼在 keychain(`NEXT_MNEMONIC_ACCOUNT`),每個 space 的新位置與金鑰在 `spaces`。可取消。
