@@ -657,7 +657,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log skips per-command approval but can request credentials through Lunport's native windows. Auto-log requires a verified server key. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log skips per-command approval but can request credentials through Lunport's native windows. A server key Lunport has not verified yet opens Lunport's native trust window during ssh_exec and start_tunnel, in both modes, and the call continues once the user trusts it; Auto-log never accepts a changed server key, which the user reviews with verify_host_key. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -703,7 +703,7 @@ fn tool_definitions() -> Value {
         {
             "name": "ssh_exec",
             "title": "Run an approved SSH command",
-            "description": "Run a remote command under the current Lunport Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.",
+            "description": "Run a remote command under the current Lunport Ask or Auto-log policy. A server key Lunport has not verified yet is shown to the user in Lunport's native trust window first, and the command runs once they trust it. In Auto-log a changed server key is refused; the user reviews it with verify_host_key.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

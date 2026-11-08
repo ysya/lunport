@@ -373,7 +373,7 @@ fn run(
 pub(crate) struct AiApproval<'a> {
     /// The destination, route and keys the start was approved for, captured as `ssh_exec` captures them.
     pub approved: &'a crate::mcp::records::ApprovedTarget,
-    /// Started in Auto-log mode: a new or changed server key is refused instead of asked about.
+    /// Started in Auto-log mode: a changed server key is refused instead of asked about (design 2026-11-09).
     pub auto_log: bool,
     /// The policy as it is now still allows the start: AI access on, the mode it was approved in, the host permitted.
     pub allowed: &'a (dyn Fn() -> Result<(), String> + Sync),
@@ -384,13 +384,11 @@ pub(crate) struct AiApproval<'a> {
 /// How often an AI client's tunnel asks whether the client's access ended.
 const REVOCATION_POLL: Duration = Duration::from_millis(250);
 
-/// What an AI client's tunnel says when a new or changed server key would have needed a person's decision in Auto-log mode.
-const NEEDS_HOST_KEY_DECISION: &str = "needs interaction: host key confirmation is required";
-
 /// Runs `rule` for an AI client (design 2026-11-08) over `base` guarded as `ssh_exec` guards its connection: it connects only to the
-/// approved route with the approved keys while the policy still allows it, asks nobody for a Privileged Access Manager grant, and in
-/// Auto-log mode trusts no new server key. When `ai.revoked` says the client's access ended, the tunnel stops with that reason, while it
-/// still connects too, which withdraws the windows its connection opened.
+/// approved route with the approved keys while the policy still allows it, asks nobody for a Privileged Access Manager grant, and asks
+/// server key questions as `ssh_exec` asks them (design 2026-11-09: the window, but no window for a changed key in Auto-log). When
+/// `ai.revoked` says the client's access ended, the tunnel stops with that reason, while it still connects too, which withdraws the
+/// windows its connection opened.
 pub(crate) fn run_for_ai(
     rule: &TunnelRule,
     entry: &Entry,
@@ -400,7 +398,7 @@ pub(crate) fn run_for_ai(
     account: &dyn Fn() -> Option<String>,
     needs_grant: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
-    use crate::mcp::records::{Asker, CheckedEngine, NoPin, PublicDirectory};
+    use crate::mcp::records::{Asker, CheckedEngine, ClientConfirmer, PublicDirectory};
     let query = HostQuery::Id(rule.host_id.clone());
     let check = || -> Result<(), String> {
         if entry.cancel.is_cancelled() {
@@ -416,7 +414,7 @@ pub(crate) fn run_for_ai(
     };
     let engine = CheckedEngine { inner: base.engine, check: &check_connected };
     let directory = PublicDirectory(base.directory, &check, &check_resolved, Asker::Automation);
-    let confirmer = NoPin::new(base.confirmer, ai.auto_log);
+    let confirmer = ClientConfirmer::new(base.confirmer, base.directory, ai.auto_log);
     let guarded = Connector {
         engine: &engine,
         directory: &directory,
@@ -450,10 +448,8 @@ pub(crate) fn run_for_ai(
         let _done = Done(&done);
         run(rule, entry, &guarded, owner, &watch)
     });
-    match result {
-        Err(_) if confirmer.needed() => Err(NEEDS_HOST_KEY_DECISION.into()),
-        other => other,
-    }
+    // `start_tunnel` passes a "needs interaction:" answer on as it is and prefixes the others with "The tunnel could not start".
+    result.map_err(|error| confirmer.answer(None).unwrap_or(error))
 }
 fn finish(entry: &Entry, result: Result<(), String>) {
     // A reason of Lunport's own (an AI client's access ended) is the tunnel's error, however its run ended.
@@ -1111,21 +1107,44 @@ mod tests {
         assert!(run.result.as_ref().is_err_and(|error| error.contains("MCP policy changed")), "{:?}", run.result);
     }
 
-    /// Auto-log never asks about a server key: a host whose key is not verified needs the person first. Ask mode lets the person
-    /// decide in the host key window.
+    /// Design 2026-11-09: a server key that is not verified when the tunnel connects (the start verified it, so it went in between) is
+    /// asked about in the host key window, in either mode; a refusal says so, and nothing runs.
     #[test]
-    fn auto_log_refuses_a_new_server_key_and_ask_mode_lets_the_person_decide() {
+    fn an_ai_clients_tunnel_asks_the_window_about_a_new_server_key_in_either_mode() {
+        use crate::session::testing::Decision;
         let unpinned = || FakeDirectory::new().with_host("db", key());
-        let nobody = FakeConfirmer::default();
-        let run = run_ai_until(&unpinned(), &unpinned(), "db", true, &nobody, &|| Ok(()), &|| None, &stop_it);
+        for auto_log in [true, false] {
+            let refusing = FakeConfirmer::default();
+            let run = run_ai_until(&unpinned(), &unpinned(), "db", auto_log, &refusing, &|| Ok(()), &|| None, &stop_it);
+            assert!(!run.ran, "auto_log: {auto_log}");
+            assert_eq!(run.result, Err("The server key of db was denied in Lunport's trust window; nothing was saved.".to_string()));
+            assert_eq!(refusing.asked().len(), 1);
+            let person = FakeConfirmer::deciding(vec![Decision::Trust]);
+            let run = run_ai_until(&unpinned(), &unpinned(), "db", auto_log, &person, &|| Ok(()), &|| None, &stop_it);
+            assert!(run.ran, "auto_log: {auto_log}");
+            assert_eq!(run.result, Ok(()));
+            assert_eq!(person.asked().len(), 1);
+        }
+    }
+
+    /// Auto-log refuses a changed server key in an AI client's tunnel without a window; Ask mode warns about it in the window.
+    #[test]
+    fn an_ai_clients_tunnel_refuses_a_changed_server_key_in_auto_log() {
+        use crate::session::testing::Decision;
+        let other = crate::ssh::HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap();
+        let changed = || FakeDirectory::new().with_host("db", key()).with_pin("db", other.clone());
+        let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+        let run = run_ai_until(&changed(), &changed(), "db", true, &window, &|| Ok(()), &|| None, &stop_it);
         assert!(!run.ran);
-        assert_eq!(run.result, Err(NEEDS_HOST_KEY_DECISION.to_string()));
-        assert!(nobody.asked().is_empty(), "nobody was asked");
-        let person = FakeConfirmer::deciding(vec![crate::session::testing::Decision::Trust]);
-        let run = run_ai_until(&unpinned(), &unpinned(), "db", false, &person, &|| Ok(()), &|| None, &stop_it);
+        assert_eq!(
+            run.result,
+            Err("needs interaction: the server key of db changed; ask the user to review it with verify_host_key. Nothing was trusted.".to_string())
+        );
+        assert!(window.asked().is_empty(), "no window");
+        let person = FakeConfirmer::deciding(vec![Decision::Trust]);
+        let run = run_ai_until(&changed(), &changed(), "db", false, &person, &|| Ok(()), &|| None, &stop_it);
         assert!(run.ran);
-        assert_eq!(run.result, Ok(()));
-        assert_eq!(person.asked().len(), 1);
+        assert_eq!(person.asked().iter().map(|q| q.changed.as_ref().map(|pinned| pinned.fingerprint.clone())).collect::<Vec<_>>(), [Some(other.fingerprint.clone())]);
     }
 
     /// The client's access ends while the tunnel still waits for the person's password: the window is withdrawn (the question is

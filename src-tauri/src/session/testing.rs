@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use super::auth::{KeyStore, Owner, Reply, VaultKey};
-use super::connect::{CancelToken, HostKeyConfirmer, HostKeyQuestion};
+use super::connect::{CancelToken, HostKeyConfirmer, HostKeyDecision, HostKeyQuestion};
 use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
 use super::protocol::{HostQuery, QuestionKind};
 use crate::sync::records_v3::MAX_JUMPS;
@@ -329,9 +329,12 @@ pub enum Decision {
     TrustFingerprint(String),
     /// Refuses (Cancel, Refuse) or closes the window.
     Refuse,
+    /// Does not answer before the window gives up.
+    Unanswered,
 }
 
-/// Lunport's host key window, scripted: each question takes the next decision (none left: `Refuse`). A cancelled wait is a refusal.
+/// Lunport's host key window, scripted: each question takes the next decision (none left: `Refuse`). A cancelled wait is a question
+/// nobody answered.
 #[derive(Default)]
 pub struct FakeConfirmer {
     decisions: Mutex<VecDeque<Decision>>,
@@ -350,14 +353,22 @@ impl FakeConfirmer {
 
 impl HostKeyConfirmer for FakeConfirmer {
     fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+        match self.decide(question, cancel) {
+            HostKeyDecision::Trusted(fingerprint) => Some(fingerprint),
+            HostKeyDecision::Refused | HostKeyDecision::Unanswered => None,
+        }
+    }
+
+    fn decide(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> HostKeyDecision {
         locked(&self.asked).push(question.clone());
         if cancel.is_cancelled() {
-            return None;
+            return HostKeyDecision::Unanswered;
         }
         match locked(&self.decisions).pop_front().unwrap_or(Decision::Refuse) {
-            Decision::Trust => Some(question.fingerprint.clone()),
-            Decision::TrustFingerprint(fingerprint) => Some(fingerprint),
-            Decision::Refuse => None,
+            Decision::Trust => HostKeyDecision::Trusted(question.fingerprint.clone()),
+            Decision::TrustFingerprint(fingerprint) => HostKeyDecision::Trusted(fingerprint),
+            Decision::Refuse => HostKeyDecision::Refused,
+            Decision::Unanswered => HostKeyDecision::Unanswered,
         }
     }
 }

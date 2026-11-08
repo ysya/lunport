@@ -909,7 +909,8 @@ pub(super) fn verify(
     authorize(&policy, &host)?;
     let approved = records::ApprovedTarget::capture(&target, connector.keys)?;
     let _active = active(runtime, &mut context, &host, cancel)?;
-    let check = || {
+    // The host as it was named, bound for the whole handshake; every question goes to the window, a changed key's too.
+    let guard = || {
         live(runtime, policy.approval_mode, cancel)?;
         let current_policy = runtime.policy.lock().unwrap().clone();
         authorize(&current_policy, &host)?;
@@ -919,42 +920,9 @@ pub(super) fn verify(
             .map_err(|e| e.to_string())?;
         approved.check_resolved(&current, connector.keys)
     };
-    let check_resolved =
-        |target: &crate::ssh::Target| approved.check_resolved(target, connector.keys);
-    let directory = records::PublicDirectory(connector.directory, &check, &check_resolved, records::Asker::Automation);
-    let guarded = Connector {
-        directory: &directory,
-        engine: connector.engine,
-        keys: connector.keys,
-        keychain: connector.keychain,
-        confirmer: connector.confirmer,
-        grants: connector.grants,
-    };
-    check()?;
-    let result =
-        crate::session::verify::verify(&guarded, &query, owner, cancel).and_then(|value| {
-            check()?;
-            serde_json::to_value(value).map_err(|_| "Could not encode verified identity.".into())
-        });
-    runtime.record(McpAuditEntry {
-        at_ms: unix_ms(),
-        completed_at_ms: unix_ms(),
-        id: context.id,
-        client: "mcp".into(),
-        host_id: Some(host.clone()),
-        alias: alias.into(),
-        mode: policy.approval_mode,
-        requested_by: context.requested_by,
-        requester_id: context.requester_id,
-        client_info: context.client_info,
-        outcome: if result.is_ok() {
-            "host_key_verified"
-        } else {
-            "host_key_not_verified"
-        }
-        .into(),
-        ..Default::default()
-    });
+    let result = records::verify_route(connector, &query, &target, owner, cancel, &guard, connector.confirmer)
+        .and_then(|value| serde_json::to_value(value).map_err(|_| "Could not encode verified identity.".into()));
+    runtime.record(records::trust_entry(&context, &host, alias, policy.approval_mode, result.is_ok()));
     result
 }
 
@@ -962,7 +930,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
     vec![
         json!({"name":"create_host","title":"Propose a new SSH host","description":"Propose public connection settings. Lunport always asks the user before saving, including in Auto-log mode. Does not connect, trust a host key or import private keys. A host in an explicitly allowed Group inherits its AI access.","inputSchema":{"type":"object","properties":{
         "alias":{"type":"string","maxLength":128},"hostname":{"type":"string","maxLength":255},"port":{"type":"integer","minimum":1,"maximum":65535,"default":22},"user":{"type":"string","maxLength":128},"auth":{"type":"string","enum":["password","key","interactive"],"default":"password"},"key_id":{"type":"string","description":"Existing Lunport key ID; no private key or password."},"group_id":{"type":"string","description":"Optional existing Group ID; settings remain explicit overrides."},"jump":{"type":"array","items":{"type":"string"},"maxItems":5},"keepalive_secs":{"type":"integer","minimum":0},"keepalive_max_missed":{"type":"integer","minimum":0},"connect_timeout_secs":{"type":"integer","minimum":1},"tags":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":64}}},"required":["alias","hostname"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}),
-        json!({"name":"verify_host_key","title":"Verify and review a server fingerprint","description":"For an AI-approved host, perform the SSH handshake and show Lunport's native trust window for a new or changed server key. New or changed keys always need a human trust decision; never authenticates to the destination or runs a command. Jump hosts may require login. Auto-log ssh_exec requires the server key to be verified first.","inputSchema":{"type":"object","properties":{"alias":{"type":"string","description":"AI-approved stable host ID or exact unambiguous alias."}},"required":["alias"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}}),
+        json!({"name":"verify_host_key","title":"Verify and review a server fingerprint","description":"For an AI-approved host, perform the SSH handshake and show Lunport's native trust window for a new or changed server key. New or changed keys always need a human trust decision; never authenticates to the destination or runs a command. Jump hosts may require login. ssh_exec and start_tunnel open the same window for a key Lunport has not verified; in Auto-log they refuse a changed key, which this tool lets the user review.","inputSchema":{"type":"object","properties":{"alias":{"type":"string","description":"AI-approved stable host ID or exact unambiguous alias."}},"required":["alias"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"update_host","title":"Change an SSH host's connection settings","description":"Propose changes to the public connection settings of a host this client may use. Only the fields given change; a field the host takes from its Group becomes the host's own. Lunport always asks the user before saving, including in Auto-log mode, and shows each change as old → new. Never changes the server key, passwords or private keys; changing the hostname or port clears the pinned server key, which the next connection verifies again (run verify_host_key). Does not move the host between Groups.","inputSchema":{"type":"object","properties":{
         "alias":{"type":"string","description":"AI-approved stable host ID or exact unambiguous alias of the host to change."},"new_alias":{"type":"string","maxLength":128},"hostname":{"type":"string","maxLength":255},"port":{"type":"integer","minimum":1,"maximum":65535},"user":{"type":"string","maxLength":128},"auth":{"type":"string","enum":["password","key","interactive"]},"key_id":{"type":"string","description":"Existing Lunport key ID; no private key or password."},"jump":{"type":"array","items":{"type":"string"},"maxItems":5},"keepalive_secs":{"type":"integer","minimum":0},"keepalive_max_missed":{"type":"integer","minimum":0},"connect_timeout_secs":{"type":"integer","minimum":1},"tags":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":64}}},"required":["alias"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}),
         json!({"name":"set_transport","title":"Set a host's Google Cloud IAP transport","description":"Propose a host's Google Cloud IAP tunnel settings (project, zone, instance, network interface, Google account, OS Login, and the Privileged Access Manager check) for a host this client may use. A field given replaces that field only; a host without a transport needs project, zone and instance. pam as an object sets the grant check (entitlements, location, duration_minutes); pam as null removes the check. Lunport always asks the user before saving, including in Auto-log mode, and shows each change as old → new. Does not connect or request a grant.","inputSchema":{"type":"object","properties":{
