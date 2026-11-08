@@ -426,10 +426,13 @@ impl HostDirectory for RecordDirectory {
         self.write_pin(self.host(host)?, Some(previous), key)
     }
     fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
-        let host = self.checked_host(hop)?;
-        let pin = host.host.payload.host_key.as_ref().map(pinned_key).transpose()?;
+        let pin = self.saved_for(hop)?;
         let state = (self.sources.snapshot)()?;
         Ok(pin.filter(|pin| super::credential_approval::matches(&state, hop, &pin.key)))
+    }
+    /// The library's pin for the endpoint that connected, whichever device saved it and whether or not this one approved it.
+    fn saved_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.checked_host(hop)?.host.payload.host_key.as_ref().map(pinned_key).transpose()
     }
     fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
         Ok(self.pinned_for(hop)?.is_some_and(|pin| Some(&pin.key) == server_key))

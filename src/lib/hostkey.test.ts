@@ -12,6 +12,7 @@ import {
   hostKeyTitle,
   hostKeyEndpoint,
   pendingFeed,
+  pinnedOn,
   TRUST_ARM_DELAY_MS,
 } from "@/lib/hostkey";
 import { stubEventBus } from "./event-bus-fixture";
@@ -26,6 +27,7 @@ function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
     algorithm: "ssh-ed25519",
     fingerprint: "SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew",
     changed: null,
+    saved: null,
     ...over,
   };
 }
@@ -41,6 +43,24 @@ describe("host key presentation", () => {
       "This server is new to Lunport. Compare its fingerprint with a trusted source before connecting.",
     );
     expect(hostKeyButtons(request())).toEqual({
+      refuse: "Cancel",
+      trust: "Trust this key",
+    });
+  });
+
+  // Design 2026-11-09 (saved pins): the library already has this very key (another device saved it), and this device still confirms it.
+  it("says when the library saved a key this device has not confirmed", () => {
+    const saved = request({
+      saved: {
+        fingerprint: request().fingerprint,
+        pinned_at_ms: 1_700_000_000_000,
+      },
+    });
+    expect(hostKeyTitle(saved)).toBe("Verify server identity");
+    expect(hostKeyBody(saved)).toBe(
+      `This key matches the one saved in your library on ${pinnedOn(1_700_000_000_000)}. Each device confirms a server key once before using it.`,
+    );
+    expect(hostKeyButtons(saved)).toEqual({
       refuse: "Cancel",
       trust: "Trust this key",
     });

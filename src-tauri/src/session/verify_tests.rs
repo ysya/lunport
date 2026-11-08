@@ -73,6 +73,39 @@ fn unknown_key_needs_exact_human_trust_and_never_prepares_destination_credential
         );
     }
 }
+/// Design 2026-11-09 (saved pins): verifying a host whose saved pin this device has not approved (another device saved it) shows a
+/// different key as a changed key, with the saved one; accepting it replaces that pin and the key is verified.
+#[test]
+fn a_key_that_differs_from_a_saved_pin_this_device_has_not_approved_is_verified_as_a_changed_key() {
+    let saved = HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap();
+    let directory = FakeDirectory::new()
+        .with_host("web", AuthMethod::Password)
+        .with_saved_pin("web", saved.clone());
+    let engine = FakeEngine::new();
+    let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
+    let verified = run(
+        &directory,
+        &engine,
+        &confirmer,
+        &FakeOwner::default(),
+        &CancelToken::default(),
+    )
+    .unwrap();
+    assert!(verified.trusted);
+    let asked = confirmer.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.clone()),
+        Some(saved.fingerprint)
+    );
+    assert_eq!(
+        directory
+            .pinned(&HostId::from("id-web"))
+            .unwrap()
+            .map(|pin| pin.key),
+        Some(default_server_key())
+    );
+}
 #[test]
 fn refusal_wrong_fingerprint_and_cancellation_never_pin_or_retry_forever() {
     for decision in [

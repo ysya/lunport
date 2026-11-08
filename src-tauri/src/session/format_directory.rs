@@ -59,6 +59,9 @@ impl HostDirectory for FormatDirectory {
     fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
         self.with_active(|d| d.pinned_for(hop))
     }
+    fn saved_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.with_active(|d| d.saved_for(hop))
+    }
     fn pin_for(&self, hop: &HopRef, key: &HostKey) -> Result<(), DirectoryError> {
         self.with_active(|d| d.pin_for(hop, key))
     }

@@ -14,6 +14,7 @@ function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
     algorithm: "ssh-ed25519",
     fingerprint: "SHA256:new",
     changed: null,
+    saved: null,
     ...over,
   };
 }
@@ -51,6 +52,19 @@ describe("HostKeyCardView", () => {
     expect(html).toContain("ssh-ed25519");
     expect(html).toContain("SHA256:new");
     expect(buttonDisabled(html, "Cancel")).toBe(false);
+    expect(buttonDisabled(html, "Trust this key")).toBe(false);
+  });
+
+  it("tells a key this device has not confirmed that the library saved it, without a warning", () => {
+    const html = render(
+      request({
+        saved: { fingerprint: "SHA256:new", pinned_at_ms: 1_700_000_000_000 },
+      }),
+    );
+    expect(html).toContain("Verify server identity");
+    expect(html).toContain("This key matches the one saved in your library on");
+    expect(html).not.toContain("new to Lunport");
+    expect(html).not.toContain('role="alert"');
     expect(buttonDisabled(html, "Trust this key")).toBe(false);
   });
 

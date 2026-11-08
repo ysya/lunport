@@ -23,9 +23,9 @@ pub const PASSWORD_PROMPTS: usize = 3;
 
 /// What one host can ask of a connect, in connects, when the person answers everything it asks: the pin that another connection made
 /// meanwhile taken into the policy (once: the policy has a pin from then on), its host key confirmed (once, see
-/// `Done::asked_host_key`), the key type of a changed pin (once, plan 1b R17: `Done::unrestricted`) and its password typed
-/// `PASSWORD_PROMPTS` times. Each is followed by one more connect. The host key question and the passwords each need one answer of the
-/// person; the pin taken meanwhile and the handshake without the pinned type need none.
+/// `Done::asked_host_key`), the key type on record that the server no longer has (a pin's or a saved key's, once, plan 1b R17:
+/// `Done::unrestricted`) and its password typed `PASSWORD_PROMPTS` times. Each is followed by one more connect. The host key question and
+/// the passwords each need one answer of the person; the pin taken meanwhile and the handshake without the key type on record need none.
 const ROUNDS_PER_HOP: usize = 1 + 1 + 1 + PASSWORD_PROMPTS;
 
 /// How many times a connect through `target` may go round: every host of the chain at the most it can ask (`ROUNDS_PER_HOP`), and the
@@ -54,7 +54,7 @@ impl CancelToken {
     }
 }
 
-/// The key that was pinned, for a changed-key question.
+/// A saved key and when it was saved, for the question: the key a changed key differs from, or the saved key a key to confirm matches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedSummary {
     pub fingerprint: String,
@@ -72,8 +72,12 @@ pub struct HostKeyQuestion {
     pub port: u16,
     pub algorithm: String,
     pub fingerprint: String,
-    /// `None` for a key Lunport has not seen; for a changed key, the one that is pinned.
+    /// `None` for a key Lunport has not seen; for a changed key, the one it differs from: the pin, or the key saved for the host that this
+    /// device has not approved (another device saved it).
     pub changed: Option<PinnedSummary>,
+    /// For a key this device has not approved that is the very key saved for the host (`HostDirectory::saved_for`): when it was saved.
+    /// The person still decides; `None` for any other key.
+    pub saved: Option<PinnedSummary>,
 }
 
 /// Lunport's host key window, for the broker. It blocks until the person decides, the question times out or `cancel` is set, and returns
@@ -252,7 +256,7 @@ struct Done {
     /// Hosts whose key the person has been asked about. Once is all a connect needs: after the key was trusted (or the changed one
     /// accepted) the server presents that key. A server that then presents another one is not asked about again.
     asked_host_key: HashSet<HostId>,
-    /// Hosts connected once more without the pinned key type (plan 1b R17).
+    /// Hosts connected once more without the key type on record, a pin's or a saved key's (plan 1b R17).
     unrestricted: HashSet<HostId>,
     /// The passwords the person has been asked for, by host (`PASSWORD_PROMPTS` at the most).
     passwords_typed: HashMap<HostId, usize>,
@@ -286,6 +290,7 @@ impl Connector<'_> {
         let auth = BrokerAuth::new(self.keys, self.keychain, owner, self.directory);
         auth.unlock(&target).map_err(|text| ConnectFailure::new(kinds::AUTH, text))?;
         let policy = PinPolicy::from_target(&target);
+        self.ask_for_saved_key_types(&mut target);
         let mut done = Done::default();
         let mut rounds_left = rounds(&target);
         // IAP's grace: whether the terminal was told, and how many times the tunnel was tried again (a backstop on the clock).
@@ -331,9 +336,12 @@ impl Connector<'_> {
                 }
                 ConnectError::HostKeyUnknown { hop, key } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, None)?,
                 ConnectError::HostKeyMismatch { hop, key, pinned } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, Some(pinned))?,
-                // Plan 1b R17: the handshake offered only the pinned key's type and the server has none of it any more. Once more without the
-                // restriction: the policy still knows the pin, so a key of another type comes back as a changed key, with its warning.
-                ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. } if policy.pinned(&hop.id).is_some() && done.unrestricted.insert(hop.id.clone()) => {
+                // Plan 1b R17: the handshake offered only the type of the key on record (the pin, or the key saved for a hop this device has
+                // not approved) and the server has none of it any more. Once more without the restriction: the policy still knows a pin, so a
+                // key of another type comes back as a changed key, with its warning; one of a saved key is asked about as changed as well.
+                ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. }
+                    if target.hops.iter().any(|candidate| candidate.id == hop.id && candidate.pinned.is_some()) && done.unrestricted.insert(hop.id.clone()) =>
+                {
                     if let Some(restricted) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
                         restricted.pinned = None;
                     }
@@ -382,6 +390,20 @@ impl Connector<'_> {
         }
         let alias = target.hops.last().map(|hop| hop.alias.clone()).unwrap_or_default();
         Err(ConnectFailure::new(kinds::CONNECT, format!("Lunport gave up connecting to {alias} after too many attempts.")))
+    }
+
+    /// The handshake's choice of key type for each hop this device has no approved pin for: the type of the key the library saved for it
+    /// (another device saved it, or this one before its approval lapsed), set as the hop's `pinned`, which the engine reads only to choose
+    /// the host key algorithms (design 2026-11-09, saved pins). The policy was made from the approved pins before this and trusts nothing
+    /// of it. A server that has the saved key presents it, and is asked about as that key even when it has a type the client prefers;
+    /// one that has none of its type is connected once more without the restriction (R17). A pin that cannot be read here chooses nothing:
+    /// the question reads it again.
+    fn ask_for_saved_key_types(&self, target: &mut Target) {
+        for hop in target.hops.iter_mut().filter(|hop| hop.pinned.is_none()) {
+            if let Ok(Some(saved)) = self.directory.saved_for(&hop.reference()) {
+                hop.pinned = Some(saved.key);
+            }
+        }
     }
 
     /// `HostDirectory::prepare`, with the grant it may need obtained first (design 2026-10-25, PAM grant requests): a connection a person
@@ -457,8 +479,10 @@ impl Connector<'_> {
         }
     }
 
-    /// Asks the window about `key`, which `hop` presented (`pinned`: the key on record, for a changed key). When the person trusts exactly
-    /// this key, it is pinned (or replaces the old pin) and the next round connects with it; anything else ends the connect.
+    /// Asks the window about `key`, which `hop` presented (`pinned`: the key on record, for a changed key). Without a pin this device
+    /// approved, the key the library saved for the host decides what is asked (`HostDirectory::saved_for`): a different one makes `key` a
+    /// changed key, the same one a key to confirm here that was saved before. When the person trusts exactly this key, it is pinned (or
+    /// replaces the old pin) and the next round connects with it; anything else ends the connect.
     #[allow(clippy::too_many_arguments)]
     fn confirm(
         &self,
@@ -478,8 +502,12 @@ impl Connector<'_> {
         if pinned.is_none() {
             if let Some(record) = self.directory.pinned_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
                 policy.pin(&hop.id, record.key.clone());
-                if let Some(refreshed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
-                    refreshed.pinned = Some(record.key);
+                // A hop already connected without the restriction (R17: its server has none of the type it was asked for, the saved key's)
+                // keeps going without it: asking for that type again would only fail the same way.
+                if !done.unrestricted.contains(&hop.id) {
+                    if let Some(refreshed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
+                        refreshed.pinned = Some(record.key);
+                    }
                 }
                 return Ok(());
             }
@@ -492,9 +520,26 @@ impl Connector<'_> {
             return Err(failure_at(Some(hop), target, kinds::HOST_KEY, sentence));
         }
         // The summary first: when there is none to give, nobody is asked, and nobody is told to wait for a window that stays closed.
-        let changed = match &pinned {
-            None => None,
-            Some(pinned) => Some(self.pinned_summary(target, hop, pinned)?),
+        let (pinned, changed, saved) = match pinned {
+            Some(pinned) => {
+                let summary = self.pinned_summary(target, hop, &pinned)?;
+                (Some(pinned), Some(summary), None)
+            }
+            // No pin this device approved, but the library may have one: another device saved it, or this one before its approval lapsed
+            // (design 2026-11-09, saved pins). It is never trusted from here. A different key is asked about as the changed key it is,
+            // with that pin and its date, and accepting it replaces that pin; the very key that was saved is asked about as new, saying
+            // when it was saved.
+            None => match self.directory.saved_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
+                Some(record) => {
+                    let summary = PinnedSummary { fingerprint: record.key.fingerprint.clone(), pinned_at_ms: record.pinned_at_ms };
+                    if record.key == *key {
+                        (None, None, Some(summary))
+                    } else {
+                        (Some(record.key), Some(summary), None)
+                    }
+                }
+                None => (None, None, None),
+            },
         };
         // The client may have gone away while the engine was connecting: nobody is left to be told that the window waits, or to wait for it.
         if cancel.is_cancelled() {
@@ -510,6 +555,7 @@ impl Connector<'_> {
             algorithm: key.algorithm.clone(),
             fingerprint: key.fingerprint.clone(),
             changed,
+            saved,
         };
         let trusted = self.confirmer.confirm(&question, cancel);
         if cancel.is_cancelled() {
@@ -700,6 +746,7 @@ mod tests {
                 algorithm: "ssh-ed25519".into(),
                 fingerprint: test_keys::PLAIN_FINGERPRINT.into(),
                 changed: None,
+                saved: None,
             }
         );
         assert_eq!(world.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(default_server_key()));
@@ -737,6 +784,106 @@ mod tests {
         accepting.connect(&web()).expect("connects with the accepted key");
         assert_eq!(accepting.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(default_server_key()));
         assert_eq!(*locked(&accepting.owner.notices), [WAITING]);
+    }
+
+    /// Design 2026-11-09 (saved pins): a key that differs from the one saved for the host, which this device has not approved (another
+    /// device saved it), is a changed key. The window warns with the saved key and its date, and only accepting the new key replaces that
+    /// pin; refused, the saved key stays as it was and this device has approved nothing.
+    #[test]
+    fn a_key_that_differs_from_a_saved_pin_this_device_has_not_approved_is_asked_about_as_changed() {
+        let saved = key(test_keys::ENC_PUBLIC);
+        let id = HostId::from("id-web");
+        let directory = || FakeDirectory::new().with_host("web", AuthMethod::Password).with_saved_pin("web", saved.clone());
+        let refusing = world(FakeEngine::new(), directory()).with_saved_password().deciding(vec![Decision::Refuse]);
+        assert_eq!(refusing.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web changed. Connection refused.")));
+        let asked = refusing.confirmer.asked();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].changed, Some(PinnedSummary { fingerprint: test_keys::ENC_FINGERPRINT.into(), pinned_at_ms: PINNED_AT_MS }));
+        assert_eq!(asked[0].saved, None);
+        assert_eq!(refusing.directory.pins().get(&id).map(|pin| pin.key.clone()), Some(saved.clone()), "the saved key stays");
+        assert!(!refusing.directory.approved(&id));
+
+        let accepting = world(FakeEngine::new(), directory()).with_saved_password().deciding(vec![Decision::Trust]);
+        accepting.connect(&web()).expect("connects with the accepted key");
+        let asked = accepting.confirmer.asked();
+        assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.as_str()), Some(test_keys::ENC_FINGERPRINT));
+        assert_eq!(accepting.directory.pins().get(&id).map(|pin| pin.key.clone()), Some(default_server_key()), "the new key replaced the saved one");
+        assert!(accepting.directory.approved(&id));
+    }
+
+    /// The very key saved for the host, which this device has not approved yet, is confirmed here once, and the question says when it was
+    /// saved (design 2026-11-09, saved pins): local trust is never taken from a saved pin, and trusting the key approves that pin as it is.
+    #[test]
+    fn the_very_key_saved_for_the_host_is_confirmed_here_once_and_the_question_says_when_it_was_saved() {
+        let id = HostId::from("id-web");
+        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_saved_pin("web", default_server_key()))
+            .with_saved_password()
+            .deciding(vec![Decision::Trust]);
+        world.connect(&web()).expect("connects once the key is trusted here");
+        world.connect(&web()).expect("and again without a question");
+        let asked = world.confirmer.asked();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].changed, None, "not a changed key");
+        assert_eq!(asked[0].saved, Some(PinnedSummary { fingerprint: test_keys::PLAIN_FINGERPRINT.into(), pinned_at_ms: PINNED_AT_MS }));
+        assert!(world.directory.approved(&id));
+    }
+
+    /// The handshake asks for the type of the key saved for a host this device has not approved, as it does for a pin, without trusting
+    /// it (design 2026-11-09, saved pins): a server that has the saved key next to a type the client prefers presents the saved key, and
+    /// the question says it was saved, instead of warning about the server's other key.
+    #[test]
+    fn a_server_that_still_has_the_saved_key_presents_it_and_is_not_asked_about_as_changed() {
+        let ecdsa = key(test_keys::ECDSA_PUBLIC);
+        let world = world(
+            FakeEngine::new().with_other_host_key_for("web", ecdsa.clone()),
+            FakeDirectory::new().with_host("web", AuthMethod::Password).with_saved_pin("web", ecdsa.clone()),
+        )
+        .with_saved_password()
+        .deciding(vec![Decision::Trust]);
+        let connected = world.connect(&web()).expect("connects once the saved key is trusted here");
+        let asked = world.confirmer.asked();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!((asked[0].fingerprint.as_str(), asked[0].changed.clone()), (test_keys::ECDSA_FINGERPRINT, None));
+        assert_eq!(asked[0].saved.as_ref().map(|saved| saved.fingerprint.as_str()), Some(test_keys::ECDSA_FINGERPRINT));
+        assert_eq!(connected.target.hops[0].pinned, Some(ecdsa.clone()));
+        assert_eq!(world.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(ecdsa), "the saved pin stays");
+        assert!(world.directory.approved(&HostId::from("id-web")));
+    }
+
+    /// A server that no longer has the saved key's type has nothing in common with that handshake: it is connected once more without the
+    /// restriction (plan 1b R17), and its key is asked about as a changed key, with the saved one.
+    #[test]
+    fn a_server_without_the_saved_keys_type_is_asked_about_as_changed_after_one_unrestricted_handshake() {
+        let ecdsa = key(test_keys::ECDSA_PUBLIC);
+        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_saved_pin("web", ecdsa))
+            .with_saved_password()
+            .deciding(vec![Decision::Refuse]);
+        assert_eq!(world.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web changed. Connection refused.")));
+        let asked = world.confirmer.asked();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.as_str()), Some(test_keys::ECDSA_FINGERPRINT));
+        assert_eq!(world.engine.attempts(), 2, "the handshake for the saved type, then the one without the restriction");
+    }
+
+    /// A jump host's saved key is handled as the destination's: a different key is refused as a changed key, said through the jump host,
+    /// and its saved key stays as it was.
+    #[test]
+    fn a_jump_hosts_key_that_differs_from_its_saved_pin_is_refused_as_changed_through_it() {
+        let saved = key(test_keys::ENC_PUBLIC);
+        let directory = FakeDirectory::new()
+            .with_host("bastion", AuthMethod::Password)
+            .with_host_via("db", AuthMethod::Password, &["bastion"])
+            .with_saved_pin("bastion", saved.clone());
+        let world = world(FakeEngine::new(), directory).deciding(vec![Decision::Refuse]);
+        world.keychain.set("host:id-bastion", "saved").unwrap();
+        world.keychain.set("host:id-db", "saved").unwrap();
+        let refused = world.connect(&HostQuery::Alias("db".into())).err();
+        assert_eq!(refused, Some(failure(kinds::HOST_KEY, "Could not connect through bastion: The host key of bastion changed. Connection refused.")));
+        let asked = world.confirmer.asked();
+        assert_eq!((asked.len(), asked[0].alias.as_str()), (1, "bastion"));
+        assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.as_str()), Some(test_keys::ENC_FINGERPRINT));
+        assert_eq!(world.directory.pins().get(&HostId::from("id-bastion")).map(|pin| pin.key.clone()), Some(saved));
+        assert!(!world.directory.approved(&HostId::from("id-bastion")));
     }
 
     /// A directory whose record of the pin is another one by the time the broker looks it up for the question: another connection
@@ -1440,9 +1587,9 @@ mod tests {
 
     /// The most that one host can ask of a connect, on every host of a chain of three, so that the bound is reached and not passed. The
     /// directory has a pin that it did not have when the host was resolved (another connection pinned it meanwhile), and it is of a type
-    /// that the server no longer has: the pin is taken into the policy, the handshake is repeated without the restriction (plan 1b R17),
-    /// the key the server has now is accepted as the changed key it is, and the password is typed wrong twice before it is right. Six
-    /// rounds a host, and the one that gets in.
+    /// that the server no longer has: the handshake is repeated without the restriction (plan 1b R17, the first handshake asked for the
+    /// pin's type as a saved key's) and the pin is taken into the policy, the key the server has now is accepted as the changed key it is,
+    /// and the password is typed wrong twice before it is right. Six rounds a host, and the one that gets in.
     #[test]
     fn a_chain_of_three_hosts_that_each_need_every_kind_of_round_connects_in_exactly_the_bound() {
         let key_hop = || AuthMethod::Key { key_id: "k-plain".into() };

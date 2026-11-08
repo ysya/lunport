@@ -668,7 +668,7 @@ pub(super) fn start(
         approved.check(connector, &query)?;
         // A server key this device has not verified is decided here (design 2026-11-09), before the tunnel launches: its worker would
         // ask while this call waits only `START_WAIT`. A rule changed meanwhile is refused by the launch.
-        let confirmer = records::ClientConfirmer::new(connector.confirmer, connector.directory, mode == ApprovalMode::AutoLog);
+        let confirmer = records::ClientConfirmer::new(connector.confirmer, mode == ApprovalMode::AutoLog);
         let host_still_allowed = || -> Result<(), String> {
             live(runtime, mode, cancel)?;
             let current = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;

@@ -7,6 +7,10 @@ import type { PinnedHostKey } from "./PinnedHostKey";
  */
 export type HostKeyRequest = { user: string, id: string, alias: string, hostname: string, port: number, algorithm: string, fingerprint: string,
 /**
- * Set for a key that changed: the pinned one.
+ * Set for a key that changed: the saved one it differs from, pinned on this device or saved by another one.
  */
-changed: PinnedHostKey | null, };
+changed: PinnedHostKey | null,
+/**
+ * Set for a key this device has not confirmed that matches the one saved for the host: that saved one.
+ */
+saved: PinnedHostKey | null, };
