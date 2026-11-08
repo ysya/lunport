@@ -18,7 +18,6 @@ name: CI - Windows
 
 on:
   pull_request:
-    paths: ["src-tauri/**", "scripts/ci-changes*.mjs", "scripts/set-app-version.mjs", "scripts/beta-channel.mjs", "scripts/validate-windows-startup.ps1", ".github/workflows/test-windows.yml"]
   workflow_dispatch:
     inputs:
       native_probe:
@@ -94,14 +93,13 @@ jobs:
         run: |
           Get-Command ssh, ssh-add, ssh-keygen -All -ErrorAction SilentlyContinue | Format-Table Name, Source -AutoSize
           ssh -V
-      # The platform-dependent tests: identity path parsing (slot_rules), the slot files, links and DACL (slot_files,
-      # slot_files_windows), the key vault (vault::), the local IPC transport (ipc:: covers the named pipes: hang-ups and deadlines, the
-      # owner check, and program identification), the SSH agent (agent:: covers the real ssh-add / ssh-keygen against the agent), the SSH
-      # engine (`ssh::`: the tests that need no sshd of their own; the scratch-sshd ones print "skipped" on Windows), the session broker
+      # The platform-dependent tests: identity path parsing (slot_rules), the owner-only DACL (slot_files_windows), the key vault
+      # (vault::), the local IPC transport (ipc:: covers the named pipes: hang-ups and deadlines, the owner check, and program
+      # identification), the SSH engine (`ssh::`: the tests that need no sshd of their own; the scratch-sshd ones print "skipped" on Windows), the session broker
       # (`session::`: its platform-neutral parts and the broker on a named pipe; its socket tests are Unix only), sshelter connect
       # (`cli::`: the arguments, the console layer against a fake console and against real ones, the keys, control events and window
       # size, and run() over a pipe against the broker; the Unix terminal's tests are Unix only), and the terminal launch (`connect::`:
-      # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the three real OS credential tests are explicitly excluded.
+      # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the real OS credential test is explicitly excluded.
       # The full suite below already includes the migration/publication/console tests.
       # Only the independent Win32 handle/DACL probe needs a separate invocation.
       - name: Central sync Windows filesystem security boundary
@@ -115,9 +113,9 @@ jobs:
       - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
-        # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
+        # Quoted: an unquoted `vault:: ipc::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
       # Release-profile boundaries run in parallel in CI - App on all three OSes.
       - name: Debug profile selection in the normal library
         run: cargo test --locked --test app_profile_build

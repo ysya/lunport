@@ -672,15 +672,11 @@ fn resume_with_budget(
     }
     let background = credentials::Background(env.keychain);
     let safe_env = SyncEnv {
-        doc: env.doc,
-        backed_up: env.backed_up,
-        retention: env.retention,
         runtime: env.runtime,
         ssh_dir: env.ssh_dir.clone(),
         state_path: env.state_path.clone(),
         home: env.home.clone(),
         keychain: &background,
-        relays: env.relays,
         events: env.events,
         clock: env.clock,
         platform: env.platform,
@@ -838,13 +834,12 @@ pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
 mod tests {
     use super::*;
     use crate::sync::{
-        fake_relay::FakeRelay,
         record_repository as repo,
         records_v3::HostScope,
         testkit::{TestClock, TestDevice},
     };
     fn device() -> TestDevice {
-        let d = TestDevice::new("a", &FakeRelay::new(), &TestClock::new());
+        let d = TestDevice::new("a", &TestClock::new());
         let env = d.env();
         let probe = record_runtime::probe_startup(&env.state_path, "central");
         record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();

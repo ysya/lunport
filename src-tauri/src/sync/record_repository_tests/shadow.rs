@@ -1,7 +1,10 @@
 use super::*;
 use crate::sync::record::{Envelope, ACCOUNT_META_ID};
-use crate::sync::relay::PullResponse;
-use crate::sync::{crypto::ChainKeys, record_merge, records_v3, state_v2::sealed_key};
+use crate::sync::{
+    crypto::ChainKeys,
+    records_v3,
+    state_v2::{sealed_key, SealedRecord, VerifiedPublicIdentity},
+};
 use serde_json::json;
 
 const KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -43,43 +46,52 @@ fn fixture() -> (SyncStateV3, ChainKeys, ChainKeys) {
     (s, account_keys, space_keys)
 }
 fn envelope(keys: &ChainKeys, r: &Record, seq: u64) -> Envelope {
-    let item = record_merge::encode_record(keys, r, 0).unwrap();
+    let sealed = crate::sync::crypto::seal(keys, r.kind.as_str(), &r.id, &serde_json::to_vec(r).unwrap()).unwrap();
     Envelope {
-        kind: item.kind,
-        id_hash: item.id_hash,
-        nonce: item.nonce,
-        ciphertext: item.ciphertext,
+        kind: r.kind.as_str().into(),
+        id_hash: sealed.id_hash,
+        nonce: sealed.nonce,
+        ciphertext: sealed.ciphertext,
         seq,
-        deleted: item.deleted,
+        deleted: r.deleted,
+    }
+}
+/// What the retired chain merger kept of a row this build cannot read as a typed record, as states saved by earlier builds still
+/// carry it: the ciphertext and, for the kinds the repository reads, the authenticated public header.
+fn retained(keys: &ChainKeys, row: Envelope, readable: &[&str]) -> SealedRecord {
+    let public_identity = readable.contains(&row.kind.as_str()).then(|| {
+        let sealed = crate::sync::crypto::Sealed {
+            id_hash: row.id_hash.clone(),
+            nonce: row.nonce.clone(),
+            ciphertext: row.ciphertext.clone(),
+        };
+        let header: serde_json::Value =
+            serde_json::from_slice(&crate::sync::crypto::open(keys, &row.kind, &row.id_hash, &sealed).unwrap()).unwrap();
+        VerifiedPublicIdentity {
+            id: header["id"].as_str().unwrap().into(),
+            version: header["version"].as_u64().unwrap(),
+            updated_at_ms: header["updated_at_ms"].as_u64().unwrap(),
+            device_id: header["device_id"].as_str().unwrap().into(),
+            deleted: header["deleted"].as_bool().unwrap(),
+        }
+    });
+    SealedRecord {
+        envelope: row,
+        dirty: false,
+        public_identity,
     }
 }
 fn apply_host(s: &mut SyncStateV3, keys: &ChainKeys, row: Envelope) {
-    let old = &s.spaces[&keys.chain_id];
-    let merged = record_merge::merge_space(
-        old,
-        keys,
-        &PullResponse {
-            latest_seq: 10,
-            records: vec![row],
-        },
-        0,
-        &record_merge::AccountGate::Compatible,
-    );
-    assert_eq!(merged.gate, record_merge::AccountGate::Compatible);
-    s.spaces.insert(keys.chain_id.clone(), merged.section);
+    let space = s.spaces.get_mut(&keys.chain_id).unwrap();
+    space.cursor_seq = space.cursor_seq.max(row.seq);
+    let row = retained(keys, row, &["host", "group"]);
+    space.sealed.insert(sealed_key(&row.envelope.kind, &row.envelope.id_hash), row);
 }
 fn apply_slot(s: &mut SyncStateV3, keys: &ChainKeys, row: Envelope) {
-    let merged = record_merge::merge_account(
-        s.account.as_ref().unwrap(),
-        keys,
-        &PullResponse {
-            latest_seq: 10,
-            records: vec![row],
-        },
-        0,
-    );
-    assert_eq!(merged.gate, record_merge::AccountGate::Compatible);
-    s.account = Some(merged.section);
+    let account = s.account.as_mut().unwrap();
+    account.cursor_seq = account.cursor_seq.max(row.seq);
+    let row = retained(keys, row, &["keyslot", "meta"]);
+    account.sealed.insert(sealed_key(&row.envelope.kind, &row.envelope.id_hash), row);
 }
 fn future_host() -> Record {
     Record {
@@ -175,129 +187,6 @@ fn unsupported_account_key_authority_cannot_fall_back_to_available_local_materia
     }
 }
 #[test]
-fn opaque_shadow_uses_timestamp_tombstone_and_smaller_device_lww_not_version_or_sequence() {
-    for (time, device, deleted, want) in [
-        (99, "a", false, HostReadiness::Ready),
-        (100, "e", false, HostReadiness::Ready),
-        (100, "a", false, HostReadiness::NeedsReview),
-        (100, "e", true, HostReadiness::NeedsReview),
-    ] {
-        let (mut s, _, keys) = fixture();
-        let mut r = future_host();
-        r.version = u64::MAX;
-        r.updated_at_ms = time;
-        r.device_id = device.repeat(32);
-        r.deleted = deleted;
-        apply_host(&mut s, &keys, envelope(&keys, &r, 10));
-        assert_eq!(get_host(&s, ID).unwrap().readiness, want);
-    }
-}
-#[test]
-fn newer_supported_host_clears_opaque_authority_and_restores_readiness() {
-    let (mut s, _, keys) = fixture();
-    apply_host(&mut s, &keys, envelope(&keys, &future_host(), 10));
-    assert_eq!(
-        get_host(&s, ID).unwrap().readiness,
-        HostReadiness::NeedsReview
-    );
-    let mut supported = cached(ID, payload("updated"), 10).record;
-    supported.updated_at_ms = 300;
-    let old = &s.spaces[&keys.chain_id];
-    let merged = record_merge::merge_space(
-        old,
-        &keys,
-        &PullResponse {
-            latest_seq: 11,
-            records: vec![envelope(&keys, &supported, 11)],
-        },
-        0,
-        &record_merge::AccountGate::Compatible,
-    );
-    assert_eq!(merged.gate, record_merge::AccountGate::Compatible);
-    s.spaces.insert(keys.chain_id.clone(), merged.section);
-    assert!(s.spaces[&keys.chain_id].sealed.is_empty());
-    let view = get_host(&restart(&s), ID).unwrap();
-    assert_eq!(view.readiness, HostReadiness::Ready);
-    assert_eq!(view.host.payload.alias, "updated");
-}
-#[test]
-fn authenticated_extended_outer_host_header_still_blocks_stale_typed_cache() {
-    let (mut s, _, keys) = fixture();
-    let mut value = serde_json::to_value(future_host()).unwrap();
-    value["future_header"] = json!(true);
-    let sealed =
-        crate::sync::crypto::seal(&keys, "host", ID, &serde_json::to_vec(&value).unwrap()).unwrap();
-    apply_host(
-        &mut s,
-        &keys,
-        Envelope {
-            kind: "host".into(),
-            id_hash: sealed.id_hash,
-            nonce: sealed.nonce,
-            ciphertext: sealed.ciphertext,
-            seq: 10,
-            deleted: false,
-        },
-    );
-    assert_eq!(
-        get_host(&s, ID).unwrap().readiness,
-        HostReadiness::NeedsReview
-    );
-}
-#[test]
-fn invalid_authenticated_identity_never_manufactures_a_public_shadow() {
-    let (mut s, _, keys) = fixture();
-    let mut row = future_host();
-    row.id = OTHER.into();
-    let sealed =
-        crate::sync::crypto::seal(&keys, "host", ID, &serde_json::to_vec(&row).unwrap()).unwrap();
-    apply_host(
-        &mut s,
-        &keys,
-        Envelope {
-            kind: "host".into(),
-            id_hash: sealed.id_hash,
-            nonce: sealed.nonce,
-            ciphertext: sealed.ciphertext,
-            seq: 10,
-            deleted: false,
-        },
-    );
-    assert_eq!(get_host(&s, ID).unwrap().readiness, HostReadiness::Ready);
-    let value = serde_json::to_value(&s.spaces[&keys.chain_id].sealed).unwrap();
-    assert!(value
-        .as_object()
-        .unwrap()
-        .values()
-        .all(|row| row.get("public_identity").is_none()));
-}
-#[test]
-fn recognized_legacy_alias_and_own_sources_do_not_block_known_records() {
-    let (mut s, account, space) = fixture();
-    local_key(&mut s);
-    account_key(&mut s, KEY, slot(PUBLIC), false);
-    let mut alias = future_host();
-    alias.payload = json!({"schema":1,"text":"Host old-alias\n HostName legacy.test\n"});
-    apply_host(&mut s, &space, envelope(&space, &alias, 10));
-    let mut own = future_slot();
-    own.payload = json!({"schema":1,"name":"old-own","mode":"own","origin_device_id":"d".repeat(32),"created_at_ms":1,"public_key":null,"fingerprint":null,"key_type":null,"has_passphrase":null});
-    apply_slot(&mut s, &account, envelope(&account, &own, 10));
-    let s = restart(&s);
-    assert_eq!(get_host(&s, ID).unwrap().readiness, HostReadiness::Ready);
-    assert_eq!(resolve_key(&s, KEY).unwrap().status, KeyStatus::Available);
-    for sealed in [
-        &s.account.as_ref().unwrap().sealed,
-        &s.spaces[&space.chain_id].sealed,
-    ] {
-        let value = serde_json::to_value(sealed).unwrap();
-        assert!(value
-            .as_object()
-            .unwrap()
-            .values()
-            .all(|row| row.get("public_identity").is_none()));
-    }
-}
-#[test]
 fn persisted_identity_hints_reject_secret_kinds_wrong_shapes_and_deleted_mismatch() {
     let (mut s, keys, space) = fixture();
     apply_host(&mut s, &space, envelope(&space, &future_host(), 10));
@@ -335,37 +224,6 @@ fn persisted_identity_hints_reject_secret_kinds_wrong_shapes_and_deleted_mismatc
 }
 
 #[test]
-fn newer_supported_keyslot_restores_matching_local_material_after_shadow() {
-    let (mut s, keys, _) = fixture();
-    local_key(&mut s);
-    account_key(&mut s, KEY, slot(PUBLIC), false);
-    apply_slot(&mut s, &keys, envelope(&keys, &future_slot(), 10));
-    assert_eq!(resolve_key(&s, KEY).unwrap().status, KeyStatus::Conflict);
-    let mut known = s.account.as_ref().unwrap().records[&record_key(RecordKind::KeySlot, KEY)]
-        .record
-        .clone();
-    known.version = 3;
-    known.updated_at_ms = 300;
-    let merge = record_merge::merge_account(
-        s.account.as_ref().unwrap(),
-        &keys,
-        &PullResponse {
-            latest_seq: 11,
-            records: vec![envelope(&keys, &known, 11)],
-        },
-        0,
-    );
-    assert_eq!(merge.gate, record_merge::AccountGate::Compatible);
-    s.account = Some(merge.section);
-    assert!(s.account.as_ref().unwrap().sealed.is_empty());
-    let view = resolve_key(&restart(&s), KEY).unwrap();
-    assert_eq!(view.status, KeyStatus::Available);
-    assert_eq!(
-        view.vault_id.as_deref(),
-        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-    );
-}
-#[test]
 fn unknown_kinds_and_secret_identity_strings_never_become_persisted_hints() {
     let (mut s, keys, _) = fixture();
     let private_id = "synthetic secret identity sentinel";
@@ -402,7 +260,7 @@ fn unknown_kinds_and_secret_identity_strings_never_become_persisted_hints() {
     assert!(records_v3::decode_state(&value.to_string()).is_err());
 }
 
-// All mutation tests cross the authenticated merger and the persisted v3 restart boundary.
+// All mutation tests cross the persisted v3 restart boundary.
 fn opaque_mutation_fixture(pinned: bool) -> SyncStateV3 {
     let (mut s, _, keys) = fixture();
     local_key(&mut s);
@@ -535,71 +393,6 @@ fn opaque_cached_id_cannot_be_recreated_but_unrelated_creation_remains_available
         assert_eq!(next.spaces, s.spaces);
         assert_eq!(next.local.keys, s.local.keys);
     });
-}
-fn assert_known_host_mutations(s: &SyncStateV3) {
-    let host = get_host(s, ID).unwrap();
-    assert_eq!(host.readiness, HostReadiness::Ready);
-    let edited = update_host(s, ID, &host.revision, payload("edited"), 400).unwrap();
-    assert_eq!(
-        get_host(&edited, ID).unwrap().readiness,
-        HostReadiness::Ready
-    );
-    assert_eq!(get_host(&edited, ID).unwrap().host.payload.alias, "edited");
-    let moved = move_host(s, ID, &host.revision, HostScope::Local, 400).unwrap();
-    assert_eq!(get_host(&moved, ID).unwrap().host.scope, HostScope::Local);
-    assert_eq!(
-        get_host(&moved, ID).unwrap().readiness,
-        HostReadiness::Ready
-    );
-    let deleted = delete_host(s, ID, &host.revision, 400).unwrap();
-    assert!(get_host(&deleted, ID).is_err());
-    let pinned = pin_host_key(s, ID, &endpoint(), None, pin(), 400).unwrap();
-    assert_eq!(
-        get_host(&pinned, ID)
-            .unwrap()
-            .host
-            .payload
-            .host_key
-            .unwrap()
-            .fingerprint,
-        FP
-    );
-}
-#[test]
-fn older_lww_opaque_evidence_does_not_block_supported_host_mutations_after_restart() {
-    for (time, device) in [(99, "a"), (100, "e")] {
-        let (mut s, _, keys) = fixture();
-        let mut unsupported = future_host();
-        unsupported.updated_at_ms = time;
-        unsupported.device_id = device.repeat(32);
-        unsupported.version = u64::MAX;
-        apply_host(&mut s, &keys, envelope(&keys, &unsupported, 10));
-        assert!(!s.spaces[&keys.chain_id].sealed.is_empty());
-        let before = s.clone();
-        assert_known_host_mutations(&restart(&s));
-        assert_eq!(s, before);
-    }
-}
-#[test]
-fn newer_supported_replacement_reenables_repository_mutations_after_restart() {
-    let (mut s, _, keys) = fixture();
-    apply_host(&mut s, &keys, envelope(&keys, &future_host(), 10));
-    let mut supported = cached(ID, payload("replacement"), 11).record;
-    supported.updated_at_ms = 300;
-    let merged = record_merge::merge_space(
-        &s.spaces[&keys.chain_id],
-        &keys,
-        &PullResponse {
-            latest_seq: 11,
-            records: vec![envelope(&keys, &supported, 11)],
-        },
-        0,
-        &record_merge::AccountGate::Compatible,
-    );
-    assert_eq!(merged.gate, record_merge::AccountGate::Compatible);
-    s.spaces.insert(keys.chain_id.clone(), merged.section);
-    assert!(s.spaces[&keys.chain_id].sealed.is_empty());
-    assert_known_host_mutations(&restart(&s));
 }
 #[test]
 fn imported_needs_review_remains_editable_without_opaque_authority() {

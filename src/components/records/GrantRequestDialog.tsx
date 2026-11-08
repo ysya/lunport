@@ -4,7 +4,7 @@ import { TaskDialogBody, TaskDialogContent } from "@/components/app/TaskDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { useNow } from "@/lib/use-now";
 import { justificationAcceptable } from "@/lib/mcp-flow";
 import {

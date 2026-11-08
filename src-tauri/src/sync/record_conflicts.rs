@@ -96,24 +96,6 @@ impl RecordRecovery {
             }))
     }
 }
-pub fn require_resolved(
-    state: &crate::sync::records_v3::SyncStateV3,
-) -> Result<(), crate::error::AppError> {
-    if state
-        .account
-        .as_ref()
-        .is_some_and(|a| !a.recovery.conflicts.is_empty())
-        || state
-            .spaces
-            .values()
-            .any(|s| !s.recovery.conflicts.is_empty())
-    {
-        return Err(crate::error::AppError::Other(
-            "Resolve saved sync conflicts before leaving or changing the sync account.".into(),
-        ));
-    }
-    Ok(())
-}
 
 pub fn upgrade_state(state: &mut crate::sync::records_v3::SyncStateV3) {
     let has_recovery = state
@@ -133,6 +115,3 @@ pub fn upgrade_state(state: &mut crate::sync::records_v3::SyncStateV3) {
             .max(crate::sync::records_v3::LOCAL_CONFLICT_STATE_VERSION);
     }
 }
-
-mod commands;
-pub use commands::{resolve_saved, views, ConflictView, Resolution};

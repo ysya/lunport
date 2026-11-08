@@ -1,12 +1,10 @@
-//! Connect module: terminal detection + per-emulator launch argv + alias validation.
+//! Connect module: terminal detection + per-emulator launch argv for `sshelter connect --id <host id>`.
 //!
 //! Security model: the WebView has NO shell permission. All process spawning happens here in
-//! Rust. We NEVER use `sh -c`; commands are always built as argv vectors. The alias is validated
-//! (charset + must exist as a host pattern in the loaded doc) before any spawn.
+//! Rust. We NEVER use `sh -c`; commands are always built as argv vectors.
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::model::{HostBlock, Item, SshConfigDoc};
 use crate::error::AppError;
 
 /// A terminal emulator we can launch into.
@@ -30,47 +28,6 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
 }
 
-/// Allowed alias charset: non-empty and every char in [A-Za-z0-9._@%-].
-fn alias_charset_ok(alias: &str) -> bool {
-    !alias.is_empty()
-        // Reject a leading '-': otherwise an alias like `-Fevil`/`-D8080` is read by `ssh` as an
-        // OPTION, not a hostname (argument injection — `-F` loads an arbitrary config → ProxyCommand
-        // RCE). OpenSSH has no `--` end-of-options marker, so rejecting the dash is the mitigation.
-        && !alias.starts_with('-')
-        && alias
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '%' | '-'))
-}
-
-/// True if the doc has a HostBlock whose patterns contain the exact `alias`.
-fn doc_has_alias(doc: &SshConfigDoc, alias: &str) -> bool {
-    doc.files.iter().any(|f| {
-        f.items.iter().any(|item| {
-            if let Item::Host(HostBlock { patterns, .. }) = item {
-                patterns.iter().any(|p| p == alias)
-            } else {
-                false
-            }
-        })
-    })
-}
-
-/// Validate an alias: charset must be safe AND the alias must exist as an exact host pattern in
-/// the loaded doc. Bad charset → ForbiddenPath; absent from doc → NotFound.
-pub fn validate_alias(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError> {
-    if !alias_charset_ok(alias) {
-        return Err(AppError::ForbiddenPath(format!(
-            "alias contains disallowed characters: {alias:?}"
-        )));
-    }
-    if !doc_has_alias(doc, alias) {
-        return Err(AppError::NotFound(format!("host '{alias}' not found")));
-    }
-    Ok(())
-}
-
-/// Escape a string for embedding inside an AppleScript double-quoted literal.
-/// (The alias charset already forbids `"` and `\`, but we escape defensively.)
 fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -357,19 +314,6 @@ pub fn build_launch_command(
 
 // ─── What the terminal runs ──────────────────────────────────────────────────
 
-/// `<program> connect [--pause-on-error] <alias>`: the command the terminal runs to connect through Lunport's own SSH client (own-ssh
-/// spec §7.3, §7.4). `program` is Lunport's executable, or on Windows the console helper next to it (`connect_program`); `pause_on_error`
-/// keeps the reason of a connection that fails before the shell opens on the terminal until Enter (`closes_after_a_failure`). The alias
-/// must be validated first.
-pub fn connect_argv(program: &std::path::Path, alias: &str, pause_on_error: bool) -> Vec<String> {
-    let mut argv = vec![program.to_string_lossy().into_owned(), "connect".to_string()];
-    if pause_on_error {
-        argv.push(crate::cli::PAUSE_ON_ERROR.to_string());
-    }
-    argv.push(alias.to_string());
-    argv
-}
-
 /// Stable identity survives alias changes and ambiguous aliases.
 pub fn connect_id_argv(program:&std::path::Path,id:&str,pause_on_error:bool)->Vec<String>{
     let mut argv=vec![program.to_string_lossy().into_owned(),"connect".into()];
@@ -416,16 +360,6 @@ fn connect_program(exe: &std::path::Path, debug_build: bool) -> Result<std::path
     }
 }
 
-/// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>`, on Windows through the console helper
-/// (`connect_program`), with `--pause-on-error` where a failure would close the window (`closes_after_a_failure`). Windows Terminal runs
-/// that argv directly and cmd in a new console that stays open (`build_launch_command`).
-pub fn launch_for(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
-    let exe = std::env::current_exe().map_err(|e| AppError::Other(format!("cannot locate Lunport: {e}")))?;
-    #[cfg(windows)]
-    let exe = connect_program(&exe, cfg!(debug_assertions))?;
-    build_launch_command(terminal_id, &connect_argv(&exe, alias, closes_after_a_failure(terminal_id)), new_tab)
-}
-
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
 pub fn launch(spec: &LaunchSpec) -> Result<(), AppError> {
     crate::process::spawn(std::process::Command::new(&spec.program).args(&spec.args)).map_err(AppError::Io)?;
@@ -439,57 +373,25 @@ pub fn connect_list_terminals() -> Vec<TerminalInfo> {
     detect_terminals()
 }
 
-// (async): spawning the terminal (osascript on macOS) does not belong on the main thread.
-#[tauri::command(async)]
-pub fn connect_launch(
-    state: tauri::State<crate::state::AppState>,
-    alias: String,
-    terminal_override: Option<String>,
-    new_tab: Option<bool>,
-) -> Result<(), AppError> {
-    {
-        let doc_lock = state.doc.lock().unwrap();
-        crate::sync::engine::require_legacy(&state.sync)?;
-        let doc = doc_lock
-            .as_ref()
-            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-        validate_alias(doc, &alias)?;
-    }
-
-    let terminal_id = match terminal_override {
-        Some(id) => id,
-        None => {
-            detect_terminals()
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::Other("no terminal found".to_string()))?
-                .id
-        }
-    };
-
-    launch(&launch_for(&terminal_id, &alias, new_tab.unwrap_or(false))?)
-}
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::include::load_doc;
+
+    /// A host id, as the Records directory gives the launch.
+    const ID: &str = "0123456789abcdef";
 
     /// The connect command reaches every terminal as it is: terminals that hand it to a shell (AppleScript's `do script`,
     /// xfce4-terminal) get the executable's path quoted when it has a space in it; the ones that run a program (the other Linux terminals,
     /// wt, cmd) get the argv untouched.
     #[test]
     fn a_record_launch_uses_id_even_when_an_alias_is_ambiguous_or_renamed(){
-        let id="0123456789abcdef";
-        for pause in [false,true]{let argv=connect_id_argv(std::path::Path::new("/app/Lunport"),id,pause);let args=&argv[2..];assert_eq!(crate::cli::parse_args(args).unwrap().host,crate::session::protocol::HostQuery::Id(id.into()));}
+        for pause in [false,true]{let argv=connect_id_argv(std::path::Path::new("/app/Lunport"),ID,pause);let args=&argv[2..];assert_eq!(crate::cli::parse_args(args).unwrap().host,crate::session::protocol::HostQuery::Id(ID.into()));}
     }
     #[test]
     fn the_connect_command_reaches_every_terminal() {
-        let argv = connect_argv(std::path::Path::new("/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter"), "web", false);
-        assert_eq!(argv, vec!["/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter", "connect", "web"]);
-        let quoted = "'/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter' connect web";
+        let argv = connect_id_argv(std::path::Path::new("/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter"), ID, false);
+        assert_eq!(argv, vec!["/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter", "connect", "--id", ID]);
+        let quoted = format!("'/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter' connect --id {ID}");
         for new_tab in [false, true] {
             let terminal = build_launch_command("terminal", &argv, new_tab).unwrap();
             assert_eq!(terminal.args.last().unwrap(), &format!("tell application \"Terminal\" to do script \"{quoted}\""));
@@ -497,7 +399,7 @@ mod tests {
             let carrying = iterm.args.iter().filter(|a| a.ends_with(&format!("command \"{quoted}\""))).count();
             assert_eq!(carrying, if new_tab { 2 } else { 1 }, "the new-tab script names the command twice: {:?}", iterm.args);
         }
-        assert_eq!(build_launch_command("xfce4-terminal", &argv, false).unwrap().args, vec!["-e".to_string(), quoted.to_string()]);
+        assert_eq!(build_launch_command("xfce4-terminal", &argv, false).unwrap().args, vec!["-e".to_string(), quoted.clone()]);
         for (id, prefix) in [("gnome-terminal", vec!["--"]), ("konsole", vec!["-e"]), ("kitty", vec![]), ("wezterm", vec!["start", "--"])] {
             let spec = build_launch_command(id, &argv, false).unwrap();
             let expected: Vec<String> = prefix.into_iter().map(String::from).chain(argv.iter().cloned()).collect();
@@ -511,9 +413,9 @@ mod tests {
     fn a_new_tab_in_iterm2_runs_the_connect_command() {
         // On Windows too: the test binary has no console helper beside it, so the command names the executable itself. iTerm2 ends the
         // window with the command: the command pauses on an error.
-        let argv = connect_argv(&std::env::current_exe().unwrap(), "web", true);
+        let argv = connect_id_argv(&std::env::current_exe().unwrap(), ID, true);
         let command = applescript_escape(&shell_join(&argv));
-        let spec = launch_for("iterm2", "web", true).unwrap();
+        let spec = launch_for_id("iterm2", ID, true).unwrap();
         assert_eq!(spec.program, "osascript");
         let script: Vec<&str> = spec.args.iter().skip(1).step_by(2).map(String::as_str).collect();
         assert_eq!(
@@ -536,9 +438,9 @@ mod tests {
     /// with its backslash escaped.
     #[test]
     fn a_path_with_a_quote_reaches_terminal_quoted_for_the_shell_and_escaped_for_applescript() {
-        let argv = connect_argv(std::path::Path::new("/Users/o'neil/Apps/Lunport.app/Contents/MacOS/sshelter"), "web", false);
+        let argv = connect_id_argv(std::path::Path::new("/Users/o'neil/Apps/Lunport.app/Contents/MacOS/sshelter"), ID, false);
         let spec = build_launch_command("terminal", &argv, false).unwrap();
-        assert_eq!(spec.args.last().unwrap(), r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/Lunport.app/Contents/MacOS/sshelter' connect web""#);
+        assert_eq!(spec.args.last().unwrap(), &format!(r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/Lunport.app/Contents/MacOS/sshelter' connect --id {ID}""#));
     }
 
     /// Every platform connects through `sshelter connect`, with `--pause-on-error` where a failure would close the window (not in cmd or
@@ -548,12 +450,12 @@ mod tests {
     fn the_launch_runs_sshelter_connect_on_every_platform() {
         let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
         if cfg!(windows) && cfg!(debug_assertions) {
-            assert_eq!(launch_for("cmd", "web", false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "web"]);
-            assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "web"]);
+            assert_eq!(launch_for_id("cmd", ID, false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "--id", ID]);
+            assert_eq!(launch_for_id("wt", ID, true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "--id", ID]);
         } else if cfg!(windows) {
-            assert!(launch_for("cmd", "web", false).unwrap_err().to_string().starts_with("sshelter-cli.exe is missing from "));
+            assert!(launch_for_id("cmd", ID, false).unwrap_err().to_string().starts_with("sshelter-cli.exe is missing from "));
         } else {
-            assert_eq!(launch_for("kitty", "web", false).unwrap().args, [exe.as_str(), "connect", "--pause-on-error", "web"]);
+            assert_eq!(launch_for_id("kitty", ID, false).unwrap().args, [exe.as_str(), "connect", "--pause-on-error", "--id", ID]);
         }
     }
 
@@ -570,14 +472,14 @@ mod tests {
             assert!(!closes_after_a_failure(id), "{id}");
         }
         let program = std::path::Path::new("/Applications/Lunport.app/Contents/MacOS/sshelter");
-        assert_eq!(connect_argv(program, "web", true), [program.to_str().unwrap(), "connect", "--pause-on-error", "web"]);
-        assert_eq!(connect_argv(program, "web", false), [program.to_str().unwrap(), "connect", "web"]);
+        assert_eq!(connect_id_argv(program, ID, true), [program.to_str().unwrap(), "connect", "--pause-on-error", "--id", ID]);
+        assert_eq!(connect_id_argv(program, ID, false), [program.to_str().unwrap(), "connect", "--id", ID]);
         if !cfg!(windows) {
             let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
-            let terminal = launch_for("terminal", "web", false).unwrap();
-            assert_eq!(terminal.args.last().unwrap(), &format!("tell application \"Terminal\" to do script \"{}\"", applescript_escape(&shell_join(&[exe.clone(), "connect".into(), "web".into()]))));
-            let iterm = launch_for("iterm2", "web", false).unwrap();
-            let paused = applescript_escape(&shell_join(&[exe, "connect".into(), "--pause-on-error".into(), "web".into()]));
+            let terminal = launch_for_id("terminal", ID, false).unwrap();
+            assert_eq!(terminal.args.last().unwrap(), &format!("tell application \"Terminal\" to do script \"{}\"", applescript_escape(&shell_join(&[exe.clone(), "connect".into(), "--id".into(), ID.into()]))));
+            let iterm = launch_for_id("iterm2", ID, false).unwrap();
+            let paused = applescript_escape(&shell_join(&[exe, "connect".into(), "--pause-on-error".into(), "--id".into(), ID.into()]));
             assert!(iterm.args.last().unwrap().ends_with(&format!("command \"{paused}\"")), "{:?}", iterm.args);
         }
     }
@@ -594,8 +496,8 @@ mod tests {
         std::fs::write(&exe, b"").unwrap();
         std::fs::write(installed.join("sshelter-cli.exe"), b"").unwrap();
         for debug_build in [false, true] {
-            let argv = connect_argv(&connect_program(&exe, debug_build).unwrap(), "web", false);
-            assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "web"], "debug: {debug_build}");
+            let argv = connect_id_argv(&connect_program(&exe, debug_build).unwrap(), ID, false);
+            assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "--id", ID], "debug: {debug_build}");
             assert_the_windows_launches_run(&argv);
         }
     }
@@ -610,8 +512,8 @@ mod tests {
         std::fs::write(&exe, b"").unwrap();
         // A directory by the helper's name is not the helper.
         std::fs::create_dir(built.join("sshelter-cli.exe")).unwrap();
-        let argv = connect_argv(&connect_program(&exe, true).unwrap(), "web", false);
-        assert_eq!(argv, [exe.to_string_lossy().as_ref(), "connect", "web"]);
+        let argv = connect_id_argv(&connect_program(&exe, true).unwrap(), ID, false);
+        assert_eq!(argv, [exe.to_string_lossy().as_ref(), "connect", "--id", ID]);
         assert_the_windows_launches_run(&argv);
     }
 
@@ -654,61 +556,6 @@ mod tests {
         let spec = build_launch("cmd", "web", false).unwrap();
         assert_eq!(spec.program, "cmd");
         assert_eq!(spec.args, vec!["/c", "start", "", "cmd", "/k", "ssh", "web"]);
-    }
-
-    fn doc_with(content: &str) -> SshConfigDoc {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config");
-        std::fs::write(&path, content).unwrap();
-        let doc = load_doc(&path).unwrap();
-        // Keep the tempdir alive for the duration by leaking it; tests are short-lived.
-        std::mem::forget(dir);
-        doc
-    }
-
-    #[test]
-    fn validate_alias_accepts_known_alias() {
-        let doc = doc_with("Host web\n    User x\n");
-        assert!(validate_alias(&doc, "web").is_ok());
-    }
-
-    #[test]
-    fn validate_alias_rejects_bad_charset() {
-        let doc = doc_with("Host web\n    User x\n");
-        let err = validate_alias(&doc, "we b").unwrap_err();
-        assert!(matches!(err, AppError::ForbiddenPath(_)), "got {err:?}");
-        let err2 = validate_alias(&doc, "we;b").unwrap_err();
-        assert!(matches!(err2, AppError::ForbiddenPath(_)), "got {err2:?}");
-        let err3 = validate_alias(&doc, "").unwrap_err();
-        assert!(matches!(err3, AppError::ForbiddenPath(_)), "got {err3:?}");
-    }
-
-    #[test]
-    fn validate_alias_rejects_absent_alias() {
-        let doc = doc_with("Host web\n    User x\n");
-        let err = validate_alias(&doc, "db").unwrap_err();
-        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn validate_alias_rejects_leading_dash_argument_injection() {
-        // A malicious/synced config can contain `Host -Fevil`; that pattern passes presence-in-doc,
-        // so the charset gate MUST reject the leading dash to prevent `ssh -Fevil` (config-file →
-        // ProxyCommand RCE). Also -D8080 / -E forms.
-        let doc = doc_with("Host -Fevil\nHost -D8080\n");
-        for bad in ["-Fevil", "-D8080", "-G", "-v"] {
-            let err = validate_alias(&doc, bad).unwrap_err();
-            assert!(
-                matches!(err, AppError::ForbiddenPath(_)),
-                "leading-dash alias {bad:?} must be rejected on charset, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_alias_accepts_dotted_and_at() {
-        let doc = doc_with("Host foo.example.com\n    User x\n");
-        assert!(validate_alias(&doc, "foo.example.com").is_ok());
     }
 
     #[test]

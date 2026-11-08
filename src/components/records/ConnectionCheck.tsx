@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Activity, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { probeRecordHost, type RecordHostView, type ConnectionProbe } from "@/lib/records";
-import { errorMessage } from "@/lib/sync";
-import { revealHidden } from "@/lib/sync-approvals";
+import { errorMessage } from "@/lib/utils";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { probeIap, type HostTransport, type IapProbeView } from "@/lib/transports";
 
 export function probeLabel(result: ConnectionProbe): string {

@@ -4,9 +4,9 @@ use crate::{
     error::AppError,
     ssh::{HopRef, HostKey},
     sync::{
-        env::{Keychain, SyncEnv},
+        env::SyncEnv,
         record_repository as repo, record_round, record_runtime,
-        records_v3::{HostScope, SyncStateV3},
+        records_v3::SyncStateV3,
     },
 };
 
@@ -69,7 +69,6 @@ pub(crate) fn confirm(
     hop: &HopRef,
     previous: Option<&HostKey>,
     key: &HostKey,
-    credentials: &dyn Keychain,
     cancel: &CancelToken,
     guard: &(dyn Fn() -> Result<(), DirectoryError> + Sync),
 ) -> Result<(), AppError> {
@@ -106,17 +105,6 @@ pub(crate) fn confirm(
     // Guards may resolve through FormatDirectory. All callbacks and external IO stay outside lifecycle.
     guard().map_err(failed)?;
     live(cancel)?;
-    let prepared = if central_identity(&captured).is_none() && matches!(host.host.scope, HostScope::Space { .. }) {
-        Some(record_round::prepare_account_gate(
-            env,
-            credentials,
-            captured.clone(),
-        )?)
-    } else {
-        None
-    };
-    guard().map_err(failed)?;
-    live(cancel)?;
     let pinned_at_ms = env.now();
     {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
@@ -124,12 +112,6 @@ pub(crate) fn confirm(
         let (current, _) = record_runtime::snapshot(env)?;
         require_approved_identity(&current, &captured, hop.id.as_str(), &approved)?;
         live(cancel)?;
-        if let Some(prepared) = prepared {
-            // A background pull/upload receipt may advance generation without changing this
-            // approval. Merge the authenticated account proof into current state, then check
-            // the exact route, key authority and prior pin again in the atomic pin transaction.
-            record_round::publish_prepared_account_gate(env, prepared)?.ensure_compatible()?;
-        }
         // No caller guards or credential/network IO under publication/core. Validate and pin against
         // the same latest state: unrelated sync receipts must neither fail nor be overwritten.
         let _publication = env.runtime.format_publication.lock().unwrap();
@@ -163,13 +145,12 @@ mod connect_tests;
 mod tests {
     use super::*;
     use crate::sync::{
-        fake_relay::FakeRelay,
-        records_v3::HostPayload,
+        records_v3::{HostPayload, HostScope},
         testkit::{TestClock, TestDevice},
     };
     const HOST: &str = "0000000000000001";
     fn device() -> TestDevice {
-        let d = TestDevice::new("pin-probe", &FakeRelay::new(), &TestClock::new());
+        let d = TestDevice::new("pin-probe", &TestClock::new());
         let record_runtime::StartupProbe::Records { state, .. } =
             record_runtime::probe_startup(&d.env().state_path, "pin-probe")
         else {
@@ -208,7 +189,6 @@ mod tests {
             &hop(),
             None,
             &key,
-            &d.keychain,
             &CancelToken::default(),
             &|| Ok(()),
         )
@@ -223,19 +203,13 @@ mod tests {
     }
     #[test]
     fn a_central_host_can_be_locally_approved_without_legacy_credentials_or_network() {
-        struct Forbidden;
-        impl Keychain for Forbidden {
-            fn get(&self,_:&str)->Result<Option<String>,AppError>{panic!("legacy credential read")}
-            fn set(&self,_:&str,_:&str)->Result<(),AppError>{panic!("legacy credential write")}
-            fn delete(&self,_:&str)->Result<(),AppError>{panic!("legacy credential delete")}
-        }
         let d=device();let env=d.env();
         record_runtime::mutate_records(&env,|current| {
             let mut next=current.clone();let mut central=crate::sync::central::workspace::tests::enrolled();
             central.control.cutover=true;next.local.central=Some(central);Ok(next)
         }).unwrap();
         let key=crate::ssh::fake::default_server_key();
-        confirm(&env,&hop(),None,&key,&Forbidden,&CancelToken::default(),&||Ok(())).unwrap();
+        confirm(&env,&hop(),None,&key,&CancelToken::default(),&||Ok(())).unwrap();
         let state=record_runtime::snapshot(&env).unwrap().0;
         let central=&state.local.central.as_ref().unwrap().control;
         let receipt=&state.local.credential_approvals[HOST];
@@ -256,7 +230,6 @@ mod tests {
                 &hop(),
                 None,
                 &crate::ssh::fake::default_server_key(),
-                &d.keychain,
                 &cancel,
                 &|| {
                     if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {

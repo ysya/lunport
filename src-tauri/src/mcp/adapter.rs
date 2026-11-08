@@ -6,16 +6,12 @@ use crate::session::{connect::CancelToken, protocol::*};
 pub(super) struct Call {
     pub cancel: CancelToken,
     stream: Mutex<Option<Stream>>,
-    legacy: AtomicBool,
 }
 impl Call {
-    pub fn cancel(&self, id: &str) {
+    pub fn cancel(&self, _id: &str) {
         self.cancel.cancel();
         if let Some(stream) = self.stream.lock().unwrap().as_ref() {
             close(stream);
-        }
-        if self.legacy.load(Ordering::SeqCst) {
-            let _ = bridge_call("cancel", json!({"request_id":id}));
         }
     }
 }
@@ -101,46 +97,21 @@ fn listed_in(tools: &[Value], name: &str) -> bool {
     tools.iter().any(|tool| tool["name"] == name)
 }
 
-pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) -> Value {
+pub(super) fn tool(params: &Value, info: &McpClientInfo, call: &Call) -> Value {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
     // Every tool the records server lists is routed, so a new tool cannot be listed and then refused; the legacy names stay known.
-    let records_tools = tools_for_mode("records");
+    let records_tools = tool_definitions();
     if !(matches!(name, "get_effective_config" | "run") || listed_in(records_tools.as_array().map(Vec::as_slice).unwrap_or_default(), name)) {
         return tool_error(format!("Unknown tool: {name}"));
     }
-    let mut arguments = params
+    let arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let mut result = ipc_call(name, arguments.clone(), info, call);
-    if result
-        .as_ref()
-        .err()
-        .is_some_and(|e| e == "legacy_transport_required")
-    {
-        // The tools only the records server has (creating, verifying and editing hosts; tunnels) have no legacy counterpart.
-        if listed_in(&management::tool_definitions(), name) || listed_in(&tunnels::tool_definitions(), name) {
-            return tool_error("This tool requires a Records workspace in the current Lunport version.".into());
-        }
-        call.legacy.store(true, Ordering::SeqCst);
-        if call.cancel.is_cancelled() {
-            return tool_error("MCP request was canceled".into());
-        }
-        if let Some(args) = arguments.as_object_mut() {
-            args.insert("_request_id".into(), json!(id));
-        }
-        result = bridge_call(
-            match name {
-                "get_host" => "get_effective_config",
-                "ssh_exec" => "run",
-                other => other,
-            },
-            arguments,
-        );
-    }
+    let result = ipc_call(name, arguments, info, call);
     match result {
         Ok(result) => {
             json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&result).unwrap()}],"structuredContent":result,"isError":false})
@@ -176,16 +147,16 @@ mod tests {
     fn every_tool_the_records_server_lists_is_routed_to_the_broker() {
         let call = Call::default();
         call.cancel.cancel();
-        let listed = tools_for_mode("records");
+        let listed = tool_definitions();
         let names: Vec<&str> = listed.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"update_host") && names.contains(&"set_transport") && names.contains(&"remove_transport"), "{names:?}");
         assert!(names.contains(&"start_tunnel") && names.contains(&"stop_tunnel") && names.contains(&"create_tunnel"), "{names:?}");
         for name in names {
-            let answer = tool(&json!({"name": name, "arguments": {}}), "1", &McpClientInfo::default(), &call).to_string();
+            let answer = tool(&json!({"name": name, "arguments": {}}), &McpClientInfo::default(), &call).to_string();
             assert!(!answer.contains("Unknown tool"), "{name} is listed but refused: {answer}");
             assert!(answer.contains("canceled"), "{name} went to the broker: {answer}");
         }
-        let unknown = tool(&json!({"name": "drop_tables", "arguments": {}}), "1", &McpClientInfo::default(), &call).to_string();
+        let unknown = tool(&json!({"name": "drop_tables", "arguments": {}}), &McpClientInfo::default(), &call).to_string();
         assert!(unknown.contains("Unknown tool: drop_tables"), "{unknown}");
     }
     #[test]

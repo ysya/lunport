@@ -106,7 +106,6 @@ fn fixture() -> Fixture {
 fn fixture_with_service(mut service: Service) -> Fixture {
     let d = Arc::new(TestDevice::new(
         "active-cycle",
-        &FakeRelay::new(),
         &TestClock::new(),
     ));
     service.login(&d);
@@ -548,7 +547,7 @@ fn actual_active_takeover_rotates_then_reconciles_its_unsent_key_through_backgro
     let address = service.server.url();
     crate::sync::central::api::with_test_transport(origin, &address, || {
         let f = fixture_with_service(service);
-        let trusted = TestDevice::new("trusted-peer", &FakeRelay::new(), &f.d.clock);
+        let trusted = TestDevice::new("trusted-peer", &f.d.clock);
         f.service.login(&trusted);
         let invite = devices::pairing_code(&trusted.env()).unwrap();
         devices::approve(&f.d.env(), &invite.code).unwrap();

@@ -10,10 +10,6 @@ pub use crate::sync::record::Envelope;
 
 /// `POST /legacy/v1/pull` 一次最多幾條 chain(spec §6.1);更多就由呼叫端分批。
 pub const MAX_BATCH_PULL: usize = 64;
-/// 一次上傳最多幾筆(relay 的 `MAX_ITEMS_PER_PUSH`)。
-/// `GET /legacy/v1/info` 回報的功能名稱(spec §6.3)。
-pub const FEATURE_PULL_BATCH: &str = "pull-batch";
-pub const FEATURE_FREEZE: &str = "freeze";
 /// 輪詢間隔的下限與每條 chain 的增量(spec §6.4)。
 const MIN_POLL_INTERVAL: Duration = Duration::from_secs(45);
 const POLL_INTERVAL_PER_CHAIN: Duration = Duration::from_secs(2);
@@ -32,12 +28,6 @@ pub struct PushItem {
     pub deleted: bool,
     /// 本機最後看到的該記錄序號(新記錄為 0);中繼較新則回 conflict。
     pub base_seq: u64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum PushResult {
-    Accepted { seq: u64 },
-    Conflict { current: Envelope },
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -170,31 +160,6 @@ pub enum BatchPullResult {
 pub struct BatchPullEntry {
     pub chain: String,
     pub result: BatchPullResult,
-}
-
-/// 上傳的結果(spec §6.2、§6.4)。
-#[derive(Clone, Debug, PartialEq)]
-pub enum PushOutcome {
-    /// 每項的結果,順序同請求(筆數已核對)。
-    Applied(Vec<PushResult>),
-    /// `409 { "status": "frozen" }`:chain 已被凍結(更換同步碼),什麼都沒寫入。呼叫端立刻停止這一輪的所有上傳、
-    /// 保留 dirty,下一輪拉帳戶 chain 確認更換標記。
-    Frozen,
-}
-
-/// v2 中繼抽象(spec §6):引擎只依賴它,測試以記憶體假中繼實作。語意見 `RelayClient` 的實作。
-pub trait RelayApi {
-    /// `GET /legacy/v1/info`:舊版 relay(404)→ `RelayInfo::default()`。
-    fn info(&self) -> Result<RelayInfo, RelayError>;
-    /// `PUT /legacy/v1/chains/{id}`:建立(201)或已存在且權杖相符(200)都是 Ok。
-    fn create_chain(&self, chain_id: &str, token: &str) -> Result<(), RelayError>;
-    fn delete_chain(&self, chain_id: &str, token: &str) -> Result<(), RelayError>;
-    /// `POST /legacy/v1/chains/{id}/freeze`:冪等。舊版 relay 也回 404 —— 呼叫前先確認 `RelayInfo` 有 `freeze`。
-    fn freeze_chain(&self, chain_id: &str, token: &str) -> Result<(), RelayError>;
-    fn pull(&self, chain_id: &str, token: &str, since: u64) -> Result<PullResponse, RelayError>;
-    /// `POST /legacy/v1/pull`:1–64 項(空的不發請求,回空)。結果順序與請求相同。
-    fn pull_batch(&self, items: &[BatchPullItem]) -> Result<Vec<BatchPullEntry>, RelayError>;
-    fn push(&self, chain_id: &str, token: &str, items: &[PushItem]) -> Result<PushOutcome, RelayError>;
 }
 
 /// Historical state still validates saved origins, but this build cannot send chain requests.

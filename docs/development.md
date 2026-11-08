@@ -35,7 +35,7 @@ Development/test builds optimize the existing OpenSSH PEM/base64 parsers as well
 
 `pnpm tauri:dev` runs **Lunport Dev**. `pnpm tauri:build:dev` builds a release-mode Development bundle. The Development profile uses `org.homelab.sshelter.dev`, the `SSHelter Development` credential service and a sandbox home under its data directory. It can run beside Production. Writes remain in that sandbox; updater and login integration are disabled. Selected external import sources are read and copied, preserving the originals.
 
-Development refuses Legacy system-SSH evaluation, Connect, deployment and MCP execution before spawning OpenSSH. Records connections use the built-in engine. A build whose configured product name or identifier disagrees with its compiled profile refuses initialization.
+Records connections use the built-in engine. A build whose configured product name or identifier disagrees with its compiled profile refuses initialization.
 
 An ordinary `pnpm tauri build` uses the Production profile. Keep the two profiles separate when validating existing data.
 
@@ -99,7 +99,7 @@ The 2.11.2 runtime has a narrow [context ownership patch](../src-tauri/vendor/ta
 
 ## Central account builds
 
-Central sync is enabled in normal macOS, Windows and Linux desktop builds through the default `central-sync` feature. Windows uses pinned native filesystem handles, owner-only ACLs, bounded source capture and write-through atomic publication; Unix permission tests remain platform-specific while migration and synchronization fixtures run on every supported platform. The old `central-sync-preview` name remains a compatibility alias. Release CI injects `SSHELTER_RELAY_URL` into the native build; fresh account setup uses that HTTPS service while an existing pinned account keeps its original service. Self-hosted builds may leave it unset and enter a service in Sync.
+Central sync is enabled in normal macOS, Windows and Linux desktop builds through the default `central-sync` feature. Windows uses pinned native filesystem handles, owner-only ACLs, bounded source capture and write-through atomic publication; Unix permission tests remain platform-specific while migration and synchronization fixtures run on every supported platform. Release CI injects `SSHELTER_RELAY_URL` into the native build; fresh account setup uses that HTTPS service while an existing pinned account keeps its original service. Self-hosted builds may leave it unset and enter a service in Sync.
 
 The ordinary-library `app_profile_build` integration test checks the shipped capability outside `cfg(test)`. Central tests use isolated in-memory credentials; never run credential-service tests against a real user Keychain as a general release check.
 

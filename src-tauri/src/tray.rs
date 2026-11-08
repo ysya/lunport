@@ -6,32 +6,8 @@ use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
-use crate::config::model::{HostBlock, Item, SshConfigDoc};
-
 /// Tray menu capacity for connect entries.
 const MAX_TRAY_ALIASES: usize = 25;
-
-/// First pattern of each HostBlock across all files, skipping pure-wildcard patterns ("*"),
-/// capped at MAX_TRAY_ALIASES. Pure function for testing.
-pub fn tray_aliases(doc: &SshConfigDoc) -> Vec<String> {
-    let mut out = Vec::new();
-    for file in &doc.files {
-        for item in &file.items {
-            if let Item::Host(HostBlock { patterns, .. }) = item {
-                if let Some(first) = patterns.first() {
-                    if first == "*" {
-                        continue;
-                    }
-                    out.push(first.clone());
-                    if out.len() >= MAX_TRAY_ALIASES {
-                        return out;
-                    }
-                }
-            }
-        }
-    }
-    out
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RecordTrayItem {
@@ -181,18 +157,10 @@ fn tray_record_items(
     Ok(items)
 }
 
-fn legacy_tray_allowed(core: &crate::sync::runtime::SyncCore) -> bool {
-    core.format == crate::sync::record_runtime::RuntimeFormat::Legacy
-        && !core.legacy_paused
-        && core.records.is_none()
-        && core.save_blocked.is_none()
-}
 fn active_record_snapshot(
     core: &crate::sync::runtime::SyncCore,
 ) -> Result<crate::sync::records_v3::SyncStateV3, crate::error::AppError> {
     if core.format != crate::sync::record_runtime::RuntimeFormat::Records
-        || core.state.is_some()
-        || core.legacy.is_some()
         || core.save_blocked.is_some()
     {
         return Err(crate::error::AppError::Other(
@@ -232,18 +200,9 @@ pub fn rebuild_record_tray(
     rebuild_menu(app, items)
 }
 
-/// Build (or update) the single menubar tray with the given aliases.
-pub fn rebuild_tray(app: &tauri::AppHandle, aliases: &[String]) -> tauri::Result<()> {
-    let items: Vec<_> = aliases
-        .iter()
-        .take(MAX_TRAY_ALIASES)
-        .map(|alias| RecordTrayItem {
-            id: format!("connect:{alias}"),
-            label: alias.clone(),
-            enabled: true,
-        })
-        .collect();
-    rebuild_menu(app, items)
+/// The tray before any workspace is known: Open and Quit only.
+pub fn rebuild_empty(app: &tauri::AppHandle) -> tauri::Result<()> {
+    rebuild_menu(app, Vec::new())
 }
 
 fn rebuild_menu(app: &tauri::AppHandle, items: Vec<RecordTrayItem>) -> tauri::Result<()> {
@@ -442,45 +401,9 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                         eprintln!("[tray] record quick-connect failed: {error}");
                     }
                 });
-            } else if let Some(alias) = other.strip_prefix("connect:") {
-                // Off the menu thread: starting the terminal spawns a process (osascript on macOS).
-                let (app, alias) = (app.clone(), alias.to_string());
-                std::thread::spawn(move || {
-                    if let Err(e) = quick_connect(&app, &alias) {
-                        eprintln!("[tray] quick-connect '{alias}' failed: {e}");
-                    }
-                });
             }
         }
     }
-}
-
-/// Validate, then launch with the first detected terminal: `sshelter connect <alias>` (own-ssh spec §7.4; on Windows through the console
-/// helper `sshelter-cli.exe`, see `connect::launch_for`).
-fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error::AppError> {
-    use crate::error::AppError;
-
-    let state = app.state::<crate::state::AppState>();
-    // Off the menu thread. Keep mode publication serialized through the terminal process spawn,
-    // without holding core/doc during detection or launch and without reading any credential.
-    let _publication = state.sync.format_publication.lock().unwrap();
-    if !legacy_tray_allowed(&state.sync.core.lock().unwrap()) {
-        return Err(AppError::Other("legacy workspace is unavailable".into()));
-    }
-    {
-        let doc_lock = state.doc.lock().unwrap();
-        let doc = doc_lock
-            .as_ref()
-            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-        crate::connect::validate_alias(doc, alias)?;
-    }
-
-    let terminal = crate::connect::detect_terminals()
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::Other("no terminal found".to_string()))?;
-
-    crate::connect::launch(&crate::connect::launch_for(&terminal.id, alias, false)?)
 }
 
 /// Records menu events never consult doc, ssh -G, Keychain or a private-material owner.
@@ -507,44 +430,6 @@ fn quick_connect_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::include::load_doc;
-
-    fn doc_with(content: &str) -> SshConfigDoc {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config");
-        std::fs::write(&path, content).unwrap();
-        let doc = load_doc(&path).unwrap();
-        std::mem::forget(dir);
-        doc
-    }
-
-    #[test]
-    fn tray_aliases_lists_first_patterns_skipping_wildcard() {
-        let doc = doc_with(
-            "Host web prod\n    User x\nHost *\n    ForwardAgent yes\nHost db\n    User y\n",
-        );
-        let aliases = tray_aliases(&doc);
-        assert_eq!(aliases, vec!["web".to_string(), "db".to_string()]);
-    }
-
-    #[test]
-    fn tray_aliases_caps_at_25() {
-        let mut content = String::new();
-        for i in 0..40 {
-            content.push_str(&format!("Host h{i}\n    User x\n"));
-        }
-        let doc = doc_with(&content);
-        let aliases = tray_aliases(&doc);
-        assert_eq!(aliases.len(), 25);
-        assert_eq!(aliases[0], "h0");
-        assert_eq!(aliases[24], "h24");
-    }
-
-    #[test]
-    fn tray_aliases_empty_for_no_hosts() {
-        let doc = doc_with("# just a comment\n");
-        assert!(tray_aliases(&doc).is_empty());
-    }
     use crate::sync::record::{record_key, LocalRecord, Record, RecordKind};
     use crate::sync::record_runtime::RuntimeFormat;
     use crate::sync::records_v3::{AuthKind, HostPayload, SpaceStateV3, SyncStateV3};
@@ -720,24 +605,6 @@ mod tests {
         let items = tray_record_items(&state).unwrap();
         assert_ne!(items[0].label, items[1].label);
         assert!(items.iter().all(|i| !i.label.contains(['\n', '\u{202e}'])));
-    }
-    #[test]
-    fn legacy_tray_guard_refuses_records_blocked_paused_and_dual_owner() {
-        let mut core = SyncCore::default();
-        assert!(legacy_tray_allowed(&core));
-        core.legacy_paused = true;
-        assert!(!legacy_tray_allowed(&core));
-        core.legacy_paused = false;
-        for format in [RuntimeFormat::Records, RuntimeFormat::Blocked] {
-            core.format = format;
-            assert!(!legacy_tray_allowed(&core));
-        }
-        core.format = RuntimeFormat::Legacy;
-        core.records = Some(record_state());
-        assert!(!legacy_tray_allowed(&core));
-        core.records = None;
-        core.save_blocked = Some("blocked".into());
-        assert!(!legacy_tray_allowed(&core));
     }
     #[test]
     fn record_click_checks_latest_records_mode_and_target_id_without_alias_fallback() {

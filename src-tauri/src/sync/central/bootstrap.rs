@@ -458,7 +458,6 @@ mod tests {
     };
     use super::*;
     use crate::sync::{
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     use serde_json::json;
@@ -476,7 +475,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let d = TestDevice::new("a", &FakeRelay::new(), &TestClock::new());
+            let d = TestDevice::new("a", &TestClock::new());
             let env = d.env();
             let probe = record_runtime::probe_startup(&env.state_path, "central");
             record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();

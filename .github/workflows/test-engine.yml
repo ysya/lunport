@@ -116,8 +116,6 @@ jobs:
           command = [
               "cargo", "test", "--locked", "--lib", "--", "--test-threads=2",
               "--skip", "secrets::tests::round_trip_set_get_delete",
-              "--skip", "askpass::tests::env_secret_takes_priority_over_keychain",
-              "--skip", "askpass::tests::missing_account_and_no_env_yields_none",
               "--skip", "ssh::engine_tests::login_methods::pam",
           ]
           try:
@@ -181,7 +179,7 @@ jobs:
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
 
       - name: Debug profile selection in the normal library
         run: cargo test --locked --test app_profile_build

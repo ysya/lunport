@@ -1,15 +1,12 @@
 //! MCP stdio adapter backed by the OS-authenticated session IPC broker.
 //!
-//! The adapter owns no credentials and executes no SSH. Records tools use protocol 2
-//! on the session socket or named pipe. The token-authenticated loopback transport
-//! is retained only after the broker explicitly confirms Legacy workspace mode.
+//! The adapter owns no credentials and executes no SSH. Every tool goes over protocol 2
+//! on the session socket or named pipe to the Records server.
 
 use crate::session::deadline::InteractionDeadline;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::io::{BufRead, Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -19,9 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::config::dto::host_summaries;
-use crate::config::intel::effective_config;
-use crate::connect::validate_alias;
 use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
@@ -36,7 +30,6 @@ pub use records::RequestContext;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_BRIDGE_LINE: u64 = 1_048_576;
 const MAX_COMMAND_BYTES: usize = 16_384;
-const MAX_STREAM_BYTES: usize = 65_536;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -65,13 +58,6 @@ impl McpClientInfo {
         let field = |key| value.and_then(|v|v.get(key)).and_then(Value::as_str).map(|s| s.chars().filter(|c|!c.is_control() && !crate::session::auth::is_deceptive_format(*c)).take(100).collect());
         Self { name:field("name"), title:field("title"), version:field("version") }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RuntimeInfo {
-    port: u16,
-    token: String,
-    pid: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -183,24 +169,13 @@ enum ApprovalDecision {
     TimedOut,
 }
 
-#[derive(Default)]
-struct CancellationState {
-    active: HashMap<String, Arc<AtomicBool>>,
-    early: HashSet<String>,
-}
-
-/// Runtime state shared by Tauri commands and loopback bridge workers.
+/// Runtime state shared by the Tauri commands and the Records MCP server.
 pub struct McpRuntime {
     policy: Mutex<McpPolicy>,
     audit: Mutex<records::AuditLog>,
     records_active:Mutex<HashMap<String,(String,crate::session::connect::CancelToken)>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
-    cancellations: Mutex<CancellationState>,
-    /// This instance's bridge (port, token, pid): what it wrote to `mcp-runtime.json`.
-    bridge: Mutex<Option<RuntimeInfo>>,
-    bridge_start: Mutex<()>,
-    bridge_active: AtomicBool,
     pub keep_alive: AtomicBool,
     next_request_id: AtomicU64,
     last_client_at_ms: AtomicU64,
@@ -214,10 +189,6 @@ impl Default for McpRuntime {
             records_active:Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
-            cancellations: Mutex::new(CancellationState::default()),
-            bridge: Mutex::new(None),
-            bridge_start: Mutex::new(()),
-            bridge_active: AtomicBool::new(false),
             keep_alive: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
             last_client_at_ms: AtomicU64::new(0),
@@ -252,7 +223,7 @@ impl McpRuntime {
             approval_mode: policy.approval_mode,
             audit_error: self.audit.lock().unwrap().error.clone(),
             enabled: policy.enabled,
-            bridge_active: self.bridge_active.load(Ordering::Relaxed),
+            bridge_active: false,
             allowed_hosts: policy.allowed_hosts.into_iter().collect(),
             allowed_groups: vec![],
             pending,
@@ -370,57 +341,6 @@ impl McpRuntime {
         }
     }
 
-    fn register_request(&self, id: &str) -> Result<Arc<AtomicBool>, String> {
-        let mut cancellations = self.cancellations.lock().unwrap();
-        if cancellations.early.remove(id) {
-            return Err("MCP request was canceled".to_string());
-        }
-        if cancellations.active.contains_key(id) {
-            return Err("duplicate MCP request id".to_string());
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        cancellations.active.insert(id.to_string(), flag.clone());
-        Ok(flag)
-    }
-
-    fn finish_request(&self, id: &str) {
-        self.cancellations.lock().unwrap().active.remove(id);
-    }
-
-    fn cancel_request(&self, id: &str) -> bool {
-        let active = {
-            let mut cancellations = self.cancellations.lock().unwrap();
-            if let Some(flag) = cancellations.active.get(id) {
-                flag.store(true, Ordering::Relaxed);
-                true
-            } else {
-                // Covers cancellation racing just ahead of request registration.
-                if cancellations.early.len() >= 256 {
-                    cancellations.early.clear();
-                }
-                cancellations.early.insert(id.to_string());
-                false
-            }
-        };
-        let pending = self.pending.lock().unwrap().remove(id);
-        if let Some(pending) = pending {
-            let _ = pending.decision.send(ApprovalDecision::Cancel);
-            true
-        } else {
-            active
-        }
-    }
-}
-
-struct ActiveRequestGuard<'a> {
-    runtime: &'a McpRuntime,
-    id: &'a str,
-}
-
-impl Drop for ActiveRequestGuard<'_> {
-    fn drop(&mut self) {
-        self.runtime.finish_request(self.id);
-    }
 }
 
 fn unix_ms() -> u64 {
@@ -432,10 +352,6 @@ fn unix_ms() -> u64 {
 
 fn policy_path() -> Result<PathBuf, AppError> {
     Ok(crate::fsutil::app_data_root()?.join("mcp-policy.json"))
-}
-
-fn runtime_path() -> Result<PathBuf, AppError> {
-    Ok(crate::fsutil::app_data_root()?.join("mcp-runtime.json"))
 }
 
 fn load_policy() -> Result<McpPolicy, AppError> {
@@ -464,290 +380,6 @@ pub fn initialize(app: &AppHandle, keep_alive: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-fn random_token() -> Result<String, AppError> {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes)
-        .map_err(|e| AppError::Other(format!("cannot create MCP bridge token: {e}")))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-pub(super) fn ensure_legacy_bridge(app:&AppHandle)->Result<(),String>{
-    let state=app.state::<AppState>();let _start=state.mcp.bridge_start.lock().unwrap();
-    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
-    if !state.mcp.bridge_active.load(Ordering::Relaxed){start_bridge(app.clone()).map_err(|e|e.to_string())?;}Ok(())
-}
-
-fn start_bridge(app: AppHandle) -> Result<(), AppError> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let info = RuntimeInfo {
-        port: listener.local_addr()?.port(),
-        token: random_token()?,
-        pid: std::process::id(),
-    };
-    write_runtime_info(&info)?;
-
-    {
-        let state = app.state::<AppState>();
-        *state.mcp.bridge.lock().unwrap() = Some(info);
-        state.mcp.bridge_active.store(true, Ordering::Relaxed);
-    }
-
-    thread::Builder::new()
-        .name("sshelter-mcp-bridge".to_string())
-        .spawn(move || {
-            for incoming in listener.incoming() {
-                match incoming {
-                    Ok(stream) => {
-                        let app = app.clone();
-                        let _ = thread::Builder::new()
-                            .name("sshelter-mcp-request".to_string())
-                            .spawn(move || handle_bridge_connection(app, stream));
-                    }
-                    // A failed accept (a connection aborted before it was accepted, no free file
-                    // descriptors) does not end the bridge: only one Lunport runs, so no other
-                    // instance would take over.
-                    Err(_) => thread::sleep(Duration::from_millis(100)),
-                }
-            }
-        })
-        .map_err(AppError::Io)?;
-    Ok(())
-}
-
-/// `mcp-runtime.json` tells `--mcp` adapters which bridge to connect to and how to authenticate.
-fn write_runtime_info(info: &RuntimeInfo) -> Result<(), AppError> {
-    let bytes = serde_json::to_vec(info)
-        .map_err(|e| AppError::Other(format!("cannot serialize MCP runtime info: {e}")))?;
-    fsutil::atomic_write(&runtime_path()?, &bytes, 0o600)
-}
-
-/// A second `--mcp-host` launch was handed over to this instance (single instance, lib.rs): its
-/// adapter could not reach the bridge named in `mcp-runtime.json`. Point the file at this
-/// instance's bridge again, so the waiting adapter finds it.
-pub fn republish_bridge(app: &AppHandle) {
-    let info = app.state::<AppState>().mcp.bridge.lock().unwrap().clone();
-    // No bridge yet: this instance is still starting, and `start_bridge` writes the file.
-    if let Some(info) = info {
-        if let Err(e) = write_runtime_info(&info) {
-            eprintln!("[mcp] cannot rewrite the MCP runtime file: {e}");
-        }
-    }
-}
-
-/// This instance is exiting: remove `mcp-runtime.json` if it still names this process, so
-/// adapters stop trying a bridge that is gone. A file another process wrote is left alone.
-pub fn forget_bridge(app: &AppHandle) {
-    let Some(info) = app.state::<AppState>().mcp.bridge.lock().unwrap().clone() else {
-        return;
-    };
-    let removed = runtime_path()
-        .map_err(|e| e.to_string())
-        .and_then(|path| remove_runtime_file_if_owned(&path, info.pid).map_err(|e| e.to_string()));
-    if let Err(e) = removed {
-        eprintln!("[mcp] cannot remove the MCP runtime file: {e}");
-    }
-}
-
-fn remove_runtime_file_if_owned(path: &Path, pid: u32) -> std::io::Result<bool> {
-    crate::fsutil::check_write_io(path)?;
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    if !runtime_file_names(&bytes, pid) {
-        return Ok(false);
-    }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
-/// Whether the contents of `mcp-runtime.json` name the process `pid`. Unreadable contents name
-/// nobody.
-fn runtime_file_names(contents: &[u8], pid: u32) -> bool {
-    serde_json::from_slice::<RuntimeInfo>(contents).is_ok_and(|info| info.pid == pid)
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BridgeEnvelope {
-    token: String,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BridgeResponse {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-fn handle_bridge_connection(app: AppHandle, mut stream: TcpStream) {
-    let cloned = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let mut reader = BufReader::new(cloned).take(MAX_BRIDGE_LINE + 1);
-    let mut line = String::new();
-    let response = match reader.read_line(&mut line) {
-        Ok(n) if n as u64 <= MAX_BRIDGE_LINE => match serde_json::from_str::<BridgeEnvelope>(&line)
-        {
-            Ok(envelope) => {
-                let completed = Arc::new(AtomicBool::new(false));
-                if envelope.method == "run" {
-                    if let Some(id) = envelope
-                        .params
-                        .get("_request_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                    {
-                        if let Ok(monitor_stream) = stream.try_clone() {
-                            let monitor_app = app.clone();
-                            let monitor_completed = completed.clone();
-                            let _ = thread::Builder::new()
-                                .name("sshelter-mcp-disconnect".to_string())
-                                .spawn(move || {
-                                    monitor_bridge_disconnect(
-                                        monitor_app,
-                                        monitor_stream,
-                                        id,
-                                        monitor_completed,
-                                    )
-                                });
-                        }
-                    }
-                }
-                let result = dispatch_bridge(&app, envelope);
-                completed.store(true, Ordering::Relaxed);
-                result
-            }
-            Err(e) => Err(format!("invalid bridge request: {e}")),
-        },
-        Ok(_) => Err("bridge request too large".to_string()),
-        Err(e) => Err(format!("cannot read bridge request: {e}")),
-    };
-    let response = match response {
-        Ok(result) => BridgeResponse {
-            ok: true,
-            result: Some(result),
-            error: None,
-        },
-        Err(error) => BridgeResponse {
-            ok: false,
-            result: None,
-            error: Some(error),
-        },
-    };
-    if serde_json::to_writer(&mut stream, &response).is_ok() {
-        let _ = stream.write_all(b"\n");
-        let _ = stream.flush();
-    }
-}
-
-fn monitor_bridge_disconnect(
-    app: AppHandle,
-    mut stream: TcpStream,
-    request_id: String,
-    completed: Arc<AtomicBool>,
-) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-    let mut byte = [0_u8; 1];
-    while !completed.load(Ordering::Relaxed) {
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                app.state::<AppState>().mcp.cancel_request(&request_id);
-                return;
-            }
-            Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => {
-                app.state::<AppState>().mcp.cancel_request(&request_id);
-                return;
-            }
-        }
-    }
-}
-
-fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, String> {
-    let state = app.state::<AppState>();
-    let authorized = state
-        .mcp
-        .bridge
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|bridge| bridge.token == envelope.token);
-    if !authorized {
-        return Err("unauthorized local MCP bridge request".to_string());
-    }
-    state
-        .mcp
-        .last_client_at_ms
-        .store(unix_ms(), Ordering::Relaxed);
-
-    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
-
-    if envelope.method == "ping" {
-        return Ok(json!({ "status": "ok" }));
-    }
-    if envelope.method == "cancel" {
-        let request_id = string_param(&envelope.params, "request_id")?;
-        return Ok(json!({ "canceled": state.mcp.cancel_request(request_id) }));
-    }
-
-    let policy = state.mcp.policy.lock().unwrap().clone();
-    if !policy.enabled {
-        return Err("MCP access is disabled in Lunport Settings → AI Access".to_string());
-    }
-
-    match envelope.method.as_str() {
-        "list_hosts" => {
-            let _lifecycle=state.sync.lifecycle.lock().unwrap();
-            crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
-            let doc = wait_for_loaded_doc(&state)?;
-            let hosts: Vec<_> = host_summaries(&doc)
-                .into_iter()
-                .filter(|h| policy.allowed_hosts.contains(&h.alias))
-                .collect();
-            Ok(json!({ "hosts": hosts }))
-        }
-        "get_effective_config" => {
-            let _lifecycle=state.sync.lifecycle.lock().unwrap();
-            crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
-            let alias = string_param(&envelope.params, "alias")?;
-            ensure_allowed(&policy, alias)?;
-            let doc = wait_for_loaded_doc(&state)?;
-            validate_alias(&doc, alias).map_err(|e| e.to_string())?;
-            let main_path = doc.files.first().map(|f| f.path.clone());
-            let config =
-                effective_config(alias, main_path.as_deref()).map_err(|e| e.to_string())?;
-            let safe: Vec<_> = config
-                .into_iter()
-                .filter(|(key, _)| {
-                    matches!(
-                        key.as_str(),
-                        "hostname" | "user" | "port" | "proxyjump" | "identitiesonly"
-                    )
-                })
-                .map(|(key, value)| json!({ "key": key, "value": value }))
-                .collect();
-            Ok(json!({ "alias": alias, "config": safe }))
-        }
-        "run" => run_approved(app, &state, &policy, &envelope.params),
-        _ => Err(format!("unknown bridge method: {}", envelope.method)),
-    }
-}
-
 /// MCP sees endpoint and routing metadata, never notes or arbitrary imported directive values.
 #[cfg(test)]
 fn record_host_metadata(host: &crate::sync::records_v3::HostRecord) -> Value {
@@ -772,29 +404,13 @@ fn string_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing or empty '{key}'"))
 }
 
-fn wait_for_loaded_doc(state: &AppState) -> Result<crate::config::model::SshConfigDoc, String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(doc) = state.doc.lock().unwrap().clone() {
-            return Ok(doc);
-        }
-        if Instant::now() >= deadline {
-            return Err("SSH config is not loaded yet".to_string());
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
+/// The allowlist check by host id, as the tests state it; the Records server checks grants through `permissions`.
+#[cfg(test)]
 fn ensure_allowed(policy: &McpPolicy, alias: &str) -> Result<(), String> {
     if !policy.allowed_hosts.contains(alias) {
         return Err(format!("host '{alias}' is not allowed for AI access"));
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn ensure_record_allowed(policy: &McpPolicy, host: &crate::sync::records_v3::HostRecord) -> Result<(), String> {
-    ensure_allowed(policy, &host.id)
 }
 
 fn change_host_permission(
@@ -832,329 +448,6 @@ fn display_safe_command(command: &str) -> bool {
                     | '\u{2069}'
             )
         })
-}
-
-fn run_approved(
-    app: &AppHandle,
-    state: &AppState,
-    policy: &McpPolicy,
-    params: &Value,
-) -> Result<Value, String> {
-    let _lifecycle=state.sync.lifecycle.lock().unwrap();
-    if state.sync.core.lock().unwrap().records.is_some() {
-        return Err("MCP remote command execution is not available in the records workspace yet".into());
-    }
-    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
-    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
-    drop(_lifecycle);
-    let alias = string_param(params, "alias")?.to_string();
-    let command = string_param(params, "command")?.to_string();
-    if !display_safe_command(&command) {
-        return Err("command is empty, too large, contains NUL, or contains bidirectional control characters".to_string());
-    }
-    ensure_allowed(policy, &alias)?;
-    let timeout_seconds = params
-        .get("timeout_seconds")
-        .and_then(Value::as_u64)
-        .unwrap_or(60)
-        .clamp(1, 300);
-
-    let (config_path, identity) = {
-        let doc = wait_for_loaded_doc(state)?;
-        validate_alias(&doc, &alias).map_err(|e| e.to_string())?;
-        let main_path = doc.files.first().map(|f| f.path.clone());
-        let effective =
-            effective_config(&alias, main_path.as_deref()).map_err(|e| e.to_string())?;
-        for (key, value) in &effective {
-            let active = !value.eq_ignore_ascii_case("none") && !value.is_empty();
-            if (key == "proxycommand" || key == "knownhostscommand") && active {
-                return Err(format!(
-                    "host '{alias}' uses {key}; local command hooks are not allowed for MCP execution"
-                ));
-            }
-            if key == "permitlocalcommand" && value.eq_ignore_ascii_case("yes") {
-                return Err(format!(
-                    "host '{alias}' enables LocalCommand; local command hooks are not allowed for MCP execution"
-                ));
-            }
-        }
-        let value = |key: &str| {
-            effective
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone())
-        };
-        (main_path, (value("hostname"), value("user"), value("port")))
-    };
-
-    let id = params
-        .get("_request_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty() && id.len() <= 160)
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "mcp-{}-{}",
-                std::process::id(),
-                state.mcp.next_request_id.fetch_add(1, Ordering::Relaxed)
-            )
-        });
-    let cancel_flag = state.mcp.register_request(&id)?;
-    let _active_guard = ActiveRequestGuard {
-        runtime: &state.mcp,
-        id: &id,
-    };
-    let request = McpPendingRequest {
-        id: id.clone(),
-        alias: alias.clone(),
-        command: command.clone(),
-        hostname: identity.0,
-        user: identity.1,
-        port: identity.2,
-        requested_at_ms: unix_ms(),
-        ..Default::default()
-    };
-    let deadline=InteractionDeadline::after(APPROVAL_TIMEOUT);
-    let (tx, rx) = mpsc::sync_channel(1);
-    state.mcp.pending.lock().unwrap().insert(
-        id.clone(),
-        PendingApproval {
-            deadline,
-            request: request.clone(),
-            decision: tx,
-        },
-    );
-    // Cancellation can race between active-request registration and pending
-    // approval insertion. Re-check the shared flag so that race still wakes
-    // the approval waiter instead of leaving a stale dialog for 120 seconds.
-    if cancel_flag.load(Ordering::Relaxed) {
-        state.mcp.cancel_request(&id);
-    }
-    state.mcp.keep_alive.store(true, Ordering::Relaxed);
-
-    // Also brings up the window of an MCP host that started in the background.
-    crate::show_main_window(app);
-    let _ = app.emit("mcp://approval-requested", &request);
-
-    let decision=rx.recv_timeout(deadline.remaining());
-    let decision=if deadline.expired(){Ok(ApprovalDecision::TimedOut)}else{decision};
-    let approved = match decision {
-        Ok(ApprovalDecision::Allow) => true,
-        Ok(ApprovalDecision::Deny) => false,
-        Ok(ApprovalDecision::Cancel) => {
-            state.mcp.pending.lock().unwrap().remove(&id);
-            state.mcp.record(McpAuditEntry {
-                id: id.clone(),
-                alias,
-                command,
-                outcome: "canceled".to_string(),
-                exit_code: None,
-                detail: Some("MCP client canceled or disconnected".to_string()),
-                completed_at_ms: unix_ms(),
-                ..Default::default()
-            });
-            return Err("MCP request was canceled".to_string());
-        }
-        Ok(ApprovalDecision::TimedOut) | Err(_) => {
-            state.mcp.pending.lock().unwrap().remove(&id);
-            state.mcp.record(McpAuditEntry {
-                id: id.clone(),
-                alias,
-                command,
-                outcome: "timed_out".to_string(),
-                exit_code: None,
-                detail: Some("No decision within 120 seconds".to_string()),
-                completed_at_ms: unix_ms(),
-                ..Default::default()
-            });
-            return Err("Lunport approval timed out".to_string());
-        }
-    };
-    state.mcp.pending.lock().unwrap().remove(&id);
-    if !approved {
-        state.mcp.record(McpAuditEntry {
-            id: id.clone(),
-            alias,
-            command,
-            outcome: "denied".to_string(),
-            exit_code: None,
-            detail: None,
-            completed_at_ms: unix_ms(),
-            ..Default::default()
-        });
-        return Err("Denied in Lunport".to_string());
-    }
-
-    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
-    let current=state.mcp.policy.lock().unwrap().clone();
-    if !current.enabled{return Err("MCP access was disabled".into());}ensure_allowed(&current,&alias)?;
-    match execute_ssh(
-        &alias,
-        &command,
-        config_path.as_deref(),
-        timeout_seconds,
-        &cancel_flag,
-    ) {
-        Ok(output) => {
-            if output.canceled {
-                state.mcp.record(McpAuditEntry {
-                    id: id.clone(),
-                    alias,
-                    command,
-                    outcome: "canceled".to_string(),
-                    exit_code: output.exit_code.map(i64::from),
-                    detail: Some("MCP client canceled or disconnected".to_string()),
-                    completed_at_ms: unix_ms(),
-                ..Default::default()
-                });
-                return Err("MCP request was canceled".to_string());
-            }
-            state.mcp.record(McpAuditEntry {
-                id: id.clone(),
-                alias,
-                command,
-                outcome: "allowed".to_string(),
-                exit_code: output.exit_code.map(i64::from),
-                detail: output
-                    .timed_out
-                    .then(|| "SSH command timed out".to_string()),
-                completed_at_ms: unix_ms(),
-                ..Default::default()
-            });
-            serde_json::to_value(output).map_err(|e| e.to_string())
-        }
-        Err(error) => {
-            state.mcp.record(McpAuditEntry {
-                id: id.clone(),
-                alias,
-                command,
-                outcome: "failed".to_string(),
-                exit_code: None,
-                detail: Some(error.clone()),
-                completed_at_ms: unix_ms(),
-                ..Default::default()
-            });
-            Err(error)
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct RunOutput {
-    alias: String,
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-    timed_out: bool,
-    canceled: bool,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
-    #[serde(rename = "duration_ms")]
-    duration_ms: u64,
-}
-
-fn drain_stream<R: Read>(mut reader: R) -> (Vec<u8>, bool) {
-    let mut kept = Vec::new();
-    let mut truncated = false;
-    let mut buffer = [0_u8; 8_192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let remaining = MAX_STREAM_BYTES.saturating_sub(kept.len());
-                kept.extend_from_slice(&buffer[..n.min(remaining)]);
-                truncated |= n > remaining;
-            }
-        }
-    }
-    (kept, truncated)
-}
-
-fn execute_ssh(
-    alias: &str,
-    remote_command: &str,
-    config_path: Option<&Path>,
-    timeout_seconds: u64,
-    canceled: &AtomicBool,
-) -> Result<RunOutput, String> {
-    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
-    let mut command = crate::process::background_command("ssh");
-    if let Some(path) = config_path {
-        command.arg("-F").arg(path);
-    }
-    command
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=15")
-        .arg("-o")
-        .arg("ClearAllForwardings=yes")
-        .arg("-o")
-        .arg("ForwardAgent=no")
-        .arg("-o")
-        .arg("PermitLocalCommand=no")
-        .arg("-o")
-        .arg("RequestTTY=no")
-        .arg("-o")
-        .arg("KnownHostsCommand=none")
-        .arg(alias)
-        .arg(remote_command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_remove("SSH_ASKPASS")
-        .env_remove("SSH_ASKPASS_REQUIRE");
-
-    let started = Instant::now();
-    let mut child =
-        crate::process::spawn(&mut command).map_err(|e| format!("cannot start ssh: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "cannot capture ssh stdout".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "cannot capture ssh stderr".to_string())?;
-    let stdout_reader = thread::spawn(move || drain_stream(stdout));
-    let stderr_reader = thread::spawn(move || drain_stream(stderr));
-
-    let deadline = started + Duration::from_secs(timeout_seconds);
-    let (status, timed_out, was_canceled) = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break (status, false, canceled.load(Ordering::Relaxed)),
-            Ok(None) if canceled.load(Ordering::Relaxed) => {
-                let _ = child.kill();
-                let status = child.wait().map_err(|e| format!("cannot reap ssh: {e}"))?;
-                break (status, false, true);
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                let _ = child.kill();
-                let status = child.wait().map_err(|e| format!("cannot reap ssh: {e}"))?;
-                break (status, true, false);
-            }
-            Err(e) => return Err(format!("cannot wait for ssh: {e}")),
-        }
-    };
-    let (stdout, stdout_truncated) = stdout_reader
-        .join()
-        .map_err(|_| "ssh stdout reader panicked".to_string())?;
-    let (stderr, stderr_truncated) = stderr_reader
-        .join()
-        .map_err(|_| "ssh stderr reader panicked".to_string())?;
-
-    Ok(RunOutput {
-        alias: alias.to_string(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        exit_code: status.code(),
-        timed_out,
-        canceled: was_canceled,
-        stdout_truncated,
-        stderr_truncated,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
 }
 
 #[tauri::command]
@@ -1213,17 +506,9 @@ pub fn mcp_set_host_allowed(
     change_host_permission(&state.mcp.policy, &alias, allowed, || {
         let _lifecycle = state.sync.lifecycle.lock().unwrap();
         let records = state.sync.core.lock().unwrap().records.clone();
-        if let Some(records) = records {
-            crate::sync::record_repository::get_host(&records, &alias)
-                .map_err(|error| AppError::Other(error.to_string()))?;
-        } else {
-            crate::sync::engine::require_legacy(&state.sync)?;
-            let doc = state.doc.lock().unwrap();
-            let doc = doc
-                .as_ref()
-                .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-            validate_alias(doc, &alias)?;
-        }
+        let records = records.ok_or_else(|| AppError::Other("Records workspace is unavailable".into()))?;
+        crate::sync::record_repository::get_host(&records, &alias)
+            .map_err(|error| AppError::Other(error.to_string()))?;
         Ok(())
     }, save_policy)?;
     if !allowed {
@@ -1331,12 +616,13 @@ pub fn run_stdio() {
             let rpc=message["id"].clone();let key=rpc_id_key(&rpc);let id=format!("adapter-{}-{}",std::process::id(),next.fetch_add(1,Ordering::Relaxed));
             let call=match adapter::insert(&active,key.clone(),id.clone()){Ok(c)=>c,Err(e)=>{let _=write_mcp_response(&jsonrpc_error(rpc,-32600,e));continue;}};
             let params=message.get("params").cloned().unwrap_or_else(||json!({}));let active=active.clone();let info=info.clone();
-            let worker=thread::spawn(move||{let result=adapter::tool(&params,&id,&info,&call);let renamed=result.pointer("/content/0/text").and_then(Value::as_str)==Some("run was renamed to ssh_exec");let response=if renamed{jsonrpc_error(rpc,-32601,"run was renamed to ssh_exec".into())}else{json!({"jsonrpc":"2.0","id":rpc,"result":result})};if !write_mcp_response(&response){call.cancel(&id);}active.lock().unwrap().remove(&key);});
+            let worker=thread::spawn(move||{let result=adapter::tool(&params,&info,&call);let renamed=result.pointer("/content/0/text").and_then(Value::as_str)==Some("run was renamed to ssh_exec");let response=if renamed{jsonrpc_error(rpc,-32601,"run was renamed to ssh_exec".into())}else{json!({"jsonrpc":"2.0","id":rpc,"result":result})};if !write_mcp_response(&response){call.cancel(&id);}active.lock().unwrap().remove(&key);});
             workers.retain(|w:&thread::JoinHandle<()>|!w.is_finished());workers.push(worker);continue;
         }
         if method=="tools/list" && message.get("id").is_some(){
-            let mode=adapter::ipc_call("mode",json!({}),&info,&adapter::Call::default());
-            let response=match mode {Ok(v)=>json!({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tools_for_mode(v["mode"].as_str().unwrap_or("legacy"))}}),Err(e)=>jsonrpc_error(message["id"].clone(),-32000,e)};
+            // Listing reaches the broker first, so a client learns Lunport is unavailable before it calls a tool.
+            let reached=adapter::ipc_call("mode",json!({}),&info,&adapter::Call::default());
+            let response=match reached {Ok(_)=>json!({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tool_definitions()}}),Err(e)=>jsonrpc_error(message["id"].clone(),-32000,e)};
             if !write_mcp_response(&response){break;}continue;
         }
         if let Some(response)=handle_mcp_message(message){if !write_mcp_response(&response){break;}}
@@ -1380,14 +666,6 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
             "id": id,
             "result": { "tools": tool_definitions() }
         })),
-        "tools/call" => {
-            let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-            Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": call_tool(&params, None)
-            }))
-        }
         _ => Some(jsonrpc_error(
             id,
             -32601,
@@ -1400,8 +678,9 @@ fn jsonrpc_error(id: Value, code: i32, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// The Records MCP server's tools, in the order clients list them.
 fn tool_definitions() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "list_hosts",
             "title": "List AI-approved SSH hosts",
@@ -1410,7 +689,7 @@ fn tool_definitions() -> Value {
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
         },
         {
-            "name": "get_effective_config",
+            "name": "get_host",
             "title": "Get sanitized SSH configuration",
             "description": "Resolve non-secret connection settings for an AI-approved host.",
             "inputSchema": {
@@ -1422,9 +701,9 @@ fn tool_definitions() -> Value {
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
         },
         {
-            "name": "run",
+            "name": "ssh_exec",
             "title": "Run an approved SSH command",
-            "description": "Ask the user to approve one exact remote command in Lunport, then run it over SSH. The request is denied if the UI does not approve it.",
+            "description": "Run a remote command under the current Lunport Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1437,52 +716,10 @@ fn tool_definitions() -> Value {
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true }
         }
-    ])
-}
-
-fn tools_for_mode(mode: &str) -> Value {
-    let mut tools = tool_definitions();
-    if mode == "records" {
-        tools[1]["name"] = json!("get_host");
-        tools[2]["name"] = json!("ssh_exec");
-        tools[2]["description"] = json!("Run a remote command under the current Lunport Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.");
-        tools.as_array_mut().unwrap().extend(management::tool_definitions());
-        tools.as_array_mut().unwrap().extend(tunnels::tool_definitions());
-    }
+    ]);
+    tools.as_array_mut().unwrap().extend(management::tool_definitions());
+    tools.as_array_mut().unwrap().extend(tunnels::tool_definitions());
     tools
-}
-
-fn call_tool(params: &Value, request_id: Option<&str>) -> Value {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let mut arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let method = match name {
-        "list_hosts" => "list_hosts",
-        "get_effective_config" => "get_effective_config",
-        "run" => "run",
-        _ => return tool_error(format!("Unknown tool: {name}")),
-    };
-    if method == "run" {
-        if let (Some(request_id), Some(arguments)) = (request_id, arguments.as_object_mut()) {
-            arguments.insert("_request_id".to_string(), json!(request_id));
-        }
-    }
-    match bridge_call(method, arguments) {
-        Ok(result) => {
-            let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-            json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": result,
-                "isError": false
-            })
-        }
-        Err(error) => tool_error(error),
-    }
 }
 
 fn tool_error(error: String) -> Value {
@@ -1490,89 +727,6 @@ fn tool_error(error: String) -> Value {
         "content": [{ "type": "text", "text": error }],
         "isError": true
     })
-}
-
-fn read_runtime_info() -> Result<RuntimeInfo, String> {
-    let path = runtime_path().map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("invalid MCP runtime info: {e}"))
-}
-
-fn send_to_runtime(
-    info: &RuntimeInfo,
-    method: &str,
-    params: Value,
-    read_timeout: Duration,
-) -> Result<Value, String> {
-    let mut stream = TcpStream::connect_timeout(
-        &(Ipv4Addr::LOCALHOST, info.port).into(),
-        Duration::from_secs(2),
-    )
-    .map_err(|e| format!("cannot connect to Lunport desktop: {e}"))?;
-    stream
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    let envelope = BridgeEnvelope {
-        token: info.token.clone(),
-        method: method.to_string(),
-        params,
-    };
-    serde_json::to_writer(&mut stream, &envelope).map_err(|e| e.to_string())?;
-    stream.write_all(b"\n").map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-
-    let mut line = String::new();
-    BufReader::new(stream)
-        .take(MAX_BRIDGE_LINE + 1)
-        .read_line(&mut line)
-        .map_err(|e| format!("cannot read Lunport response: {e}"))?;
-    if line.len() as u64 > MAX_BRIDGE_LINE {
-        return Err("Lunport response is too large".to_string());
-    }
-    let response: BridgeResponse =
-        serde_json::from_str(&line).map_err(|e| format!("invalid Lunport response: {e}"))?;
-    if response.ok {
-        Ok(response.result.unwrap_or(Value::Null))
-    } else {
-        Err(response
-            .error
-            .unwrap_or_else(|| "Lunport rejected the request".to_string()))
-    }
-}
-
-/// How long a tool call may wait for Lunport's answer: an approval (up to 120 s) and then the
-/// SSH command (up to 300 s).
-const CALL_TIMEOUT: Duration = Duration::from_secs(430);
-/// How long a ping may wait for its answer. A bridge answers at once; the port in a stale runtime
-/// file may belong to another program by now, and a ping must not hang on it while holding the
-/// spawn locks.
-const PING_TIMEOUT: Duration = Duration::from_secs(5);
-/// Only one Lunport runs: an open Lunport whose bridge doesn't answer is not replaced.
-const NO_ANSWER: &str =
-    "Lunport didn't answer within 12 seconds. If it is open, quit it and open it again.";
-
-/// The bridge of a running Lunport, started in the background first if none answers
-/// (`host_start`, shared with `sshelter connect`).
-fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
-    use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
-    ensure_started(answering_bridge, take_spawn_locks, start_host, START_WAIT, NO_ANSWER)
-}
-
-/// The bridge named in `mcp-runtime.json`, if it answers a ping.
-fn answering_bridge() -> Option<RuntimeInfo> {
-    read_runtime_info()
-        .ok()
-        .filter(|info| send_to_runtime(info, "ping", json!({}), PING_TIMEOUT).is_ok())
-}
-
-fn bridge_call(method: &str, params: Value) -> Result<Value, String> {
-    let info = ensure_desktop_bridge()?;
-    // Never automatically retry a tool call: an application-level denial or a
-    // dropped response after execution must not create a duplicate SSH action.
-    send_to_runtime(&info, method, params, CALL_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -1612,33 +766,12 @@ mod tests {
     }
 
     #[test]
-    fn records_allowlist_does_not_inherit_a_legacy_alias_grant() {
-        let host: crate::sync::records_v3::HostRecord = serde_json::from_value(json!({"id":"0123456789abcdef","scope":{"kind":"local"},"payload":{"schema":2,"alias":"web","hostname":"fixture.invalid","auth":"password"}})).unwrap();
-        let mut policy = McpPolicy::default();
-        policy.allowed_hosts.insert("web".into());
-        assert!(ensure_record_allowed(&policy, &host).is_err());
-        policy.allowed_hosts.insert(host.id.clone());
-        assert!(ensure_record_allowed(&policy, &host).is_ok());
-    }
-
-    #[test]
     fn record_metadata_does_not_expose_notes_or_imported_directive_values(){
         let host:crate::sync::records_v3::HostRecord=serde_json::from_value(json!({"id":"0123456789abcdef","scope":{"kind":"local"},"payload":{"schema":2,"alias":"web","hostname":"example.test","auth":"password","notes":"private-note-sentinel","imported":{"source":"private-source-sentinel","at_ms":1,"unsupported":[{"keyword":"setenv","value":"private-env-sentinel","requires_review":true}]}}})).unwrap();
         let result=record_host_metadata(&host).to_string();
         for private in ["private-note-sentinel","private-source-sentinel","private-env-sentinel"] {assert!(!result.contains(private));}
         assert_eq!(record_host_metadata(&host)["hostname"],"example.test");
     }
-    #[test]
-    fn development_mcp_execution_is_refused_before_spawning() {
-        if crate::app_profile::CURRENT != crate::app_profile::AppProfile::Development { return; }
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("nonexistent");
-        let canceled = AtomicBool::new(false);
-        let error = execute_ssh("fixture", "true", Some(&config), 1, &canceled).err().expect("Development must refuse before opening a config or spawning ssh");
-        assert!(error.contains("Development"), "{error}");
-        assert!(!config.exists());
-    }
-
     #[test]
     fn rejects_bidi_control_characters_in_commands() {
         assert!(display_safe_command("sudo systemctl status runner"));
@@ -1648,13 +781,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_marks_run_as_destructive_and_not_read_only() {
+    fn tool_list_marks_ssh_exec_as_destructive_and_not_read_only() {
         let tools = tool_definitions();
         let run = tools
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == "run")
+            .find(|tool| tool["name"] == "ssh_exec")
             .unwrap();
         assert_eq!(run["annotations"]["readOnlyHint"], false);
         assert_eq!(run["annotations"]["destructiveHint"], true);
@@ -1674,63 +807,6 @@ mod tests {
         assert!(response["result"]["capabilities"]["tools"].is_object());
     }
 
-    #[test]
-    fn cancellation_marks_an_active_request() {
-        let runtime = McpRuntime::default();
-        let flag = runtime.register_request("request-1").unwrap();
-        assert!(runtime.cancel_request("request-1"));
-        assert!(flag.load(Ordering::Relaxed));
-        runtime.finish_request("request-1");
-    }
-
-    fn runtime_json(pid: u32) -> Vec<u8> {
-        serde_json::to_vec(&RuntimeInfo {
-            port: 49152,
-            token: "ab".repeat(32),
-            pid,
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn a_confined_profile_does_not_remove_an_owned_runtime_file_outside_its_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("runtime.json");
-        let bytes = runtime_json(4242);
-        std::fs::write(&path, &bytes).unwrap();
-        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
-            assert!(remove_runtime_file_if_owned(&path, 4242).is_err());
-        });
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
-    }
-
-    #[test]
-    fn runtime_file_names_only_the_process_it_was_written_for() {
-        assert!(runtime_file_names(&runtime_json(4242), 4242));
-        assert!(!runtime_file_names(&runtime_json(4242), 4243));
-        assert!(!runtime_file_names(b"", 4242));
-        assert!(!runtime_file_names(b"not json", 4242));
-        assert!(!runtime_file_names(br#"{"port":1,"token":"t"}"#, 4242));
-    }
-
-    #[test]
-    fn exiting_removes_only_a_runtime_file_that_names_this_process() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp-runtime.json");
-
-        std::fs::write(&path, runtime_json(4243)).unwrap();
-        assert!(!remove_runtime_file_if_owned(&path, 4242).unwrap());
-        assert!(path.exists(), "another instance's file must stay");
-
-        std::fs::write(&path, runtime_json(4242)).unwrap();
-        assert!(remove_runtime_file_if_owned(&path, 4242).unwrap());
-        assert!(!path.exists());
-
-        assert!(
-            !remove_runtime_file_if_owned(&path, 4242).unwrap(),
-            "a missing file is fine"
-        );
-    }
 }
 
 #[cfg(test)]

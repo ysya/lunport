@@ -11,8 +11,8 @@ import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader,
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { KnownHostsFilePanel } from "@/components/KnownHostsDialog";
 import { applyRecordOverview, forgetRecordHostKey, verifyRecordHostKey, recordsStatusKey, type RecordOverview, type RecordHostView } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
-import { errorMessage } from "@/lib/sync";
+import { revealHidden } from "@/lib/reveal-hidden";
+import { errorMessage } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import { pinnedOn } from "@/lib/hostkey";
 

@@ -2,12 +2,11 @@ use super::*;
 use crate::sync::{
     central::{initial_projection_for_test, InitialProjection},
     env::Keychain,
-    fake_relay::FakeRelay,
     testkit::{TestClock, TestDevice},
 };
 pub(super) fn fixture() -> (TestDevice, InitialProjection) {
     let (initial, _) = initial_projection_for_test();
-    let device = TestDevice::new("initial-stage", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("initial-stage", &TestClock::new());
     record_runtime::save_active(&device.env().state_path, initial.source()).unwrap();
     let probe = record_runtime::probe_startup(&device.env().state_path, "initial-stage");
     record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
@@ -288,7 +287,7 @@ fn readback_can_form_only_an_inert_initial_candidate_and_the_ordinary_writer_rej
 fn an_initial_library_without_managed_private_keys_still_stages_without_creating_a_master() {
     let (initial, _) = crate::sync::central::initial_empty_projection_for_test();
     assert!(!initial.delta().has_changes());
-    let device = TestDevice::new("empty-initial-stage", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("empty-initial-stage", &TestClock::new());
     let env = device.env();
     record_runtime::save_active(&env.state_path, initial.source()).unwrap();
     record_runtime::activate_probe(
@@ -310,7 +309,7 @@ fn an_initial_library_without_managed_private_keys_still_stages_without_creating
 #[test]
 fn initial_stage_can_create_its_first_scoped_vault_master_without_a_credential_prompt() {
     let initial = crate::sync::central::initial_fresh_projection_for_test();
-    let device = TestDevice::new("fresh-initial-stage", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("fresh-initial-stage", &TestClock::new());
     record_runtime::save_active(&device.env().state_path, initial.source()).unwrap();
     let probe = record_runtime::probe_startup(&device.env().state_path, "fresh-initial-stage");
     record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();

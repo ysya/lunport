@@ -75,7 +75,6 @@ describe("persisted connection details width", () => {
     const first = await launch();
     expect(first.store.getState().hostPreviewWidth).toBe(400);
     first.store.getState().setHostPreviewWidth(600);
-    expect(first.store.getState().sidebarWidth).toBe(24);
     const second = await launch(
       JSON.parse(first.items.get("sshelter-ui")!).state,
     );
@@ -91,6 +90,5 @@ describe("persisted connection details width", () => {
       collapsedGroups: ["work"],
     });
     expect(store.getState().hostPreviewWidth).toBe(400);
-    expect(store.getState().sidebarWidth).toBe(20);
   });
 });

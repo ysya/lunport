@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { centralConflicts, centralResolveConflict, type CentralConflict, type CentralStatus } from "@/lib/central-sync";
 import type { RecordOverview } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { CATALOG_CHOICE_NOTE, CATALOG_TITLE, CatalogConflictView, catalogChoiceTitle } from "./CatalogConflict";
 
 type Option = "local" | "remote" | "copy_remote";

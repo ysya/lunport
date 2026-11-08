@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { TaskDialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { exportRecordHosts, savedWorkspaces } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 
 export function WorkspaceTransfer({ open, onOpenChange, onImport }: { open: boolean; onOpenChange: (open: boolean) => void; onImport?: () => void }) {
   const query = useQuery({ queryKey: ["saved-workspaces"], queryFn: savedWorkspaces, enabled: open, retry: false, staleTime: 0 });

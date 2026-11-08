@@ -192,15 +192,11 @@ pub(super) fn with_background<T>(
     // Fresh initial libraries may need their first scoped master; every operation stays noninteractive.
     let keychain = Background(env.keychain);
     let safe = SyncEnv {
-        doc: env.doc,
-        backed_up: env.backed_up,
-        retention: env.retention,
         runtime: env.runtime,
         ssh_dir: env.ssh_dir.clone(),
         state_path: env.state_path.clone(),
         home: env.home.clone(),
         keychain: &keychain,
-        relays: env.relays,
         events: env.events,
         clock: env.clock,
         platform: env.platform,

@@ -9,8 +9,8 @@ import { Label } from "@/components/ui/label";
 import { TaskDialogBody, TaskDialogContent } from "@/components/app/TaskDialog";
 import { FormSection } from "@/components/app/Workflow";
 import type { RecordOverview } from "@/lib/records";
-import { errorMessage } from "@/lib/sync";
-import { revealHidden } from "@/lib/sync-approvals";
+import { errorMessage } from "@/lib/utils";
+import { revealHidden } from "@/lib/reveal-hidden";
 import {
   gcloudAccountsQuery,
   grantBusy,

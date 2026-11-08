@@ -1,4 +1,6 @@
-//! A broker survives a confirmed cutover; every request uses the current single runtime owner.
+//! The broker's directory: the Records directory, reached under the sync lifecycle lock so an account, server or migration change
+//! never runs in the middle of a request, and refused while the workspace is not a Records library (a saved OpenSSH workspace that
+//! was not imported yet, or a blocked state).
 use super::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, PinnedKey, Prepared};
 use super::protocol::HostQuery;
 use crate::ssh::{HopRef, HostId, HostKey, Target};
@@ -7,10 +9,11 @@ use std::sync::Arc;
 
 pub struct FormatDirectory {
     pub lifecycle: Arc<std::sync::Mutex<()>>,
-    pub mode: Box<dyn Fn() -> (RuntimeFormat, bool) + Send + Sync>,
-    pub legacy: Arc<dyn HostDirectory>,
+    pub mode: Box<dyn Fn() -> RuntimeFormat + Send + Sync>,
     pub records: Arc<dyn HostDirectory>,
 }
+
+const NOT_RECORDS: &str = "Import the existing workspace into the library, or resolve the blocked state, before connecting.";
 impl FormatDirectory {
     fn with_active<T>(
         &self,
@@ -21,12 +24,16 @@ impl FormatDirectory {
     }
     fn active(&self) -> Result<&dyn HostDirectory, DirectoryError> {
         match (self.mode)() {
-            (RuntimeFormat::Records, _) => Ok(self.records.as_ref()),
-            (RuntimeFormat::Legacy, false) => Ok(self.legacy.as_ref()),
-            _ => Err(DirectoryError::Unsupported(
-                "Choose a workspace or resolve the blocked state before connecting.".into(),
-            )),
+            RuntimeFormat::Records => Ok(self.records.as_ref()),
+            _ => Err(DirectoryError::Unsupported(NOT_RECORDS.into())),
         }
+    }
+    /// Checks the format under lifecycle and hands the directory back to be called outside it (a call that waits on Google or on an
+    /// OS authorization must not hold lifecycle).
+    fn chosen(&self) -> Result<Arc<dyn HostDirectory>, DirectoryError> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        self.active()?;
+        Ok(self.records.clone())
     }
 }
 impl HostDirectory for FormatDirectory {
@@ -73,61 +80,32 @@ impl HostDirectory for FormatDirectory {
     ) -> Result<(), DirectoryError> {
         // Request guards may themselves resolve through this adapter; never run them under lifecycle.
         guard()?;
-        let lifecycle = self.lifecycle.lock().unwrap();
-        match (self.mode)() {
-            (RuntimeFormat::Records, _) => {
-                let records = self.records.clone();
-                drop(lifecycle);
-                records.pin_confirmed(hop, previous, key, cancel, guard)
+        let records = {
+            let _lifecycle = self.lifecycle.lock().unwrap();
+            if (self.mode)() != RuntimeFormat::Records {
+                return Err(DirectoryError::Unsupported(
+                    "The workspace changed before host-key confirmation.".into(),
+                ));
             }
-            (RuntimeFormat::Legacy, false) => {
-                self.legacy
-                    .pin_confirmed(hop, previous, key, cancel, &|| Ok(()))
-            }
-            _ => Err(DirectoryError::Unsupported(
-                "The workspace changed before host-key confirmation.".into(),
-            )),
-        }
+            self.records.clone()
+        };
+        records.pin_confirmed(hop, previous, key, cancel, guard)
     }
     fn password_authorized(&self, hop: &HopRef, server_key: Option<&HostKey>) -> Result<bool, DirectoryError> {
         self.with_active(|d| d.password_authorized(hop, server_key))
     }
     fn prepare(&self, target: &Target, public_key: &dyn Fn(&str) -> Option<String>, cancel: &super::connect::CancelToken) -> Result<Prepared, DirectoryError> {
         // Google may take seconds to answer: choose the directory under lifecycle, call it outside.
-        let directory = {
-            let _lifecycle = self.lifecycle.lock().unwrap();
-            match (self.mode)() {
-                (RuntimeFormat::Records, _) => self.records.clone(),
-                (RuntimeFormat::Legacy, false) => self.legacy.clone(),
-                _ => return Err(DirectoryError::Unsupported("Choose a workspace or resolve the blocked state before connecting.".into())),
-            }
-        };
-        directory.prepare(target, public_key, cancel)
+        self.chosen()?.prepare(target, public_key, cancel)
     }
     fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
         // The request waits on Google for up to a minute: choose the directory under lifecycle, call it outside, as `prepare` does.
-        let directory = {
-            let _lifecycle = self.lifecycle.lock().unwrap();
-            match (self.mode)() {
-                (RuntimeFormat::Records, _) => self.records.clone(),
-                (RuntimeFormat::Legacy, false) => self.legacy.clone(),
-                _ => return Err(DirectoryError::Unsupported("Choose a workspace or resolve the blocked state before connecting.".into())),
-            }
-        };
-        directory.request_grant(need, justification, duration_secs, cancel)
+        self.chosen()?.request_grant(need, justification, duration_secs, cancel)
     }
     fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
         // Records' native reader owns lifecycle while checking its exact saved owner. Never
         // hold this adapter's lifecycle across that protected read or an OS authorization.
-        let directory = {
-            let _lifecycle=self.lifecycle.lock().unwrap();
-            match (self.mode)() {
-                (RuntimeFormat::Records,_)=>self.records.clone(),
-                (RuntimeFormat::Legacy,false)=>self.legacy.clone(),
-                _=>return Err(DirectoryError::Unsupported("Choose a workspace before reading saved passwords.".into())),
-            }
-        };
-        directory.saved_password(hop,keychain)
+        self.chosen()?.saved_password(hop, keychain)
     }
     fn password_account(&self, id: &HostId) -> String {
         self.active()
@@ -166,28 +144,25 @@ mod tests {
             Ok(Some(zeroize::Zeroizing::new(format!("{} native saved password",self.0))))
         }
     }
-    fn fixture() -> (FormatDirectory, Arc<Mutex<(RuntimeFormat, bool)>>) {
-        let mode = Arc::new(Mutex::new((RuntimeFormat::Legacy, false)));
+    fn fixture() -> (FormatDirectory, Arc<Mutex<RuntimeFormat>>) {
+        let mode = Arc::new(Mutex::new(RuntimeFormat::Legacy));
         let read = mode.clone();
         (
             FormatDirectory {
                 lifecycle: Arc::default(),
                 mode: Box::new(move || *read.lock().unwrap()),
-                legacy: Arc::new(Fake("legacy")),
                 records: Arc::new(Fake("records")),
             },
             mode,
         )
     }
     #[test]
-    fn an_existing_broker_switches_to_records_without_legacy_fallback() {
+    fn an_existing_broker_reaches_records_once_the_workspace_is_imported() {
         let (d, mode) = fixture();
         let q = HostQuery::Alias("web".into());
-        assert_eq!(
-            d.resolve(&q).unwrap_err(),
-            DirectoryError::NotFound("legacy".into())
-        );
-        *mode.lock().unwrap() = (RuntimeFormat::Records, false);
+        assert!(matches!(d.resolve(&q), Err(DirectoryError::Unsupported(_))));
+        assert_eq!(d.password_account(&HostId::from("id")), "host:id");
+        *mode.lock().unwrap() = RuntimeFormat::Records;
         assert_eq!(
             d.resolve(&q).unwrap_err(),
             DirectoryError::NotFound("records".into())
@@ -196,16 +171,13 @@ mod tests {
         let hop=crate::ssh::Hop::new("id","web","fixture.invalid",22,"fixture",crate::ssh::AuthMethod::Password).reference();
         let keychain=crate::sync::testkit::MemKeychain::default();
         assert_eq!(d.saved_password(&hop,&keychain).unwrap().as_deref().map(String::as_str),Some("records native saved password"));
-        *mode.lock().unwrap()=(RuntimeFormat::Blocked,false);
+        *mode.lock().unwrap()=RuntimeFormat::Blocked;
         assert!(d.saved_password(&hop,&keychain).is_err());
     }
     #[test]
-    fn blocked_and_pending_legacy_modes_cannot_resolve_or_read_pins() {
+    fn blocked_and_saved_legacy_workspaces_cannot_resolve_or_read_pins() {
         let (d, mode) = fixture();
-        for m in [
-            (RuntimeFormat::Blocked, false),
-            (RuntimeFormat::Legacy, true),
-        ] {
+        for m in [RuntimeFormat::Blocked, RuntimeFormat::Legacy] {
             *mode.lock().unwrap() = m;
             assert!(matches!(
                 d.resolve(&HostQuery::Id("id".into())),
@@ -217,7 +189,7 @@ mod tests {
     #[test]
     fn endpoint_aware_reads_reach_the_current_adapter() {
         let (d, mode) = fixture();
-        *mode.lock().unwrap() = (RuntimeFormat::Records, false);
+        *mode.lock().unwrap() = RuntimeFormat::Records;
         let hop = HopRef {
             id: HostId::from("id"),
             alias: "web".into(),
@@ -262,14 +234,14 @@ mod tests {
         }
         let lifecycle: Arc<Mutex<()>> = Arc::default();
         let records = Arc::new(Notes { lifecycle: Arc::clone(&lifecycle), calls: AtomicUsize::new(0) });
-        let mode = Arc::new(Mutex::new((RuntimeFormat::Records, false)));
+        let mode = Arc::new(Mutex::new(RuntimeFormat::Records));
         let read = mode.clone();
-        let d = FormatDirectory { lifecycle, mode: Box::new(move || *read.lock().unwrap()), legacy: Arc::new(Fake("legacy")), records: records.clone() };
+        let d = FormatDirectory { lifecycle, mode: Box::new(move || *read.lock().unwrap()), records: records.clone() };
         let target = Target { hops: vec![crate::ssh::Hop::new("id", "web", "fixture.invalid", 22, "fixture", crate::ssh::AuthMethod::Password)] };
         let cancel = super::super::connect::CancelToken::default();
         d.prepare(&target, &|_| None, &cancel).unwrap();
         assert_eq!(records.calls.load(Ordering::SeqCst), 1);
-        *mode.lock().unwrap() = (RuntimeFormat::Blocked, false);
+        *mode.lock().unwrap() = RuntimeFormat::Blocked;
         assert!(matches!(d.prepare(&target, &|_| None, &cancel), Err(DirectoryError::Unsupported(_))));
         assert_eq!(records.calls.load(Ordering::SeqCst), 1);
     }

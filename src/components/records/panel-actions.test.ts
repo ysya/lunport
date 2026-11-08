@@ -3,10 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "@/lib/test-ipc";
 import { recordKeyDestinationKey, recordsStatusKey } from "@/lib/records";
 import {
-  clearAccountDraft,
   clearKeyDraft,
   keyActionError,
-  submitAccountDraft,
   submitImportConsent,
   submitKeyDraft,
   resumeImport,
@@ -72,105 +70,12 @@ describe("secret form boundary", () => {
     expect(state.busy).toBe(false);
     expect(cache.getMutationCache().getAll()).toEqual([]);
   });
-  it("keeps generated account words only in the account component draft", async () => {
-    const cache = client();
-    stubBackend(async () => ({
-      words: "SECRET sync fixture words",
-      overview: recordOverview(),
-    }));
-    let state = { ...clearAccountDraft(), deviceName: "Laptop" };
-    const update = (patch: Partial<typeof state>) => {
-      state = { ...state, ...patch };
-    };
-    expect(await submitAccountDraft(cache, state, update, true)).toBe(true);
-    expect(state.createdWords).toBe("SECRET sync fixture words");
-    expect(state.words).toBe("");
-    expect(cacheText(cache)).not.toContain("SECRET");
-    expect(cache.getMutationCache().getAll()).toEqual([]);
-  });
-  it("retains code and exposes pending setup when remote publication was incomplete", async () => {
-    const cache = client();
-    const overview = recordOverview({
-      pending_account: {
-        id: "a".repeat(32),
-        kind: "create_account",
-        phase: "prepared",
-      },
-    });
-    stubBackend(async () => ({
-      words: "SECRET partial code",
-      overview,
-      complete: false,
-      pending_error: "Relay is unavailable",
-      operation_id: "a".repeat(32),
-    }));
-    let state = { ...clearAccountDraft(), deviceName: "Laptop" };
-    const update = (patch: Partial<typeof state>) => {
-      state = { ...state, ...patch };
-    };
-    expect(await submitAccountDraft(cache, state, update, true)).toBe(true);
-    expect(state.createdWords).toBe("SECRET partial code");
-    expect(state.error).toContain("Relay is unavailable");
-    expect(cacheText(cache)).not.toContain("SECRET");
-  });
-  it("retains a refused old-account code and offers authoritative migration preview", async () => {
-    const cache = client();
-    stubBackend(async () => {
-      throw "this account needs explicit migration before joining records mode";
-    });
-    let state = {
-      ...clearAccountDraft(),
-      deviceName: "Laptop",
-      words: "SECRET older fixture words",
-    };
-    const update = (patch: Partial<typeof state>) => {
-      state = { ...state, ...patch };
-    };
-    expect(await submitAccountDraft(cache, state, update, false)).toBe(false);
-    expect(state.words).toBe("SECRET older fixture words");
-    expect(state).toMatchObject({ migrationOffered: true });
-    expect(cacheText(cache)).not.toContain("SECRET");
-    expect(state.error).not.toContain("SECRET");
-  });
-  it("clears join words on success without leaving mutation variables in cache", async () => {
-    const cache = client();
-    const calls = stubBackend(async () => recordOverview());
-    let state = {
-      ...clearAccountDraft(),
-      deviceName: "Laptop",
-      words: "SECRET join fixture words",
-    };
-    const update = (patch: Partial<typeof state>) => {
-      state = { ...state, ...patch };
-    };
-    expect(await submitAccountDraft(cache, state, update, false)).toBe(true);
-    expect(calls).toEqual([
-      [
-        "records_account_join",
-        { words: "SECRET join fixture words", deviceName: "Laptop" },
-      ],
-    ]);
-    expect(state.words).toBe("");
-    expect(state.createdWords).toBe("");
-    expect(cacheText(cache)).not.toContain("SECRET");
-    expect(cache.getMutationCache().getAll()).toEqual([]);
-  });
   it("clears every secret when cancelled and refuses invalid or busy forms before IPC", async () => {
     const cache = client();
     const calls = stubBackend(async () => undefined);
     const update = vi.fn();
     expect(clearKeyDraft().privateText).toBe("");
-    expect(clearAccountDraft().words).toBe("");
-    expect(clearAccountDraft().createdWords).toBe("");
     expect(await submitKeyDraft(cache, clearKeyDraft(), update)).toBe(false);
-    expect(
-      await submitAccountDraft(
-        cache,
-        { ...clearAccountDraft(), busy: true },
-        update,
-        true,
-      ),
-    ).toBe(false);
     expect(calls).toEqual([]);
   });
   it("generates a local key using only its public name", async () => {

@@ -373,9 +373,9 @@ fn central_publication_is_persistent_and_cannot_remove_the_root_or_downgrade_aft
 #[test]
 fn a_central_history_page_cannot_overwrite_a_local_edit_saved_while_it_was_inflight() {
     use crate::sync::{central::{crypto::{DeviceKeys,VaultKeys},rekey::{Checkpoint,Version},wire::{canonical,RecordHeader}},
-        fake_relay::FakeRelay,testkit::{TestClock,TestDevice},record::{LocalRecord,Record,RecordKind,record_key}};
+        testkit::{TestClock,TestDevice},record::{LocalRecord,Record,RecordKind,record_key}};
     use base64::{engine::general_purpose::STANDARD as B64,Engine as _};
-    let relay=FakeRelay::new();let device=TestDevice::new("a",&relay,&TestClock::new());let env=device.env();
+    let device=TestDevice::new("a",&TestClock::new());let env=device.env();
     let mut records=state();records.version=crate::sync::records_v3::CENTRAL_STATE_VERSION;
     let mut workspace=crate::sync::central::workspace::tests::enrolled();workspace.control.cutover=true;
     let chain=workspace.control.verified_chain().unwrap();

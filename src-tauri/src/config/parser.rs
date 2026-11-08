@@ -93,10 +93,8 @@ fn group_blocks(flat: Vec<Item>) -> Vec<Item> {
                         }));
                     }
                     HeaderKind::Match => {
-                        let criteria = header.value.clone();
                         out.push(Item::Match(MatchBlock {
                             header,
-                            criteria,
                             body: block_body,
                         }));
                     }
@@ -219,8 +217,8 @@ mod tests {
             _ => None,
         });
         let m = match_block.expect("expected a Match block");
-        assert!(!m.criteria.is_empty(), "Match criteria must be non-empty");
-        assert!(m.criteria.contains("bastion.example.com"));
+        assert!(!m.header.value.is_empty(), "Match criteria must be non-empty");
+        assert!(m.header.value.contains("bastion.example.com"));
 
         // The Include line is a TOP-LEVEL Directive with key "include".
         let include = items.iter().find_map(|it| match it {

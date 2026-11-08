@@ -191,7 +191,6 @@ fn even_valid_resigned_history_must_admit_superseded_payloads_and_a_complete_mat
 fn encrypted_source_cursor_restores_the_same_prepared_plan_after_the_original_plan_is_dropped() {
     use crate::sync::{
         central::{source_archive, source_cursor::Cursor},
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     let (before, keys, signer) = initial();
@@ -201,7 +200,6 @@ fn encrypted_source_cursor_restores_the_same_prepared_plan_after_the_original_pl
     let plain = plan.encode_local().unwrap();
     let device = TestDevice::new(
         "migration-plan-archive",
-        &FakeRelay::new(),
         &TestClock::new(),
     );
     let env = device.env();

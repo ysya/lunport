@@ -15,7 +15,7 @@ import {
   type RecordHostView,
   type RecordOverview,
 } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import {
   beginEditor,
   beginDuplicateEditor,

@@ -19,7 +19,7 @@ import {
   type CentralAccountDevice,
   type CentralStatus,
 } from "@/lib/central-sync";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 export function CentralAccountAccessList({
   registry,
   onRevoke,

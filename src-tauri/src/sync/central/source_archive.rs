@@ -622,7 +622,6 @@ mod tests {
     use super::*;
     use crate::sync::{
         env::Keychain,
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     use std::{
@@ -630,7 +629,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
     fn device() -> TestDevice {
-        let device = TestDevice::new("source-archive", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("source-archive", &TestClock::new());
         fs::create_dir_all(device.env().state_path.parent().unwrap()).unwrap();
         device
     }

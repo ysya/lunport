@@ -20,7 +20,7 @@ import {
   resolveAuthentication,
   type AuthenticationSnapshot,
 } from "@/lib/authentication";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { useApplyTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

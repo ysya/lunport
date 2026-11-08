@@ -785,8 +785,7 @@ fn public_resolution_and_private_authentication_leave_lifecycle_available() {
     };
     let directory = FormatDirectory {
         lifecycle,
-        mode: Box::new(|| (crate::sync::record_runtime::RuntimeFormat::Records, false)),
-        legacy: Arc::new(FakeDirectory::new()),
+        mode: Box::new(|| crate::sync::record_runtime::RuntimeFormat::Records),
         records: Arc::new(PublicOnly(
             FakeDirectory::new()
                 .with_host(

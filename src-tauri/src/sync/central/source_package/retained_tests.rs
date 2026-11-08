@@ -554,17 +554,15 @@ mod completed_migration_evidence {
             inventory_keys::Snapshot, migration_files::Files, migration_history,
             migration_sources::Sources, payload::Data, source_package::Package,
         },
-        fake_relay::FakeRelay,
         record_runtime,
         testkit::{TestClock, TestDevice},
     };
     #[test]
     fn actual_completed_local_migration_evidence_is_read_without_replaying_original_paths() {
-        let d=TestDevice::with_main_config("legacy-captured",&FakeRelay::new(),&TestClock::new(),"Host local\n HostName local.test\n PreferredAuthentications password,keyboard-interactive\n");
+        let d=TestDevice::with_main_config("legacy-captured",&TestClock::new(),"Host local\n HostName local.test\n PreferredAuthentications password,keyboard-interactive\n");
         {
             let mut core = d.runtime.core.lock().unwrap();
             core.state.as_mut().unwrap().device_id = "a".repeat(32);
-            core.legacy_paused = true;
         }
         std::fs::create_dir_all(d.env().state_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -663,8 +661,8 @@ mod completed_migration_evidence {
 
 #[test]
 fn unjoined_v2_own_slots_remain_retained_public_metadata_without_cloud_authority() {
-    use crate::sync::{fake_relay::FakeRelay, state_v2, testkit::TestClock};
-    let d = TestDevice::new("unjoined-v2-slots", &FakeRelay::new(), &TestClock::new());
+    use crate::sync::{state_v2, testkit::TestClock};
+    let d = TestDevice::new("unjoined-v2-slots", &TestClock::new());
     let env = d.env();
     std::fs::create_dir_all(env.state_path.parent().unwrap()).unwrap();
     let (owner, keys, _) = migration_history::tests::initial();

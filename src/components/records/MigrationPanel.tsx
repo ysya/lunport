@@ -12,7 +12,7 @@ import {
   type MigrationPreviewResult,
   type MigrationReceipt,
 } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import {
   clearMigrationDraft,
   discardMigrationPreview,

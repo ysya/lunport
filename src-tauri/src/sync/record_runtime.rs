@@ -640,7 +640,6 @@ pub fn activate_probe(
     core.batch_failures = 0;
     core.relay_checked = None;
     core.rounds = 0;
-    core.legacy_paused = true;
     core.generation = generation;
     match probe {
         StartupProbe::Records { state, .. } => {
@@ -895,36 +894,13 @@ pub fn commit_candidate(
     }
     persist_candidate(&mut core, &env.state_path, candidate)
 }
-/// Explicit workspace pause is memory-only; it never loads credentials, upgrades, or saves sources.
-pub fn pause_legacy_workspace(env: &crate::sync::env::SyncEnv) -> Result<(), AppError> {
-    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let _publication = env.runtime.format_publication.lock().unwrap();
-    let _doc = env.doc.lock().unwrap();
-    let mut core = env.runtime.core.lock().unwrap();
-    if core.format != RuntimeFormat::Legacy || core.save_blocked.is_some() || core.unsaved {
-        return Err(AppError::Other(
-            "the legacy workspace must be durable and available before pausing".into(),
-        ));
-    }
-    if core.legacy_paused {
-        return Ok(());
-    }
-    let generation = core
-        .generation
-        .checked_add(1)
-        .ok_or_else(|| AppError::Other("sync state generation exhausted".into()))?;
-    core.legacy_paused = true;
-    core.generation = generation;
-    Ok(())
-}
-/// Caller owns lifecycle -> vault -> publication; this method takes the final Doc -> Core barrier.
+/// Caller owns lifecycle -> vault -> publication; this method takes the final core barrier.
 pub fn commit_migration_candidate(
     env: &crate::sync::env::SyncEnv,
     expected_generation: u64,
     mut candidate: SyncStateV3,
     keys: Option<crate::sync::crypto::ChainKeys>,
 ) -> Result<u64, AppError> {
-    let mut doc = env.doc.lock().unwrap();
     let mut core = env.runtime.core.lock().unwrap();
     if core.generation != expected_generation {
         return Err(crate::sync::runtime::superseded());
@@ -932,11 +908,6 @@ pub fn commit_migration_candidate(
     if core.format == RuntimeFormat::Blocked || core.save_blocked.is_some() {
         return Err(AppError::Other(
             "migration activation is blocked on this device".into(),
-        ));
-    }
-    if core.format == RuntimeFormat::Legacy && !core.legacy_paused {
-        return Err(AppError::Other(
-            "pause the legacy workspace before migration activation".into(),
         ));
     }
     if keys.as_ref().is_some_and(|keys| {
@@ -967,7 +938,6 @@ pub fn commit_migration_candidate(
         },
     )?;
     core.account_keys = keys;
-    *doc = None;
     Ok(core.generation)
 }
 /// The transform must be pure: no clock, credentials, network or event callbacks under core.

@@ -5,7 +5,6 @@ import {
   previewRecordMigration,
   confirmRecordMigration,
   resumeRecordMigration,
-  pauseLegacyWorkspace,
   cancelRecordMigration,
   type RecordsStatus,
   type MigrationPreviewResult,
@@ -143,17 +142,6 @@ async function applyNativeStatus(
       : acceptStatus(current, status),
   );
 }
-export async function pauseLegacyForMigration(
-  client: QueryClient,
-  savedEdits: boolean,
-): Promise<boolean> {
-  if (!savedEdits) return false;
-  const status = await pauseLegacyWorkspace();
-  await applyNativeStatus(client, status);
-  return true;
-}
-
-/** Dispose only the in-memory native preview; this cannot roll back a confirmed migration. */
 export async function discardMigrationPreview(
   token: string | null,
 ): Promise<void> {

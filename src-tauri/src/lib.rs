@@ -2,23 +2,18 @@ pub mod write_policy;
 pub mod app_profile;
 #[cfg(target_os = "macos")]
 mod about;
-mod agent;
-pub mod askpass;
 pub mod cli;
 mod sync;
 pub use sync::central::controller::enabled as central_sync_available;
 mod config;
 mod connect;
 mod connection_probe;
-mod deploy;
-mod discover;
 mod diagnostics;
 mod error;
 mod fsutil;
 mod gcp;
 pub mod host_start;
 mod ipc;
-mod keys;
 mod known_hosts;
 #[cfg(target_os = "macos")]
 pub mod macos_health;
@@ -38,22 +33,11 @@ mod tray;
 mod updater_channel;
 pub mod vault;
 
-use agent::prompt::{agent_pending, agent_resolve};
-use agent::{agent_fix_include, agent_problem};
-use config::commands::*;
-use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};
-use connect::{connect_launch, connect_list_terminals};
-use deploy::{
-    deploy_key, deploy_precheck_host_key, deploy_preflight, deploy_trust_host_key, secrets_delete,
-    secrets_get, secrets_has, secrets_set,
-};
-use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
+use connect::connect_list_terminals;
 use known_hosts::{known_hosts_list, known_hosts_remove};
 use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_set_group_allowed, mcp_status};
 use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
-use sync::engine::sync_overview;
-use sync::migrate::{sync_duplicate_aliases, sync_resolve_shadowed};
 use tauri::Manager;
 use tray::tray_set_visible;
 use updater_channel::{updater_check_beta, updater_install_beta};
@@ -168,7 +152,6 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
     if second_launch_shows_window(&args) {
         show_main_window_by_user(app);
     } else {
-        mcp::republish_bridge(app);
         session::app::start(app);
     }
 }
@@ -243,7 +226,7 @@ fn run_app(host: bool, start_hidden: bool) {
             // Publish the initial native tray before any worker can request an update.
             // A missing/unavailable notification area must not prevent the main UI from opening.
             diagnostics::stage(diagnostics::Stage::Tray);
-            if let Err(error) = tray::rebuild_tray(app.handle(), &[]) {
+            if let Err(error) = tray::rebuild_empty(app.handle()) {
                 diagnostics::tauri_error("tray_initialization_failed", &error);
                 eprintln!("[tray] initial menu unavailable: {error}");
             }
@@ -251,8 +234,6 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::engine::initialize(app.handle())?;
             diagnostics::stage(diagnostics::Stage::Mcp);
             mcp::initialize(app.handle(), host)?;
-            // Lunport 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
-            if sync::engine::require_legacy(&app.state::<state::AppState>().sync).is_ok() { agent::start(app.handle()); }
             // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
             diagnostics::stage(diagnostics::Stage::Broker);
             session::app::start(app.handle());
@@ -281,13 +262,6 @@ fn run_app(host: bool, start_hidden: bool) {
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window.app_handle().state::<state::AppState>().session.embedded.close_all();
-            }
-            // SSH agent 的核准視窗(金鑰保管庫 spec §7.4):關掉它就是拒絕等待中的請求;它的焦點與同步的輪詢無關。
-            if window.label() == agent::prompt::APPROVAL_WINDOW {
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    window.app_handle().state::<state::AppState>().agent.prompts.deny_all();
-                }
-                return;
             }
             // The host key window (own-ssh spec §10): closing it refuses every key it was asking about.
             if window.label() == session::auth_window::AUTH_WINDOW {
@@ -355,7 +329,6 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::central::commands::central_refresh,
             sync::central::commands::central_sign_out,
             sync::record_commands::records_status,
-            sync::record_commands::records_conflict_resolve,
             sync::record_commands::records_group_create,
             sync::record_commands::records_group_order,
             sync::record_commands::records_group_update,
@@ -366,8 +339,6 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_host_move,
             sync::record_commands::records_host_group,
             sync::record_commands::records_sync_now,
-            sync::record_commands::records_use_legacy,
-            sync::record_commands::records_pause_legacy,
             sync::record_commands::records_connect,
             connection_probe::records_host_probe,
             sync::record_commands::records_import_preview,
@@ -392,27 +363,6 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_migration_cancel,
             sync::record_commands::records_migration_resume,
             sync::record_commands::records_migration_pending,
-            config_load,
-            config_list_files,
-            config_plan_new_file,
-            config_create_file,
-            config_get_host,
-            config_save_host,
-            config_set_identity_file,
-            config_add_host,
-            config_remove_host,
-            config_rename_host,
-            config_move_host,
-            config_duplicate_host,
-            config_read_file,
-            config_set_option_enabled,
-            config_set_tags,
-            config_reorder_hosts,
-            config_check_drift,
-            config_set_backup_retention,
-            discover_hosts,
-            config_list_backups,
-            config_restore_backup,
             connect_list_terminals,
             session::embedded::terminal_open,
             session::tunnels::tunnels_list,
@@ -438,28 +388,10 @@ fn run_app(host: bool, start_hidden: bool) {
             session::embedded::terminal_resize,
             session::embedded::terminal_ack,
             session::embedded::terminal_close,
-            connect_launch,
-            keys_list,
-            keys_agent_status,
-            keys_git_ssh_hint,
-            keys_read_public,
-            keys_deploy,
-            deploy_precheck_host_key,
-            deploy_trust_host_key,
-            deploy_key,
-            deploy_preflight,
-            secrets_has,
             sync::central::passwords::records_password_status,
             sync::central::passwords::records_password_change,
-            secrets_get,
-            secrets_set,
-            secrets_delete,
             known_hosts_list,
             known_hosts_remove,
-            config_effective,
-            config_lint,
-            config_jump_chain,
-            config_key_hygiene,
             tray_set_visible,
             settings_export,
             settings_import,
@@ -474,24 +406,6 @@ fn run_app(host: bool, start_hidden: bool) {
             mcp_set_host_allowed,
             mcp_set_group_allowed,
             mcp_resolve_request,
-            sync_overview,
-            sync::engine::sync_key_candidates,
-            sync::engine::sync_key_pick,
-            sync::engine::sync_key_use_synced,
-            sync::engine::sync_key_delete_copy,
-            sync::engine::sync_key_set_delivery,
-            sync::engine::sync_key_move_all_into_vault,
-            sync::engine::sync_key_export_private,
-            sync::engine::sync_key_import_text,
-            sync::engine::sync_key_import_file,
-            sync::engine::sync_key_preview_file,
-            sync::engine::sync_key_generate,
-            sync_duplicate_aliases,
-            sync_resolve_shadowed,
-            agent_pending,
-            agent_resolve,
-            agent_problem,
-            agent_fix_include,
             hostkey_pending,
             hostkey_resolve,
         ])
@@ -513,7 +427,6 @@ fn run_app(host: bool, start_hidden: bool) {
             tauri::RunEvent::Reopen { .. } => show_main_window_by_user(app),
             tauri::RunEvent::Exit => {
                 diagnostics::stage(diagnostics::Stage::Exit);
-                mcp::forget_bridge(app);
                 // Quitting ends every session; each terminal is told why (own-ssh spec §4).
                 session::app::quit(app);
             }

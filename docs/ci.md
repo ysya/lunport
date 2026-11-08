@@ -7,8 +7,8 @@ runs release-please and builds installers only when a release PR is merged.
 | Workflow | When | Responsibility |
 | --- | --- | --- |
 | CI - App | Every PR; manual full run | Version consistency, CI policy tests and workflow syntax; frontend tests/build for UI changes; macOS and Linux Rust/SSH tests for native changes |
-| CI - Windows | Native paths; manual | Windows Rust/SSH, console, GUI startup and one native tray smoke test |
-| CI - macOS credentials | Credential/signing/build scripts or Rust dependencies; manual | Disposable Keychain authorization, frozen helper transport/recovery, signed universal app and updater |
+| CI - Windows | Every PR (Windows suites for native changes); manual | Windows Rust/SSH, console, GUI startup and one native tray smoke test |
+| CI - macOS credentials | Every PR (suites for credential/signing/build scripts or Rust dependencies); manual | Disposable Keychain authorization, frozen helper transport/recovery, signed universal app and updater |
 | CI - Relay | Relay paths; manual | Relay tests, deployed update script and self-host integration |
 | Packages - Linux upgrade | Installer, icon or meaningful Tauri config changes; manual | DEB/RPM packaging and upgrade from published SSHelter |
 | Packages - Windows upgrade (manual) | Explicit dispatch | NSIS/MSI contents and upgrade; supports reuse of verified candidates |
@@ -28,6 +28,18 @@ so dispatch scripts and Rust caches continue to work.
 - Rust changes run native suites without rebuilding the UI. Changes spanning both
   areas run both. Rust dependency changes also run credential checks.
 - Docs changes run the inexpensive policy/version/workflow check.
+
+## Required checks and auto-merge
+
+`main` requires the checks that report on every PR: `Policy, versions and workflow lint`,
+`Frontend tests and build`, `Rust and SSH (macOS)`, `Rust, SSH and PAM (Linux)`,
+`Rust, SSH and native smoke (Windows)`, `Helper authorization protocol`,
+`Frozen helper and Rust transport` and `Signed universal app and updater`. A job its
+selection step skips reports as passing, so each of them can be required. CI - Windows
+and CI - macOS credentials therefore run their selection job on every PR instead of
+filtering by path. The `Production and Development boundaries` matrix is not required:
+GitHub reports a skipped matrix job under its unexpanded name. Auto-merge is allowed and
+merges a PR once every required check passes; administrators can still merge past them.
 - Pure application version changes in package.json, Tauri config, Cargo.toml and
   the root Cargo.lock package skip compilation. Dependency, capability, installer
   or configuration edits in the same PR still run their relevant checks.
@@ -53,7 +65,7 @@ or `handles`, and supply `baseline_ref`. Only that explicit comparison runs ten
 independent processes for each source; it does not run the full application suite.
 
 Keychain probes run only in their dedicated workflow on disposable macOS runners.
-The helper Rust job includes the native metadata probe and partition regression;
+The helper Rust job includes the partition regression;
 the separate identity job is reserved for `identity_only=true` or fork PRs without
 signing secrets. Ordinary releases verify and embed the frozen helper; they never
 rebuild it. `freeze_helper` remains an explicit candidate-generation operation.

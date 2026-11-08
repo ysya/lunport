@@ -1,13 +1,10 @@
 /** Development-only Vite entry. No native backend, real hosts, keys, or relay requests. */
-import App from "@/App";
-import { legacyPreviewRead } from "./legacy-fixtures";
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { RecordsWorkspace } from "@/components/records/RecordsWorkspace";
 import { HostKeyCard } from "@/components/HostKeyWindow";
-import { ApprovalCard } from "@/components/AgentApprovalWindow";
 import { AuthenticationCardView } from "@/components/AuthenticationWindow";
 import { groupView, hostPayload, hostTransport, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
 import type { CentralStatus } from "@/lib/central-sync";
@@ -74,8 +71,6 @@ else {
       at_ms: 0, completed_at_ms: Date.parse("2026-10-21T23:55:30.000Z"),
     }] };
   }
-  if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
-  if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
   const updateOverview = (patch: Partial<RecordOverview>) => {
     overview = { ...overview, ...patch, generation: String(BigInt(overview.generation) + 1n) };
     return overview;
@@ -321,10 +316,7 @@ else {
           return answer(null);
         }
         if (command === "records_key_rename") return updateOverview({ keys: overview.keys.map(key => key.id === args.keyId && key.public ? { ...key, public: { ...key.public, name: String(args.name) } } : key) });
-        if (command === "config_load" && args.path === "/fixture/slow-config") await new Promise((resolve) => setTimeout(resolve, 1500));
-        const fixture = legacyPreviewRead(command, args);
-        if (fixture.handled) return fixture.value;
-        if (command === "records_status") return { format: scenario === "legacy" ? "legacy" : "records", legacy_paused: false, blocked_reason: null, overview };
+        if (command === "records_status") return { format: "records", blocked_reason: null, overview };
         if (command === "records_connect" && scenario === "host-interactions") {
           console.info("Fixture connection requested", String(args.hostId));
           return;
@@ -380,19 +372,6 @@ else {
           updateOverview({ hosts: [...overview.hosts.filter((host) => !preview.candidates.some((candidate) => candidate.id === host.id)), ...preview.candidates.map((candidate) => hostView({ ...candidate, readiness: { kind: candidate.payload.imported ? "needs_review" : "ready" } }))] });
           return { overview, receipt: { import_id: "fixture-import", host_ids: preview.candidates.map((host) => host.id), copied_key_ids: (args.copyKeyIds as string[]).filter((id) => preview.key_references.some((reference) => reference.key_id === id && reference.resolved_path)) } };
         }
-        if (command === "records_set_relay_url") return updateOverview({ relay_url: String(args.url) });
-        if (command === "records_account_create" || command === "records_account_join" || command === "records_account_resume") {
-          updateOverview({ account: { chain_id: "c".repeat(64), device_name: String(args.deviceName ?? "Example laptop") }, pending_account: null, shared_writes_blocked: false });
-          includeFixtureLibrary();
-          return command === "records_account_create" ? { overview, words: "DEMO ONLY — interface fixture, not a real sync code", complete: true, pending_error: null, operation_id: "fixture-setup" } : overview;
-        }
-        if (command === "records_account_words") return "DEMO ONLY — interface fixture, not a real sync code";
-        if (command === "records_library_preview") return { token: "fixture-library-review", conflicts: [{ kind: "host", id: overview.hosts[0].id, current_name: overview.hosts[0].payload.alias, suggested_name: `${overview.hosts[0].payload.alias} (this device)` }], local_hosts: overview.hosts.length, local_groups: overview.groups.length };
-        if (command === "records_library_enable") {
-          const review = args.review as { token: string; renames: { kind: string; id: string; name: string }[] } | undefined;
-          if (review?.token !== "fixture-library-review") throw new Error("Review the fixture library first.");
-          return includeFixtureLibrary(review.renames);
-        }
         if (command === "mcp_setup_overview") return { sandbox: true, executable: "/fixture/sshelter", clients: ["codex", "claude_code", "claude_desktop", "cursor", "vscode"].map(client => ({ client, state: "not_added", config_path: null, message: null })) };
         if (command === "mcp_status") return mcp;
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
@@ -414,7 +393,7 @@ else {
   });
   Object.defineProperty(window, "__TAURI_EVENT_PLUGIN_INTERNALS__", { value: { unregisterListener: () => { } } });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  client.setQueryData(recordsStatusKey, { format: "records", legacy_paused: false, blocked_reason: null, overview });
+  client.setQueryData(recordsStatusKey, { format: "records", blocked_reason: null, overview });
   function Preview() {
     useApplyTheme();
     const status = useRecordsStatus();
@@ -424,13 +403,8 @@ else {
       useTerminalStore.getState().open({ host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
       return () => useTerminalStore.getState().reset();
     }, []);
-    if (scenario === "legacy") return <App />;
     if (scenario === "hostkey" || scenario === "hostkey-changed") return <HostKeyCard
       request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
-      busy={false} onAnswer={() => {}}
-    />;
-    if (scenario === "approval") return <ApprovalCard
-      request={{ id: "fixture-approval", key_name: "Work key", key_fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", program_chain: ["Example client", "zsh", "ssh"], user: "deploy", host: "web.example.com", host_fingerprint: null, rememberable: true, remember_minutes: 240, needs_passphrase: true, passphrase_error: null, preapproved: false }}
       busy={false} onAnswer={() => {}}
     />;
     if (scenario === "authentication" || scenario === "authentication-expired") return <AuthenticationCardView

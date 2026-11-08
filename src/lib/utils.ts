@@ -11,3 +11,8 @@ export function basename(p: string): string {
   const parts = norm.split("/")
   return parts[parts.length - 1] || p
 }
+
+/** The text of a backend error, which arrives as an Error or as a plain string. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}

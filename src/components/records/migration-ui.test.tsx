@@ -3,7 +3,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { recordsPendingMigrationsKey } from "@/lib/records";
 import { describe, expect, it, vi } from "vitest";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
-import { LegacyPauseReview } from "./LegacyPauseReview";
 import {
   MigrationReview,
   MigrationOutcome,
@@ -59,25 +58,6 @@ describe("explicit migration review", () => {
     expect(text(html)).toContain("Migration pending");
     expect(text(html)).not.toContain("Migration completed");
     expect(text(html)).toContain("Resume migration");
-  });
-  it("requires saving editor changes before the pause command becomes available", () => {
-    const renderPause = (saved: boolean) =>
-      renderToStaticMarkup(
-        <LegacyPauseReview
-          saved={saved}
-          busy={false}
-          setSaved={vi.fn()}
-          confirm={vi.fn()}
-          cancel={vi.fn()}
-          error={null}
-        />,
-      );
-    expect(buttonTag(renderPause(false), "Pause legacy workspace")).toContain(
-      DISABLED,
-    );
-    expect(
-      buttonTag(renderPause(true), "Pause legacy workspace"),
-    ).not.toContain(DISABLED);
   });
 });
 

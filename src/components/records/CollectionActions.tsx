@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { applyCollectionAction } from "./collection-actions";
 import { selectClass } from "./form";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 
 export function CollectionActions({
   overview,

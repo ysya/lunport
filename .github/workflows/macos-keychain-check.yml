@@ -1,7 +1,6 @@
 name: CI - macOS credentials
 on:
   pull_request:
-    paths: ["scripts/*macos*", "scripts/ci-changes*.mjs", "src-tauri/signing/**", "!src-tauri/signing/**/*.md", "src-tauri/src/macos_credential*", "src-tauri/src/secrets.rs", "src-tauri/build.rs", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:
     inputs:
       identity_only:
@@ -49,12 +48,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-      - name: Placeholder frontend for the native metadata probe
+      - name: Placeholder frontend for the Rust test build
         run: |
           mkdir -p dist
           echo '<!doctype html>' > dist/index.html
       - name: Native metadata in a disposable keychain
-        run: bash scripts/validate-macos-keychain.sh --with-rust
+        run: bash scripts/validate-macos-keychain.sh
       - name: Prepare the pinned signing identity
         env:
           LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
@@ -108,7 +107,7 @@ jobs:
 
   identity:
     name: Keychain partition regression
-    # The full helper job already includes this probe with the Rust metadata test.
+    # The full helper job already includes this probe.
     needs: changes
     if: needs.changes.outputs.credentials == 'true' && (inputs.identity_only == true || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))
     runs-on: macos-latest

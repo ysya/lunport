@@ -2,7 +2,6 @@ use super::super::typed::{LegacyHost, LegacySlot};
 use super::*;
 use crate::sync::{
     central::{migration_history, migration_materials::Materials, payload::Data},
-    fake_relay::FakeRelay,
     records_v3::SpaceStateV3,
     state_v2::AccountState,
     testkit::{MemKeychain, TestClock, TestDevice},
@@ -89,7 +88,7 @@ fn includes_commands_missing_keys_and_colliding_modern_ids_require_review() {
 }
 #[test]
 fn old_own_slot_uses_only_captured_managed_bytes_and_preserves_original_container() {
-    let device = TestDevice::new("old-own-slot", &FakeRelay::new(), &TestClock::new());
+    let device = TestDevice::new("old-own-slot", &TestClock::new());
     let env = device.env();
     std::fs::create_dir_all(env.state_path.parent().unwrap()).unwrap();
     let mut state = state();

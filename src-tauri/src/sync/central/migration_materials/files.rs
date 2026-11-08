@@ -301,7 +301,6 @@ mod tests {
     use super::*;
     use crate::{
         sync::{
-            fake_relay::FakeRelay,
             records_v3::LocalKeyMetadata,
             testkit::{MemKeychain, TestClock, TestDevice},
         },
@@ -309,7 +308,7 @@ mod tests {
     };
     use std::{fs, sync::Mutex};
     fn device() -> TestDevice {
-        TestDevice::new("captured-materials", &FakeRelay::new(), &TestClock::new())
+        TestDevice::new("captured-materials", &TestClock::new())
     }
     fn put(path: &Path, memory: &dyn Keychain, id: &str, raw: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

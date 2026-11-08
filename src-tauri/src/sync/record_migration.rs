@@ -6,11 +6,9 @@ pub(in crate::sync) use source::key_options as legacy_key_options;
 use crate::error::AppError;
 use crate::sync::crypto::ChainKeys;
 use crate::sync::env::SyncEnv;
-use crate::sync::record::{record_key, Envelope, RecordKind};
+use crate::sync::record::Envelope;
 use crate::sync::record_runtime::{self, RuntimeFormat, MAX_STATE_BYTES};
-use crate::sync::records_v3::{
-    self, KeySlotPayload, MigrationGate, MigrationPhase, SpaceStateV3, SyncStateV3,
-};
+use crate::sync::records_v3::{self, KeySlotPayload, SyncStateV3};
 use crate::sync::relay::PushItem;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -87,14 +85,6 @@ struct ChainPlan {
     create: bool,
 }
 impl ChainPlan {
-    fn new(keys: &ChainKeys, original: Vec<Envelope>, create: bool) -> Self {
-        Self {
-            chain_id: keys.chain_id.clone(),
-            original,
-            items: vec![],
-            create,
-        }
-    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +140,8 @@ impl Journal {
         }
     }
 }
+/// What a migration of a chain-account source answers: the chain relay it publishes through was retired in 1.11.4.
+const CHAIN_RETIRED: &str = "Legacy chain sync is no longer available; use central account sync.";
 fn failure(text: &str) -> AppError {
     AppError::Other(text.into())
 }
@@ -399,12 +391,8 @@ pub fn pending_migrations(env: &SyncEnv) -> Result<Vec<PendingMigration>, AppErr
 pub(crate) enum Step {
     Prepared,
     CodeStaged,
-    AccountGated,
-    BatchSaved,
-    VaultPublished,
     BeforeStateSave,
     StateSaved,
-    ActiveSaved,
 }
 #[cfg(test)]
 thread_local! {static TEST_STEP:std::cell::RefCell<Option<Box<dyn FnMut(Step)->Result<(),AppError>>>>=std::cell::RefCell::new(None);}
@@ -437,14 +425,4 @@ pub fn resume_with_code(
     code: Zeroizing<String>,
 ) -> Result<MigrationReceipt, AppError> {
     resume_inner(env, id, Some(code))
-}
-
-fn space_identity(keys: &ChainKeys) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"sshelter-migration-space-identity-v1");
-    hash.update(keys.chain_id.as_bytes());
-    hash.update(keys.auth_token.as_bytes());
-    let encoded = Zeroizing::new(keys.enc_key_b64());
-    hash.update(encoded.as_bytes());
-    hex(&hash.finalize())
 }

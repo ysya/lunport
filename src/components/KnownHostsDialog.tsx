@@ -7,7 +7,7 @@ import type { KnownHostEntry } from "@/bindings/KnownHostEntry";
 import { useKnownHosts, useRemoveKnownHosts } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

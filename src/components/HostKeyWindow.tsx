@@ -18,7 +18,7 @@ import {
   pinnedOn,
   resolveHostKey,
 } from "@/lib/hostkey";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { copyText } from "@/lib/clipboard";
 import { useApplyTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";

@@ -6,7 +6,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/app/PageHeader";
 import { FormSection } from "@/components/app/Workflow";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { iapTarget, routeLocalReason, routeSynced, type HostTransport } from "@/lib/transports";
 import { GoogleAccountsTab } from "./GoogleAccountsTab";
 import { PamAccessTab } from "./PamAccessTab";

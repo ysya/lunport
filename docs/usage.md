@@ -102,7 +102,7 @@ To change a key's name, select it in **Keys**, choose **Rename**, and save the n
 
 Central library sync includes managed SSH private keys by default after you sign in and unlock sync. There are no per-key sync switches or private-key download steps. The Keys page offers **Set up automatic sync** until this library has completed account setup and migration. Generating or importing a key then includes it in that encrypted library. Hardware and external-agent keys keep their private material on their original device. Saved SSH passwords sync with their hosts; separately stored key passphrases stay on each device.
 
-Lunport's SSH agent provides vault keys to compatible local SSH clients while the app is running and asks before a program uses a key. Keep the app running, or enable launch at login when you need that integration. Exporting a private key creates an ordinary key file outside the vault; other programs can then use that copy independently.
+Vault keys serve Lunport's own connections. Importing a key leaves its original file in place, so other programs keep using that file.
 
 ## Local use without an account
 
@@ -171,38 +171,17 @@ Ask reviews the exact command and can request credentials through Lunport. Auto-
 
 **Recent activity** shows the latest 10 public audit entries, retained across app restarts. Each entry shows the host, command, result and approval mode, with a compact local timestamp. Being allowed to run does not mean a command succeeded; missing exit results show **Result unavailable**. Expand **Details** for the full command, recorded outcome, request and host IDs, exit information and requester attribution. **Requested** and **Completed** in Details include seconds and this device's local time zone. Older entries show only the timestamps that were recorded; entries without a usable timestamp show **Time unavailable**.
 
-## Existing Legacy workspaces
+## Moving an older workspace into the library
 
-Legacy mode keeps your OpenSSH configuration as the source of truth. It preserves comments, blank lines, ordering and unknown directives, changing only the edited lines. Included files remain part of the workspace. Every write is backed up; restoring also backs up the current file first.
+Older Lunport versions could also work directly on your OpenSSH configuration. Lunport now keeps hosts only in its own library. When it finds such a workspace, it opens on **Your existing workspace** with **Preview migration** and **Retry**.
 
-Legacy tools include effective configuration, key hygiene, jump-chain inspection, lint, discovery from `known_hosts` or Tailscale, and host-key cleanup. Settings uses **Files & backups** and **Discovery & checks** for the corresponding controls. Use the explicit migration review to copy selected hosts and keys into Records.
+The migration review reads the workspace's local files: `~/.ssh/config` and its Include files, the managed files under `~/.ssh/sshelter/`, the key files under `~/.ssh/sshelter/keys/` and the old `sync-state.json`. It copies the hosts and keys you select into the library, then switches the workspace. It deletes, moves and rewrites none of those files.
 
-### Historical sync files
-
-The old chain sync service is retired. Existing files under `~/.ssh/sshelter/` remain local OpenSSH sources; this release does not delete them or retrieve old chain data from the server. If an alias appears in more than one source, OpenSSH combines matching blocks and takes the first value for most settings; repeatable options may accumulate. Lunport blocks ambiguous edits and identifies the sources to review.
-
-Use **Import** to copy host settings from an old local `sync-state.json` into Records, then enable encrypted library sync with a central account. Keep a backup of the original files until you have reviewed the imported hosts and keys. Key material, saved SSH passwords and trust approvals need separate review.
-
-### Legacy MCP
-
-The Legacy adapter uses an authenticated localhost bridge and exposes `list_hosts`, `get_effective_config` and `run`. Each remote `run` waits for an in-app **Allow once** decision. It uses non-interactive OpenSSH authentication (`BatchMode=yes`), so key or agent authentication must already work without prompts. Passwords and passphrases are not forwarded to the AI process.
+A workspace that joined an account of the old chain sync is imported the same way, from its local files. That service is retired, so the account stays behind; turn on encrypted library sync with a central account afterwards. Key material, saved SSH passwords and trust approvals need separate review.
 
 ## Windows integrations
 
-Connections use Lunport's engine and bundled console helper. Vault keys do not require Windows' ssh-agent service. For external key files that you want Windows OpenSSH to keep loaded, enable the **OpenSSH Authentication Agent** service once from an administrator PowerShell:
-
-```powershell
-Set-Service ssh-agent -StartupType Automatic
-Start-Service ssh-agent
-```
-
-In-app key deployment uses Windows OpenSSH; Windows does not include `ssh-copy-id`. The app's deployment check identifies unsupported older OpenSSH builds and explains the next step.
-
-Git for Windows has its own SSH executable, which cannot use Lunport's Windows agent pipe. To use Windows OpenSSH with Git, run:
-
-```bash
-git config --global core.sshCommand C:/Windows/System32/OpenSSH/ssh.exe
-```
+Connections use Lunport's engine and bundled console helper. They need neither Windows OpenSSH nor its ssh-agent service.
 
 ## Updates and help
 

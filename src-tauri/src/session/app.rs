@@ -4,8 +4,7 @@
 //! flag (a client that found nobody listening) starts the listener again if it is down. A restart of the app (an update) ends every
 //! session; the clients say so and exit.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use tauri::Manager;
 use zeroize::Zeroizing;
@@ -13,13 +12,9 @@ use zeroize::Zeroizing;
 use super::auth::{KeyStore, VaultKey};
 use super::broker::{Broker, QUIT_WAIT};
 use super::hostkey_window::{TauriHostKeySurface, WindowConfirmer, HOSTKEY_TIMEOUT};
-use super::pins::PinStore;
-use super::ssh_config_directory::{vault_slot_of, Sources, SshConfigDirectory};
-use crate::config::model::SshConfigDoc;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::sync::env::{Keychain, OsKeychain};
-use crate::sync::state_v2::{SlotSource, SyncStateV2};
 
 /// Whether the broker listens.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -32,32 +27,9 @@ pub enum BrokerStatus {
     Failed(String),
 }
 
-/// How long a connect waits for the window to load the SSH config before reading it itself (as the MCP bridge waits).
-const DOC_WAIT: Duration = Duration::from_secs(5);
-
 /// The vault key `key_id` as the sync state lists it: a key "Only in Lunport", named as the agent names it (the slot's name, else its
-/// file name). `None` for a slot whose key is not in the vault.
-pub fn vault_key_in(state: &SyncStateV2, key_id: &str) -> Option<VaultKey> {
-    let local = state.key_slots.get(key_id)?;
-    let Some(SlotSource::Vault { public_key, .. }) = &local.source else { return None };
-    let name = local.payload.as_ref().map(|payload| payload.name.clone()).filter(|name| !name.is_empty()).unwrap_or_else(|| local.file_name.clone());
-    Some(VaultKey { name, public_key: public_key.clone() })
-}
 
 /// The SSH config the window loaded; when it has not loaded one within `wait` (an app started in the background by a client), the one
-/// `fallback` reads.
-pub fn loaded_doc(doc: &Mutex<Option<SshConfigDoc>>, wait: Duration, fallback: impl FnOnce() -> Result<SshConfigDoc, AppError>) -> Result<SshConfigDoc, String> {
-    let deadline = Instant::now() + wait;
-    loop {
-        if let Some(doc) = doc.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
-            return Ok(doc);
-        }
-        if Instant::now() >= deadline {
-            return fallback().map_err(|error| error.to_string());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
 
 /// Whether closing the main window hides it instead of quitting: the tray setting, a host started for a client, or open sessions (which
 /// quitting would end, spec §4).
@@ -79,7 +51,6 @@ impl KeyStore for AppKeyStore {
                 if key.status!=crate::sync::record_repository::KeyStatus::Available{return None;}
                 let public=key.public?;Some(VaultKey{name:public.name,public_key:public.public_key})
             }
-            crate::sync::record_runtime::RuntimeFormat::Legacy if !core.legacy_paused=>core.state.as_ref().and_then(|s|vault_key_in(s,key_id)),
             _=>None,
         }
     }
@@ -95,7 +66,7 @@ impl AppKeyStore {
             let _lifecycle=env.runtime.lifecycle.lock().unwrap();
             let noninteractive=crate::sync::env::NonInteractiveKeychain(env.keychain);
             let read_keychain:&dyn Keychain=if interactive {&OsKeychain}else{&noninteractive};
-            let format={let core=env.runtime.core.lock().unwrap();if core.legacy_paused && core.format==crate::sync::record_runtime::RuntimeFormat::Legacy{return Err("Choose a workspace before using keys.".into());}core.format};
+            let format=env.runtime.core.lock().unwrap().format;
             match format {
                 crate::sync::record_runtime::RuntimeFormat::Records=>{
                     drop(_lifecycle);
@@ -108,7 +79,6 @@ impl AppKeyStore {
                     super::record_material::verify(&key,&entry).map_err(str::to_owned)?;
                     Ok(Some(Zeroizing::new(entry.private_key.clone())))
                 }
-                crate::sync::record_runtime::RuntimeFormat::Legacy=>crate::vault::store::with_vault(env.runtime,&crate::vault::store::vault_path(&env.state_path),read_keychain,env.now(),|v|v.get(key_id)).map(|entry|entry.map(|entry|Zeroizing::new(entry.private_key.clone()))).map_err(|e|e.to_string()),
                 _=>Err("The workspace is blocked.".into()),
             }
         }).map_err(|e|e.to_string()).and_then(|r|r)
@@ -129,9 +99,8 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         pin:Box::new(move|id,endpoint,previous,candidate|crate::sync::engine::with_env(&for_pin,|env|{
             let now=env.now();
             let(s,_)=crate::sync::record_runtime::snapshot(env)?;
-            let host=crate::sync::record_repository::get_host(&s,id.as_str()).map_err(|e|AppError::Other(e.to_string()))?;
-            if matches!(host.host.scope,crate::sync::records_v3::HostScope::Space{..}){crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;}
-            crate::sync::record_runtime::mutate_records(env,|s|crate::sync::record_repository::pin_host_key(s,id.as_str(),endpoint,previous,candidate.clone(),now).map_err(|e|AppError::Other(e.to_string())))?;
+            crate::sync::record_repository::get_host(&s,id.as_str()).map_err(|e|AppError::Other(e.to_string()))?;
+                        crate::sync::record_runtime::mutate_records(env,|s|crate::sync::record_repository::pin_host_key(s,id.as_str(),endpoint,previous,candidate.clone(),now).map_err(|e|AppError::Other(e.to_string())))?;
             env.events.wake();Ok::<_,AppError>(())
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
     };
@@ -142,7 +111,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
     let gcp: Arc<dyn crate::gcp::rest::GcpClient> = app.state::<AppState>().gcp.clone();
     super::record_directory::RecordDirectory::new(sources).with_password_reader(Box::new(move |hop,keychain| {
         crate::sync::engine::with_env(&for_password, |env| {
-            let safe=crate::sync::env::SyncEnv{doc:env.doc,backed_up:env.backed_up,retention:env.retention,runtime:env.runtime,ssh_dir:env.ssh_dir.clone(),state_path:env.state_path.clone(),home:env.home.clone(),keychain,relays:env.relays,events:env.events,clock:env.clock,platform:env.platform};
+            let safe=crate::sync::env::SyncEnv{runtime:env.runtime,ssh_dir:env.ssh_dir.clone(),state_path:env.state_path.clone(),home:env.home.clone(),keychain,events:env.events,clock:env.clock,platform:env.platform};
             crate::sync::central::passwords::read(&safe,hop.id.as_str())
         }).map_err(|_|super::directory::DirectoryError::Failed("The saved password is unavailable.".into()))?
           .map_err(|_|super::directory::DirectoryError::Failed("Unlock your library to use its saved password.".into()))
@@ -151,7 +120,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
             // Native host-key trust authorizes this one credential read, without lifting the
             // background gate or changing Auto-log's no-pin policy.
             crate::sync::engine::with_env(&app, |env| {
-                super::record_pin::confirm(env, hop, previous, key, &OsKeychain, cancel, guard)
+                super::record_pin::confirm(env, hop, previous, key, cancel, guard)
             })
             .map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))?
             .map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))
@@ -166,35 +135,6 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         env.events.wake();
         Ok::<_, AppError>(())
     }).map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))))
-}
-
-/// The temporary directory over the app's ssh_config, sync state and keychain (`ssh_config_directory.rs`).
-fn directory(app: &tauri::AppHandle) -> Result<SshConfigDirectory, AppError> {
-    let pins = PinStore::new(crate::fsutil::app_data_root()?.join("host-pins.json"));
-    let (for_doc, for_keys) = (app.clone(), app.clone());
-    let sources = Sources {
-        doc: Box::new(move || {
-            let state = for_doc.state::<AppState>();
-            loaded_doc(&state.doc, DOC_WAIT, || crate::config::include::load_doc(&crate::keys::ssh_dir()?.join("config")))
-        }),
-        // With a deadline: a `Match exec` in the user's config can keep `ssh -G` from ever answering, and the connect would hang with it.
-        effective: Box::new(|alias| crate::session::ssh_g::effective_within(alias, None, crate::session::ssh_g::EFFECTIVE_DEADLINE)),
-        vault_key: Box::new(move |identity_files| {
-            let home = crate::keys::ssh_dir().ok()?.parent()?.to_path_buf();
-            let state = for_keys.state::<AppState>();
-            let core = state.sync.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            core.state.as_ref().and_then(|state| vault_slot_of(identity_files, state, &home))
-        }),
-        password_saved: Box::new(|host| {
-            let account = crate::secrets::host_account(host.as_str());
-            // Route selection needs presence only; the connector reads protected data when login needs it.
-            #[cfg(target_os = "macos")]
-            { crate::secrets::contains(&account).unwrap_or(false) }
-            #[cfg(not(target_os = "macos"))]
-            { OsKeychain.get(&account).ok().flatten().is_some_and(|password| !password.is_empty()) }
-        }),
-    };
-    Ok(SshConfigDirectory::new(sources, pins))
 }
 
 /// Builds the broker and starts its listener, unless it listens already: at the app's start (`setup`), and when a client found nobody
@@ -226,17 +166,13 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
         let state = app.state::<AppState>();
         let mut slot = state.session.broker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.is_none() {
-            let directory = match directory(app) {
-                Ok(directory) => directory,
-                Err(error) => return BrokerStatus::Failed(error.to_string()),
-            };
             let confirmer = WindowConfirmer { hub: Arc::clone(&state.session.host_keys), surface: Arc::new(TauriHostKeySurface { app: app.clone() }), timeout: HOSTKEY_TIMEOUT };
             *slot = Some(Broker::new(
                 Arc::new(crate::ssh::russh_engine::RusshEngine::new()),
-                Arc::new(super::format_directory::FormatDirectory{
-                    lifecycle:Arc::clone(&state.sync.lifecycle),
-                    mode:{let app=app.clone();Box::new(move||{let state=app.state::<AppState>();let core=state.sync.core.lock().unwrap();(core.format,core.legacy_paused)})},
-                    legacy:Arc::new(directory),records:Arc::new(record_directory(app)),
+                Arc::new(super::format_directory::FormatDirectory {
+                    lifecycle: Arc::clone(&state.sync.lifecycle),
+                    mode: { let app = app.clone(); Box::new(move || app.state::<AppState>().sync.core.lock().unwrap().format) },
+                    records: Arc::new(record_directory(app)),
                 }),
                 Arc::new(AppKeyStore { app: app.clone() }),
                 Arc::new(OsKeychain),
@@ -298,62 +234,6 @@ pub fn quit(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::slot_rules::{KeySlotPayload, SlotMode};
-    use crate::sync::state_v2::LocalSlot;
-
-    fn slot(file: &str, source: Option<SlotSource>) -> LocalSlot {
-        LocalSlot {
-            file_name: file.into(),
-            source,
-            last_error: None,
-            asked: false,
-            payload: None,
-            uploaded_fingerprint: None,
-            parked: false,
-            learned_in: None,
-            copy_from_another_account: false,
-            local_only: false,
-        }
-    }
-
-    #[test]
-    fn a_vault_key_is_one_only_in_sshelter_named_by_its_slot() {
-        let mut state = SyncStateV2::fresh("mac").unwrap();
-        let vault = SlotSource::Vault { fingerprint: "SHA256:v".into(), public_key: "ssh-ed25519 AAAA".into(), has_passphrase: true };
-        state.key_slots.insert("a".repeat(32), slot("id_mac-aaaaaaaa", Some(vault.clone())));
-        state.key_slots.insert("b".repeat(32), slot("work-bbbbbbbb", Some(SlotSource::SyncedCopy { fingerprint: "SHA256:w".into() })));
-        assert_eq!(vault_key_in(&state, &"a".repeat(32)), Some(VaultKey { name: "id_mac-aaaaaaaa".into(), public_key: "ssh-ed25519 AAAA".into() }));
-        assert_eq!(vault_key_in(&state, &"b".repeat(32)), None, "a key in a file is not the vault's");
-        assert_eq!(vault_key_in(&state, "missing"), None);
-
-        // The slot's name in the account names the key; a slot whose name there is empty is named by its file.
-        let named = |name: &str| KeySlotPayload {
-            schema: 1,
-            name: name.into(),
-            mode: SlotMode::Own,
-            origin_device_id: "d".repeat(32),
-            created_at_ms: 0,
-            public_key: None,
-            fingerprint: None,
-            key_type: None,
-            has_passphrase: None,
-        };
-        state.key_slots.insert("c".repeat(32), LocalSlot { payload: Some(named("work laptop")), ..slot("id_work-cccccccc", Some(vault.clone())) });
-        state.key_slots.insert("d".repeat(32), LocalSlot { payload: Some(named("")), ..slot("id_old-dddddddd", Some(vault)) });
-        assert_eq!(vault_key_in(&state, &"c".repeat(32)).map(|key| key.name), Some("work laptop".to_string()));
-        assert_eq!(vault_key_in(&state, &"d".repeat(32)).map(|key| key.name), Some("id_old-dddddddd".to_string()), "an empty name falls back to the file's");
-    }
-
-    #[test]
-    fn the_loaded_config_is_used_and_without_one_the_fallback_is_read_after_the_wait() {
-        let doc = Mutex::new(Some(SshConfigDoc { files: Vec::new() }));
-        assert!(loaded_doc(&doc, Duration::from_secs(5), || panic!("the window's config is there")).is_ok());
-
-        let none = Mutex::new(None);
-        let started = Instant::now();
-        assert_eq!(loaded_doc(&none, Duration::from_millis(200), || Err(AppError::Other("no config".into()))).err(), Some("no config".to_string()));
-        assert!(started.elapsed() >= Duration::from_millis(200));
-    }
 
     /// A start is a no-op for a broker that listens already; every other status is worth another try.
     #[test]

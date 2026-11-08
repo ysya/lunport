@@ -3,13 +3,15 @@ import { useState } from "react";
 import { Copy } from "lucide-react";
 import { toast } from "sonner";
 
-import { errorMessage } from "@/lib/sync";
-import type { Tone } from "@/lib/sync-overview";
+import { errorMessage } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+
+/** The tone of a status line or badge. */
+export type Tone = "ok" | "busy" | "warning" | "error";
 
 /** Text color for a status tone (Settings → Sync rows, space rows). */
 export const TONE_TEXT: Record<Tone, string> = {

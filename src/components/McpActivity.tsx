@@ -1,7 +1,7 @@
 import { Ban, CheckCircle2, CircleHelp, CircleX, Clock3, ShieldX, TriangleAlert } from "lucide-react";
 import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import { auditRows } from "@/lib/mcp-audit-rows";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { Badge } from "@/components/ui/badge";
 import { McpAttribution } from "./McpAttribution";
 

@@ -110,11 +110,10 @@ fn a_prepared_phase_proves_only_its_existing_whitelisted_outputs() {
 fn a_first_scoped_master_must_exist_and_be_promoted_before_the_active_image_is_proved() {
     use crate::sync::{
         env::Keychain,
-        fake_relay::FakeRelay,
         testkit::{TestClock, TestDevice},
     };
     let initial = crate::sync::central::initial_fresh_projection_for_test();
-    let d = TestDevice::new("fresh-effects", &FakeRelay::new(), &TestClock::new());
+    let d = TestDevice::new("fresh-effects", &TestClock::new());
     let env = d.env();
     record_runtime::save_active(&env.state_path, initial.source()).unwrap();
     let probe = record_runtime::probe_startup(&env.state_path, "fresh-effects");

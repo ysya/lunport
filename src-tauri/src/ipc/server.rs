@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::error::AppError;
-use crate::sync::slot_files;
 
 /// 同時處理的連線上限;超過的直接關掉(同一使用者的程式可以一直連上來)。
 pub const MAX_CONNECTIONS: usize = 64;
@@ -34,7 +33,7 @@ pub enum Started {
 pub(crate) fn take_lock(dir: &Path) -> Result<Option<File>, AppError> {
     crate::fsutil::check_write(dir)?;
     crate::fsutil::check_write(&dir.join("lock"))?;
-    slot_files::ensure_keys_dir(dir)?;
+    crate::fsutil::ensure_private_dir(dir)?;
     let file = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("lock"))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),

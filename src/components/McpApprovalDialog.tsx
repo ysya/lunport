@@ -7,7 +7,7 @@ import { ShieldAlert } from "lucide-react";
 import type { McpPendingRequest } from "@/bindings/McpPendingRequest";
 import { mcpStatusKey, useMcpStatus, useResolveMcpRequest } from "@/lib/mcp";
 import { armAfterDelay } from "@/lib/hostkey";
-import { revealHidden } from "@/lib/sync-approvals";
+import { revealHidden } from "@/lib/reveal-hidden";
 import { McpAttribution } from "./McpAttribution";
 import { Button } from "@/components/ui/button";
 import {

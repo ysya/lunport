@@ -244,33 +244,6 @@ fn known_hosts_path() -> Result<PathBuf, AppError> {
     crate::fsutil::home_dir().map(|h| h.join(".ssh").join("known_hosts"))
 }
 
-/// Read the full known_hosts text; a missing file reads back as empty (the normal first-run
-/// state).
-pub fn read_known_hosts_text() -> Result<String, AppError> {
-    let path = known_hosts_path()?;
-    match std::fs::read_to_string(&path) {
-        Ok(t) => Ok(t),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Append one line to known_hosts. The caller MUST have already validated `line`'s shape (see
-/// `deploy_trust_host_key`). Backs up the existing file first (same mirror-dir convention as
-/// `remove_from_file`), then creates the file at 0600 if absent and ensures a newline separates
-/// it from the previous line.
-pub fn append_known_hosts_line(line: &str) -> Result<(), AppError> {
-    let path = known_hosts_path()?;
-    let mut text = read_known_hosts_text()?;
-    fsutil::backup(&path)?;
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(line.trim_end());
-    text.push('\n');
-    crate::fsutil::atomic_write(&path, text.as_bytes(), 0o600)
-}
-
 #[tauri::command]
 pub fn known_hosts_list() -> Result<Vec<KnownHostEntry>, AppError> {
     let path = known_hosts_path()?;
@@ -282,19 +255,20 @@ pub fn known_hosts_list() -> Result<Vec<KnownHostEntry>, AppError> {
     Ok(list_entries(&text))
 }
 
+/// Backups of `known_hosts` kept after a removal: the default of the backup setting that left with the Legacy workspace.
+const KNOWN_HOSTS_BACKUPS: usize = 20;
+
 #[tauri::command]
 pub fn known_hosts_remove(
-    state: tauri::State<crate::state::AppState>,
     line_indices: Vec<u32>,
     expected_hosts: Vec<String>,
     expected_line_hashes: Option<Vec<String>>,
 ) -> Result<u32, AppError> {
-    let retention = *state.backup_retention.lock().unwrap();
     remove_from_file(
         &known_hosts_path()?,
         &line_indices,
         &expected_hosts,
-        retention,
+        Some(KNOWN_HOSTS_BACKUPS),
         expected_line_hashes.as_deref(),
     )
 }

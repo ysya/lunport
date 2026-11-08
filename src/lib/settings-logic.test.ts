@@ -4,14 +4,10 @@ import type { TerminalInfo } from "@/bindings/TerminalInfo";
 import {
   clampFontSize,
   DEFAULT_FONT_SIZE,
-  defaultLintRules,
   effectiveNewTab,
-  filterLintIssues,
-  LINT_RULES,
   normalizeUpdateChannel,
   quickConnectLabel,
   quickConnectShortcut,
-  resolveTerminal,
   resolveTheme,
   systemPrefersDark,
   terminalSupportsNewTab,
@@ -57,41 +53,6 @@ describe("systemPrefersDark", () => {
   });
 });
 
-describe("lint rule filtering", () => {
-  const issue = (rule: string) => ({ rule });
-
-  it("defaults all known rules to enabled", () => {
-    const defaults = defaultLintRules();
-    for (const r of LINT_RULES) expect(defaults[r.id]).toBe(true);
-    expect(Object.keys(defaults)).toHaveLength(LINT_RULES.length);
-  });
-
-  it("keeps only issues whose rule is enabled", () => {
-    const issues = [
-      issue("duplicate-directive"),
-      issue("shadowed-host"),
-      issue("missing-identity-file"),
-    ];
-    const rules = { ...defaultLintRules(), "shadowed-host": false };
-    expect(filterLintIssues(issues, rules).map((i) => i.rule)).toEqual([
-      "duplicate-directive",
-      "missing-identity-file",
-    ]);
-  });
-
-  it("fails open for rule ids the store does not know about", () => {
-    const issues = [issue("brand-new-backend-rule")];
-    expect(filterLintIssues(issues, defaultLintRules())).toHaveLength(1);
-  });
-
-  it("returns everything when all rules are enabled and nothing when all are off", () => {
-    const issues = LINT_RULES.map((r) => issue(r.id));
-    expect(filterLintIssues(issues, defaultLintRules())).toHaveLength(issues.length);
-    const allOff = Object.fromEntries(LINT_RULES.map((r) => [r.id, false]));
-    expect(filterLintIssues(issues, allOff)).toHaveLength(0);
-  });
-});
-
 describe("new-tab connect gating", () => {
   const TERMINALS: TerminalInfo[] = [
     { id: "iterm2", label: "iTerm2", supports_new_tab: true },
@@ -117,30 +78,6 @@ describe("new-tab connect gating", () => {
     expect(effectiveNewTab(false, "iterm2", TERMINALS)).toBe(false);
     expect(effectiveNewTab(true, "terminal", TERMINALS)).toBe(false);
     expect(effectiveNewTab(true, null, TERMINALS)).toBe(false);
-  });
-});
-
-describe("resolveTerminal", () => {
-  const OVERRIDES = { web: "iterm2", db: "kitty" };
-
-  it("prefers the host override over the global preference", () => {
-    expect(resolveTerminal("web", OVERRIDES, "terminal")).toBe("iterm2");
-    expect(resolveTerminal("db", OVERRIDES, null)).toBe("kitty");
-  });
-
-  it("falls back to the global preference when the host has no override", () => {
-    expect(resolveTerminal("bastion", OVERRIDES, "terminal")).toBe("terminal");
-    expect(resolveTerminal("bastion", {}, "iterm2")).toBe("iterm2");
-  });
-
-  it("returns null (system default) when neither override nor global is set", () => {
-    expect(resolveTerminal("bastion", {}, null)).toBeNull();
-    expect(resolveTerminal("web", {}, null)).toBeNull();
-  });
-
-  it("ignores a blank override entry (defensive against bad persisted state)", () => {
-    expect(resolveTerminal("web", { web: "" }, "terminal")).toBe("terminal");
-    expect(resolveTerminal("web", { web: "" }, null)).toBeNull();
   });
 });
 

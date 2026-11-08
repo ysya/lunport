@@ -756,7 +756,6 @@ pub(in crate::sync::central) mod tests {
             central::inventory_keys::Capture,
             crypto::ChainKeys,
             env::Keychain,
-            fake_relay::FakeRelay,
             state_v2::AccountState,
             testkit::{TestClock, TestDevice},
         },
@@ -769,7 +768,7 @@ pub(in crate::sync::central) mod tests {
     use std::fs;
     pub(in crate::sync::central) fn fixture() -> (TestDevice, Package, VaultKeys, Workspace, String)
     {
-        let device = TestDevice::new("source-package", &FakeRelay::new(), &TestClock::new());
+        let device = TestDevice::new("source-package", &TestClock::new());
         let env = device.env();
         let root = env.state_path.parent().unwrap();
         fs::create_dir_all(root).unwrap();

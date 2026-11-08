@@ -1,19 +1,10 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::config::model::SshConfigDoc;
-
-/// Tauri-managed app state: the loaded multi-file config document and which files have already
-/// been backed up this session (so we back up each live file only once before the first write).
+/// Tauri-managed app state.
 pub struct AppState {
     /// A hidden client-started host must not unlock credentials before a human opens its UI.
     pub background_credentials_only: AtomicBool,
-    pub doc: Mutex<Option<SshConfigDoc>>,
-    pub backed_up: Mutex<HashSet<PathBuf>>,
-    /// How many `.bak` snapshots to keep per managed file. `None` = unlimited (no pruning).
-    pub backup_retention: Mutex<Option<usize>>,
     /// Desired menubar tray visibility; `rebuild_tray` re-applies it so a hidden tray stays hidden.
     pub tray_visible: AtomicBool,
     /// When true, closing the main window hides it to the tray instead of quitting.
@@ -22,7 +13,6 @@ pub struct AppState {
     pub mcp: crate::mcp::McpRuntime,
     /// 同步執行期狀態:generation/狀態/帳戶金鑰同一把鎖(`SyncCore`)、lifecycle 互斥鎖、同步中旗標。
     pub sync: crate::sync::runtime::SyncRuntime,
-    pub agent: crate::agent::AgentRuntime,
     /// The session broker: its host key window, its sessions (own-ssh spec §4, §7).
     pub session: crate::session::SessionRuntime,
     /// The one client for Google's APIs (design 2026-10-25): its token cache and its library clients serve the connections and the
@@ -34,14 +24,10 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             background_credentials_only: AtomicBool::new(false),
-            doc: Mutex::new(None),
-            backed_up: Mutex::new(HashSet::new()),
-            backup_retention: Mutex::new(None),
             tray_visible: AtomicBool::new(true),
             close_to_tray: AtomicBool::new(false),
             mcp: crate::mcp::McpRuntime::default(),
             sync: crate::sync::runtime::SyncRuntime::default(),
-            agent: crate::agent::AgentRuntime::default(),
             session: crate::session::SessionRuntime::default(),
             gcp: Arc::new(crate::gcp::rest::RestClient::new(Arc::new(crate::gcp::auth::FileStore::from_environment()))),
         }

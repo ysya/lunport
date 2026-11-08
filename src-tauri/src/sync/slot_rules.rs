@@ -14,13 +14,17 @@ use crate::error::AppError;
 /// 插槽目錄,相對於家目錄。主機的 `IdentityFile` 一律寫成 `~/` 加上這個路徑。
 pub const SLOT_DIR: &str = ".ssh/sshelter/keys";
 /// 可以同步的私鑰檔大小上限(spec §4.1)。
+#[cfg(test)]
 pub const MAX_PRIVATE_KEY_BYTES: usize = 16 * 1024;
 /// `keyslot`、`key` payload 的 schema。
 pub const SLOT_SCHEMA: u32 = 1;
 
 // 以 `concat!` 組出標頭:原始碼裡不出現完整的字面(避免被祕密掃描誤判)。
+#[cfg(test)]
 const OPENSSH_BEGIN: &str = concat!("-----BEGIN ", "OPENSSH", " PRIVATE KEY-----");
+#[cfg(test)]
 const OPENSSH_END: &str = concat!("-----END ", "OPENSSH", " PRIVATE KEY-----");
+#[cfg(test)]
 const AUTH_MAGIC: &[u8] = b"openssh-key-v1\0";
 
 /// 插槽的共用方式(spec §2):同步私鑰,或每台電腦用自己的金鑰。
@@ -46,22 +50,6 @@ pub struct KeySlotPayload {
     pub fingerprint: Option<String>,
     pub key_type: Option<String>,
     pub has_passphrase: Option<bool>,
-}
-
-/// `key` 記錄的 payload(祕密;帳戶 chain,id = 插槽 id):私鑰檔內容原樣,passphrase 不在這裡。`Debug` 不印內容。
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct KeyPayload {
-    pub schema: u32,
-    pub private_key: String,
-}
-
-impl std::fmt::Debug for KeyPayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KeyPayload")
-            .field("schema", &self.schema)
-            .field("private_key", &format_args!("<redacted>"))
-            .finish()
-    }
 }
 
 /// `device` 記錄的 `slots`(spec §4.1):這台的插槽裡是哪把金鑰、是不是同步來的副本。只含公開資訊。
@@ -119,18 +107,6 @@ pub fn default_slot_name(file_name: &str) -> String {
 /// 插槽檔名:`<name>-<插槽 id 前 8 字元>`(同 space 檔名,不需跨裝置協調唯一性)。
 pub fn slot_file_name(name: &str, slot_id: &str) -> String {
     format!("{name}-{}", &slot_id[..slot_id.len().min(8)])
-}
-
-/// 主機的 `IdentityFile` 要寫的值。
-pub fn slot_value(file_name: &str) -> String {
-    format!("~/{SLOT_DIR}/{file_name}")
-}
-
-/// 插槽旁的公鑰檔(`<slot>.pub`)。
-pub fn public_path(slot: &Path) -> PathBuf {
-    let mut name = slot.as_os_str().to_owned();
-    name.push(".pub");
-    PathBuf::from(name)
 }
 
 /// 去掉成對的雙引號(ssh_config 的值可以加引號,`Directive.value` 原樣保留引號)。
@@ -201,7 +177,8 @@ fn is_absolute_path(v: &str) -> bool {
         || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
 }
 
-/// 從 OpenSSH 私鑰讀出的公開資訊。
+/// 從 OpenSSH 私鑰讀出的公開資訊(the vault tests check generated keys with it).
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyFacts {
     /// `<type> <base64>`(沒有 comment)。
@@ -215,11 +192,14 @@ pub struct KeyFacts {
 /// 不能同步的原因(訊息給使用者;不含金鑰內容)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unsyncable {
+    #[cfg(test)]
     TooLarge,
+    #[cfg(test)]
     NotOpenSsh,
     Unreadable,
 }
 
+#[cfg(test)]
 impl Unsyncable {
     pub fn message(self) -> &'static str {
         match self {
@@ -232,6 +212,7 @@ impl Unsyncable {
 
 /// 檢查 OpenSSH 格式的私鑰(PROTOCOL.key):讀出未加密的公鑰段、指紋、類型,以及 ciphername 是不是 `none`。
 /// 不需要 passphrase、不寫任何檔案。只接受一個檔案一把金鑰。
+#[cfg(test)]
 pub fn inspect_private_key(text: &str) -> Result<KeyFacts, Unsyncable> {
     if text.len() > MAX_PRIVATE_KEY_BYTES {
         return Err(Unsyncable::TooLarge);
@@ -305,11 +286,6 @@ pub fn valid_slot_payload(p: &KeySlotPayload) -> bool {
             _ => false,
         },
     }
-}
-
-/// `key` payload 能不能進快取:schema 與大小(內容與指紋的比對在落地時做,spec §6.2)。
-pub fn valid_key_payload(p: &KeyPayload) -> bool {
-    p.schema == SLOT_SCHEMA && !p.private_key.is_empty() && p.private_key.len() <= MAX_PRIVATE_KEY_BYTES
 }
 
 /// SSH wire 格式的讀取器(uint32 big-endian;string = 長度 + 內容)。
@@ -813,8 +789,6 @@ mod tests {
 
         let id = "3fa2c1d90123456789abcdef01234567";
         assert_eq!(slot_file_name("id_mac", id), "id_mac-3fa2c1d9");
-        assert_eq!(slot_value("id_mac-3fa2c1d9"), "~/.ssh/sshelter/keys/id_mac-3fa2c1d9");
-        assert_eq!(public_path(Path::new("/k/id_mac-3fa2c1d9")), PathBuf::from("/k/id_mac-3fa2c1d9.pub"));
     }
 
     #[test]
@@ -897,16 +871,6 @@ mod tests {
             ..synced_payload()
         }));
 
-        assert!(valid_key_payload(&KeyPayload { schema: SLOT_SCHEMA, private_key: plain() }));
-        assert!(!valid_key_payload(&KeyPayload { schema: SLOT_SCHEMA, private_key: String::new() }));
-        assert!(!valid_key_payload(&KeyPayload { schema: SLOT_SCHEMA, private_key: "A".repeat(MAX_PRIVATE_KEY_BYTES + 1) }));
-    }
-
-    #[test]
-    fn key_payload_debug_hides_the_key() {
-        let shown = format!("{:?}", KeyPayload { schema: SLOT_SCHEMA, private_key: plain() });
-        assert!(!shown.contains(PLAIN_BODY[0]), "{shown}");
-        assert!(shown.contains("<redacted>"));
     }
 
     /// 這三句會原樣顯示在 UI(計畫的 UI 字串表):不能悄悄改字。
