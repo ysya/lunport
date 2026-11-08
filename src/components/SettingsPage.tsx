@@ -764,7 +764,7 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log skips command review. Passwords, key passphrases and 2FA can still require authorization in Lunport’s native windows. Use Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool, to review a new or changed server key before Auto-log execution.
+            Auto-log skips command review. Passwords, key passphrases and 2FA can still require authorization in Lunport’s native windows. A server key Lunport has not verified opens the trust window before the AI client connects. A changed key is refused until you review it with Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.

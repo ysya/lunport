@@ -64,6 +64,8 @@ pub struct PinnedSummary {
 /// A host key for the person to confirm in Lunport's window (spec §10, §14).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKeyQuestion {
+    /// The saved host the key is for.
+    pub host: HostId,
     pub user: String,
     pub alias: String,
     pub hostname: String,
@@ -79,6 +81,26 @@ pub struct HostKeyQuestion {
 /// and only when the fingerprints match.
 pub trait HostKeyConfirmer: Send + Sync {
     fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String>;
+
+    /// `confirm`, telling a refusal from a question nobody answered (design 2026-11-09: an AI client's call says which). A confirmer that
+    /// cannot tell them apart calls every question it did not trust refused.
+    fn decide(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> HostKeyDecision {
+        match self.confirm(question, cancel) {
+            Some(fingerprint) => HostKeyDecision::Trusted(fingerprint),
+            None => HostKeyDecision::Refused,
+        }
+    }
+}
+
+/// What the person did with a host key question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostKeyDecision {
+    /// They trusted the key with this fingerprint.
+    Trusted(String),
+    /// They refused it (Cancel, Refuse) or closed the window.
+    Refused,
+    /// Nobody answered before the question ran out of time or was withdrawn.
+    Unanswered,
 }
 
 /// A session that is open, and the target it reached (with what the connect learned: the pins the person confirmed, and a hop that starts
@@ -480,6 +502,7 @@ impl Connector<'_> {
         }
         owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in Lunport.", label(&hop.alias)));
         let question = HostKeyQuestion {
+            host: hop.id.clone(),
             user: hop.user.clone(),
             alias: hop.alias.clone(),
             hostname: hop.hostname.clone(),
@@ -669,6 +692,7 @@ mod tests {
         assert_eq!(
             asked[0],
             HostKeyQuestion {
+                host: HostId::from("id-web"),
                 user: "deploy".into(),
                 alias: "web".into(),
                 hostname: "web.example.com".into(),

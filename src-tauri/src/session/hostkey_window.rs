@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::connect::{CancelToken, HostKeyConfirmer, HostKeyQuestion};
+use super::connect::{CancelToken, HostKeyConfirmer, HostKeyDecision, HostKeyQuestion};
 use crate::error::AppError;
 
 pub const HOSTKEY_WINDOW: &str = "hostkey";
@@ -167,6 +167,15 @@ pub struct WindowConfirmer {
 
 impl HostKeyConfirmer for WindowConfirmer {
     fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+        match self.decide(question, cancel) {
+            HostKeyDecision::Trusted(fingerprint) => Some(fingerprint),
+            HostKeyDecision::Refused | HostKeyDecision::Unanswered => None,
+        }
+    }
+
+    /// An answer is trust or a refusal (Cancel, Refuse, or the window closed: `deny_all`); no answer within `timeout`, or a question
+    /// withdrawn, is `Unanswered`.
+    fn decide(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> HostKeyDecision {
         let request = HostKeyRequest {
             user: question.user.clone(),
             id: String::new(),
@@ -177,8 +186,11 @@ impl HostKeyConfirmer for WindowConfirmer {
             fingerprint: question.fingerprint.clone(),
             changed: question.changed.as_ref().map(|pinned| PinnedHostKey { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: pinned.pinned_at_ms }),
         };
-        let answer = self.hub.ask(self.surface.as_ref(), request, self.timeout, cancel)?;
-        answer.trust.then_some(answer.fingerprint)
+        match self.hub.ask(self.surface.as_ref(), request, self.timeout, cancel) {
+            Some(answer) if answer.trust => HostKeyDecision::Trusted(answer.fingerprint),
+            Some(_) => HostKeyDecision::Refused,
+            None => HostKeyDecision::Unanswered,
+        }
     }
 }
 
@@ -287,7 +299,7 @@ mod tests {
     }
 
     fn question(alias: &str) -> HostKeyQuestion {
-        HostKeyQuestion { user: "deploy".into(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+        HostKeyQuestion { host: crate::ssh::HostId::from(format!("id-{alias}")), user: "deploy".into(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
     }
 
     fn wait_until(what: &str, condition: impl Fn() -> bool) {
@@ -332,6 +344,30 @@ mod tests {
         hub.deny_all();
         assert_eq!(asking.join().unwrap(), None);
         assert!(hub.pending().is_empty());
+    }
+
+    /// Design 2026-11-09: an AI client's call says whether the person refused the key or nobody answered, so the window's confirmer
+    /// tells them apart: Cancel or Refuse and a closed window are refusals; a question that runs out of time is no answer.
+    #[test]
+    fn the_window_tells_a_refusal_and_a_closed_window_from_a_question_nobody_answered() {
+        use crate::session::connect::HostKeyDecision;
+        let hub = Arc::new(HostKeyHub::default());
+        let surface: Arc<dyn HostKeySurface> = Arc::new(Recorder::default());
+        let confirmer = |timeout| WindowConfirmer { hub: Arc::clone(&hub), surface: Arc::clone(&surface), timeout };
+        assert_eq!(confirmer(Duration::from_millis(20)).decide(&question("web"), &CancelToken::default()), HostKeyDecision::Unanswered);
+        let answered = |answer: Option<HostKeyAnswer>| {
+            let asking = confirmer(Duration::from_secs(5));
+            let waiting = std::thread::spawn(move || asking.decide(&question("web"), &CancelToken::default()));
+            wait_until("the question", || !hub.pending().is_empty());
+            match answer {
+                Some(answer) => hub.resolve(&hub.pending()[0].id, answer).unwrap(),
+                None => hub.deny_all(),
+            }
+            waiting.join().unwrap()
+        };
+        assert_eq!(answered(Some(HostKeyAnswer { trust: false, fingerprint: "SHA256:new".into() })), HostKeyDecision::Refused);
+        assert_eq!(answered(None), HostKeyDecision::Refused, "the window was closed");
+        assert_eq!(answered(Some(HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() })), HostKeyDecision::Trusted("SHA256:new".into()));
     }
 
     /// A question withdrawn before it is asked (the client went away between the connect's own look at the token and `ask`) opens no

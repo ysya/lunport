@@ -279,12 +279,16 @@ fn mcp_legitimate_new_pin_and_explicit_interactive_password_fallback_still_execu
         assert_eq!(output["ended"], "exited");
         assert!(directory.pinned(&HostId::from("id-web")).unwrap().is_some());
         let actual = engine.targets.lock().unwrap();
-        assert_eq!(actual.first().unwrap().hops[0].auth, auth);
-        assert!(actual.last().unwrap().hops[0].pinned.is_some());
+        // Design 2026-11-09: the new key is decided in verify_host_key's handshake first (the destination resolved for a probe, which
+        // never logs in: once to meet the key, once more to see it pinned), then the connection logs in with the saved method, and
+        // the password fallback still follows.
+        let connects: Vec<_> = actual.iter().map(|target| (target.hops[0].auth.clone(), target.hops[0].pinned.is_some())).collect();
+        let mut expected = vec![(AuthMethod::Interactive, false), (AuthMethod::Interactive, true), (auth.clone(), true)];
         if fallback {
-            assert_eq!(actual.last().unwrap().hops[0].auth, AuthMethod::Password);
+            expected.push((AuthMethod::Password, true));
             assert_eq!(owner.asked().len(), 1);
         }
+        assert_eq!(connects, expected);
         assert_eq!(
             directory
                 .resolve(&HostQuery::Id("id-web".into()))

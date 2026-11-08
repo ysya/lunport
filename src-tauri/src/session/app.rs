@@ -118,7 +118,8 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
     })).with_confirmed_pin(Box::new(
         move |hop, previous, key, cancel, guard| {
             // Native host-key trust authorizes this one credential read, without lifting the
-            // background gate or changing Auto-log's no-pin policy.
+            // background gate. Which questions an AI client's call may ask is the MCP
+            // confirmer's (`mcp::records::ClientConfirmer`).
             crate::sync::engine::with_env(&app, |env| {
                 super::record_pin::confirm(env, hop, previous, key, cancel, guard)
             })

@@ -1,6 +1,6 @@
 use super::*;
 use crate::session::directory::HostDirectory;
-use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys};
+use crate::session::testing::{Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
 use crate::session::tunnels::TunnelLive;
 use crate::ssh::{
     fake::{default_server_key, FakeEngine},
@@ -162,7 +162,7 @@ fn the_tunnels_of_hosts_the_client_may_not_use_answer_as_unknown() {
     for result in [
         update(&d.env(), &r, &tunnels, &json!({"tunnel": "00000000000000f2", "port": 1}), RequestContext::default(), &CancelToken::default(), &never),
         delete(&d.env(), &r, &tunnels, &by_id, RequestContext::default(), &CancelToken::default(), &never),
-        start(&d.env(), &r, &tunnels, &connector, &by_id, RequestContext::default(), &CancelToken::default(), &never, &no_launch),
+        start(&d.env(), &r, &tunnels, &connector, &FakeOwner::default(), &by_id, RequestContext::default(), &CancelToken::default(), &never, &no_launch),
         stop(&d.env(), &r, &tunnels, &by_id, RequestContext::default(), &CancelToken::default()),
     ] {
         assert_eq!(result.unwrap_err(), unknown);
@@ -540,6 +540,13 @@ impl Route {
         }
         Route { engine: FakeEngine::new(), directory, keys: FakeKeys::new(), keychain: MemKeychain::default(), confirmer: FakeConfirmer::default() }
     }
+    /// The route whose host key window decides `decisions` (by default every question is refused).
+    fn deciding(self, decisions: Vec<Decision>) -> Route {
+        Route { confirmer: FakeConfirmer::deciding(decisions), ..self }
+    }
+    fn pin(&self, web: &str) -> Option<crate::ssh::HostKey> {
+        self.directory.pinned(&HostId::from(web)).unwrap().map(|pin| pin.key)
+    }
     fn connector(&self) -> Connector<'_> {
         Connector {
             engine: &self.engine,
@@ -589,11 +596,11 @@ fn starting_in_ask_mode_asks_with_the_route_and_answers_where_it_listens() {
     let tunnels = Tunnels::default();
     let web = host(&d, &r, "web-1", true);
     created(&d, &r, &tunnels);
-    let route = Route::to(&web, false);
+    let route = Route::to(&web, true);
     let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
     let context = RequestContext { requested_by: vec!["Terminal".into(), "claude".into()], ..Default::default() };
     let asked = AtomicUsize::new(0);
-    let value = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), context, &CancelToken::default(), &|q| {
+    let value = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), context, &CancelToken::default(), &|q| {
         asked.fetch_add(1, Ordering::SeqCst);
         assert_eq!(q.host_proposal.as_ref().unwrap().kind, proposal_kinds::START_TUNNEL);
         let rows = rows_of(q);
@@ -615,23 +622,80 @@ fn starting_in_ask_mode_asks_with_the_route_and_answers_where_it_listens() {
 }
 
 #[test]
-fn auto_log_starts_without_a_window_once_the_server_key_is_verified() {
+fn auto_log_starts_a_route_whose_server_key_is_verified_without_any_window() {
     let d = device();
     let r = runtime(ApprovalMode::AutoLog);
     let tunnels = Tunnels::default();
     let web = host(&d, &r, "web-1", true);
     created(&d, &r, &tunnels);
-    let unverified = Route::to(&web, false);
+    let verified = Route::to(&web, true);
     let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
     let launch = |rule: &TunnelRule, approved, mode, who| launches.launch(rule, approved, mode, who);
-    let error = start(&d.env(), &r, &tunnels, &unverified.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &launch).unwrap_err();
-    assert_eq!(error, "needs interaction: host key is not pinned");
-    assert!(launches.given().is_empty());
-    assert_eq!(last_outcome(&r), "tunnel_not_started");
-    let verified = Route::to(&web, true);
-    let value = start(&d.env(), &r, &tunnels, &verified.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &launch).unwrap();
+    let value = start(&d.env(), &r, &tunnels, &verified.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &launch).unwrap();
     assert_eq!(value["tunnel"]["state"], "running");
+    assert!(verified.confirmer.asked().is_empty(), "no host key window either");
     assert_eq!(launches.given(), vec![(ApprovalMode::AutoLog, "An unidentified AI client".to_string())]);
+    assert_eq!(last_outcome(&r), "tunnel_started");
+}
+
+fn recent_outcomes(r: &McpRuntime) -> Vec<String> {
+    r.recent.lock().unwrap().iter().map(|entry| entry.outcome.clone()).collect()
+}
+
+/// Design 2026-11-09: a server key this device has not verified is asked about in Lunport's trust window inside the start, in both modes
+/// (after the start's own approval in Ask mode), and the tunnel starts once the person trusts it; the trust decision is audited first.
+#[test]
+fn a_new_server_key_is_asked_about_then_the_tunnel_starts() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::AutoLog] {
+        let d = device();
+        let r = runtime(mode);
+        let tunnels = Tunnels::default();
+        let web = host(&d, &r, "web-1", true);
+        created(&d, &r, &tunnels);
+        let route = Route::to(&web, false).deciding(vec![Decision::Trust]);
+        let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
+        let approvals = AtomicUsize::new(0);
+        let approve = |_: &McpPendingRequest| {
+            assert!(route.confirmer.asked().is_empty(), "the start's approval comes before the key");
+            approvals.fetch_add(1, Ordering::SeqCst);
+            ApprovalDecision::Allow
+        };
+        let launch = |rule: &TunnelRule, approved, mode, who| launches.launch(rule, approved, mode, who);
+        let value = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &approve, &launch).unwrap();
+        assert_eq!(value["tunnel"]["state"], "running", "{mode:?}");
+        assert_eq!(approvals.load(Ordering::SeqCst), usize::from(mode == ApprovalMode::Ask), "{mode:?}");
+        let asked = route.confirmer.asked();
+        assert_eq!((asked.len(), asked[0].alias.as_str(), asked[0].changed.is_none()), (1, "web-1", true), "{mode:?}");
+        assert_eq!(route.pin(&web), Some(default_server_key()), "{mode:?}");
+        assert_eq!(launches.given().len(), 1, "{mode:?}");
+        assert_eq!(recent_outcomes(&r)[..2], ["tunnel_started", "host_key_verified"], "{mode:?}");
+    }
+}
+
+/// Refusing the key, closing the window or not answering it starts no tunnel and saves nothing, in both modes.
+#[test]
+fn a_new_server_key_refused_or_unanswered_starts_no_tunnel() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::AutoLog] {
+        for (decision, sentence) in [
+            (Decision::Refuse, "The server key of web-1 was denied in Lunport's trust window; nothing was saved and the tunnel did not start."),
+            (Decision::Unanswered, "Lunport's trust window for the server key of web-1 timed out after 2 minutes; nothing was saved and the tunnel did not start."),
+        ] {
+            let d = device();
+            let r = runtime(mode);
+            let tunnels = Tunnels::default();
+            let web = host(&d, &r, "web-1", true);
+            created(&d, &r, &tunnels);
+            let route = Route::to(&web, false).deciding(vec![decision]);
+            let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
+            let launch = |rule: &TunnelRule, approved, mode, who| launches.launch(rule, approved, mode, who);
+            let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &allow, &launch).unwrap_err();
+            assert_eq!(error, sentence, "{mode:?}");
+            assert_eq!(route.confirmer.asked().len(), 1, "{mode:?}");
+            assert!(launches.given().is_empty(), "nothing started ({mode:?})");
+            assert_eq!(route.pin(&web), None, "nothing saved ({mode:?})");
+            assert_eq!(recent_outcomes(&r)[..2], ["tunnel_not_started", "host_key_not_verified"], "{mode:?}");
+        }
+    }
 }
 
 #[test]
@@ -648,7 +712,7 @@ fn a_start_the_person_does_not_allow_starts_nothing() {
         created(&d, &r, &tunnels);
         let route = Route::to(&web, true);
         let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
-        let error = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| decision, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+        let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| decision, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
         assert_eq!(error, sentence);
         assert!(launches.given().is_empty());
         assert_eq!(last_outcome(&r), "tunnel_not_started");
@@ -695,7 +759,7 @@ fn a_start_whose_route_changed_during_the_window_starts_nothing() {
     }
     let directory = Switching { first: &route.directory, then: &changed.directory, switched: &resolving };
     let connector = Connector { directory: &directory, ..route.connector() };
-    let error = start(&d.env(), &r, &tunnels, &connector, &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| {
+    let error = start(&d.env(), &r, &tunnels, &connector, &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| {
         resolving.store(true, Ordering::SeqCst);
         ApprovalDecision::Allow
     }, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who))
@@ -714,7 +778,7 @@ fn a_start_that_fails_says_why() {
     let route = Route::to(&web, true);
     let failed = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some("Connection refused by web-1.example.com".into()), ..Default::default() }, started_by: None };
     let launches = Launches::new(&d, &tunnels, Some(failed));
-    let error = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+    let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
     assert_eq!(error, "The tunnel could not start: Connection refused by web-1.example.com");
     assert_eq!(last_outcome(&r), "tunnel_not_started");
 }
@@ -729,7 +793,7 @@ fn a_running_tunnel_answers_its_state_instead_of_starting_again() {
     start_here(&d, &tunnels, &id);
     let route = Route::to(&web, true);
     let launches = Launches::new(&d, &tunnels, None);
-    let value = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": id}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap();
+    let value = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": id}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap();
     assert_eq!(value["message"], "The tunnel is already running.");
     assert_eq!(value["tunnel"]["state"], "running");
     assert!(launches.given().is_empty());
@@ -747,7 +811,7 @@ fn a_start_canceled_while_connecting_leaves_nothing_running() {
     let launches = Launches::new(&d, &tunnels, None);
     let cancel = CancelToken::default();
     let entry = Mutex::new(None);
-    let error = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &cancel, &never, &|rule, approved, mode, who| {
+    let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &cancel, &never, &|rule, approved, mode, who| {
         let started = launches.launch(rule, approved, mode, who)?;
         *entry.lock().unwrap() = Some(Arc::clone(&started));
         cancel.cancel();
@@ -771,7 +835,7 @@ fn a_tunnel_still_connecting_says_so_instead_of_starting_again() {
     entry.set_live(TunnelLive { phase: TunnelPhase::Connecting, ..TunnelLive::default() });
     let route = Route::to(&web, true);
     let launches = Launches::new(&d, &tunnels, None);
-    let value = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": id}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap();
+    let value = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": id}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap();
     assert_eq!(value["message"], "The tunnel is already starting; read list_tunnels for its state.");
     assert_eq!(value["tunnel"]["state"], "connecting");
     assert!(launches.given().is_empty());
@@ -792,7 +856,7 @@ fn a_start_beyond_the_limit_is_refused_before_the_window() {
     }
     let route = Route::to(&web, true);
     let launches = Launches::new(&d, &tunnels, None);
-    let error = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+    let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
     assert_eq!(error, "16 tunnels are already active on this computer; stop one first.");
     assert!(launches.given().is_empty());
 }
@@ -807,7 +871,7 @@ fn a_start_whose_rule_changed_during_the_window_starts_nothing() {
     created(&d, &r, &tunnels);
     let route = Route::to(&web, true);
     let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
-    let error = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| {
+    let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| {
         let current = saved(&d).pop().unwrap();
         let mut other = current.clone();
         other.forward.bind_address = "0.0.0.0".into();
@@ -831,10 +895,10 @@ fn a_start_that_needs_the_person_says_so_as_ssh_exec_does() {
     let web = host(&d, &r, "web-1", true);
     created(&d, &r, &tunnels);
     let route = Route::to(&web, true);
-    let refused = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some("needs interaction: host key confirmation is required".into()), ..Default::default() }, started_by: None };
+    let refused = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some("needs interaction: the server key of web-1 changed; ask the user to review it with verify_host_key. Nothing was trusted.".into()), ..Default::default() }, started_by: None };
     let launches = Launches::new(&d, &tunnels, Some(refused));
-    let error = start(&d.env(), &r, &tunnels, &route.connector(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
-    assert_eq!(error, "needs interaction: host key confirmation is required");
+    let error = start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+    assert_eq!(error, "needs interaction: the server key of web-1 changed; ask the user to review it with verify_host_key. Nothing was trusted.");
 }
 
 /// What the app's worker asks while an AI client's tunnel connects and runs, over the real permission rules: turning AI access off
