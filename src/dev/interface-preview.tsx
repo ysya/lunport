@@ -403,8 +403,8 @@ else {
       useTerminalStore.getState().open({ host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
       return () => useTerminalStore.getState().reset();
     }, []);
-    if (scenario === "hostkey" || scenario === "hostkey-changed") return <HostKeyCard
-      request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
+    if (scenario === "hostkey" || scenario === "hostkey-changed" || scenario === "hostkey-saved") return <HostKeyCard
+      request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null, saved: scenario === "hostkey-saved" ? { fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
       busy={false} onAnswer={() => {}}
     />;
     if (scenario === "authentication" || scenario === "authentication-expired") return <AuthenticationCardView

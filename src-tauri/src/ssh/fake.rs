@@ -115,6 +115,8 @@ pub fn default_server_key() -> HostKey {
 struct Script {
     host_key: HostKey,
     host_keys: HashMap<String, HostKey>,
+    /// More host keys the server of a host has (by alias), besides the one it presents first.
+    other_host_keys: HashMap<String, Vec<HostKey>>,
     login: FakeLogin,
     logins: HashMap<String, FakeLogin>,
     connect_error: Option<ConnectError>,
@@ -163,6 +165,7 @@ impl FakeEngine {
         let script = Script {
             host_key: default_server_key(),
             host_keys: HashMap::new(),
+            other_host_keys: HashMap::new(),
             login: FakeLogin::Accept,
             logins: HashMap::new(),
             connect_error: None,
@@ -189,6 +192,12 @@ impl FakeEngine {
     /// The key every fake server presents.
     pub fn with_host_key(self, key: HostKey) -> FakeEngine {
         self.script(|script| script.host_key = key)
+    }
+
+    /// Another host key the server of one host (by alias) has, besides the one it presents first: a handshake that offers only `key`'s
+    /// type (a hop with `pinned` of that type) gets `key`, as from a real server with several host keys.
+    pub fn with_other_host_key_for(self, alias: &str, key: HostKey) -> FakeEngine {
+        self.script(|script| script.other_host_keys.entry(alias.to_string()).or_default().push(key))
     }
 
     /// The key the server of one host (by alias) presents, for jump chains.
@@ -340,7 +349,7 @@ fn hop_of(error: &ConnectError) -> Option<&HopRef> {
 impl SshEngine for FakeEngine {
     fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
         check_chain(target)?;
-        let (login_default, logins, key_default, keys, scripted_error, banner, prompt_wait) = {
+        let (login_default, logins, key_default, keys, other_keys, scripted_error, banner, prompt_wait) = {
             let mut script = locked(&self.shared.script);
             // A failure scripted for so many connects is spent by this one.
             let scripted_error = match script.connect_error_times {
@@ -356,6 +365,7 @@ impl SshEngine for FakeEngine {
                 script.logins.clone(),
                 script.host_key.clone(),
                 script.host_keys.clone(),
+                script.other_host_keys.clone(),
                 scripted_error,
                 script.banner.clone(),
                 script.prompt_wait,
@@ -371,12 +381,23 @@ impl SshEngine for FakeEngine {
             if let Some(error) = scripted_error.as_ref().filter(|error| hop_of(error).is_some_and(|failing| failing.id == hop.id)) {
                 return Err(error.clone());
             }
-            let key = keys.get(&hop.alias).unwrap_or(&key_default).clone();
-            // A pinned hop offers only its pin's key type in the handshake, as in the real engine: a server whose key is of another type has
-            // nothing in common with it.
-            if let Some(ours) = hop.pinned.as_ref().filter(|pinned| pinned.algorithm != key.algorithm).and_then(|pinned| offered_for_pin(&pinned.algorithm)) {
-                return Err(ConnectError::NoCommonHostKeyAlgorithm { hop: reference, ours, theirs: vec![key.algorithm] });
-            }
+            let first = keys.get(&hop.alias).unwrap_or(&key_default).clone();
+            let others = other_keys.get(&hop.alias).cloned().unwrap_or_default();
+            // A pinned hop offers only its pin's key type in the handshake, as in the real engine: the server presents its key of that type,
+            // and a server with no key of that type has nothing in common with it.
+            let key = match hop.pinned.as_ref().filter(|pinned| pinned.algorithm != first.algorithm) {
+                None => first,
+                Some(pinned) => match others.iter().find(|other| other.algorithm == pinned.algorithm) {
+                    Some(other) => other.clone(),
+                    None => match offered_for_pin(&pinned.algorithm) {
+                        Some(ours) => {
+                            let theirs = std::iter::once(first.algorithm).chain(others.into_iter().map(|other| other.algorithm)).collect();
+                            return Err(ConnectError::NoCommonHostKeyAlgorithm { hop: reference, ours, theirs });
+                        }
+                        None => first,
+                    },
+                },
+            };
             match host_keys.check(&reference, &key) {
                 HostKeyVerdict::Pinned => {}
                 HostKeyVerdict::Unknown => return Err(ConnectError::HostKeyUnknown { hop: reference, key }),

@@ -523,6 +523,7 @@ mod tests {
                     algorithm: "ssh-ed25519".into(),
                     fingerprint: "SHA256:fixture".into(),
                     changed: None,
+                    saved: None,
                 },
                 Duration::from_secs(5),
                 &CancelToken::default(),

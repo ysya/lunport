@@ -61,6 +61,9 @@ impl HostDirectory for ProbeDirectory<'_> {
     fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
         self.inner.pinned_for(hop)
     }
+    fn saved_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.inner.saved_for(hop)
+    }
     fn pin_for(&self, hop: &HopRef, key: &HostKey) -> Result<(), DirectoryError> {
         self.inner.pin_for(hop, key)
     }

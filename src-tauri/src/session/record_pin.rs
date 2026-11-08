@@ -92,8 +92,9 @@ pub(crate) fn confirm(
         .transpose()
         .map_err(failed)?;
     match current.as_ref().map(|p| &p.key) {
-        Some(current) if current != key && previous != Some(current)
-            && (previous.is_some() || super::credential_approval::matches(&captured, hop, current)) => {
+        // A key confirmed as new never replaces a saved one, approved on this device or not: a pin another device saved is asked about as
+        // the changed key it is, and `previous` names it (design 2026-11-09, saved pins).
+        Some(current) if current != key && previous != Some(current) => {
             return Err(failed("The confirmed host key changed; connect again."))
         }
         None if previous.is_some() => {
@@ -200,6 +201,91 @@ mod tests {
             key.fingerprint
         );
         assert!(matches!(saved.readiness, repo::HostReadiness::NeedsKey(_)));
+    }
+    /// A pin saved for the host without this device's approval, as one another device saved arrives here, dated 7.
+    fn save_unapproved(env: &SyncEnv, key: &HostKey) {
+        record_runtime::mutate_records(env, |s| {
+            repo::pin_host_key(
+                s,
+                HOST,
+                &repo::HostEndpoint { hostname: "fixture.invalid".into(), port: 22 },
+                None,
+                super::super::record_directory::stored(key),
+                7,
+            )
+            .map_err(failed)
+        })
+        .unwrap();
+    }
+    fn saved_pin(env: &SyncEnv) -> Option<crate::sync::records_v3::StoredHostKey> {
+        let state = record_runtime::snapshot(env).unwrap().0;
+        repo::get_host(&state, HOST).unwrap().host.payload.host_key
+    }
+    /// Design 2026-11-09 (saved pins): a key trusted as new (`previous: None`) never replaces a pin saved for the host, even one this device
+    /// has not approved (another device saved it): the person was not shown that pin. Accepted as the changed key it is (`previous` names
+    /// the saved pin), the key replaces the pin and is approved here.
+    #[test]
+    fn a_key_trusted_as_new_never_replaces_a_saved_pin_this_device_has_not_approved() {
+        let d = device();
+        let env = d.env();
+        let saved = HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap();
+        let key = crate::ssh::fake::default_server_key();
+        save_unapproved(&env, &saved);
+        let refused = confirm(&env, &hop(), None, &key, &CancelToken::default(), &|| Ok(()));
+        assert_eq!(refused.map_err(|error| error.to_string()), Err("The confirmed host key changed; connect again.".to_string()));
+        assert_eq!(saved_pin(&env).map(|pin| pin.fingerprint), Some(saved.fingerprint.clone()), "the saved pin stays");
+        let state = record_runtime::snapshot(&env).unwrap().0;
+        assert!(!state.local.credential_approvals.contains_key(HOST), "nothing was approved");
+
+        confirm(&env, &hop(), Some(&saved), &key, &CancelToken::default(), &|| Ok(())).unwrap();
+        assert_eq!(saved_pin(&env).map(|pin| pin.fingerprint), Some(key.fingerprint.clone()));
+        let state = record_runtime::snapshot(&env).unwrap().0;
+        assert!(super::super::credential_approval::matches(&state, &hop(), &key));
+    }
+    /// Another device replaced the saved pin while the changed-key window showed the old one: accepting the key against the pin the person
+    /// was shown writes nothing and approves nothing.
+    #[test]
+    fn accepting_a_changed_key_against_a_saved_pin_that_was_replaced_meanwhile_writes_nothing() {
+        let d = device();
+        let env = d.env();
+        let shown = HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap();
+        let meanwhile = HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::RSA_PUBLIC).unwrap();
+        save_unapproved(&env, &shown);
+        record_runtime::mutate_records(&env, |s| {
+            let current = repo::get_host(s, HOST).map_err(failed)?.host.payload.host_key;
+            repo::pin_host_key(
+                s,
+                HOST,
+                &repo::HostEndpoint { hostname: "fixture.invalid".into(), port: 22 },
+                current.as_ref(),
+                super::super::record_directory::stored(&meanwhile),
+                8,
+            )
+            .map_err(failed)
+        })
+        .unwrap();
+        let key = crate::ssh::fake::default_server_key();
+        let refused = confirm(&env, &hop(), Some(&shown), &key, &CancelToken::default(), &|| Ok(()));
+        assert_eq!(refused.map_err(|error| error.to_string()), Err("The confirmed host key changed; connect again.".to_string()));
+        assert_eq!(saved_pin(&env).map(|pin| (pin.fingerprint, pin.pinned_at_ms)), Some((meanwhile.fingerprint.clone(), 8)));
+        let state = record_runtime::snapshot(&env).unwrap().0;
+        assert!(!state.local.credential_approvals.contains_key(HOST), "nothing was approved");
+    }
+    /// The very key another device saved is approved here as it is (`previous: None`): its pin keeps the date it was saved with, and only
+    /// this device's approval is added.
+    #[test]
+    fn the_saved_key_itself_is_approved_here_without_rewriting_its_pin() {
+        let d = device();
+        let env = d.env();
+        let key = crate::ssh::fake::default_server_key();
+        save_unapproved(&env, &key);
+        let before = saved_pin(&env).unwrap();
+        confirm(&env, &hop(), None, &key, &CancelToken::default(), &|| Ok(())).unwrap();
+        let after = saved_pin(&env).unwrap();
+        assert_eq!((after.fingerprint.as_str(), after.pinned_at_ms), (key.fingerprint.as_str(), 7));
+        assert_eq!(after, before, "the pin is not written again");
+        let state = record_runtime::snapshot(&env).unwrap().0;
+        assert!(super::super::credential_approval::matches(&state, &hop(), &key));
     }
     #[test]
     fn a_central_host_can_be_locally_approved_without_legacy_credentials_or_network() {

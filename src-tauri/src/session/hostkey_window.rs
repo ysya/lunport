@@ -32,11 +32,14 @@ pub struct HostKeyRequest {
     pub port: u16,
     pub algorithm: String,
     pub fingerprint: String,
-    /// Set for a key that changed: the pinned one.
+    /// Set for a key that changed: the saved one it differs from, pinned on this device or saved by another one.
     pub changed: Option<PinnedHostKey>,
+    /// Set for a key this device has not confirmed that matches the one saved for the host: that saved one.
+    #[serde(default)]
+    pub saved: Option<PinnedHostKey>,
 }
 
-/// The pinned key a changed key replaces.
+/// A saved key: the pinned one a changed key replaces, or the one a key this device has not confirmed matches.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
@@ -185,6 +188,7 @@ impl HostKeyConfirmer for WindowConfirmer {
             algorithm: question.algorithm.clone(),
             fingerprint: question.fingerprint.clone(),
             changed: question.changed.as_ref().map(|pinned| PinnedHostKey { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: pinned.pinned_at_ms }),
+            saved: question.saved.as_ref().map(|saved| PinnedHostKey { fingerprint: saved.fingerprint.clone(), pinned_at_ms: saved.pinned_at_ms }),
         };
         match self.hub.ask(self.surface.as_ref(), request, self.timeout, cancel) {
             Some(answer) if answer.trust => HostKeyDecision::Trusted(answer.fingerprint),
@@ -299,7 +303,7 @@ mod tests {
     }
 
     fn question(alias: &str) -> HostKeyQuestion {
-        HostKeyQuestion { host: crate::ssh::HostId::from(format!("id-{alias}")), user: "deploy".into(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+        HostKeyQuestion { host: crate::ssh::HostId::from(format!("id-{alias}")), user: "deploy".into(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None, saved: None }
     }
 
     fn wait_until(what: &str, condition: impl Fn() -> bool) {
@@ -424,8 +428,26 @@ mod tests {
         assert_eq!(web.join().unwrap(), None);
     }
 
+    /// A key this device has not confirmed that matches the one saved for the host reaches the window with when that key was saved
+    /// (design 2026-11-09, saved pins), and is still a question for the person.
+    #[test]
+    fn a_key_that_matches_the_saved_one_reaches_the_window_with_when_it_was_saved() {
+        let hub = Arc::new(HostKeyHub::default());
+        let surface: Arc<dyn HostKeySurface> = Arc::new(Recorder::default());
+        let mut matching = question("web");
+        matching.saved = Some(PinnedSummary { fingerprint: "SHA256:new".into(), pinned_at_ms: 1_700_000_000_000 });
+        let confirmer = WindowConfirmer { hub: Arc::clone(&hub), surface, timeout: Duration::from_secs(5) };
+        let asking = std::thread::spawn(move || confirmer.confirm(&matching, &CancelToken::default()));
+        wait_until("the question", || !hub.pending().is_empty());
+        let shown = hub.pending();
+        assert_eq!(shown[0].changed, None);
+        assert_eq!(shown[0].saved, Some(PinnedHostKey { fingerprint: "SHA256:new".into(), pinned_at_ms: 1_700_000_000_000 }));
+        hub.resolve(&shown[0].id, HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
+        assert_eq!(asking.join().unwrap(), Some("SHA256:new".to_string()));
+    }
+
     fn request(alias: &str) -> HostKeyRequest {
-        HostKeyRequest { user: "deploy".into(), id: String::new(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+        HostKeyRequest { user: "deploy".into(), id: String::new(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None, saved: None }
     }
 
     /// An answered question whose `ask` has not woken up yet is no longer listed: it would be announced again, as the head, meanwhile.
@@ -510,7 +532,7 @@ mod tests {
     fn the_window_comes_to_the_front_only_for_a_new_question_at_the_head() {
         let list = |ids: &[&str]| {
             ids.iter()
-                .map(|id| HostKeyRequest { user: "deploy".into(), id: (*id).into(), alias: "web".into(), hostname: "web".into(), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:x".into(), changed: None })
+                .map(|id| HostKeyRequest { user: "deploy".into(), id: (*id).into(), alias: "web".into(), hostname: "web".into(), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:x".into(), changed: None, saved: None })
                 .collect::<Vec<_>>()
         };
         let mut shown = None;

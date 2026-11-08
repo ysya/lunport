@@ -414,7 +414,7 @@ pub(crate) fn run_for_ai(
     };
     let engine = CheckedEngine { inner: base.engine, check: &check_connected };
     let directory = PublicDirectory(base.directory, &check, &check_resolved, Asker::Automation);
-    let confirmer = ClientConfirmer::new(base.confirmer, base.directory, ai.auto_log);
+    let confirmer = ClientConfirmer::new(base.confirmer, ai.auto_log);
     let guarded = Connector {
         engine: &engine,
         directory: &directory,

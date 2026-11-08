@@ -178,6 +178,14 @@ pub trait HostDirectory: Send + Sync {
     fn replace_pin_for(&self, hop: &HopRef, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
         self.replace_pin(&hop.id, previous, key)
     }
+    /// The key saved for `hop`'s endpoint, whether or not this device approved it (design 2026-11-09, saved pins). Records keep one pin
+    /// per host in the library: another device may have saved it, or this one before its approval lapsed (a changed user, a new device
+    /// identity), and `pinned_for` shows only a pin this device approved. It tells the person what was saved; it never makes a key
+    /// trusted. A directory without device-local approval saves exactly what it pins: the default. A directory that wraps another must
+    /// forward this as it forwards `pinned_for`, or a key that differs from another device's saved one looks new through it.
+    fn saved_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.pinned_for(hop)
+    }
 
     /// A native trust decision. Records adapters may prepare credentials/relay outside lifecycle,
     /// then revalidate cancellation and the public snapshot before committing the pin.

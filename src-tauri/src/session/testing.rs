@@ -1,7 +1,7 @@
 //! Test doubles for the broker's tests (`#[cfg(test)]` in `session/mod.rs`): saved hosts in memory, and the checks every
 //! `HostDirectory` must pass.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory
 use super::protocol::{HostQuery, QuestionKind};
 use crate::sync::records_v3::MAX_JUMPS;
 use crate::ssh::fake::FakeEngine;
-use crate::ssh::{AuthMethod, AuthSource, ConnectError, DisconnectReason, ExecResult, Hop, HostId, HostKey, HostKeyPolicy, Pty, Session, SessionError, ShellChannel, SshEngine, Target};
+use crate::ssh::{AuthMethod, AuthSource, ConnectError, DisconnectReason, ExecResult, Hop, HopRef, HostId, HostKey, HostKeyPolicy, Pty, Session, SessionError, ShellChannel, SshEngine, Target};
 use crate::sync::slot_rules::test_keys;
 
 /// The passphrase of `test_keys::encrypted()`.
@@ -135,7 +135,8 @@ struct FakeHost {
 }
 
 /// Saved hosts and pins in memory. A host added as `web` has the id `id-web`, the hostname `web.example.com`, port 22 and the user
-/// `deploy`; pins are dated `PINNED_AT_MS`. Chains are resolved as the ssh_config adapter will: the first jump host's own jump hosts come
+/// `deploy`; pins are dated `PINNED_AT_MS`. A pin added with `with_saved_pin` is one this device has not approved, as Records keep a pin
+/// another device saved. Chains are resolved as the ssh_config adapter will: the first jump host's own jump hosts come
 /// in front of it (a later one is just itself, as OpenSSH routes a list), and a chain that loops, names a host twice without looping
 /// (`bastion,bastion`, the host itself as a later jump host, a later jump host that the first one's own jump hosts have) or names a host
 /// that is not saved is refused with the adapter's sentences.
@@ -143,6 +144,8 @@ struct FakeHost {
 pub struct FakeDirectory {
     hosts: Vec<FakeHost>,
     pins: Mutex<HashMap<HostId, PinnedKey>>,
+    /// The hosts whose pin this device has not approved (`with_saved_pin`); a pin written here is approved.
+    unapproved: Mutex<HashSet<HostId>>,
     /// Every call that reads the pins fails (`with_unreadable_pins`).
     unreadable_pins: bool,
 }
@@ -196,6 +199,19 @@ impl FakeDirectory {
         self
     }
 
+    /// A key saved for the host with this alias that this device has not approved, as Records keep the pin another device saved:
+    /// `resolve` and `pinned_for` leave it out, `pinned` and `saved_for` show it, and pinning a key (this one, or another in its place)
+    /// approves the pin.
+    pub fn with_saved_pin(self, alias: &str, key: HostKey) -> FakeDirectory {
+        locked(&self.unapproved).insert(HostId::from(format!("id-{alias}")));
+        self.with_pin(alias, key)
+    }
+
+    /// Whether `host` has a pin this device approved: any pin but one `with_saved_pin` added and nothing has been pinned over since.
+    pub fn approved(&self, host: &HostId) -> bool {
+        locked(&self.pins).contains_key(host) && !locked(&self.unapproved).contains(host)
+    }
+
     /// The pins cannot be read, as when the pin file is damaged: `resolve`, `pinned`, `pin` and `replace_pin` fail with `Failed`, which
     /// names `host-pins.json` as the real store's does, and write nothing. `pins()` still shows what was set with `with_pin`.
     pub fn with_unreadable_pins(mut self) -> FakeDirectory {
@@ -226,7 +242,8 @@ impl FakeDirectory {
     }
 
     fn with_its_pin(&self, hop: &Hop) -> Result<Hop, DirectoryError> {
-        Ok(Hop { pinned: self.readable_pins()?.get(&hop.id).map(|pin| pin.key.clone()), ..hop.clone() })
+        let pinned = self.readable_pins()?.get(&hop.id).map(|pin| pin.key.clone());
+        Ok(Hop { pinned: pinned.filter(|_| !locked(&self.unapproved).contains(&hop.id)), ..hop.clone() })
     }
 
     /// The hops of `host` and of its jump hosts, as OpenSSH routes them (`ProxyJump a,b,c` is `ssh -J a,b -W host c`, and `-J` replaces
@@ -291,28 +308,39 @@ impl HostDirectory for FakeDirectory {
         Ok(self.readable_pins()?.get(host).cloned())
     }
 
+    fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        let pin = self.readable_pins()?.get(&hop.id).cloned();
+        Ok(pin.filter(|_| !locked(&self.unapproved).contains(&hop.id)))
+    }
+
+    fn saved_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.pinned(&hop.id)
+    }
+
     fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
         let mut pins = self.readable_pins()?;
         match decide_pin(host, pins.get(host).map(|pinned| pinned.key.fingerprint.as_str()), key) {
-            PinDecision::AlreadyPinned => Ok(()),
-            PinDecision::Refuse(sentence) => Err(DirectoryError::Failed(sentence)),
+            PinDecision::AlreadyPinned => {}
+            PinDecision::Refuse(sentence) => return Err(DirectoryError::Failed(sentence)),
             PinDecision::Write => {
                 pins.insert(host.clone(), PinnedKey { key: key.clone(), pinned_at_ms: PINNED_AT_MS });
-                Ok(())
             }
         }
+        locked(&self.unapproved).remove(host);
+        Ok(())
     }
 
     fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
         let mut pins = self.readable_pins()?;
         match decide_replace(host, pins.get(host).map(|pinned| pinned.key.fingerprint.as_str()), previous, key) {
-            PinDecision::AlreadyPinned => Ok(()),
-            PinDecision::Refuse(sentence) => Err(DirectoryError::Failed(sentence)),
+            PinDecision::AlreadyPinned => {}
+            PinDecision::Refuse(sentence) => return Err(DirectoryError::Failed(sentence)),
             PinDecision::Write => {
                 pins.insert(host.clone(), PinnedKey { key: key.clone(), pinned_at_ms: PINNED_AT_MS });
-                Ok(())
             }
         }
+        locked(&self.unapproved).remove(host);
+        Ok(())
     }
 
     fn password_account(&self, host: &HostId) -> String {

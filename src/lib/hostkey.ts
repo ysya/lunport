@@ -33,7 +33,7 @@ export function onHostKeyRequests(
   );
 }
 
-/** When the old key was pinned, as the changed-key text says it. */
+/** When a saved key was pinned, as the changed-key and saved-key texts say it. */
 export function pinnedOn(pinnedAtMs: number): string {
   return new Date(pinnedAtMs).toLocaleString(undefined, {
     dateStyle: "medium",
@@ -48,10 +48,14 @@ export function hostKeyTitle(r: HostKeyRequest): string {
 }
 
 export function hostKeyBody(r: HostKeyRequest): string {
-  if (r.changed === null) {
-    return "This server is new to Lunport. Compare its fingerprint with a trusted source before connecting.";
+  if (r.changed !== null) {
+    return "This key differs from the saved identity. The connection may be intercepted. Refuse unless you have verified why the server's key changed.";
   }
-  return "This key differs from the saved identity. The connection may be intercepted. Refuse unless you have verified why the server's key changed.";
+  // The library already has this very key (another device saved it, or this one before its approval lapsed): each device still decides.
+  if (r.saved !== null) {
+    return `This key matches the one saved in your library on ${pinnedOn(r.saved.pinned_at_ms)}. Each device confirms a server key once before using it.`;
+  }
+  return "This server is new to Lunport. Compare its fingerprint with a trusted source before connecting.";
 }
 
 export function hostKeyEndpoint(r: HostKeyRequest): string {

@@ -149,18 +149,17 @@ impl KeyOutcome {
 const COMMAND_STOPPED: &str = "the command did not run";
 
 /// Lunport's host key window as an AI client's call asks it (design 2026-11-09): every question goes to the window, except that Auto-log
-/// refuses, without asking, a key that differs from the one saved for the host: a changed key, and a key other than the one another device
-/// saved (a pin this device has not approved yet). It remembers the first question that ended without trust, for the client's answer.
+/// refuses, without asking, a changed key. The connect path asks a key that differs from the one another device saved for the host (a pin
+/// this device has not approved yet) as a changed key too. It remembers the first question that ended without trust, for the client's
+/// answer.
 pub(crate) struct ClientConfirmer<'a> {
     window: &'a dyn HostKeyConfirmer,
-    /// Where the saved pins are read, approved on this device or not.
-    directory: &'a dyn crate::session::directory::HostDirectory,
     auto_log: bool,
     outcome: Mutex<Option<KeyOutcome>>,
 }
 impl<'a> ClientConfirmer<'a> {
-    pub(crate) fn new(window: &'a dyn HostKeyConfirmer, directory: &'a dyn crate::session::directory::HostDirectory, auto_log: bool) -> Self {
-        Self { window, directory, auto_log, outcome: Mutex::new(None) }
+    pub(crate) fn new(window: &'a dyn HostKeyConfirmer, auto_log: bool) -> Self {
+        Self { window, auto_log, outcome: Mutex::new(None) }
     }
     /// The client's answer when a question ended without trust (`stopped`: what did not happen); `None` when none did.
     pub(crate) fn answer(&self, stopped: Option<&str>) -> Option<String> {
@@ -168,14 +167,6 @@ impl<'a> ClientConfirmer<'a> {
     }
     fn note(&self, outcome: KeyOutcome) {
         self.outcome.lock().unwrap().get_or_insert(outcome);
-    }
-    /// Whether `question`'s key differs from the one saved for its host, on this device or another. A pin that cannot be read differs.
-    fn differs(&self, question: &HostKeyQuestion) -> bool {
-        question.changed.is_some()
-            || match self.directory.pinned(&question.host) {
-                Ok(saved) => saved.is_some_and(|saved| saved.key.fingerprint != question.fingerprint),
-                Err(_) => true,
-            }
     }
 }
 impl HostKeyConfirmer for ClientConfirmer<'_> {
@@ -187,7 +178,7 @@ impl HostKeyConfirmer for ClientConfirmer<'_> {
     }
     fn decide(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> HostKeyDecision {
         let alias = crate::session::auth::printable(&question.alias).replace(['\n', '\t'], "?");
-        if self.auto_log && self.differs(question) {
+        if self.auto_log && question.changed.is_some() {
             self.note(KeyOutcome::Changed(alias));
             return HostKeyDecision::Refused;
         }
@@ -377,6 +368,15 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         crate::session::directory::DirectoryError,
     > {
         self.0.pinned_for(h)
+    }
+    fn saved_for(
+        &self,
+        h: &crate::ssh::HopRef,
+    ) -> Result<
+        Option<crate::session::directory::PinnedKey>,
+        crate::session::directory::DirectoryError,
+    > {
+        self.0.saved_for(h)
     }
     fn pin_for(
         &self,
@@ -589,7 +589,7 @@ pub(super) fn execute_context(
                 }
             }
             check()?;
-            let confirmer = ClientConfirmer::new(connector.confirmer, connector.directory, mode == ApprovalMode::AutoLog);
+            let confirmer = ClientConfirmer::new(connector.confirmer, mode == ApprovalMode::AutoLog);
             verify_unverified(runtime, connector, &query, &target, owner, cancel, &check, &confirmer, (&context, mode), COMMAND_STOPPED)?;
             let check_resolved = |actual: &Target| approved.check_resolved(actual, connector.keys);
             let check_connected = |actual: &Target| {
@@ -1827,75 +1827,49 @@ mod behavior_tests {
         assert!(!executed(&e));
     }
 
-    /// A key that differs from the one another device saved for the host (a pin this device has not approved) counts as changed in
-    /// Auto-log; the very key another device saved is asked about as new, and trusted here.
+    /// A key that differs from the one another device saved for the host (a pin this device has not approved) is a changed key, as the
+    /// connect path asks it (design 2026-11-09, saved pins): Auto-log refuses it without a window, and Ask mode warns about it in the window,
+    /// with the saved key. The very key another device saved is asked about as new, says when it was saved, and is trusted here in both
+    /// modes.
     #[test]
-    fn auto_log_counts_a_key_that_differs_from_another_devices_saved_key_as_changed() {
-        use crate::session::directory::{DirectoryError, HostDirectory, PinnedKey};
-        use crate::ssh::{HopRef, HostId, HostKey};
-        /// Pins this device has not approved: resolution and `pinned_for` do not show them, `pinned` does (as the Records directory reads
-        /// a synced pin); a pin written here is approved.
-        struct Unapproved {
-            inner: FakeDirectory,
-            approved: Mutex<BTreeSet<String>>,
-        }
-        impl Unapproved {
-            fn of(inner: FakeDirectory) -> Unapproved {
-                Unapproved { inner, approved: Mutex::default() }
-            }
-            fn approved(&self, host: &HostId) -> bool {
-                self.approved.lock().unwrap().contains(host.as_str())
-            }
-        }
-        impl HostDirectory for Unapproved {
-            fn resolve(&self, q: &HostQuery) -> Result<Target, DirectoryError> {
-                let mut target = self.inner.resolve(q)?;
-                for hop in &mut target.hops {
-                    if !self.approved(&hop.id) {
-                        hop.pinned = None;
-                    }
-                }
-                Ok(target)
-            }
-            fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
-                self.inner.pinned(host)
-            }
-            fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
-                if self.approved(&hop.id) { self.inner.pinned_for(hop) } else { Ok(None) }
-            }
-            fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
-                self.inner.pin(host, key)?;
-                self.approved.lock().unwrap().insert(host.as_str().into());
-                Ok(())
-            }
-            fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
-                self.inner.replace_pin(host, previous, key)?;
-                self.approved.lock().unwrap().insert(host.as_str().into());
-                Ok(())
-            }
-            fn password_account(&self, host: &HostId) -> String {
-                self.inner.password_account(host)
-            }
-        }
+    fn a_key_that_differs_from_another_devices_saved_key_is_a_changed_key_in_both_modes() {
+        let web = crate::ssh::HostId::from("id-web");
         let r = runtime(ApprovalMode::AutoLog);
         let e = FakeEngine::new();
-        let d = Unapproved::of(directory(AuthMethod::Password, false).with_pin("web", other_key()));
+        let d = directory(AuthMethod::Password, false).with_saved_pin("web", other_key());
         let window = FakeConfirmer::deciding(vec![Decision::Trust]);
         let error = run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| panic!("auto-log never asks approval")).unwrap_err();
         assert_eq!(error, CHANGED);
         assert!(window.asked().is_empty(), "no window");
-        assert!(!d.approved(&HostId::from("id-web")));
+        assert_eq!(pin_of(&d), Some(other_key()), "the saved key stays");
+        assert!(!d.approved(&web));
         assert!(!executed(&e));
 
-        let r = runtime(ApprovalMode::AutoLog);
+        let r = runtime(ApprovalMode::Ask);
         let e = FakeEngine::new();
-        let d = Unapproved::of(directory(AuthMethod::Password, false).with_pin("web", default_server_key()));
+        let d = directory(AuthMethod::Password, false).with_saved_pin("web", other_key());
         let window = FakeConfirmer::deciding(vec![Decision::Trust]);
-        run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| panic!("auto-log never asks approval")).unwrap();
-        assert_eq!(window.asked().len(), 1);
-        assert!(window.asked()[0].changed.is_none(), "asked about as new");
-        assert!(d.approved(&HostId::from("id-web")));
+        run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap();
+        let asked = window.asked();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].changed.as_ref().map(|pinned| pinned.fingerprint.clone()), Some(other_key().fingerprint), "warned about as changed");
+        assert_eq!(pin_of(&d), Some(default_server_key()));
+        assert!(d.approved(&web));
         assert!(executed(&e));
+
+        for mode in [ApprovalMode::AutoLog, ApprovalMode::Ask] {
+            let r = runtime(mode);
+            let e = FakeEngine::new();
+            let d = directory(AuthMethod::Password, false).with_saved_pin("web", default_server_key());
+            let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+            run_with(&r, &e, &d, &FakeOwner::typing(&["secret"]), &window, &|_| ApprovalDecision::Allow).unwrap();
+            let asked = window.asked();
+            assert_eq!(asked.len(), 1, "{mode:?}");
+            assert!(asked[0].changed.is_none(), "asked about as new ({mode:?})");
+            assert_eq!(asked[0].saved.as_ref().map(|saved| saved.fingerprint.clone()), Some(default_server_key().fingerprint), "{mode:?}");
+            assert!(d.approved(&web), "{mode:?}");
+            assert!(executed(&e), "{mode:?}");
+        }
     }
 }
 

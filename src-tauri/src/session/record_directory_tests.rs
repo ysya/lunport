@@ -522,6 +522,28 @@ fn synchronized_identity_changes_never_release_a_locally_saved_password() {
     }
 }
 
+/// Design 2026-11-09 (saved pins): `saved_for` shows the library's pin of the endpoint that connected even when this device has not
+/// approved it, which resolution and `pinned_for` leave out, and refuses an endpoint that changed since the connect resolved it.
+#[test]
+fn saved_for_shows_a_pin_this_device_has_not_approved_and_checks_the_endpoint() {
+    let original = add(&state(), WEB, payload("web"));
+    let original = repo::pin_host_key(&original, WEB, &HostEndpoint { hostname: "web.example.com".into(), port: 22 }, None, stored(&key()), 1).unwrap();
+    let (directory, shared, _) = fixture(original, true, true);
+    let hop = directory.resolve(&HostQuery::Id(WEB.into())).unwrap().hops.remove(0);
+    assert!(hop.pinned.is_none(), "resolution leaves the unapproved pin out");
+    let hop = hop.reference();
+    assert_eq!(directory.pinned_for(&hop).unwrap(), None);
+    assert_eq!(directory.saved_for(&hop).unwrap().map(|pin| (pin.key, pin.pinned_at_ms)), Some((key(), 1)));
+    {
+        let mut state = shared.lock().unwrap();
+        let view = repo::get_host(&state, WEB).unwrap();
+        let mut payload = view.host.payload;
+        payload.user = "root".into();
+        *state = repo::update_host(&state, WEB, &view.revision, payload, 2).unwrap();
+    }
+    assert!(directory.saved_for(&hop).is_err(), "the endpoint changed since the connect resolved it");
+}
+
 #[test]
 fn harmless_edits_preserve_local_approval_but_forgotten_pins_do_not() {
     let (directory, shared, _) = fixture(add(&state(), WEB, payload("web")), true, true);
