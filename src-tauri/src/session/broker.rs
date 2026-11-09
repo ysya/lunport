@@ -1139,6 +1139,7 @@ mod tests {
         let world = world_with(engine, pinned_web(), Arc::new(FakeConfirmer::default()), MemKeychain::default());
         let hub = Arc::new(AuthHub::default());
         world.broker.set_authentication_owner({ let hub = Arc::clone(&hub); Arc::new(move |id, cancel| Arc::new(NativeOwner {
+            ai: None,
             hub: Arc::clone(&hub), surface: Arc::new(Surface), request_id: format!("terminal-{id}"), cancel,
         })) });
         (world, hub)

@@ -503,6 +503,7 @@ mod tests {
         }
         let state = Arc::new(crate::state::AppState::default());
         let owner = NativeOwner {
+            ai: None,
             hub: state.session.auth_questions.clone(),
             surface: Arc::new(Silent),
             request_id: "health-test".into(),
@@ -515,6 +516,7 @@ mod tests {
             host_state.session.host_keys.ask(
                 &Silent,
                 HostKeyRequest {
+                    ai: None,
                     user: "ops".into(),
                     id: String::new(),
                     alias: "fixture".into(),

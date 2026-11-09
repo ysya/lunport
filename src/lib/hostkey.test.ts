@@ -28,6 +28,7 @@ function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
     fingerprint: "SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew",
     changed: null,
     saved: null,
+    ai: null,
     ...over,
   };
 }

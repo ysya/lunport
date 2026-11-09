@@ -268,12 +268,50 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         )
         .unwrap();
         assert_eq!(value["fingerprint"], default_server_key().fingerprint);
-        assert_eq!(confirmer.asked().len(), 1);
+        // The window names the AI client (design 2026-11-09, native windows for AI requests); nothing runs after a verification, so it
+        // has no Auto-log note.
+        assert_eq!(
+            confirmer.asked().into_iter().map(|question| question.ai).collect::<Vec<_>>(),
+            [Some(crate::session::protocol::AiAsker { client: "An unidentified AI client".into(), unreviewed: None })],
+            "{mode:?}"
+        );
         assert!(
             engine.events().is_empty(),
             "verification cannot authenticate, execute or open a shell"
         );
         assert!(r.records_active.lock().unwrap().is_empty());
+    }
+}
+/// verify_host_key on a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window (design
+/// 2026-11-09, native windows for AI requests), in both modes, and then shows the server key.
+#[test]
+fn verification_asks_for_the_grant_its_host_needs() {
+    use crate::session::testing::{grant_answer, grant_need, NeedsGrant};
+    for mode in [ApprovalMode::Ask, ApprovalMode::AutoLog] {
+        let r = runtime(mode);
+        r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+        let inner = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "missing".into() });
+        let directory = NeedsGrant::new(&inner, grant_need("web", "acme-verify-302010"));
+        let engine = FakeEngine::new();
+        let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
+        let owner = FakeOwner::typing(&[&grant_answer(30, "check the server fingerprint")]);
+        let (keys, keychain) = (FakeKeys::new(), MemKeychain::default());
+        let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
+            directory: &directory,
+            engine: &engine,
+            confirmer: &confirmer,
+            keys: &keys,
+            keychain: &keychain,
+        };
+        let value = verify(&r, &connector, "web", RequestContext::default(), &CancelToken::default(), &owner, &ensure_allowed).unwrap();
+        assert_eq!(value["fingerprint"], default_server_key().fingerprint, "{mode:?}");
+        assert_eq!(
+            owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(),
+            [crate::session::protocol::QuestionKind::Grant],
+            "{mode:?}"
+        );
+        assert_eq!(directory.requested(), [("check the server fingerprint".to_string(), 30 * 60)], "{mode:?}");
     }
 }
 #[test]

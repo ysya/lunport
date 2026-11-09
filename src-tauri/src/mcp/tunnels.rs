@@ -4,8 +4,8 @@ use super::management::{active, find_host, live, route_label};
 use super::*;
 use crate::session::{
     connect::{CancelToken, Connector},
-    protocol::HostQuery,
-    tunnels::{Entry, TunnelPhase, TunnelView, Tunnels},
+    protocol::{AiAsker, HostQuery, Unreviewed},
+    tunnels::{Entry, TunnelLive, TunnelPhase, TunnelView, Tunnels},
 };
 use crate::ssh::forward::{ForwardKind, ForwardSpec};
 use crate::sync::{
@@ -16,7 +16,8 @@ use crate::sync::{
     tunnel_rules::{self, TunnelRule},
 };
 
-/// How long `start_tunnel` waits for the tunnel to run or fail before it answers that it is still connecting.
+/// How long `start_tunnel` waits for the tunnel to run or fail before it answers that it is still connecting, unless the tunnel's
+/// connection has one of Lunport's windows open for the person (`wait_for_start`).
 const START_WAIT: Duration = Duration::from_secs(90);
 /// How long `stop_tunnel` waits for the tunnel to finish stopping.
 const STOP_WAIT: Duration = Duration::from_secs(5);
@@ -587,16 +588,6 @@ pub(super) fn delete(
 pub(super) type Launch<'a> =
     dyn Fn(&TunnelRule, records::ApprovedTarget, ApprovalMode, String) -> Result<Arc<Entry>, String> + 'a;
 
-/// Who started a tunnel, as the Tunnels panel names it: the requester Lunport observed, never what the client says of itself.
-fn started_by(context: &RequestContext) -> String {
-    let observed: Vec<&str> = context.requested_by.iter().map(String::as_str).filter(|name| *name != "Unknown").collect();
-    if observed.is_empty() {
-        "An unidentified AI client".into()
-    } else {
-        observed.join(" → ")
-    }
-}
-
 /// The most tunnels that run on one device at once (`Tunnels::prepare` refuses the next).
 const MAX_ACTIVE: usize = 16;
 
@@ -668,7 +659,7 @@ pub(super) fn start(
         approved.check(connector, &query)?;
         // A server key this device has not verified is decided here (design 2026-11-09), before the tunnel launches: its worker would
         // ask while this call waits only `START_WAIT`. A rule changed meanwhile is refused by the launch.
-        let confirmer = records::ClientConfirmer::new(connector.confirmer, mode == ApprovalMode::AutoLog);
+        let confirmer = records::ClientConfirmer::new(connector.confirmer, records::asker(&context, mode, Unreviewed::Tunnel));
         let host_still_allowed = || -> Result<(), String> {
             live(runtime, mode, cancel)?;
             let current = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
@@ -676,31 +667,9 @@ pub(super) fn start(
             approved.check(connector, &query)
         };
         records::verify_unverified(runtime, connector, &query, &target, owner, cancel, &host_still_allowed, &confirmer, (&context, mode), TUNNEL_STOPPED)?;
-        let entry = launch(&rule, approved.clone(), mode, started_by(&context))?;
-        let deadline = Instant::now() + START_WAIT;
+        let entry = launch(&rule, approved.clone(), mode, records::client_label(&context))?;
         // The answer is the tunnel as last seen, so that its state, the message and the audit agree.
-        let seen = loop {
-            let now = entry.live();
-            match now.phase {
-                TunnelPhase::Running => break now,
-                TunnelPhase::Error => {
-                    let error = now.forwarding.error.as_deref().map(safe).unwrap_or_else(|| "it ended.".into());
-                    // As `ssh_exec` says it, so that a client can tell what it needs from the person.
-                    return Err(if error.starts_with("needs interaction:") { error } else { format!("The tunnel could not start: {error}") });
-                }
-                TunnelPhase::Stopped => return Err("The tunnel was stopped before it ran.".into()),
-                TunnelPhase::Connecting | TunnelPhase::Stopping => {}
-            }
-            if cancel.is_cancelled() {
-                // The client went away or its access changed while the tunnel connected: nothing is left running for it.
-                entry.stop();
-                return Err("Tunnel start was canceled.".into());
-            }
-            if Instant::now() >= deadline {
-                break now;
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
+        let seen = wait_for_start(&entry, cancel, START_WAIT)?;
         let current = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
         let mut view = tunnels.list(&current).into_iter().find(|view| view.rule.id == rule.id).ok_or("The saved tunnel no longer exists.")?;
         view.live = seen;
@@ -728,6 +697,35 @@ pub(super) fn start(
         ..Default::default()
     });
     result
+}
+
+/// Waits until the started tunnel `entry` runs or fails, up to `wait`, and answers it as last seen. While its connection has one of
+/// Lunport's windows open for the person (a server key, a password, a grant; design 2026-11-09, native windows for AI requests), it waits
+/// on past `wait`: the windows' own limits end the wait, and a client that cancels stops the tunnel, which withdraws them.
+fn wait_for_start(entry: &Entry, cancel: &CancelToken, wait: Duration) -> Result<TunnelLive, String> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let now = entry.live();
+        match now.phase {
+            TunnelPhase::Running => return Ok(now),
+            TunnelPhase::Error => {
+                let error = now.forwarding.error.as_deref().map(safe).unwrap_or_else(|| "it ended.".into());
+                // As `ssh_exec` says it, so that a client can tell what it needs from the person.
+                return Err(if error.starts_with("needs interaction:") { error } else { format!("The tunnel could not start: {error}") });
+            }
+            TunnelPhase::Stopped => return Err("The tunnel was stopped before it ran.".into()),
+            TunnelPhase::Connecting | TunnelPhase::Stopping => {}
+        }
+        if cancel.is_cancelled() {
+            // The client went away or its access changed while the tunnel connected: nothing is left running for it.
+            entry.stop();
+            return Err("Tunnel start was canceled.".into());
+        }
+        if Instant::now() >= deadline && !entry.asking() {
+            return Ok(now);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// `stop_tunnel`: a running tunnel of the client's stopped, without a window; one that is not running is left as it is.
@@ -798,21 +796,20 @@ pub(super) fn launcher(app: &AppHandle) -> impl Fn(&TunnelRule, records::Approve
     move |rule, approved, mode, started_by| {
         let host_id = rule.host_id.clone();
         let worker_app = app.clone();
+        // Who asks in the windows the tunnel's connection opens (design 2026-11-09, native windows for AI requests): the client, and in
+        // Auto-log that the tunnel then starts without review.
+        let asker = AiAsker { client: started_by, unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Tunnel) };
+        let for_worker = asker.clone();
         let work: crate::session::tunnels::Work = Box::new(move |rule, entry, connector, owner, account, needs_grant| {
             let state = worker_app.state::<AppState>();
             let policy = || state.mcp.policy.lock().unwrap().clone();
             let authorize = |policy: &McpPolicy| permissions::authorize(&state, policy, &host_id);
             let allowed = || may_connect(&policy(), mode, authorize);
             let revoked = || access_ended(&policy(), authorize);
-            let ai = crate::session::tunnels::AiApproval {
-                approved: &approved,
-                auto_log: mode == ApprovalMode::AutoLog,
-                allowed: &allowed,
-                revoked: &revoked,
-            };
+            let ai = crate::session::tunnels::AiApproval { approved: &approved, asker: for_worker, allowed: &allowed, revoked: &revoked };
             crate::session::tunnels::run_for_ai(rule, entry, connector, owner, &ai, account, needs_grant)
         });
-        crate::session::tunnels::launch(app, rule, Some(started_by), work)
+        crate::session::tunnels::launch(app, rule, Some(asker), work)
     }
 }
 
@@ -836,7 +833,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         json!({"name":"create_tunnel","title":"Propose a new tunnel","description":"Propose a saved tunnel through a host this client may use. Lunport always asks the user before saving, including in Auto-log mode, and shows who could reach the listener. Does not start it; use start_tunnel.","inputSchema":{"type":"object","properties":{"name":{"type":"string","maxLength":128},"host":{"type":"string","description":"AI-approved stable host ID or exact unambiguous alias of the host the tunnel goes through."},"kind":with_default(&kind, json!("local")),"bind_address":with_default(&bind_address, json!("127.0.0.1")),"port":with_default(&port, json!(0)),"target_host":target_host.clone(),"target_port":target_port.clone()},"required":["name","host"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}),
         json!({"name":"update_tunnel","title":"Change a tunnel","description":"Propose changes to a saved tunnel through a host this client may use. Only the fields given change; changing kind to dynamic clears the destination. Lunport always asks the user before saving, including in Auto-log mode, and shows each change as old → new. A running tunnel must be stopped first.","inputSchema":{"type":"object","properties":{"tunnel":tunnel,"name":{"type":"string","maxLength":128},"host":{"type":"string","description":"AI-approved stable host ID or exact unambiguous alias of the host to go through instead."},"kind":kind,"bind_address":bind_address,"port":port,"target_host":target_host,"target_port":target_port},"required":["tunnel"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}),
         json!({"name":"delete_tunnel","title":"Delete a tunnel","description":"Propose deleting a saved tunnel through a host this client may use. Lunport always asks the user first, including in Auto-log mode. A running tunnel must be stopped first.","inputSchema":only_tunnel.clone(),"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}}),
-        json!({"name":"start_tunnel","title":"Start a tunnel","description":"Start a saved tunnel on this computer under the current Lunport Ask or Auto-log policy and wait until it runs (up to 90 seconds); answers where it listens. Ask mode shows the tunnel in Lunport's approval window. A server key Lunport has not verified yet opens Lunport's native trust window first, in both modes; in Auto-log a changed server key is refused and the user reviews it with verify_host_key. Credentials may be requested through Lunport's native windows. The tunnel keeps running after this call until stop_tunnel or the user stops it; Lunport stops it when AI access to its host ends.","inputSchema":only_tunnel.clone(),"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
+        json!({"name":"start_tunnel","title":"Start a tunnel","description":"Start a saved tunnel on this computer under the current Lunport Ask or Auto-log policy and wait until it runs (up to 90 seconds, longer while one of Lunport's windows waits for the user); answers where it listens. Ask mode shows the tunnel in Lunport's approval window. In both modes a new or changed server key opens Lunport's native trust window, and a Privileged Access Manager grant the route needs Lunport's Request a grant window. Credentials may be requested through Lunport's native windows. The tunnel keeps running after this call until stop_tunnel or the user stops it; Lunport stops it when AI access to its host ends.","inputSchema":only_tunnel.clone(),"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true}}),
         json!({"name":"stop_tunnel","title":"Stop a tunnel","description":"Stop a running tunnel through a host this client may use, including one the user started. Does not ask; a tunnel that is not running is left as it is.","inputSchema":only_tunnel,"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}}),
     ]
 }

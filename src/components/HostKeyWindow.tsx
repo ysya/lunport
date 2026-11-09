@@ -19,6 +19,7 @@ import {
   resolveHostKey,
 } from "@/lib/hostkey";
 import { revealHidden } from "@/lib/reveal-hidden";
+import { askedBy, unreviewedNote } from "@/lib/ai-asker";
 import { copyText } from "@/lib/clipboard";
 import { useApplyTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -37,6 +38,7 @@ export function HostKeyCardView({
 }) {
   const buttons = hostKeyButtons(request);
   const changed = request.changed !== null;
+  const unreviewed = request.ai && unreviewedNote(request.ai, "hostkey");
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   useEffect(() => {
@@ -85,6 +87,12 @@ export function HostKeyCardView({
           <p role="alert" className="text-xs leading-relaxed text-destructive">
             {hostKeyBody(request)}
           </p>
+        )}
+        {request.ai && (
+          <section aria-label="AI request" className="space-y-1 text-xs leading-relaxed">
+            <p className="text-muted-foreground">{askedBy(request.ai)}</p>
+            {unreviewed && <p className="font-medium">{unreviewed}</p>}
+          </section>
         )}
         <div className="flex items-start justify-between gap-4 text-xs">
           <div className="min-w-0 space-y-1">

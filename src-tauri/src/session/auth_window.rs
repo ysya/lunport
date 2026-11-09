@@ -31,6 +31,9 @@ pub struct AuthRequest {
     /// The form of a `grant` question (design 2026-10-25, PAM grant requests); `None` for every other kind.
     #[serde(default)]
     pub grant: Option<GrantPrompt>,
+    /// The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` for a person's connection.
+    #[serde(default)]
+    pub ai: Option<crate::session::protocol::AiAsker>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -117,6 +120,9 @@ pub struct NativeOwner {
     pub surface: Arc<dyn AuthSurface>,
     pub request_id: String,
     pub cancel: CancelToken,
+    /// The AI client whose request this owner answers for (design 2026-11-09, native windows for AI requests): every question it asks
+    /// names it. `None` for a person's connection.
+    pub ai: Option<crate::session::protocol::AiAsker>,
 }
 impl NativeOwner {
     fn ask_context(
@@ -163,6 +169,7 @@ impl NativeOwner {
             echo,
             remaining_ms: deadline.remaining().as_millis() as u64,
             grant,
+            ai: self.ai.clone(),
         };
         {
             let mut p = self.hub.pending.lock().unwrap();
@@ -354,7 +361,7 @@ mod tests {
     /// grant anywhere in the queue gets the taller window (design 2026-10-25, PAM grant requests).
     #[test]
     fn the_window_is_taller_for_a_grant_form_than_for_a_servers_question() {
-        let password = AuthRequest { id: "a".into(), request_id: "r".into(), hop: None, kind: "password".into(), text: "pw".into(), echo: false, remaining_ms: 1, grant: None };
+        let password = AuthRequest { ai: None, id: "a".into(), request_id: "r".into(), hop: None, kind: "password".into(), text: "pw".into(), echo: false, remaining_ms: 1, grant: None };
         let grant = AuthRequest { kind: "grant".into(), ..password.clone() };
         assert_eq!(window_size(&[]), (480.0, 360.0));
         assert_eq!(window_size(&[password.clone()]), (480.0, 360.0));
@@ -366,7 +373,7 @@ mod tests {
     fn a_grant_question_carries_its_prompt_and_waits_five_minutes() {
         use crate::session::protocol::GrantAnswer;
         let hub = Arc::new(AuthHub::default());
-        let owner = NativeOwner { hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "terminal-7".into(), cancel: CancelToken::default() };
+        let owner = NativeOwner { ai: None, hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "terminal-7".into(), cancel: CancelToken::default() };
         let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
         let text = prompt.to_text();
         let worker = std::thread::spawn(move || owner.ask(QuestionKind::Grant, &text, true, Some(Instant::now() + Duration::from_secs(3600))));
@@ -383,6 +390,29 @@ mod tests {
             other => panic!("expected the answer, got {other:?}"),
         }
     }
+
+    /// Every question an AI client's request asks names the client and what then goes ahead without review (design 2026-11-09, native
+    /// windows for AI requests): a grant and a password alike. A person's questions name nobody.
+    #[test]
+    fn an_ai_clients_questions_name_the_client() {
+        use crate::session::protocol::{AiAsker, Unreviewed};
+        let asker = AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command) };
+        let grant = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None }.to_text();
+        for (ai, kind, text) in [
+            (Some(asker.clone()), QuestionKind::Grant, grant.clone()),
+            (Some(asker), QuestionKind::Password, "Password".to_string()),
+            (None, QuestionKind::Grant, grant),
+        ] {
+            let hub = Arc::new(AuthHub::default());
+            let owner = NativeOwner { ai: ai.clone(), hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "mcp-1".into(), cancel: CancelToken::default() };
+            let worker = std::thread::spawn(move || owner.ask(kind, &text, false, None));
+            wait(&hub);
+            let q = hub.pending().remove(0);
+            assert_eq!(q.ai, ai, "{kind:?}");
+            hub.resolve(&q.id, None).unwrap();
+            assert!(matches!(worker.join().unwrap(), Reply::Cancelled), "{kind:?}");
+        }
+    }
     #[test]
     fn native_questions_bound_escape_and_cancel_all_interactive_categories() {
         for kind in [
@@ -394,6 +424,7 @@ mod tests {
             let surface = Arc::new(Surface::default());
             let cancel = CancelToken::default();
             let owner = NativeOwner {
+                ai: None,
                 hub: hub.clone(),
                 surface: surface.clone(),
                 request_id: "request-hop-context".into(),
@@ -421,6 +452,7 @@ mod tests {
     fn native_answer_is_consumed_once_and_timeout_never_reuses_it() {
         let hub = Arc::new(AuthHub::default());
         let owner = NativeOwner {
+            ai: None,
             hub: hub.clone(),
             surface: Arc::new(Surface::default()),
             request_id: "request".into(),
@@ -435,6 +467,7 @@ mod tests {
         assert!(matches!(worker.join().unwrap(),Reply::Answer(s) if s.as_str()=="AUTH_SENTINEL"));
         assert!(hub.resolve(&id, None).is_err());
         let owner = NativeOwner {
+            ai: None,
             hub: hub.clone(),
             surface: Arc::new(Surface::default()),
             request_id: "next".into(),
@@ -464,6 +497,7 @@ mod attribution_tests {
     fn passphrase_question_carries_trusted_hop_separately_from_server_text() {
         let hub = Arc::new(AuthHub::default());
         let owner = NativeOwner {
+            ai: None,
             hub: hub.clone(),
             surface: Arc::new(Surface),
             request_id: "deployment-or-mcp-request".into(),
@@ -518,6 +552,7 @@ mod expiry_tests {
         let (tx, rx) = mpsc::sync_channel(1);
         hub.pending.lock().unwrap().push(Waiting {
             request: AuthRequest {
+                ai: None,
                 id: "expired".into(),
                 request_id: "request".into(),
                 hop: None,
@@ -544,6 +579,7 @@ mod expiry_tests {
         let (tx, rx) = mpsc::sync_channel(1);
         hub.pending.lock().unwrap().push(Waiting {
             request: AuthRequest {
+                ai: None,
                 id: "wall-expired".into(),
                 request_id: "request".into(),
                 hop: None,

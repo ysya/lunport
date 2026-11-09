@@ -4,7 +4,7 @@ import type { AuthRequest } from "@/bindings/AuthRequest";
 
 const question: AuthRequest = {
   id: "q1", request_id: "exec1", hop: null, kind: "password",
-  text: "Password:", echo: false, remaining_ms: 1000, grant: null,
+  text: "Password:", echo: false, remaining_ms: 1000, grant: null, ai: null,
 };
 
 describe("MCP mode changes", () => {

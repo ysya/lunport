@@ -972,6 +972,7 @@ fn quit_during_native_auth_question_cancels_question_and_drains() {
     let (review, cancel) = r.take(&p.id, true).unwrap();
     let hub = Arc::new(AuthHub::default());
     let owner = NativeOwner {
+        ai: None,
         hub: hub.clone(),
         surface: Arc::new(Surface),
         request_id: p.id,

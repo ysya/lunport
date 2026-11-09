@@ -15,6 +15,7 @@ function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
     fingerprint: "SHA256:new",
     changed: null,
     saved: null,
+    ai: null,
     ...over,
   };
 }
@@ -40,6 +41,33 @@ function buttonDisabled(html: string, label: string): boolean {
   if (found === undefined) throw new Error(`no ${label} button in ${html}`);
   return found[1].includes('disabled=""');
 }
+
+describe("HostKeyCardView for an AI client's request", () => {
+  it("names the AI client, and in Auto-log says the command then runs without review", () => {
+    const html = render(request({ ai: { client: "claude → node", unreviewed: "command" } }));
+    expect(html).toContain("Asked by claude → node, an AI client using Lunport AI access.");
+    expect(html).toContain("Auto-log is on: once you trust this key, the AI client’s command runs right away, without per-command review.");
+  });
+  it("says a tunnel then starts without review", () => {
+    expect(render(request({ ai: { client: "claude", unreviewed: "tunnel" } }))).toContain(
+      "Auto-log is on: once you trust this key, the tunnel the AI client asked for starts right away, without review.",
+    );
+  });
+  it("names the client without an Auto-log note in Ask mode, and on a changed key's warning too", () => {
+    const html = render(
+      request({
+        changed: { fingerprint: "SHA256:old", pinned_at_ms: 1_700_000_000_000 },
+        ai: { client: "claude", unreviewed: null },
+      }),
+    );
+    expect(html).toContain("Server identity changed");
+    expect(html).toContain("Asked by claude, an AI client using Lunport AI access.");
+    expect(html).not.toContain("Auto-log");
+  });
+  it("names nobody for a person's connection", () => {
+    expect(render(request())).not.toContain("Asked by");
+  });
+});
 
 describe("HostKeyCardView", () => {
   it("shows the resolved username alongside the endpoint before trust", () => {

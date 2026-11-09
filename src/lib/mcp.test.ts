@@ -22,7 +22,7 @@ afterEach(() => {
 
 const question = (id: string): AuthRequest => ({
   id, request_id: "exec1", hop: null, kind: "password",
-  text: "Password:", echo: false, remaining_ms: 1000, grant: null,
+  text: "Password:", echo: false, remaining_ms: 1000, grant: null, ai: null,
 });
 
 describe("native MCP frontend boundary", () => {
