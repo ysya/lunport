@@ -59,6 +59,8 @@ function DatabaseRow({ row, busy, toggle, requestGrant, ask }: { row: DatabaseVi
   const address = localAddress(row);
   const active = databaseBusy(row);
   const changing = live.phase === "starting" || live.phase === "stopping";
+  // A port that runs can be stopped whatever the record holds now (another device may have cleared its port); starting needs a saved one.
+  const controllable = active || database.local_port !== null;
   const note = live.phase === "running" ? connectionsLine(live.connections) : row.blocked && !row.removed ? "Sync review needed" : "\u00a0";
   return <tr className="border-b last:border-0 hover:bg-muted/20">
     <td className="max-w-72 px-4 py-3">
@@ -81,7 +83,7 @@ function DatabaseRow({ row, busy, toggle, requestGrant, ask }: { row: DatabaseVi
       {live.phase === "error" && live.error ? <span className="mt-1 block max-w-64 whitespace-normal text-xs text-destructive">{revealHidden(live.error)}</span> : <span className="mt-1 block text-xs text-muted-foreground">{note}</span>}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
-      {(row.removed || database.local_port !== null) && <Button size="sm" variant={active ? "outline" : "secondary"} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{active ? "Stop" : live.phase === "error" ? "Retry" : "Start"}</Button>}
+      {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{active ? "Stop" : live.phase === "error" ? "Retry" : "Start"}</Button>}
       {!row.removed && <>
         <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked}><PencilLine className="size-3.5" /></Button>
         <Button size="icon-sm" variant="ghost" aria-label={`Delete ${name}`} disabled={active || busy || row.blocked} onClick={ask}><Trash2 className="size-3.5" /></Button>

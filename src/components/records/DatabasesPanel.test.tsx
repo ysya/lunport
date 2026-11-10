@@ -154,6 +154,23 @@ describe("the Databases page", () => {
     expect(iconButton(blocked, "Delete Orders")).toContain(DISABLED);
   });
 
+  it("a_running_database_whose_saved_port_was_cleared_can_still_be_stopped", () => {
+    // Another device cleared the port from the record while this computer's port went on running.
+    const cleared = { local_port: null, pam: null };
+    for (const phase of ["starting", "running"] as const) {
+      const html = render([row({ live: live(phase, { connections: 1 }) }, cleared)]);
+      expect(buttonTag(html, "Stop"), phase).not.toContain(DISABLED);
+      expect(html, phase).not.toMatch(/>(Start|Retry)<\/button>/);
+      // The address shown is the port that runs, not the one the record no longer holds.
+      expect(text(html), phase).toContain("127.0.0.1:6543");
+    }
+    // A port that is already stopping waits.
+    expect(buttonTag(render([row({ live: live("stopping") }, cleared)]), "Stop")).toContain(DISABLED);
+    // Once it has stopped there is no port to offer: neither Start nor Stop, and a failed start has no port to retry on.
+    expect(render([row({}, cleared)])).not.toMatch(/>(Start|Stop|Retry)<\/button>/);
+    expect(render([row({ live: live("error", { error: "Port 6543 is already in use on this computer." }) }, cleared)])).not.toMatch(/>(Start|Stop|Retry)<\/button>/);
+  });
+
   it("the_library_navigation_lists_databases_after_tunnels", () => {
     const navigation = (panel: WorkspacePanel) => renderToStaticMarkup(
       <LibraryNavigation overview={recordOverview()} panel={panel} filter={{ kind: "all" }} navigate={vi.fn()} changeFilter={vi.fn()} createGroup={vi.fn()} />,
