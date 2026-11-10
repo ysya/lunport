@@ -87,7 +87,7 @@ else {
       groups: overview.groups.map((group) => ({ ...group, scope })),
     });
   };
-  // The `iap` scenario (design 2026-10-26, Connect via): a central library whose hosts connect through Google Cloud IAP, with fakes of the
+  // The `iap` scenario: a central library whose hosts connect through Google Cloud IAP, with fakes of the
   // commands the host editor, the details pane and the Google Cloud page call, in the shapes of src/bindings. Nothing reaches Google or a
   // gcloud directory, and every grant, route and request lives in memory.
   const gcloud: GcloudAccountsView = {

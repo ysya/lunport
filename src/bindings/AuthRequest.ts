@@ -5,10 +5,10 @@ import type { GrantPrompt } from "./GrantPrompt";
 
 export type AuthRequest = { id: string, request_id: string, hop: AuthHop | null, kind: string, text: string, echo: boolean, remaining_ms: number,
 /**
- * The form of a `grant` question (design 2026-10-25, PAM grant requests); `None` for every other kind.
+ * The form of a `grant` question; `None` for every other kind.
  */
 grant: GrantPrompt | null,
 /**
- * The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` for a person's connection.
+ * The AI client whose request asks; `None` for a person's connection.
  */
 ai: AiAsker | null, };

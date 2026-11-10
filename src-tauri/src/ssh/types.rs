@@ -1,4 +1,4 @@
-//! The data that crosses the engine interface (own-ssh spec §6.1). Plain data only: no russh type and no vault type appears here, so the
+//! The data that crosses the engine interface. Plain data only: no russh type and no vault type appears here, so the
 //! broker, the fake engine and a future hand-written engine can all use it.
 
 use std::fmt;
@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-/// The defaults of a host record (spec §5.1: `connect_timeout_secs` 15, `keepalive_secs` 30, `keepalive_max_missed` 3).
+/// The defaults of a host record (`connect_timeout_secs` 15, `keepalive_secs` 30, `keepalive_max_missed` 3).
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_KEEPALIVE_EVERY: Duration = Duration::from_secs(30);
 pub const DEFAULT_KEEPALIVE_MAX_MISSED: u32 = 3;
@@ -52,7 +52,7 @@ pub struct HopRef {
     pub user: String,
 }
 
-/// A server's host key in the form a host record stores it (spec §5.1).
+/// A server's host key in the form a host record stores it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKey {
     /// The key type as OpenSSH names it: `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa` (the key type, whatever hash the signature used).
@@ -86,7 +86,7 @@ pub enum HostKeyVerdict {
     Mismatch { pinned: HostKey },
 }
 
-/// The hash an RSA login signature uses. There is no SHA-1 variant on purpose: the engine refuses to sign with it (spec §6.3 b).
+/// The hash an RSA login signature uses. There is no SHA-1 variant on purpose: the engine refuses to sign with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RsaHash {
     Sha256,
@@ -125,7 +125,7 @@ impl AuthMethod {
     }
 }
 
-/// How a hop's connection is made (design 2026-10-25: Google Cloud IAP transports).
+/// How a hop's connection is made (Google Cloud IAP transports).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transport {
     /// A TCP connection to `hostname:port`.
@@ -192,7 +192,7 @@ pub struct Hop {
 }
 
 impl Hop {
-    /// A hop with the spec's default timeouts and `nodelay` on.
+    /// A hop with the default timeouts and `nodelay` on.
     pub fn new(id: &str, alias: &str, hostname: &str, port: u16, user: &str, auth: AuthMethod) -> Hop {
         Hop {
             id: HostId::from(id),
@@ -311,7 +311,7 @@ pub enum DisconnectKind {
     Other,
 }
 
-/// The first recorded end of a connection, taken from the outermost hop that recorded one (spec §6.2 step 2).
+/// The first recorded end of a connection, taken from the outermost hop that recorded one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisconnectReason {
     /// The hop that recorded it.

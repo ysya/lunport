@@ -1,7 +1,7 @@
 //! The local IPC endpoint on Windows: a named pipe per role, `\\.\pipe\lunport-<role>-<the first 16 hex digits of the SHA-256 of the
-//! user's SID string>` (the key vault's `lunport-agent-…`, its spec §4.4 and §5.1; the session broker's `lunport-session-…`, own-ssh
-//! spec §4). Every instance's DACL grants the current user alone and remote clients are refused; the first instance carries
-//! `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name another program holds is not served (spec §11; another Lunport is stopped before that, by
+//! user's SID string>` (the key vault's `lunport-agent-…`; the session broker's `lunport-session-…`). Every instance's DACL
+//! grants the current user alone and remote clients are refused; the first instance carries
+//! `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name another program holds is not served (another Lunport is stopped before that, by
 //! `server::take_lock`). Only std and windows-sys.
 //!
 //! Both ends of a connection are a `PipeStream`, and its handle is in overlapped mode. A handle in synchronous mode serializes all I/O on
@@ -134,7 +134,7 @@ fn user_sid() -> io::Result<String> {
 }
 
 /// The pipe name of a role (`agent`, `session`): `lunport-<role>-<the first 16 hex digits of the SHA-256 of the user's SID string>`, where
-/// `lunport` is the pipe prefix of the build's identity (key vault spec §4.4, own-ssh spec §4). The same every time for a user, and
+/// `lunport` is the pipe prefix of the build's identity. The same every time for a user, and
 /// another user's is another name.
 pub fn pipe_name_for(role: &str) -> io::Result<String> {
     let digest = Sha256::digest(user_sid()?.as_bytes());
@@ -278,7 +278,7 @@ impl PipeStream {
         Ok(PipeStream { shared: Arc::clone(&self.shared) })
     }
 
-    /// Hangs the connection up for good (own-ssh spec §4): from now on every read returns the end of the stream (`Ok(0)`) and every write
+    /// Hangs the connection up for good: from now on every read returns the end of the stream (`Ok(0)`) and every write
     /// fails (`BrokenPipe`), and a read or a write that is waiting on the pipe, in any thread, returns now. The pipe is not disconnected
     /// (`DisconnectNamedPipe` throws away what the other end has not read yet, such as the last frames of a session): the other end reads
     /// what was written before the hang-up, and then the end of the pipe, once the last clone of this stream is dropped.
@@ -289,7 +289,7 @@ impl PipeStream {
     /// `Some(after)`: the stream hangs up (`hang_up`) unless the deadline is cleared before `after` has passed. A read or a write that
     /// is waiting when the time is over returns then, and one made later finds the stream hung up; a deadline that ran out while nothing
     /// was waiting on the pipe has hung it up all the same. `None` clears the deadline; a new one replaces the one before. A pipe has no
-    /// read timeout: the broker bounds with this how long a new connection may take for its first messages (spec §7.2).
+    /// read timeout: the broker bounds with this how long a new connection may take for its first messages.
     pub fn hang_up_after(&self, after: Option<Duration>) -> io::Result<()> {
         self.shared.hang_up_after(after)
     }
@@ -532,7 +532,7 @@ fn create_instance(path: &[u16], security: &OwnerOnly, first: bool, max_instance
     Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
 }
 
-/// 第一個 instance 開不起來的說明:名稱已經有人用時,`FILE_FLAG_FIRST_PIPE_INSTANCE` 回 `ERROR_ACCESS_DENIED`(spec §11);其他錯誤不是名稱被佔用。
+/// 第一個 instance 開不起來的說明:名稱已經有人用時,`FILE_FLAG_FIRST_PIPE_INSTANCE` 回 `ERROR_ACCESS_DENIED`;其他錯誤不是名稱被佔用。
 /// `what` names the pipe (`agent`, `session`).
 fn first_instance_error(e: io::Error, what: &str) -> AppError {
     if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
@@ -667,7 +667,7 @@ mod tests {
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// Plan 1b-3 Task 1: the broker's pipe is named like the agent's, after the same user, with its own role.
+    /// The broker's pipe is named like the agent's, after the same user, with its own role.
     #[test]
     fn each_role_has_its_own_pipe_named_after_the_user() {
         let agent = pipe_name_for("agent").unwrap();
@@ -742,7 +742,7 @@ mod tests {
         rx
     }
 
-    /// Plan 1b-3 Task 1: a hang-up wakes a read that waits in another thread, every read after it is the end at once, and every write
+    /// A hang-up wakes a read that waits in another thread, every read after it is the end at once, and every write
     /// fails. The pipe is not disconnected: what was written just before the hang-up stays in it, and the client reads that, and then the
     /// end once the server's last handle is closed.
     #[test]
@@ -818,7 +818,7 @@ mod tests {
         assert!(server.is_hung_up(), "a deadline that ran out while nothing waited is a hang-up too");
     }
 
-    /// Plan 1b-3 Task 1: no pipe of that name, nobody to wait for.
+    /// No pipe of that name, nobody to wait for.
     #[test]
     fn connect_says_not_found_without_a_listener() {
         let started = Instant::now();
@@ -854,7 +854,7 @@ mod tests {
         drop((first, client, only, second));
     }
 
-    /// Fix round 1 (security): only a pipe the user owns is Lunport's; one of another owner, or one whose owner cannot be read, is not,
+    /// Security: only a pipe the user owns is Lunport's; one of another owner, or one whose owner cannot be read, is not,
     /// and the refusal says which pipe another program is using.
     #[test]
     fn only_a_pipe_the_user_owns_is_lunports() {
@@ -889,7 +889,7 @@ mod tests {
         assert_eq!(role_in(&format!("{old}-session-0123456789abcdef")), old);
     }
 
-    /// Fix round 1 (security): the pipe's name comes from the user's SID, which is no secret, and any local program can make a pipe of
+    /// Security: the pipe's name comes from the user's SID, which is no secret, and any local program can make a pipe of
     /// that name while Lunport does not serve it. `connect` takes a pipe only if the user owns it, and says why it refuses one.
     #[test]
     fn connect_refuses_a_pipe_another_owner_made() {
@@ -907,7 +907,7 @@ mod tests {
         assert!(error.to_string().contains("Another program is using Lunport's session pipe"), "{error}");
     }
 
-    /// Fix round 1: the pipes a listener makes are the user's, also when Lunport runs elevated, where its objects would otherwise be
+    /// The pipes a listener makes are the user's, also when Lunport runs elevated, where its objects would otherwise be
     /// owned by the Administrators group (an elevated administrator's default owner), and `connect` would refuse Lunport's own pipe.
     #[test]
     fn a_listener_makes_its_pipes_the_users_own() {

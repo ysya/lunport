@@ -1,6 +1,6 @@
 //! What `lunport connect` takes from and gives to the Windows console, apart from the Windows calls (`inputs_windows.rs` makes them):
 //! the keys read as UTF-16 turned into the UTF-8 the remote takes, the remote's UTF-8 cut into pieces the console is given whole
-//! characters of, and the console's control events turned into the inputs the loop knows (own-ssh spec §7.3, the Windows bullet).
+//! characters of, and the console's control events turned into the inputs the loop knows.
 //! Compiled on Windows and in the tests of every platform.
 
 use zeroize::Zeroizing;
@@ -127,7 +127,7 @@ pub struct Control {
     pub ends: bool,
 }
 
-/// The signal a console control event stands for (spec §7.3): Ctrl-C and Ctrl-Break are SIGINT (130), the console closed is SIGHUP
+/// The signal a console control event stands for: Ctrl-C and Ctrl-Break are SIGINT (130), the console closed is SIGHUP
 /// (129), log-off and shut-down are SIGTERM (143). `None` for an event the program leaves to the next handler.
 pub fn control(event: u32) -> Option<Control> {
     match event {
@@ -162,7 +162,7 @@ mod tests {
         String::from_utf8(decoder.decode(units).to_vec()).expect("always UTF-8")
     }
 
-    /// Spec §7.3: what the console reads (UTF-16) reaches the remote as UTF-8: ASCII, a character of the basic plane, and one outside it
+    /// What the console reads (UTF-16) reaches the remote as UTF-8: ASCII, a character of the basic plane, and one outside it
     /// (a surrogate pair) read whole.
     #[test]
     fn a_read_becomes_utf_8() {
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(whole_characters(b"\xe5\x41"), 2, "a character broken off, not cut short");
     }
 
-    /// Spec §7.3: the console is never given a part of a character: a character cut at the end of a piece waits for the next piece, the
+    /// The console is never given a part of a character: a character cut at the end of a piece waits for the next piece, the
     /// rest is written at once, and nothing is lost: at the end what waits is written as it is.
     #[test]
     fn a_character_cut_between_two_pieces_waits_for_the_second() {
@@ -251,11 +251,11 @@ mod tests {
         assert_eq!(pieces.next(b"\xffz"), b"\xffz", "bytes that are no character go at once");
     }
 
-    /// Spec §7.3: Ctrl-C and Ctrl-Break are SIGINT (130: a question is cancelled, the program ends without one), the console closed is
+    /// Ctrl-C and Ctrl-Break are SIGINT (130: a question is cancelled, the program ends without one), the console closed is
     /// SIGHUP (129) and log-off and shut-down SIGTERM (143); those three end the program: the watchdog is armed, and the handler waits
     /// for the console to be put back. Any other event is left to the next handler.
     #[test]
-    fn each_control_event_is_the_signal_spec_7_3_gives_it() {
+    fn each_control_event_is_the_signal_it_stands_for() {
         let interrupt = Control { signal: 2, ends: false };
         assert_eq!(control(CTRL_C_EVENT), Some(Control { signal: 2, ends: false }));
         assert_eq!(control(CTRL_BREAK_EVENT), Some(interrupt));

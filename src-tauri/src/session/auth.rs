@@ -1,9 +1,9 @@
-//! What the broker gives the engine for one connect (own-ssh spec §6.1, §7.2, decision 7): the host key policy, over the pins, and the
+//! What the broker gives the engine for one connect: the host key policy, over the pins, and the
 //! auth source, over the vault, the keychain and the session's owner (the person at the `lunport connect` terminal, asked through
 //! `question` frames). One `BrokerAuth` serves one `open_shell`, all its reconnects included: what the person typed lives in memory for
 //! that long (a first contact connects twice: the host key is unknown the first time) and is dropped with it.
 //!
-//! The engine's rules (spec §6.1): passphrases and vault unlocking happen before `connect` (`BrokerAuth::unlock`); `sign` and a password
+//! The engine's rules: passphrases and vault unlocking happen before `connect` (`BrokerAuth::unlock`); `sign` and a password
 //! asked during the login must be quick, so a person is asked for a password only before the connection is opened, for a hop that
 //! starts with the password method (`BrokerAuth::prepare` records which). A password wanted later, after a refused key, comes back as
 //! `AuthFailed { password_wanted }`: the broker asks the person between two connects, keeps the answer (`BrokerAuth::set_typed`) and connects
@@ -35,7 +35,7 @@ pub fn passphrase_account(key_id: &str) -> String {
     format!("vault:passphrase:{key_id}")
 }
 
-/// How long a person gets to answer a prompt for `hop`: 4 × its connect timeout, at least a minute (spec §6.2 step 4; the engine gives
+/// How long a person gets to answer a prompt for `hop`: 4 × its connect timeout, at least a minute (the engine gives
 /// keyboard-interactive the same).
 pub fn prompt_wait(hop: &Hop) -> Duration {
     hop.connect_timeout.saturating_mul(4).max(Duration::from_secs(60))
@@ -77,7 +77,7 @@ pub enum Reply {
     Gone,
 }
 
-/// The owner of a session: the person at the client's terminal, who is asked for what a login needs (spec §7.2).
+/// The owner of a session: the person at the client's terminal, who is asked for what a login needs.
 pub trait Owner: Send + Sync {
     /// Asks and waits for the answer until `deadline` (`None`: for as long as the owner is there). Whatever a server wrote in `text` has
     /// been through `printable` already, and the real `(user@alias) ` is in front of every line of a server's prompt, so the owner shows
@@ -85,7 +85,7 @@ pub trait Owner: Send + Sync {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
     /// Trusted hop attribution is supplied separately from server-controlled prompt text.
     fn ask_at(&self, hop:&HopRef, kind:QuestionKind,text:&str,echo:bool,deadline:Option<Instant>)->Reply{let _=hop;self.ask(kind,text,echo,deadline)}
-    /// Shows that the host key waits for the person in Lunport's window (spec §11); no answer.
+    /// Shows that the host key waits for the person in Lunport's window; no answer.
     fn host_key_notice(&self, text: &str);
     /// Shows the server's banner (already through `printable`).
     fn banner(&self, text: &str);
@@ -212,7 +212,7 @@ impl<'a> BrokerAuth<'a> {
         *locked(&self.password_first) = target.hops.iter().filter(|hop| hop.auth == AuthMethod::Password).map(|hop| (hop.id.clone(), prompt_wait(hop))).collect();
     }
 
-    /// Opens the vault keys of `target` before anything connects (spec §6.1): a key with a passphrase takes the one remembered in the
+    /// Opens the vault keys of `target` before anything connects: a key with a passphrase takes the one remembered in the
     /// keychain, or asks the person, up to `PASSPHRASE_ATTEMPTS` times. A key the vault does not have is left to the engine, which skips
     /// it and says so. `Err` is the sentence for the user; nothing has connected.
     pub fn unlock(&self, target: &Target) -> Result<(), String> {
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_passphrase_or_three_wrong_ones_abandon_the_connect_with_the_spec_sentence() {
+    fn a_cancelled_passphrase_or_three_wrong_ones_abandon_the_connect_with_the_abandoned_login_sentence() {
         let world = world();
         let cancelled = FakeOwner::answering(vec![Reply::Cancelled]);
         assert_eq!(

@@ -304,7 +304,7 @@ const PUBLIC_ONLY: &str = "Provide public connection settings only. Passwords, p
 const HOST_CHANGED: &str = "The host changed while the request was open; read it again and retry.";
 const PIN_CLEARED: &str = "pinned → verified again at the next connection";
 
-/// What `update_host` may change: every field optional, replacing that field only (design 2026-10-26, AI edits).
+/// What `update_host` may change: every field optional, replacing that field only.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateInput {
@@ -485,7 +485,7 @@ fn update_candidate(state: &SyncStateV3, before: &repo::HostView, changes: &Upda
     Ok((next, McpHostProposal { kind: proposal_kinds::UPDATE_HOST.into(), settings: rows }, pin_cleared))
 }
 
-/// `update_host`: a permitted host's connection settings, changed with the person's consent (design 2026-10-26, AI edits).
+/// `update_host`: a permitted host's connection settings, changed with the person's consent.
 pub(super) fn update(
     env: &SyncEnv,
     runtime: &McpRuntime,
@@ -585,7 +585,7 @@ struct PamInput {
     duration_minutes: Option<u32>,
 }
 
-/// What `set_transport` may change: a field given replaces that field only (design 2026-10-26, AI edits).
+/// What `set_transport` may change: a field given replaces that field only.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransportInput {
@@ -762,7 +762,7 @@ fn transport_change(
         return Err("Nothing would change.".into());
     }
     // What the save would refuse is refused before the window: a library whose writes are blocked, or one whose Catalog has no room
-    // for the route (design 2026-10-26, Room in the Catalog).
+    // for the route.
     crate::sync::transports::set(state, &id, before.as_ref(), after.clone(), env.now()).map_err(crate::sync::transports::refusal)?;
     let proposal = McpHostProposal { kind: kind.into(), settings: rows };
     let _active = active(runtime, &mut context, &id, cancel)?;
@@ -920,7 +920,7 @@ pub(super) fn verify(
             .map_err(|e| e.to_string())?;
         approved.check_resolved(&current, connector.keys)
     };
-    // The window names the AI client (design 2026-11-09, native windows for AI requests); nothing runs after a verification, so it says
+    // The window names the AI client; nothing runs after a verification, so it says
     // nothing goes ahead without review.
     let asker = crate::session::protocol::AiAsker { client: records::client_label(&context), unreviewed: None };
     let confirmer = records::ClientConfirmer::new(connector.confirmer, asker);

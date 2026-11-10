@@ -1,5 +1,5 @@
-//! Windows:把檔案或目錄的 DACL 設成「只有目前使用者、不繼承上層」(SP3 spec §8;Win32-OpenSSH 拒用其他人也能讀的
-//! 私鑰)。只依賴 std 與 windows-sys,好讓它能在其他平台上單獨做型別檢查(計畫 Task 2 Step 6)。
+//! Windows:把檔案或目錄的 DACL 設成「只有目前使用者、不繼承上層」(Win32-OpenSSH 拒用其他人也能讀的
+//! 私鑰)。只依賴 std 與 windows-sys,好讓它能在其他平台上單獨做型別檢查。
 use std::ffi::{c_void, OsStr};
 use std::io;
 use std::os::windows::ffi::OsStrExt;

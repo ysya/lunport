@@ -35,7 +35,7 @@ fn revision(read: &VerifiedLibrary, row: &RecordEnvelope) -> Result<u64, AppErro
         .map_or(Ok(0), |r| number(&r.version.revision, false))
 }
 /// The part of a Catalog this merge brings, which another device's edit must not have changed: its collections, their group orders and
-/// its tunnels. It brings no routes (R11), so the library's routes are never part of it: another device may edit them meanwhile, and
+/// its tunnels. It brings no routes, so the library's routes are never part of it: another device may edit them meanwhile, and
 /// the rebased Catalog carries them as they are.
 fn partition(
     mut c: Catalog,
@@ -44,7 +44,7 @@ fn partition(
 ) -> Catalog {
     c.tunnels.retain(|r| owned_tunnels.contains(&r.id));
     c.transports.clear();
-    // Search scopes and grant memory are not the adoption's either (design 2026-10-27): they stay this device's until the publish step.
+    // Search scopes and grant memory are not the adoption's either: they stay this device's until the publish step.
     c.pam_scopes.clear();
     c.pam_requests.clear();
     c.collections.retain(|v| owned.contains(&v.id));

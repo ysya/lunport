@@ -1,4 +1,4 @@
-//! The gcloud CLI, for the account actions of the Google Cloud page (design 2026-10-27, Finding gcloud; Running gcloud). Everything else
+//! The gcloud CLI, for the account actions of the Google Cloud page. Everything else
 //! Lunport does with Google reads gcloud's files and calls Google itself; only signing in, removing an account and changing gcloud's
 //! active account run gcloud, since those are gcloud's own state.
 //!

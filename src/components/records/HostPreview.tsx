@@ -33,7 +33,7 @@ import { KnownHostsManager } from "./KnownHostsManager";
 import { ConnectionCheck } from "./ConnectionCheck";
 
 /**
- * A route's Privileged Access Manager grant as it stands now (design 2026-10-26, Host list and details): read when the pane opens and
+ * A route's Privileged Access Manager grant as it stands now: read when the pane opens and
  * every minute, with Request grant…, which is off while a grant is active or activating. Mount it for one host at a time (key it).
  */
 function AccessGrant({ transport, alias, memory }: { transport: HostTransport; alias: string; memory: GrantMemoryView | null }) {

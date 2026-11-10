@@ -1,4 +1,4 @@
-//! The session broker (own-ssh spec §4, §7.2): it serves the clients that connect to the local IPC socket, one session per connection.
+//! The session broker: it serves the clients that connect to the local IPC socket, one session per connection.
 //! A connection says `hello`, asks for a shell (`open_shell`), and owns the session from then on: what the login needs is asked of it,
 //! its keystrokes and resizes go to the shell, and when it goes away the session is closed. The connection's own thread reads it; a
 //! second thread connects and pumps the shell. No read timeout applies once `open_shell` has arrived: an idle shell stays open for as
@@ -39,7 +39,7 @@ const HELLO_WAIT: Duration = Duration::from_secs(10);
 /// still being opened when the app quits may need longer than this (`end_all` says what becomes of its client).
 pub const QUIT_WAIT: Duration = SETTLE.saturating_add(Duration::from_secs(2));
 
-/// The sentence a client is told when the app quits under its session (spec §4).
+/// The sentence a client is told when the app quits under its session.
 pub fn quit_reason(alias: &str) -> String {
     format!("Lunport quit, so the connection to {alias} was closed.")
 }
@@ -52,7 +52,7 @@ pub enum SessionState {
 }
 
 /// A session, for the app (it keeps running while there are some, and ends them when it quits) and, in a later version, for the list of
-/// sessions (spec §10). It is in the table from the moment the client asked for a shell, not only once the connection is made: a client
+/// sessions. It is in the table from the moment the client asked for a shell, not only once the connection is made: a client
 /// at a question, or at the host key window, has a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -62,8 +62,8 @@ pub struct SessionInfo {
     /// `None` until the connect has looked the host up, unless the client asked for the host by its id.
     pub host_id: Option<HostId>,
     pub state: SessionState,
-    /// Who asked for it: the process chain of the client, outermost first, without Lunport's own executable (spec §7.2); `None` when it
-    /// could not be told. Recorded now, shown from phase 2 on.
+    /// Who asked for it: the process chain of the client, outermost first, without Lunport's own executable; `None` when it
+    /// could not be told. Recorded with the session.
     pub requested_by: Option<Vec<String>>,
     /// When the client asked for the shell.
     pub started_at_ms: u64,
@@ -117,7 +117,7 @@ type AuthenticationOwnerFactory = Arc<dyn Fn(u64, CancelToken) -> Arc<dyn Owner>
 pub struct Broker {
     mcp: Mutex<Option<McpHandler>>,
     authentication_owner: Mutex<Option<AuthenticationOwnerFactory>>,
-    /// One grant request at a time for each grant several connections may need (design 2026-10-25, PAM grant requests).
+    /// One grant request at a time for each grant several connections may need.
     grants: GrantGates,
     audit:Mutex<Option<Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>>>,
     engine: Arc<dyn SshEngine>,
@@ -230,7 +230,7 @@ impl Broker {
         !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty() || !table.tunnels.is_empty()
     }
 
-    /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
+    /// The app is quitting: every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
     /// empty, which is when every client has been told: the app exits when this returns, so a client that was not told by then hears
     /// nothing (its terminal says "The connection to Lunport ended."). The app gives it `QUIT_WAIT`.
     ///
@@ -309,7 +309,7 @@ impl Broker {
             Greeting::Mcp(info) => return self.serve_mcp(reader, link, pid, info),
             Greeting::Refused => return,
         }
-        // The time is for each message (spec §7.2): `open_shell` has all of it again. (A socket's read timeout is per read already; a
+        // The time is for each message: `open_shell` has all of it again. (A socket's read timeout is per read already; a
         // pipe's bound is one deadline, which this sets again.)
         let _ = set_read_timeout(&reader, Some(self.hello_wait));
         let requested_by = requester_of(pid);
@@ -574,13 +574,13 @@ impl Drop for SessionOver<'_> {
     }
 }
 
-/// A session that could not be opened: the error, then `exited` without a status (spec §7.2), written as one piece.
+/// A session that could not be opened: the error, then `exited` without a status, written as one piece.
 fn could_not_open(link: &dyn ClientLink, kind: &str, text: &str) {
     let error = ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() });
     let _ = tell_all(link, vec![error, ServerMessage::Exited { code: None, signal: None }]);
 }
 
-/// Tells a client that the app quit under its session (spec §4): the sentence and `exited`, written as one piece. Another thread of the
+/// Tells a client that the app quit under its session: the sentence and `exited`, written as one piece. Another thread of the
 /// session may be writing to the client at the same moment (a banner, a notice, a question), and none of it may come between them.
 fn say_quit(link: &dyn ClientLink, alias: &str) {
     let _ = tell_all(link, vec![ServerMessage::Event(Event::Disconnected { reason: quit_reason(alias) }), ServerMessage::Exited { code: None, signal: None }]);
@@ -616,7 +616,7 @@ fn hello_version(payload: &[u8]) -> Option<u64> {
 }
 
 /// Reads the first message of a connection, which has to be the `hello` of `lunport connect` in this protocol version. Anything else is
-/// refused by name with an `error` event (spec §7.2), and `false` comes back: the connection is closed, and nothing was started. The
+/// refused by name with an `error` event, and `false` comes back: the connection is closed, and nothing was started. The
 /// version is looked at first: a client of another version may say hello in ways this version cannot read, and what helps its user then
 /// is to be told to quit Lunport and open it again, whoever the client says it is.
 enum Greeting {Connect,Mcp(Option<serde_json::Value>),Refused}
@@ -651,7 +651,7 @@ fn set_read_timeout(stream: &Stream, timeout: Option<Duration>) -> std::io::Resu
 }
 
 /// A Windows pipe has no read timeout: the connection is hung up instead when the time is over without the bound being cleared
-/// (`PipeStream::hang_up_after`), and what waits on it reads the end of the stream (spec §4).
+/// (`PipeStream::hang_up_after`), and what waits on it reads the end of the stream.
 #[cfg(windows)]
 fn set_read_timeout(stream: &Stream, timeout: Option<Duration>) -> std::io::Result<()> {
     stream.hang_up_after(timeout)
@@ -663,7 +663,7 @@ fn hang_up(stream: &Stream) {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-/// A pipe has no `shutdown`: the connection is hung up for good (spec §4), so that a read or a write blocked on it returns and every
+/// A pipe has no `shutdown`: the connection is hung up for good, so that a read or a write blocked on it returns and every
 /// one after it fails. The client reads what was written before, and the end of the pipe once the broker's last handle on it is closed.
 #[cfg(windows)]
 fn hang_up(stream: &Stream) {
@@ -863,7 +863,7 @@ pub fn without_own_executable(chain: Vec<ProcInfo>, own: Option<&Path>) -> Vec<P
     chain.into_iter().filter(|process| process.path.as_deref().map(Path::new) != Some(own)).collect()
 }
 
-/// Who connected (spec §7.2): the peer's process chain, without Lunport's own executable, named as `ipc::peer` names programs.
+/// Who connected: the peer's process chain, without Lunport's own executable, named as `ipc::peer` names programs.
 pub fn requester_of(pid: Option<u32>) -> Option<Vec<String>> {
     let own = std::env::current_exe().ok().map(|path| std::fs::canonicalize(&path).unwrap_or(path));
     let chain = without_own_executable(peer::process_chain(pid?), own.as_deref());
@@ -1310,7 +1310,7 @@ mod tests {
         crate::ssh::testing::eventually("the session to be forgotten", 5, || !world.broker.has_sessions());
     }
 
-    /// The terminal was closed: the broker sees the end of the connection and closes the session (spec §7.2).
+    /// The terminal was closed: the broker sees the end of the connection and closes the session.
     #[test]
     fn when_the_client_goes_away_its_session_is_closed() {
         let world = world(FakeEngine::new());
@@ -1367,7 +1367,7 @@ mod tests {
         assert!(world.broker.has_sessions());
     }
 
-    /// Spec §4: quitting the app ends every session; each client is told why.
+    /// Quitting the app ends every session; each client is told why.
     #[test]
     fn quitting_ends_every_session_and_tells_each_client_why() {
         let world = world(FakeEngine::new());
@@ -1463,7 +1463,7 @@ mod tests {
         (vec![Got::Message(quit_sentence()), Got::Message(no_status())], true)
     }
 
-    /// Plan 1b-1 review, Task 11 Important 2: a client that is being asked a question (here the password) has a session as much as one
+    /// A client that is being asked a question (here the password) has a session as much as one
     /// whose shell is open. The app does not quit under it without saying why, and the window it closes does not quit the app.
     #[test]
     fn a_client_at_a_password_question_has_a_session_and_is_told_why_when_the_app_quits() {
@@ -1667,7 +1667,7 @@ mod tests {
         assert!(!world.broker.enter(&conn_on_a_socket_pair(3).0, &query, None), "and no session is started once the app is quitting");
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 1: a question asked after the owner was told the client is gone is not written and not waited for
+    /// A question asked after the owner was told the client is gone is not written and not waited for
     /// (the client may have sent `close` and not hung up yet).
     #[test]
     fn a_question_asked_after_the_client_is_gone_is_neither_written_nor_waited_for() {
@@ -1855,7 +1855,7 @@ mod tests {
         assert_eq!(waiting(&owner), 0, "the question that ran out is forgotten, and a late answer to it is dropped");
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 3: whatever a client says first that the broker cannot use, it is told so before the connection
+    /// Whatever a client says first that the broker cannot use, it is told so before the connection
     /// is closed. The version comes first: a client of another protocol version may say hello in ways this version cannot read.
     #[test]
     fn a_first_message_the_broker_cannot_use_is_answered_before_the_connection_closes() {
@@ -1888,7 +1888,7 @@ mod tests {
         assert!(world.engine.events().is_empty(), "nothing was connected");
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 4: a connection is one of the 64 the server takes and costs a thread; one that says nothing, or
+    /// A connection is one of the 64 the server takes and costs a thread; one that says nothing, or
     /// says hello and then nothing, is closed after the time `hello` and `open_shell` are given, not kept for ever.
     #[test]
     fn a_connection_that_does_not_say_hello_and_then_open_shell_in_time_is_closed() {
@@ -1913,7 +1913,7 @@ mod tests {
         assert!(world.broker.has_sessions() && !control.is_gone(), "an idle session is not given up on after the time hello is given");
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 5: the client leaves while the engine is still connecting, which cannot be interrupted. When the
+    /// The client leaves while the engine is still connecting, which cannot be interrupted. When the
     /// connect gets through, its session is closed, and no shell is opened on the server for nobody.
     #[test]
     fn a_client_that_leaves_while_the_engine_connects_gets_no_shell_opened_for_it() {
@@ -1938,7 +1938,7 @@ mod tests {
         }
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 6: a panic on the session's thread must not leave the session in the table, with its client
+    /// A panic on the session's thread must not leave the session in the table, with its client
     /// connected to nothing for ever.
     #[test]
     fn a_panic_on_the_sessions_thread_still_forgets_the_session_and_hangs_up() {
@@ -1952,8 +1952,8 @@ mod tests {
         crate::ssh::testing::eventually("the session to be forgotten", 5, || !broker.has_sessions());
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 7: a session that could not be started, as when the thread for it cannot be made, is an error and
-    /// an exit without a status, like every other session that could not be opened (spec §7.2). A client that is told only the error
+    /// A session that could not be started, as when the thread for it cannot be made, is an error and
+    /// an exit without a status, like every other session that could not be opened. A client that is told only the error
     /// waits for the exit.
     #[test]
     fn a_session_that_could_not_be_started_is_an_error_and_an_exit_without_a_status() {
@@ -2035,7 +2035,7 @@ mod tests {
         assert_eq!(client.rest(), (Vec::new(), vec![quit_sentence(), no_status()]));
     }
 
-    /// Plan 1b-1 review round 2, Task 11 Minor 2: the thread for a session cannot be made. Its client is told so, unless the app quit
+    /// The thread for a session cannot be made. Its client is told so, unless the app quit
     /// meanwhile: `end_all` tells it that (and closes the connection), and a client is not told both.
     #[test]
     fn a_session_whose_thread_could_not_be_made_is_told_so_unless_the_app_is_quitting() {
@@ -2072,7 +2072,7 @@ mod tests {
         assert_eq!(written_to(&mut client), [quit_sentence(), no_status()], "told that the app quit, and not that the session could not be started as well");
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 8: a server's keyboard-interactive prompt too large for a frame cannot be shown, and nobody
+    /// A server's keyboard-interactive prompt too large for a frame cannot be shown, and nobody
     /// cancelled it: the login ends, and the client is told what happened, and not that the prompt was cancelled.
     #[test]
     fn a_prompt_too_large_to_send_ends_the_login_as_one_that_could_not_be_shown() {
@@ -2088,7 +2088,7 @@ mod tests {
                 no_status(),
             ]
         );
-        // A prompt that was cancelled, by the person, still reads so (spec §11).
+        // A prompt that was cancelled, by the person, still reads so.
         let world = world_with(
             FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::interactive("Password: ", "answer"))),
             FakeDirectory::new().with_host("web", AuthMethod::Interactive).with_pin("web", default_server_key()),
@@ -2108,8 +2108,8 @@ mod tests {
         );
     }
 
-    /// Plan 1b-1 review, Task 11 Minor 9: who asked for a session is worked out once, when the connection is accepted, from the pid of the
-    /// peer (spec §7.2): its process chain without Lunport's own executable. A client of this test is this process.
+    /// Who asked for a session is worked out once, when the connection is accepted, from the pid of the
+    /// peer: its process chain without Lunport's own executable. A client of this test is this process.
     #[test]
     fn a_session_records_who_asked_for_it_from_the_pid_of_the_peer() {
         let world = world(FakeEngine::new());
@@ -2184,7 +2184,7 @@ mod tests {
     }
 }
 
-/// The broker on a named pipe (plan 1b-3 Task 1): what the socket tests above show on macOS and Linux, through `ipc::pipe_windows`. A pipe
+/// The broker on a named pipe: what the socket tests above show on macOS and Linux, through `ipc::pipe_windows`. A pipe
 /// has no `shutdown`: a hang-up is a flag and a cancel, and the client reads the end of the pipe once the broker's last handle on it is
 /// closed, after everything that was written before.
 #[cfg(all(test, windows))]
@@ -2329,7 +2329,7 @@ mod windows_tests {
         ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to web was closed.".into() })
     }
 
-    /// Plan 1b-3 Task 1: a whole session over the pipe. The broker reads its client on one thread while the session writes to it from
+    /// A whole session over the pipe. The broker reads its client on one thread while the session writes to it from
     /// another, and the last frame, `exited`, is read before the end of the pipe.
     #[test]
     fn a_session_served_on_a_pipe_ends_with_exited_then_the_end_of_the_pipe() {
@@ -2349,9 +2349,9 @@ mod windows_tests {
         assert_eq!(world.engine.events().last(), Some(&FakeEvent::Closed));
     }
 
-    /// Plan 1b-3 Task 1: a pipe has no read timeout. A connection that does not say hello, or says hello and then nothing, is hung up when
+    /// A pipe has no read timeout. A connection that does not say hello, or says hello and then nothing, is hung up when
     /// the time for its first messages is over (300 ms here, 10 s in the app), and its client reads the end of the pipe; one that sent
-    /// both in time is off the clock. Fix round 1: the time is for each of the two messages (spec §7.2), so `open_shell` has all of it
+    /// both in time is off the clock. The time is for each of the two messages, so `open_shell` has all of it
     /// again from the `hello`, however late that came.
     #[test]
     fn a_client_that_says_nothing_is_hung_up_after_the_deadline() {
@@ -2383,7 +2383,7 @@ mod windows_tests {
         assert!(after_hello >= Duration::from_millis(850) && after_hello < Duration::from_secs(4), "ended {after_hello:?} after the hello");
     }
 
-    /// Plan 1b-3 Task 1: the app quits under an open session. Its client reads why and `exited`, and then the end of the pipe.
+    /// The app quits under an open session. Its client reads why and `exited`, and then the end of the pipe.
     #[test]
     fn quitting_tells_a_connected_client_and_ends_its_pipe() {
         let world = world(FakeEngine::new());
@@ -2413,7 +2413,7 @@ mod windows_tests {
         assert!(world.engine.events().is_empty(), "nothing was connected");
     }
 
-    /// The terminal was closed: the broker reads the end of the pipe and closes the session (spec §7.2).
+    /// The terminal was closed: the broker reads the end of the pipe and closes the session.
     #[test]
     fn when_the_client_goes_away_its_session_is_closed() {
         let world = world(FakeEngine::new());

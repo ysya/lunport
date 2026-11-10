@@ -1,8 +1,8 @@
-//! Lunport's host key window (own-ssh spec §10, §14, decision 6): the broker's `HostKeyConfirmer`. A host key is confirmed only here,
+//! Lunport's host key window: the broker's `HostKeyConfirmer`. A host key is confirmed only here,
 //! never in a terminal: the broker's session thread asks (`HostKeyHub::ask` blocks it), a small always-on-top window labelled `hostkey`
 //! shows the oldest question, and the person's answer comes back through `hostkey_resolve`. Closing the window refuses every waiting
-//! question (`deny_all`, from lib.rs). The window and its hub are modelled on the SSH agent's approval window (`agent/prompt.rs`), copied
-//! rather than shared because plan 1c deletes `agent/`.
+//! question (`deny_all`, from lib.rs). The window and its hub are modelled on the SSH agent's approval window, copied rather than
+//! shared with it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
@@ -15,7 +15,7 @@ use crate::error::AppError;
 
 pub const HOSTKEY_WINDOW: &str = "hostkey";
 pub const HOSTKEY_EVENT: &str = "hostkey://requests";
-/// How long a question waits for the person (the connection itself is not waiting: the engine failed fast, spec §6.2 step 3).
+/// How long a question waits for the person (the connection itself is not waiting: the engine failed fast).
 pub const HOSTKEY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A host key question as the window shows it. The strings come from the user's host settings and the server: the window shows them
@@ -37,7 +37,7 @@ pub struct HostKeyRequest {
     /// Set for a key this device has not confirmed that matches the one saved for the host: that saved one.
     #[serde(default)]
     pub saved: Option<PinnedHostKey>,
-    /// The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` for a person's connection.
+    /// The AI client whose request asks; `None` for a person's connection.
     #[serde(default)]
     pub ai: Option<crate::session::protocol::AiAsker>,
 }
@@ -354,7 +354,7 @@ mod tests {
         assert!(hub.pending().is_empty());
     }
 
-    /// Design 2026-11-09: an AI client's call says whether the person refused the key or nobody answered, so the window's confirmer
+    /// An AI client's call says whether the person refused the key or nobody answered, so the window's confirmer
     /// tells them apart: Cancel or Refuse and a closed window are refusals; a question that runs out of time is no answer.
     #[test]
     fn the_window_tells_a_refusal_and_a_closed_window_from_a_question_nobody_answered() {
@@ -432,8 +432,8 @@ mod tests {
         assert_eq!(web.join().unwrap(), None);
     }
 
-    /// A key this device has not confirmed that matches the one saved for the host reaches the window with when that key was saved
-    /// (design 2026-11-09, saved pins), and is still a question for the person.
+    /// A key this device has not confirmed that matches the one saved for the host reaches the window with when that key was saved,
+    /// and is still a question for the person.
     #[test]
     fn a_key_that_matches_the_saved_one_reaches_the_window_with_when_it_was_saved() {
         let hub = Arc::new(HostKeyHub::default());
@@ -450,8 +450,8 @@ mod tests {
         assert_eq!(asking.join().unwrap(), Some("SHA256:new".to_string()));
     }
 
-    /// A question an AI client's request asks reaches the window with the client and what then runs without review (design 2026-11-09,
-    /// native windows for AI requests); a person's question has none.
+    /// A question an AI client's request asks reaches the window with the client and what then runs without review;
+    /// a person's question has none.
     #[test]
     fn an_ai_clients_question_reaches_the_window_with_the_client() {
         use crate::session::protocol::{AiAsker, Unreviewed};

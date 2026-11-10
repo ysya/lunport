@@ -427,7 +427,7 @@ fn v3_state_decodes_local_hosts_public_metadata_and_tombstones() {
     ));
 }
 
-/// Design 2026-10-26 and 2026-10-27: state versions 10 and 11 are known to every place that lists the versions a state may carry (the
+/// State versions 10 and 11 are known to every place that lists the versions a state may carry (the
 /// decoder, the validator and the repository's header check), and the version after them is not.
 #[test]
 fn state_versions_ten_and_eleven_are_known_everywhere_and_the_next_one_is_not() {

@@ -277,7 +277,7 @@ impl Operation {
         Ok(())
     }
 }
-/// The publish step (design 2026-10-26, Existing routes move in; R64a): the routes saved on this device alone that the library takes
+/// The publish step: the routes saved on this device alone that the library takes
 /// become its rows by an ordinary save of their own (they change the library's rows, which this dispatch's own publication never does),
 /// so that the capture after it publishes them. It waits while a Catalog captured now would conflict with the library's: until the
 /// latest Catalog the pull staged is read into this device's rows, which the round that staged it does at its end, and while the
@@ -297,7 +297,7 @@ fn publish_local_routes(env: &SyncEnv, state: &SyncStateV3, keys: &VaultKeys) ->
     })?;
     Ok(true)
 }
-/// The automatic merge (design 2026-10-27, Catalog conflicts keep both devices' changes): a Catalog conflict whose two versions change
+/// The automatic merge: a Catalog conflict whose two versions change
 /// different items is merged into this device's rows and draft by an ordinary save of its own, as the publish step saves, so that the
 /// capture after it publishes the merged Catalog (`catalog_conflict::merge_automatically`). Under the publish step's gates: a library
 /// frozen for an encrypted migration, or whose writes are blocked, takes none, and the conflict waits. Whether it saved.

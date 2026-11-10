@@ -7,7 +7,7 @@ import { groupView, hostPayload, hostTransport, hostView, recordOverview } from 
 import { CATALOG_CHOICE_NOTE, CatalogConflictView, catalogChoiceTitle } from "./CatalogConflict";
 import { ConflictRow } from "./CentralConflicts";
 
-/* Design 2026-10-27 (Collisions: the review): the Catalog's row in Central conflicts, in plain words. */
+/* The Catalog's row in Central conflicts, in plain words. */
 
 const jump = hostView({ id: "000000000000000a", payload: hostPayload({ alias: "prod-jump" }) });
 const web = groupView({ id: "0000000000000010", payload: { schema: 1, name: "Web", parent_id: null, defaults: {} } });

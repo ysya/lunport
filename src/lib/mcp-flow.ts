@@ -25,7 +25,7 @@ export function chooseMcpMode(
   return false;
 }
 
-/** How long a question may wait: a server's two minutes; a grant request (design 2026-10-25, PAM grant requests) five. */
+/** How long a question may wait: a server's two minutes; a grant request five. */
 export const SERVER_QUESTION_MS = 120000;
 export const GRANT_QUESTION_MS = 300000;
 /** The longest grant the form lets a person ask for, in minutes (the broker refuses more; the entitlement may allow less). */

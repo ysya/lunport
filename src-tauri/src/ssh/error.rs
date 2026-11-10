@@ -1,6 +1,6 @@
-//! The engine's errors. Their `Display` text is the sentence the user sees (own-ssh spec §11); none of them carries a key or a password.
+//! The engine's errors. Their `Display` text is the sentence the user sees; none of them carries a key or a password.
 //! A failure behind a jump host is reported on the hop where it happened (`Unreachable`'s `reason` names the jump host when the jump host
-//! could not reach the next one); spec §11's `Could not connect through {jump alias}: {reason}` is the broker's wording of it, as are the
+//! could not reach the next one); `Could not connect through {jump alias}: {reason}` is the broker's wording of it, as are the
 //! sentences that need the keepalive seconds or "while the command was running".
 
 use std::fmt;
@@ -14,8 +14,8 @@ pub enum ConnectError {
     BadJumpChain { why: String },
     /// DNS or TCP failed, or the jump host could not open a connection to `hop`.
     Unreachable { hop: HopRef, reason: String },
-    /// The Google Cloud IAP tunnel that carries `hop` could not be opened. `text` is the whole sentence (design 2026-10-25, "Error
-    /// texts"): it names the instance and the account, which `Unreachable`'s "Could not reach host:port" would not. `code` is the relay's
+    /// The Google Cloud IAP tunnel that carries `hop` could not be opened. `text` is the whole sentence:
+    /// it names the instance and the account, which `Unreachable`'s "Could not reach host:port" would not. `code` is the relay's
     /// close code when IAP closed the tunnel (4033: not authorized), for the broker's note about a grant IAP does not see yet.
     Tunnel { hop: HopRef, text: String, code: Option<u16> },
     /// `hop` did not answer in time: its `connect_timeout` ran out during `phase`, or the server stopped answering the login. The wait for
@@ -33,7 +33,7 @@ pub enum ConnectError {
     /// method and no password was tried on this connection (the auth source had none, or the login did not get to the method): a password
     /// typed now could get in. The caller can ask the person and connect again with the hop as it is: the methods go in the same order, and
     /// `AuthSource::password` returns the typed password from memory at once, because nobody may wait for a person while a connection is
-    /// open (spec §6.2 step 4). Putting the password first would drop the key from a server that wants `publickey,password`; only a hop
+    /// open. Putting the password first would drop the key from a server that wants `publickey,password`; only a hop
     /// with no password method in its sequence (one that starts with keyboard-interactive) is connected again with the password first.
     AuthFailed { hop: HopRef, tried: Vec<AuthMethod>, reason: String, password_wanted: bool },
     /// Login stopped on our side (signer failure, cancelled or overdue prompt) and the connection was dropped.
@@ -146,9 +146,9 @@ mod tests {
         HostKey { algorithm: "ssh-ed25519".into(), public_key: vec![1, 2, 3], fingerprint: "SHA256:abc".into() }
     }
 
-    /// The sentences are the ones in spec §11; the broker and the CLI show them as they are.
+    /// These are the sentences the user reads; the broker and the CLI show them as they are.
     #[test]
-    fn connect_errors_read_like_the_messages_of_the_spec() {
+    fn connect_errors_read_as_the_sentences_the_user_sees() {
         let cases = [
             (ConnectError::Unreachable { hop: hop(), reason: "connection refused".into() }, "Could not reach web.example.com:2222 (connection refused)."),
             (ConnectError::Timeout { hop: hop(), phase: Phase::Tcp }, "Could not reach web.example.com:2222 (timed out during the TCP connection)."),

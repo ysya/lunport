@@ -1,7 +1,7 @@
-//! Starting Lunport in the background for a client that needs it and finds it not running (own-ssh spec §4): the MCP adapter, and
-//! `lunport connect` from plan 1b on. Both start the same thing, the app as a host (`--host`, its window hidden), under the same two
+//! Starting Lunport in the background for a client that needs it and finds it not running: the MCP adapter, and
+//! `lunport connect`. Both start the same thing, the app as a host (`--host`, its window hidden), under the same two
 //! locks, so that they never start two. Moved here from `mcp.rs` unchanged, but for four things: the message for "nothing answered" is
-//! the caller's (spec §11 gives the CLI its own); the flag is `--host`, with the old `--mcp-host` still accepted (an update's
+//! the caller's (the CLI has its own); the flag is `--host`, with the old `--mcp-host` still accepted (an update's
 //! "Install & restart" starts the app again with the arguments it was started with); the line it writes to stderr starts with `[host]`
 //! (not `[mcp]`); and the thread that reaps the app it started is `lunport-host-wait` (not `lunport-mcp-host-wait`).
 
@@ -17,7 +17,7 @@ use crate::fsutil;
 
 /// First argument that starts Lunport as the host of its clients (main.rs): the desktop app, in the background.
 pub const HOST_FLAG: &str = "--host";
-/// The host flag before plan 1b. Still accepted, for the restart of an app that was started with it.
+/// The earlier name of the host flag. Still accepted, for the restart of an app that was started with it.
 pub const LEGACY_HOST_FLAG: &str = "--mcp-host";
 
 /// Whether `arg`, the first argument (main.rs reads the mode from it), starts Lunport as a host.

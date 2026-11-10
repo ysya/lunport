@@ -917,7 +917,7 @@ $candidateMsi = $newMsi[0].FullName
     Write-Output "Verified the published MSI UpgradeCode is preserved: $newUpgrade"
 })
 [void] (Test-Stage 'start' 'a clean machine' { Reset-Machine })
-# The in-app update first (Review Focus 4), then the installer run by hand, then the MSI.
+# The in-app update first, then the installer run by hand, then the MSI.
 Test-NsisUpgrade 'nsis update' '/P /R /UPDATE /ARGS' -Updater
 Test-NsisUpgrade 'nsis by hand' '/S'
 Test-MsiUpgrade 'msi'

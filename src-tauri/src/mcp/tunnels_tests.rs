@@ -642,7 +642,7 @@ fn recent_outcomes(r: &McpRuntime) -> Vec<String> {
     r.recent.lock().unwrap().iter().map(|entry| entry.outcome.clone()).collect()
 }
 
-/// Design 2026-11-09: a server key this device has not verified is asked about in Lunport's trust window inside the start, in both modes
+/// A server key this device has not verified is asked about in Lunport's trust window inside the start, in both modes
 /// (after the start's own approval in Ask mode), and the tunnel starts once the person trusts it; the trust decision is audited first.
 #[test]
 fn a_new_server_key_is_asked_about_then_the_tunnel_starts() {
@@ -887,7 +887,7 @@ fn a_start_whose_rule_changed_during_the_window_starts_nothing() {
 }
 
 /// While the tunnel's connection has a window open for the person (a changed server key, a password, a grant), `start_tunnel` keeps
-/// waiting past its own limit and answers once the tunnel runs (design 2026-11-09, native windows for AI requests); with no window open
+/// waiting past its own limit and answers once the tunnel runs; with no window open
 /// it answers at its limit that the tunnel is still connecting.
 #[test]
 fn a_start_waits_while_the_tunnels_connection_asks_the_person() {

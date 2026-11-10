@@ -33,8 +33,8 @@ struct ProbeDirectory<'a> {
     inner: &'a dyn HostDirectory,
     expected: Target,
     query: &'a HostQuery,
-    /// Whether a Privileged Access Manager grant the route needs is asked for (an AI client's verification, design 2026-11-09) or is the
-    /// refusal (the person's fingerprint check, design 2026-10-25).
+    /// Whether a Privileged Access Manager grant the route needs is asked for (an AI client's verification) or is the
+    /// refusal (the person's fingerprint check).
     asks_for_grant: bool,
 }
 impl ProbeDirectory<'_> {
@@ -109,7 +109,7 @@ impl HostDirectory for ProbeDirectory<'_> {
         if self.asks_for_grant {
             prepared
         } else {
-            // The person's fingerprint check asks nobody for a grant (design 2026-10-25, PAM grant requests): a needed grant is the refusal.
+            // The person's fingerprint check asks nobody for a grant: a needed grant is the refusal.
             prepared.map_err(DirectoryError::for_automation)
         }
     }
@@ -244,7 +244,7 @@ pub fn verify(
     verify_with(connector, query, owner, cancel, false)
 }
 
-/// `verify` for an AI client's request (design 2026-11-09, native windows for AI requests): a Privileged Access Manager grant the route
+/// `verify` for an AI client's request: a Privileged Access Manager grant the route
 /// needs is asked for in Lunport's window, through `owner`, instead of being the refusal.
 pub fn verify_for_ai(
     connector: &Connector<'_>,

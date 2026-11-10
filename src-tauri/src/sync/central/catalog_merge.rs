@@ -1,4 +1,4 @@
-//! The three-way rule of a Catalog conflict (design 2026-10-27, Catalog conflicts keep both devices' changes). Pure: no state, keys
+//! The three-way rule of a Catalog conflict. Pure: no state, keys
 //! or I/O; the caller reads the three versions and applies what `merge` returns.
 use super::payload::{
     catalog_fits, Catalog, Collection, GroupOrder, MAX_COLLECTIONS, MAX_GROUP_ORDERS, MAX_ORDERED_GROUPS, MAX_TUNNELS,
@@ -29,7 +29,7 @@ pub enum Collision {
     /// A collection's name.
     Collection { id: String, local: Option<String>, remote: Option<String> },
     GroupOrder { scope: HostScope, local: Option<Vec<String>>, remote: Option<Vec<String>> },
-    /// A Privileged Access Manager search scope (design 2026-10-27).
+    /// A Privileged Access Manager search scope.
     PamScope { id: String, local: Option<PamScope>, remote: Option<PamScope> },
 }
 
@@ -167,7 +167,7 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
         |id, local, remote| Collision::PamScope { id, local, remote },
         &mut collisions,
     );
-    // A grant memory both devices changed takes the synced one, never a review (design 2026-10-27): it is a convenience. Two scopes
+    // A grant memory both devices changed takes the synced one, never a review: it is a convenience. Two scopes
     // that look in the same place keep the synced one too.
     let pam_requests = merge_list(
         common.map(|c| c.pam_requests.as_slice()),
@@ -248,8 +248,7 @@ pub fn fit(merged: Merged) -> Result<Fitted, Over> {
     {
         return Err(Over::GroupOrders);
     }
-    // Grant memories make room before anything else, the first in the Catalog's order first: a memory is a convenience (design
-    // 2026-10-27).
+    // Grant memories make room before anything else, the first in the Catalog's order first: a memory is a convenience.
     while !catalog_fits(&catalog) && !catalog.pam_requests.is_empty() {
         catalog.pam_requests.remove(0);
     }
@@ -570,7 +569,7 @@ pub(super) mod tests {
         GrantRequestMemory { name: format!("projects/acme-prod-123456/locations/global/entitlements/{name}"), justification: justification.into(), duration_secs: 1800 }
     }
 
-    /// Design 2026-10-27: both devices' scopes and memories survive a merge; a scope both changed is reviewed, a memory both changed
+    /// Both devices' scopes and memories survive a merge; a scope both changed is reviewed, a memory both changed
     /// takes the synced one without asking, and two scopes that look in the same place keep the synced one.
     #[test]
     fn scopes_merge_as_items_and_a_memory_collision_takes_the_synced_one() {
@@ -598,7 +597,7 @@ pub(super) mod tests {
         assert_eq!(merged.collisions, vec![Collision::PamScope { id: A.into(), local: Some(edited.pam_scopes[0].clone()), remote: None }]);
     }
 
-    /// A merge too large for one record drops grant memories before it gives up (design 2026-10-27).
+    /// A merge too large for one record drops grant memories before it gives up.
     #[test]
     fn grant_memories_make_room_before_a_merge_is_over() {
         let mut catalog = Catalog { tunnels: (0..256).map(long_tunnel).collect(), ..Catalog::default() };

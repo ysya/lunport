@@ -12,12 +12,12 @@ pub const STATE_VERSION: u32 = 3;
 pub const LOCAL_CREDENTIAL_STATE_VERSION: u32 = 6;
 pub const LOCAL_CONFLICT_STATE_VERSION: u32 = 7;
 pub const CENTRAL_STATE_VERSION: u32 = 8;
-/// `local.transports` exists (design 2026-10-25): an older Lunport refuses the state instead of misreading it.
+/// `local.transports` exists: an older Lunport refuses the state instead of misreading it.
 pub const TRANSPORT_STATE_VERSION: u32 = 9;
-/// `local.transport_grants` exists, and the library's route rows may sit in `account.records` (design 2026-10-26): an older Lunport
+/// `local.transport_grants` exists, and the library's route rows may sit in `account.records`: an older Lunport
 /// refuses the state instead of misreading it or meeting rows it cannot publish.
 pub const TRANSPORT_SYNC_STATE_VERSION: u32 = 10;
-/// Search scopes and grant memory exist (`pam_scope:` and `pam_request:` records, design 2026-10-27), in `local.pam_records` or as the
+/// Search scopes and grant memory exist (`pam_scope:` and `pam_request:` records), in `local.pam_records` or as the
 /// library's rows in `account.records`: an older Lunport refuses the state instead of meeting rows it cannot publish.
 pub const PAM_STATE_VERSION: u32 = 11;
 pub const MAX_JUMPS: usize = 5;

@@ -1,4 +1,4 @@
-//! v1 的本機同步狀態(`sync-state.json` 的 `version: 1` 格式):只用來讀取並升級(Sync v2 spec §7.6;讀檔在
+//! v1 的本機同步狀態(`sync-state.json` 的 `version: 1` 格式):只用來讀取並升級(讀檔在
 //! `state_v2::load`)。另有兩版共用的狀態檔路徑、內建 relay 與同步碼的 keychain account。
 
 use std::collections::BTreeMap;
@@ -52,7 +52,7 @@ pub struct SyncState {
     /// chain 的 `meta.schema_version`(收到後持久化);比 `SCHEMA_VERSION` 新 → 唯讀模式。
     #[serde(default)]
     pub remote_schema_version: Option<u32>,
-    /// 剛 Join 後 false:第一輪是「以 chain 為準」的基線輪,不做本機 diff(spec §6);Create 的 chain 是空的,直接 true。
+    /// 剛 Join 後 false:第一輪是「以 chain 為準」的基線輪,不做本機 diff;Create 的 chain 是空的,直接 true。
     #[serde(default)]
     pub baseline_established: bool,
     /// Leave 時 keychain 裡的助記詞刪不掉:持久化這個待辦,重啟後仍顯示警示與重試。
@@ -61,7 +61,7 @@ pub struct SyncState {
     /// 明文快取,key = `record_key(kind, id)`;只放本版會處理的種類(host/device/meta)。
     pub records: BTreeMap<String, LocalRecord>,
     /// 本版不處理的種類(key/password/未知 kind)的原始密文 envelope,key = `"{kind}:{id_hash}"`。
-    /// 絕不解密進這裡:祕密只能落在 keychain 或 `~/.ssh/<name>`(spec §2)。
+    /// 絕不解密進這裡:祕密只能落在 keychain 或 `~/.ssh/<name>`。
     #[serde(default)]
     pub sealed: BTreeMap<String, Envelope>,
     pub last_sync_ms: Option<u64>,
@@ -96,7 +96,7 @@ impl SyncState {
         self.chain_id.is_some()
     }
 
-    /// chain 用了比本 app 新的格式:只套用可理解的記錄、不上傳(spec §10)。只有測試用:升級讀的是狀態檔裡的欄位,v2 的唯讀判斷在 `SyncStateV2::read_only`。
+    /// chain 用了比本 app 新的格式:只套用可理解的記錄、不上傳。只有測試用:升級讀的是狀態檔裡的欄位,v2 的唯讀判斷在 `SyncStateV2::read_only`。
     #[cfg(test)]
     pub fn read_only(&self) -> bool {
         self.remote_schema_version.is_some_and(|v| v > SCHEMA_VERSION)

@@ -15,8 +15,8 @@ use crate::{
 use std::collections::BTreeMap;
 
 /// The routes in the Catalog are the library's (`catalog_of`): the routes saved on this device alone never join it here. They move into
-/// the library by one publish step, which makes them the library's rows first (design 2026-10-26, Existing routes move in; R64a:
-/// `transports::publish_local`, run by the central dispatch before its capture).
+/// the library by one publish step, which makes them the library's rows first (`transports::publish_local`, run by the central
+/// dispatch before its capture).
 pub fn public_rows(
     state: &SyncStateV3,
     original: &Catalog,
@@ -130,8 +130,8 @@ fn is_group_order(row: &LocalRecord) -> bool {
     row.record.kind == RecordKind::Meta && row.record.id == crate::sync::group_order::RECORD_ID
 }
 /// The Catalog `public_rows` publishes: the collections, group orders, tunnels and routes of this state, each in `original`'s order
-/// and then new ones by id. Its routes are the account's `transport:` rows, the library's, never the routes saved on this device alone
-/// (R64a), and none keeps a justification. Account rows the Catalog does not carry are skipped, those it does not know included:
+/// and then new ones by id. Its routes are the account's `transport:` rows, the library's, never the routes saved on this device alone,
+/// and none keeps a justification. Account rows the Catalog does not carry are skipped, those it does not know included:
 /// `public_rows` is what refuses an unknown row, so a caller of `catalog_of` alone (the room check of route and tunnel saves,
 /// `transports::ensure_room`, and the publish step's walk, `transports::local_routes`) learns the Catalog, not whether the state can be
 /// captured.
@@ -358,7 +358,7 @@ mod tests {
         transports::tests::saved_on_this_device(&state, &route(host_id))
     }
 
-    /// R64a: a capture never takes the routes saved on this device alone, before or after the library moved to central sync: they
+    /// A capture never takes the routes saved on this device alone, before or after the library moved to central sync: they
     /// become the library's rows by the publish step first (`transports::publish_local`), and only those rows reach the Catalog.
     #[test]
     fn a_capture_never_takes_the_routes_saved_on_this_device() {

@@ -87,7 +87,7 @@ export const gcloudAccountsQuery = queryOptions({
   staleTime: 60_000,
   networkMode: "always",
 });
-/** Where gcloud is on this computer, found once for the app's run (design 2026-10-27, Finding gcloud). */
+/** Where gcloud is on this computer, found once for the app's run. */
 export const gcloudCliKey = ["gcp", "cli"] as const;
 export const gcloudCliQuery = queryOptions({
   queryKey: gcloudCliKey,
@@ -98,7 +98,7 @@ export const gcloudCliQuery = queryOptions({
 });
 /** Looks for gcloud again: the Accounts tab's Check again. */
 export const locateGcloudAgain = () => tauriInvoke<GcloudCliView>("gcp_cli_locate_again");
-/** Runs one account action with gcloud, once the person confirmed it (design 2026-10-27, The Accounts tab). */
+/** Runs one account action with gcloud, once the person confirmed it. */
 export const runAccountAction = (action: AccountAction) => tauriInvoke<AccountActionView>("gcp_account_action", { action });
 /** Stops the account action that is running, if one is. */
 export const cancelAccountAction = () => tauriInvoke<void>("gcp_account_cancel");
@@ -185,7 +185,7 @@ const grantProblem = (grant: { message: string | null }) => grant.message ?? "Th
 const grantExpired = (grant: { state: string; active_until_ms?: number | null }, now: number) =>
   grant.state === "active" && grant.active_until_ms != null && grant.active_until_ms <= now;
 
-/** One line about a transport's PAM grant (design 2026-10-25): which entitlement holds it and until when, on this computer's clock, or why there is none. */
+/** One line about a transport's PAM grant: which entitlement holds it and until when, on this computer's clock, or why there is none. */
 export function pamStatusLine(view: PamStatusView, now = Date.now()): string {
   if (grantExpired(view, now)) return `${view.entitlement ?? "grant"} · expired`;
   switch (view.state) {
@@ -226,7 +226,7 @@ export function grantStateOrMessage(grant: { state: string; active_until_ms: num
 }
 
 /**
- * Whether a grant that was read is held: active before its known deadline, or activating (a request already in flight, R54). Request
+ * Whether a grant that was read is held: active before its known deadline, or activating (a request already in flight). Request
  * grant is off for both, and a held grant is shown as held. A grant not read yet, or whose read failed, is not.
  */
 export function grantHeld(grant: { state: string; active_until_ms?: number | null } | null, now = Date.now()): boolean {
@@ -234,7 +234,7 @@ export function grantHeld(grant: { state: string; active_until_ms?: number | nul
 }
 
 /**
- * Whether Request grant is off for a grant that was read: held, or waiting for an approver (design 2026-10-27), since PAM refuses another
+ * Whether Request grant is off for a grant that was read: held, or waiting for an approver, since PAM refuses another
  * request on the entitlement while one waits.
  */
 export function grantBusy(grant: { state: string; active_until_ms?: number | null } | null, now = Date.now()): boolean {
@@ -248,7 +248,7 @@ export function grantLine(status: PamStatusView, now = Date.now()): string {
 }
 
 /**
- * What a tunnel's row says of the grant its first hop needs (design 2026-10-26, Tunnels through a host that needs a grant): a held
+ * What a tunnel's row says of the grant its first hop needs: a held
  * grant as the host's Access grant says it, the API's sentence when it could not be checked, and otherwise the entitlements of the
  * route's PAM check, any of which can hold one.
  */
@@ -286,7 +286,7 @@ export function routeLocalReason(overview: RecordOverview, hostId: string): Tran
 export const entitlementName = (project: string, location: string, id: string) => `projects/${project}/locations/${location}/entitlements/${id}`;
 
 /**
- * What a request for the host's route starts from (design 2026-10-27): the library's memory of the entitlement it requests (`entitlement`,
+ * What a request for the host's route starts from: the library's memory of the entitlement it requests (`entitlement`,
  * else the route's first), else what this computer remembered for the host as an earlier release kept it; `null` when there is neither.
  */
 export function grantMemoryFor(overview: RecordOverview, hostId: string | null, entitlement?: string): GrantMemoryView | null {

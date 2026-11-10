@@ -102,7 +102,7 @@ fn migration_activation_persists_before_switching_to_records() {
     );
 }
 
-/// Design 2026-10-26: a migration's candidate that carries the device-local grant memory is saved at state version 10 too.
+/// A migration's candidate that carries the device-local grant memory is saved at state version 10 too.
 #[test]
 fn migration_activation_raises_the_version_for_grant_memory() {
     let f = Fixture::new();

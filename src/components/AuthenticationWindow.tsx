@@ -47,10 +47,10 @@ export function AuthenticationCardView({
   const answerId = useId();
   const minutesId = useId();
   const [shown, setShown] = useState(false);
-  // A grant question (design 2026-10-25, PAM grant requests) is Lunport's own, not a server's prompt: it gets the Request-a-grant form.
+  // A grant question is Lunport's own, not a server's prompt: it gets the Request-a-grant form.
   const grant = request.kind === "grant" ? request.grant : null;
   const isGrant = grant !== null;
-  // An AI client's request (design 2026-11-09, native windows for AI requests): who asked, and what then runs unreviewed in Auto-log.
+  // An AI client's request: who asked, and what then runs unreviewed in Auto-log.
   const unreviewed = request.ai && unreviewedNote(request.ai, isGrant ? "grant" : "question");
   useEffect(() => { setShown(false); }, [request.id]);
   useEffect(() => { (isGrant ? justification.current : cancel.current)?.focus(); }, [request.id, isGrant]);

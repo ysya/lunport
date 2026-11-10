@@ -1,4 +1,4 @@
-//! SP3 金鑰插槽的純函式與型別:
+//! 金鑰插槽的純函式與型別:
 //! 帳戶記錄的 payload、插槽 id/名稱/檔名規則、OpenSSH 私鑰的檢查(不需要 passphrase、不寫任何檔案),以及
 //! `IdentityFile` 值的解析。這裡不碰檔案系統與同步狀態。
 
@@ -14,7 +14,7 @@ use crate::error::AppError;
 /// 插槽目錄,相對於家目錄。主機的 `IdentityFile` 一律寫成 `~/` 加上這個路徑。
 // frozen-identity: the folder that IdentityFile values in users' ssh configs and in synced libraries already name; it never changes.
 pub const SLOT_DIR: &str = ".ssh/sshelter/keys";
-/// 可以同步的私鑰檔大小上限(spec §4.1)。
+/// 可以同步的私鑰檔大小上限。
 #[cfg(test)]
 pub const MAX_PRIVATE_KEY_BYTES: usize = 16 * 1024;
 /// `keyslot`、`key` payload 的 schema。
@@ -28,7 +28,7 @@ const OPENSSH_END: &str = concat!("-----END ", "OPENSSH", " PRIVATE KEY-----");
 #[cfg(test)]
 const AUTH_MAGIC: &[u8] = b"openssh-key-v1\0";
 
-/// 插槽的共用方式(spec §2):同步私鑰,或每台電腦用自己的金鑰。
+/// 插槽的共用方式:同步私鑰,或每台電腦用自己的金鑰。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -38,7 +38,7 @@ pub enum SlotMode {
     Own,
 }
 
-/// `keyslot` 記錄的 payload(帳戶 chain,id = 插槽 id;spec §4.1)。`mode = Synced` 時後四項必填,`Own` 時都是 None
+/// `keyslot` 記錄的 payload(帳戶 chain,id = 插槽 id)。`mode = Synced` 時後四項必填,`Own` 時都是 None
 /// (每台電腦的金鑰不同)。刪除 = tombstone。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KeySlotPayload {
@@ -53,14 +53,14 @@ pub struct KeySlotPayload {
     pub has_passphrase: Option<bool>,
 }
 
-/// `device` 記錄的 `slots`(spec §4.1):這台的插槽裡是哪把金鑰、是不是同步來的副本。只含公開資訊。
+/// `device` 記錄的 `slots`:這台的插槽裡是哪把金鑰、是不是同步來的副本。只含公開資訊。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceSlot {
     pub slot_id: String,
     pub fingerprint: Option<String>,
     pub synced_copy: bool,
-    /// 這台的金鑰在 Lunport 的保管庫裡(`SlotSource::Vault`;金鑰保管庫 spec §7.3,別台的明細寫「in Lunport」)。只在 true 時寫出:
-    /// 其他插槽的 `device` 記錄和 SP3 寫的一樣。SP3 讀到會略過這個欄位;它寫的記錄沒有這個欄位 → false。
+    /// 這台的金鑰在 Lunport 的保管庫裡(`SlotSource::Vault`;別台的明細寫「in Lunport」)。只在 true 時寫出:
+    /// 其他插槽的 `device` 記錄和沒有這個欄位的舊版寫的一樣。舊版讀到會略過這個欄位;它寫的記錄沒有這個欄位 → false。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_vault: bool,
 }
@@ -76,7 +76,7 @@ pub fn new_slot_id() -> Result<String, AppError> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// 名稱規則(spec §4.1):`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`,不得以 `.pub` 結尾(不分大小寫)。
+/// 名稱規則:`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`,不得以 `.pub` 結尾(不分大小寫)。
 pub fn valid_slot_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else { return false };
@@ -129,7 +129,7 @@ pub fn slot_file_of_value(value: &str) -> Option<String> {
     (!file.is_empty() && !file.contains(['/', '\\'])).then(|| file.to_string())
 }
 
-/// 一個 `IdentityFile` 值在這台電腦上指到什麼(spec §5)。
+/// 一個 `IdentityFile` 值在這台電腦上指到什麼。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdentityTarget {
     /// 指到插槽(插槽檔名)。
@@ -145,7 +145,7 @@ pub const REASON_TOKENS: &str = "uses % tokens or environment variables";
 pub const REASON_RELATIVE: &str = "is a relative path";
 
 /// 解析一個 `IdentityFile` 值:`~`、`%d`(`/` 或 `\` 分隔)、Unix 與 Windows 的絕對路徑;其他 token、環境變數、
-/// 指向 `.pub` 的值、相對路徑都不處理(計畫裁定 6)。
+/// 指向 `.pub` 的值、相對路徑都不處理。
 pub fn resolve_identity_value(value: &str, home: &Path) -> IdentityTarget {
     let v = unquote(value);
     if let Some(file) = slot_file_of_value(v) {
@@ -269,7 +269,7 @@ pub fn parse_public_key(line: &str) -> Option<(String, String)> {
     Some((format!("{key_type} {b64}"), blob_fingerprint(&blob)))
 }
 
-/// `keyslot` payload 能不能進快取(spec §4.1):schema、名稱、來源裝置;`mode` 與四個金鑰欄位一致;`Synced` 的
+/// `keyslot` payload 能不能進快取:schema、名稱、來源裝置;`mode` 與四個金鑰欄位一致;`Synced` 的
 /// `public_key` 必須剛好是 `<type> <base64>`(沒有 comment、沒有第二行、沒有多餘的空白:其他電腦會把它原樣寫進 `.pub`,
 /// 帳戶裡的惡意成員不得借此夾帶別的內容),而且它的指紋要等於 `fingerprint`。
 pub fn valid_slot_payload(p: &KeySlotPayload) -> bool {
@@ -315,7 +315,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 pub(crate) mod test_keys {
-    //! 只給測試用的金鑰(寫計畫時產生,沒有在任何地方使用)。指紋由 `ssh-keygen -l` 核對過。
+    //! 只給測試用的金鑰(沒有在任何地方使用)。指紋由 `ssh-keygen -l` 核對過。
     pub const BEGIN: &str = concat!("-----BEGIN ", "OPENSSH", " PRIVATE KEY-----");
     pub const END: &str = concat!("-----END ", "OPENSSH", " PRIVATE KEY-----");
 
@@ -367,7 +367,7 @@ pub(crate) mod test_keys {
     pub const ECDSA_PUBLIC: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEjFNKVD5g/ngM+x8oESowshddffHjvh+l4MYyyXDZMfnXpzylT6xjkTiMop0/8K1KN1+LyseBdXlLj6j5m8mvU=";
     pub const ECDSA_FINGERPRINT: &str = "SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs";
 
-    /// rsa 2048,沒有 passphrase,comment `sp3-rsa`(金鑰保管庫計畫 Task 2 產生,沒有在任何地方使用)。指紋由 `ssh-keygen -l` 核對過。
+    /// rsa 2048,沒有 passphrase,comment `sp3-rsa`(沒有在任何地方使用)。指紋由 `ssh-keygen -l` 核對過。
     pub const RSA_BODY: &[&str] = &[
         "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn",
         "NhAAAAAwEAAQAAAQEA2LN0JUt3ulLhhwkHP9LqkMwtBGyB5tBCHH89TW85tUNw4yKFEO18",
@@ -874,7 +874,7 @@ mod tests {
 
     }
 
-    /// 這三句會原樣顯示在 UI(計畫的 UI 字串表):不能悄悄改字。
+    /// 這三句會原樣顯示在 UI:不能悄悄改字。
     #[test]
     fn unsyncable_reasons_have_the_user_facing_messages() {
         assert_eq!(Unsyncable::TooLarge.message(), "This key is larger than 16 KiB, so it can't be synced. Keep it on this computer.");
@@ -885,13 +885,13 @@ mod tests {
         assert_eq!(Unsyncable::Unreadable.message(), "This file couldn't be read as an OpenSSH private key.");
     }
 
-    /// `in_vault` 只在 true 時寫出:沒放進保管庫的插槽,`device` 記錄和 SP3 寫的一模一樣;SP3 寫的(沒有這個欄位)讀成 false。
+    /// `in_vault` 只在 true 時寫出:沒放進保管庫的插槽,`device` 記錄和沒有這個欄位的舊版寫的一模一樣;舊版寫的(沒有這個欄位)讀成 false。
     #[test]
     fn a_device_slot_names_the_vault_only_when_the_key_is_in_it() {
-        let sp3 = serde_json::json!({ "slot_id": "0".repeat(32), "fingerprint": null, "synced_copy": true });
+        let older = serde_json::json!({ "slot_id": "0".repeat(32), "fingerprint": null, "synced_copy": true });
         let file = DeviceSlot { slot_id: "0".repeat(32), fingerprint: None, synced_copy: true, in_vault: false };
-        assert_eq!(serde_json::to_value(&file).unwrap(), sp3);
-        assert_eq!(serde_json::from_value::<DeviceSlot>(sp3).unwrap(), file);
+        assert_eq!(serde_json::to_value(&file).unwrap(), older);
+        assert_eq!(serde_json::from_value::<DeviceSlot>(older).unwrap(), file);
         let vault = DeviceSlot { in_vault: true, ..file };
         assert_eq!(serde_json::to_value(&vault).unwrap()["in_vault"], true);
     }

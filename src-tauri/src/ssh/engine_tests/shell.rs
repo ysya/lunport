@@ -68,7 +68,7 @@ fn a_window_change_while_the_shell_runs_is_applied() {
 }
 
 /// Review focus. The user resizes the terminal the moment `lunport connect` starts: the broker has the size ready when `shell` returns
-/// and sends it at once, before the prompt is even drawn (spec §7.2). It must not be lost and must not hurt the shell.
+/// and sends it at once, before the prompt is even drawn. It must not be lost and must not hurt the shell.
 #[test]
 fn a_window_change_sent_right_after_the_shell_opens_is_applied() {
     let Some(tools) = tools() else { return };

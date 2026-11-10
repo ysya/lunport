@@ -133,13 +133,13 @@ struct PendingApproval {
     decision: mpsc::SyncSender<ApprovalDecision>,
 }
 
-/// What kind of change a proposal asks the person to approve (design 2026-10-26, AI edits): the window words each kind.
+/// What kind of change a proposal asks the person to approve: the window words each kind.
 pub mod proposal_kinds {
     pub const CREATE_HOST: &str = "create_host";
     pub const UPDATE_HOST: &str = "update_host";
     pub const SET_TRANSPORT: &str = "set_transport";
     pub const REMOVE_TRANSPORT: &str = "remove_transport";
-    /// Tunnels (design 2026-11-08): saving one always asks; starting one asks in Ask mode.
+    /// Tunnels: saving one always asks; starting one asks in Ask mode.
     pub const CREATE_TUNNEL: &str = "create_tunnel";
     pub const UPDATE_TUNNEL: &str = "update_tunnel";
     pub const DELETE_TUNNEL: &str = "delete_tunnel";

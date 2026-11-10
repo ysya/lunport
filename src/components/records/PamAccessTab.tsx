@@ -36,7 +36,7 @@ import { EntitlementGrantDialog } from "./GrantRequestDialog";
 import { reading, type Reading } from "./GoogleAccountsTab";
 
 /*
- * The Google Cloud page's Access tab (design 2026-10-27, The Access tab): Privileged Access Manager on its own. Where Lunport looks for
+ * The Google Cloud page's Access tab: Privileged Access Manager on its own. Where Lunport looks for
  * entitlements (the projects the routes use, and the scopes the person added, which sync with the library), and every entitlement the
  * person may request there or a route names, each with its grant and Request grant.
  */

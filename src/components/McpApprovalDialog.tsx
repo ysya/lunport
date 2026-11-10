@@ -23,8 +23,8 @@ export type McpApprovalCardViewProps = {
 };
 
 /**
- * The window's words for each kind of proposal (design 2026-10-26, AI edits): a new host, a changed host, a transport set or removed;
- * and a tunnel saved, changed, deleted or started (design 2026-11-08). `note` replaces the line under the rows.
+ * The window's words for each kind of proposal: a new host, a changed host, a transport set or removed;
+ * and a tunnel saved, changed, deleted or started. `note` replaces the line under the rows.
  */
 const EDIT_DESCRIPTION = "Review what would change before saving. Saving does not connect, trust a server key or change AI access. The MCP client cannot approve this request.";
 const SAVE_NOTE = "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval.";

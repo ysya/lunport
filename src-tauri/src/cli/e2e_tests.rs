@@ -1,4 +1,4 @@
-//! `lunport connect` the whole way (plan 1b): the CLI's loop, the broker on a real socket, the real engine, and a scratch OpenSSH.
+//! `lunport connect` the whole way: the CLI's loop, the broker on a real socket, the real engine, and a scratch OpenSSH.
 //! The doubles: the terminal (a `FakeTermios` under the real `Tty`; the keys go in through `Inputs::send`, so no keys, signal or
 //! watchdog thread runs, nor `own_writer`, `reach_broker` or main.rs), standard output and error (`Shared`), the host directory
 //! (`FakeDirectory`), the key store (`FakeKeys`), the keychain (`MemKeychain`), and the window that confirms host keys
@@ -185,7 +185,7 @@ fn a_host_key_the_person_does_not_trust_ends_lunport_connect() {
     ended.forgotten();
 }
 
-/// `--pause-on-error` (spec §7.3): the refused key's reason stays on the terminal with the prompt under it, and the CLI waits until Enter
+/// `--pause-on-error`: the refused key's reason stays on the terminal with the prompt under it, and the CLI waits until Enter
 /// in a question's mode with what is typed hidden, what was typed before thrown away; then it starts the next line (the hidden Enter did
 /// not) and ends with 255, the terminal put back. The broker forgets the session meanwhile: a paused CLI holds none.
 #[test]

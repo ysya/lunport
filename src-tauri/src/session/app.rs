@@ -1,4 +1,4 @@
-//! The broker in the app (own-ssh spec §4): built in `setup` from the app's state, the same way on every platform, and listening on
+//! The broker in the app: built in `setup` from the app's state, the same way on every platform, and listening on
 //! `<app data>/ipc/sock` on macOS and Linux and on the user's named pipe on Windows (`session::pipe_name`), its lock in `<app data>/ipc`
 //! either way. Its sessions keep the app running when the window is closed, quitting the app ends them, and a second launch with the host
 //! flag (a client that found nobody listening) starts the listener again if it is down. A restart of the app (an update) ends every
@@ -32,7 +32,7 @@ pub enum BrokerStatus {
 /// The SSH config the window loaded; when it has not loaded one within `wait` (an app started in the background by a client), the one
 
 /// Whether closing the main window hides it instead of quitting: the tray setting, a host started for a client, or open sessions (which
-/// quitting would end, spec §4).
+/// quitting would end).
 pub fn hides_on_close(close_to_tray: bool, host_keep_alive: bool, sessions: bool) -> bool {
     close_to_tray || host_keep_alive || sessions
 }
@@ -107,7 +107,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
     let for_password = app.clone();
     let for_grant = app.clone();
     let app = app.clone();
-    // Google Cloud IAP transports: OS Login and PAM through the app's one client (design 2026-10-25).
+    // Google Cloud IAP transports: OS Login and PAM through the app's one client.
     let gcp: Arc<dyn crate::gcp::rest::GcpClient> = app.state::<AppState>().gcp.clone();
     super::record_directory::RecordDirectory::new(sources).with_password_reader(Box::new(move |hop,keychain| {
         crate::sync::engine::with_env(&for_password, |env| {
@@ -129,7 +129,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
     ))
     .with_gcp(gcp)
     // A grant the person requested from a connection: its justification and duration are remembered for its entitlement (the library's
-    // grant memory, design 2026-10-27) and offered next time; what an earlier release remembered for the host goes.
+    // grant memory) and offered next time; what an earlier release remembered for the host goes.
     .with_grant_memory(Box::new(move |host, name, justification, duration_secs| crate::sync::engine::with_env(&for_grant, |env| {
         let now = env.now();
         crate::sync::record_runtime::mutate_records(env, |s| Ok(crate::sync::pam_records::remember(s, name, justification, duration_secs, Some(host.as_str()), now).unwrap_or_else(|| s.clone())))?;
@@ -206,13 +206,13 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
     }
 }
 
-/// The broker's endpoint (spec §4): the socket `<dir>/sock` on macOS and Linux.
+/// The broker's endpoint: the socket `<dir>/sock` on macOS and Linux.
 #[cfg(unix)]
 fn listen_on(dir: &std::path::Path, handler: crate::ipc::server::Handler) -> Result<crate::ipc::server::Started, AppError> {
     crate::ipc::server::listen_unix(dir, handler)
 }
 
-/// The broker's endpoint (spec §4): the user's named pipe on Windows, with the lock in `dir` as on the other platforms.
+/// The broker's endpoint: the user's named pipe on Windows, with the lock in `dir` as on the other platforms.
 #[cfg(windows)]
 fn listen_on(dir: &std::path::Path, handler: crate::ipc::server::Handler) -> Result<crate::ipc::server::Started, AppError> {
     crate::ipc::pipe_windows::listen(dir, &super::pipe_name()?, &crate::identity::thread_name("session"), handler)
@@ -224,7 +224,7 @@ pub fn has_sessions(app: &tauri::AppHandle) -> bool {
     broker.is_some_and(|broker| broker.has_sessions())
 }
 
-/// The app is quitting: every session ends, each client told why (spec §4). It waits the broker's `QUIT_WAIT`, not less: a shell that has
+/// The app is quitting: every session ends, each client told why. It waits the broker's `QUIT_WAIT`, not less: a shell that has
 /// not printed yet is closed, and its client told, only after `SETTLE`, and the app exits when this returns.
 pub fn quit(app: &tauri::AppHandle) {
     let broker = app.state::<AppState>().session.broker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();

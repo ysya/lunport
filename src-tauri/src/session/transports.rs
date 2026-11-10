@@ -1,10 +1,10 @@
-//! The app's commands for a host's transport (design 2026-10-25): ask OS Login for the username the editor fills in, and show or
-//! request the Privileged Access Manager grant a transport needs (design 2026-10-25, PAM grant requests). A route is saved, changed
-//! and removed with its host (`records_host_create`, `records_host_update`, `records_host_delete`; design 2026-10-26, Commands);
+//! The app's commands for a host's transport: ask OS Login for the username the editor fills in, and show or
+//! request the Privileged Access Manager grant a transport needs. A route is saved, changed
+//! and removed with its host (`records_host_create`, `records_host_update`, `records_host_delete`);
 //! connections read it through `RecordDirectory`. `gcp_accounts` lists the Google accounts gcloud holds credentials for on this computer
 //! and whether each sign-in works; `transports_pam_request` requests the entitlement of a host's route the person chose (the Access tab's
-//! own commands, by entitlement, are `session::pam`'s). `transports_iap_probe` checks a host's route (design 2026-10-26,
-//! Check through IAP): it opens a tunnel to the route's instance on the host's port and closes it again, with no grant request, no
+//! own commands, by entitlement, are `session::pam`'s). `transports_iap_probe` checks a host's route:
+//! it opens a tunnel to the route's instance on the host's port and closes it again, with no grant request, no
 //! sign-in prompt and no SSH.
 
 use std::collections::BTreeSet;
@@ -73,7 +73,7 @@ fn epoch_ms(time: SystemTime) -> u64 {
 
 /// What the grants found on one entitlement amount to at a moment: the end of the longest-lasting active one (`None` for an `ACTIVE`
 /// grant PAM did not date, which counts below every dated one; one whose time is up counts for nothing), else a grant on its way, else
-/// one waiting for an approver (design 2026-10-27), else nothing. A route's status (`pam_status`) and each row of the Access tab
+/// one waiting for an approver, else nothing. A route's status (`pam_status`) and each row of the Access tab
 /// (`session::pam::overview`) both decide through this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Standing {
@@ -168,8 +168,8 @@ pub fn pam_status(gcp: &dyn GcpClient, transport: &HostTransport) -> PamStatusVi
 }
 
 /// The routes of `records` whose host the library has, in host-id order. A route whose host is gone (deleted on another device, or in a
-/// space this computer does not keep) is ignored, as the Catalog's tunnels tolerate a host that is missing (design 2026-10-26, Deleting a
-/// host): the Access grants section names only hosts the person can see.
+/// space this computer does not keep) is ignored, as the Catalog's tunnels tolerate a host that is missing:
+/// the Access grants section names only hosts the person can see.
 pub(crate) fn live_routes(records: &SyncStateV3) -> Result<Vec<HostTransport>, String> {
     let hosts: BTreeSet<String> = repo::list_hosts(records).map_err(|error| error.to_string())?.into_iter().map(|view| view.host.id).collect();
     Ok(transports::view(records).into_iter().filter(|route| hosts.contains(&route.host_id)).collect())
@@ -206,7 +206,7 @@ pub fn pam_request_with(
 }
 
 /// Requests a grant on the entitlement `name` (whose id is `id`) as `account` and waits for it (`pam::request_and_wait`, with an
-/// approver allowed: the Google Cloud page and a host's details ask for approval entitlements too, design 2026-10-27). A request made is
+/// approver allowed: the Google Cloud page and a host's details ask for approval entitlements too). A request made is
 /// remembered through `remember`; a failed memory write does not fail the request, since the grant exists either way. The answer is
 /// `active` with its end, or `approval_awaited`.
 #[allow(clippy::too_many_arguments)]
@@ -280,7 +280,7 @@ pub fn account_state(tokens: &dyn auth::TokenSource, account: &str) -> GcloudAcc
 const ACCOUNTS_BOUND: Duration = Duration::from_secs(20);
 
 /// gcloud's directory `dir` as the page and the account picker see it: whether it is there, its active account, and each account that
-/// holds credentials with its sign-in checked through `tokens` (design 2026-10-26, Commands). Only an email address is an account here:
+/// holds credentials with its sign-in checked through `tokens`. Only an email address is an account here:
 /// a route can name nothing else (`is_email`, the rule the route editor applies) and the picker must never offer one the editor would
 /// then refuse, so a folder named otherwise, such as `default` (gcloud's folder for an empty account), is neither listed nor checked.
 /// Nothing is written under `dir`, and a directory that is not there is `config_found: false`, not an error.
@@ -314,7 +314,7 @@ pub async fn gcloud_accounts(dir: PathBuf, tokens: Arc<dyn auth::TokenSource>, b
     Ok(GcloudAccountsView { config_found, active, accounts })
 }
 
-/// What **Check through IAP** learns of a host's route (design 2026-10-26, Check through IAP): `reachable` (the relay connected to the
+/// What **Check through IAP** learns of a host's route: `reachable` (the relay connected to the
 /// instance's port), `denied` (IAP, or the Google sign-in, refused this computer's account) or `unreachable` (anything else that ended
 /// the open, running out of time included). `latency_ms` is how long the tunnel took to open, when it did; `elapsed_ms` how long the
 /// whole check took; `checked_at_ms` when it ended; `message` the sentence why, for a check that did not reach the instance.
@@ -355,8 +355,8 @@ fn millis(duration: Duration) -> u64 {
     duration.as_millis() as u64
 }
 
-/// Opens an IAP tunnel to `port` of the instance `target` names, as its account, and closes it at once, for `deadline` at most (design
-/// 2026-10-26, Check through IAP). `iap::open` returns once the relay answers the connect with success, that is once the relay has
+/// Opens an IAP tunnel to `port` of the instance `target` names, as its account, and closes it at once, for `deadline` at most.
+/// `iap::open` returns once the relay answers the connect with success, that is once the relay has
 /// reached the instance's port, so that is `reachable`. The relay refusing the handshake with 403 or closing the tunnel with 4033 "not
 /// authorized" is IAP refusing the account, and a sign-in that gives no token is `denied` too, with the sentence of why; every other
 /// end of the open, and the deadline, is `unreachable` with its text. Nothing is asked of the person (no grant, no sign-in) and nothing
@@ -392,7 +392,7 @@ struct Probe {
     requires_grant: bool,
 }
 
-/// What a check of `host_id`'s route needs, read from one state (design 2026-10-26, Check through IAP): the instance and account the
+/// What a check of `host_id`'s route needs, read from one state: the instance and account the
 /// route names, as a connection takes them (`RecordDirectory`), and the port the host is saved with, its effective one, which a group
 /// may supply and a connection dials. A host whose group settings need review has no effective port to trust, so the check, like the
 /// port check, declines.
@@ -518,7 +518,7 @@ pub async fn transports_pam_status(app: tauri::AppHandle, window: tauri::Webview
 }
 
 /// Requests a grant for `host_id`'s route and waits for it: on `entitlement`, which the route must list, or on the first it lists when
-/// none is named (design 2026-10-26, Commands). The justification and length are remembered on this computer, never in the route.
+/// none is named. The justification and length are remembered on this computer, never in the route.
 #[tauri::command]
 pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::WebviewWindow, host_id: String, justification: String, duration_secs: u32, entitlement: Option<String>) -> Result<PamStatusView, String> {
     main_only(&window)?;
@@ -544,7 +544,7 @@ pub async fn transports_pam_request(app: tauri::AppHandle, window: tauri::Webvie
 }
 
 /// The Google accounts gcloud holds credentials for on this computer and whether each sign-in works, for the Google Cloud page and the
-/// host editor's account picker (design 2026-10-26, Commands). Checked through the client's own token source, so a check warms the
+/// host editor's account picker. Checked through the client's own token source, so a check warms the
 /// calls that follow; bounded to `ACCOUNTS_BOUND` overall.
 #[tauri::command]
 pub async fn gcp_accounts(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<GcloudAccountsView, String> {
@@ -553,8 +553,8 @@ pub async fn gcp_accounts(app: tauri::AppHandle, window: tauri::WebviewWindow) -
     gcloud_accounts(gcloud_config_dir(), tokens, ACCOUNTS_BOUND).await
 }
 
-/// Checks whether this computer reaches the instance `host_id`'s route names, on the host's port, through IAP with its Google sign-in
-/// (design 2026-10-26, Check through IAP): a tunnel is opened as the route's account and closed at once (`probe_iap`), for 20 s at most
+/// Checks whether this computer reaches the instance `host_id`'s route names, on the host's port, through IAP with its Google sign-in:
+/// a tunnel is opened as the route's account and closed at once (`probe_iap`), for 20 s at most
 /// and among the four connection checks at once the port check shares. It never requests a grant or asks for a sign-in, and attempts
 /// no SSH. A refusal by IAP on a route that requires a grant says to request one.
 #[tauri::command]
@@ -788,7 +788,7 @@ mod tests {
         }
     }
 
-    /// Design 2026-10-25 (PAM grant requests): the panel names the entitlement whose grant lasts longest, since a connection passes
+    /// The panel names the entitlement whose grant lasts longest, since a connection passes
     /// while any of them holds, and when it ends.
     #[test]
     fn pam_status_names_the_entitlement_that_holds_the_grant_and_the_latest_end() {
@@ -875,7 +875,7 @@ mod tests {
         assert!(remembered.lock().unwrap().is_empty(), "nothing to remember");
     }
 
-    /// Design 2026-10-27: a request from the app on an entitlement an approver approves ends once the grant waits for the approver,
+    /// A request from the app on an entitlement an approver approves ends once the grant waits for the approver,
     /// and says so; it is remembered under the entitlement's full name.
     #[test]
     fn a_request_that_waits_for_an_approver_answers_so_and_is_remembered_by_name() {
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(remembered.lock().unwrap().as_slice(), [("projects/acme-dev-654321/locations/global/entitlements/prod-admin".to_string(), "audit".to_string(), 1800)]);
     }
 
-    /// Design 2026-10-26 (`transports_pam_request`): a request is for the entitlement the person chose, which the route must list, and
+    /// A request is for the entitlement the person chose, which the route must list, and
     /// the answer names it; left out, it is the first, as the connect asks (`pam_request_requests_the_first_entitlement_...`).
     #[test]
     fn a_request_asks_for_the_chosen_listed_entitlement() {
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(error, Some("This host's route requires no grant.".to_string()));
     }
 
-    /// Design 2026-10-26 (Deleting a host): the page ignores a route whose host is gone, as the Catalog's tunnels tolerate orphans, so
+    /// The page ignores a route whose host is gone, as the Catalog's tunnels tolerate orphans, so
     /// no row names a host the person cannot see.
     #[test]
     fn the_grants_page_ignores_a_route_whose_host_is_gone() {
@@ -1104,9 +1104,9 @@ mod tests {
         assert!(!wire.contains(TOKEN) && !format!("{signed_in:?}").contains(TOKEN), "{wire}");
     }
 
-    /// Design 2026-10-26 (`gcp_accounts`): each account gcloud holds credentials for, in order of name, with its sign-in checked through
-    /// the token source by name; the active account; a service account, and folders that are no email address (R31: the picker offers
-    /// only accounts a route accepts, and R32: this layer is the one that knows what a route can name, while `credentialed_accounts` is
+    /// Each account gcloud holds credentials for, in order of name, with its sign-in checked through
+    /// the token source by name; the active account; a service account, and folders that are no email address (the picker offers
+    /// only accounts a route accepts, and this layer is the one that knows what a route can name, while `credentialed_accounts` is
     /// gcloud's own view), listed by nobody and asked about by nobody.
     #[tokio::test]
     async fn gcloud_accounts_lists_each_account_with_its_sign_in_state_and_the_active_one() {
@@ -1156,7 +1156,7 @@ mod tests {
         assert!(![TOKEN, REFRESH_TOKEN, "csecret"].iter().any(|secret| text.contains(secret)), "{text}");
     }
 
-    /// Review Focus 4: no gcloud directory is `config_found: false` and no error; gcloud with nobody signed in is found, with no accounts;
+    /// No gcloud directory is `config_found: false` and no error; gcloud with nobody signed in is found, with no accounts;
     /// the active account is reported even when this computer holds no credentials for it. Reading creates nothing under gcloud's directory
     /// and makes no Google call when there is no account to check.
     #[tokio::test]
@@ -1180,7 +1180,7 @@ mod tests {
         assert!(answers.asked().is_empty(), "no account, so nothing was asked of Google");
     }
 
-    /// Design 2026-10-26: every check is bounded and the command is bounded overall. A check that gets no answer is `unknown` with the
+    /// Every check is bounded and the command is bounded overall. A check that gets no answer is `unknown` with the
     /// token service's own "timed out" sentence, and the others are not held back: the last account, checked after the one that hangs,
     /// still answers.
     #[tokio::test]
@@ -1257,7 +1257,7 @@ mod tests {
         Arc::new(StaticToken(TOKEN.into()))
     }
 
-    /// Design 2026-10-26 (Check through IAP): the check opens a tunnel and closes it. A relay that connects is `reachable`; one that
+    /// The check opens a tunnel and closes it. A relay that connects is `reachable`; one that
     /// refuses the handshake with 403, or closes the tunnel with 4033 instead of announcing the session, is IAP refusing the account
     /// (`denied`); any other end of the open, 4003 "failed to connect to backend" for one, is `unreachable` with the relay's reason.
     /// (The Close that ends the open is `CloseAtOpen`: `CloseAfter` comes after the announcement, when the open is over, see below.)

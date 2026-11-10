@@ -59,8 +59,8 @@ pub fn wake() {
     send(Wake::Now);
 }
 
-/// 順便的喚醒:存檔 hook、視窗取得焦點(`SyncEvents::wake_implicit`)。平常一樣立刻再跑一輪;退避期間(`round::backoff_window`)要等到退避結束才跑
-/// (spec §6.4):不然每一次存檔、每一次切回視窗,都對還在限流或出錯的 relay 再發一輪請求,退避就形同虛設。
+/// 順便的喚醒:存檔 hook、視窗取得焦點(`SyncEvents::wake_implicit`)。平常一樣立刻再跑一輪;退避期間(`round::backoff_window`)要等到退避結束才跑,
+/// 不然每一次存檔、每一次切回視窗,都對還在限流或出錯的 relay 再發一輪請求,退避就形同虛設。
 pub fn wake_implicit() {
     send(Wake::Implicit);
 }
@@ -156,13 +156,13 @@ fn with_keychain<T>(
 struct Wait {
     /// 最晚什麼時候跑下一輪(輪詢間隔,或退避的間隔)。
     deadline: Instant,
-    /// 退避(連續被限流、relay 出錯,或 keychain 失敗之後,spec §6.4)擋到什麼時候:這之前順便的喚醒(`Wake::Implicit`)不能提早開始一輪。不晚於 `deadline`。
+    /// 退避(連續被限流、relay 出錯,或 keychain 失敗之後)擋到什麼時候:這之前順便的喚醒(`Wake::Implicit`)不能提早開始一輪。不晚於 `deadline`。
     hold_until: Instant,
     defer_explicit: bool,
 }
 
 impl Wait {
-    /// 啟動:第一輪馬上跑(spec §6.4、§7.6)—— 沒有什麼要先等的。
+    /// 啟動:第一輪馬上跑—— 沒有什麼要先等的。
     fn launch(now: Instant) -> Self {
         Self { deadline: now, hold_until: now, defer_explicit: false }
     }
@@ -193,7 +193,7 @@ fn wait_for_round(rx: &Receiver<Wake>, wait: &Wait) -> Result<(), RecvTimeoutErr
     }
 }
 
-/// 背景執行緒:啟動時馬上跑第一輪,之後每一輪結束依 `round::next_delay`(輪詢間隔、退避,spec §6.4)等下一輪。一輪之前先把已經排隊的喚醒全部收掉(一次搬 60 台主機
+/// 背景執行緒:啟動時馬上跑第一輪,之後每一輪結束依 `round::next_delay`(輪詢間隔、退避)等下一輪。一輪之前先把已經排隊的喚醒全部收掉(一次搬 60 台主機
 /// 會排上百則)。
 fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
     let (mut delay, mut backoff) = (crate::sync::relay::IDLE_POLL_INTERVAL, Duration::ZERO);
@@ -360,7 +360,7 @@ pub(crate) fn join_error(e: tauri::Error) -> AppError {
 mod tests {
     use super::*;
 
-    // ── 退避期間,順便的喚醒不會提早開始一輪(spec §6.4);「Sync now」與引擎自己的再跑照常立刻執行 ──
+    // ── 退避期間,順便的喚醒不會提早開始一輪;「Sync now」與引擎自己的再跑照常立刻執行 ──
 
     #[test]
     fn a_save_or_focus_during_a_backoff_waits_for_the_window_to_end_but_sync_now_does_not() {

@@ -1,5 +1,5 @@
-//! One Privileged Access Manager grant request at a time for each grant that several connections may need at once (design 2026-10-25,
-//! PAM grant requests). The in-app terminal reconnects every prod tab when the network returns, a saved tunnel and a tab start together:
+//! One Privileged Access Manager grant request at a time for each grant that several connections may need at once.
+//! The in-app terminal reconnects every prod tab when the network returns, a saved tunnel and a tab start together:
 //! the first connection to need a grant asks the person and requests it; the others wait for how that comes out instead of asking again.
 //! A gate is keyed by what names the grant (account, project, location, entitlement) and lives as long as the request; a connection that
 //! needs the grant after the request came out finds no gate and leads anew (a grant that is active never gets this far: `prepare` passes).

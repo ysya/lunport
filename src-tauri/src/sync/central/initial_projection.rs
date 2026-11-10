@@ -46,8 +46,8 @@ impl Prepared {
     }
 }
 /// The state version of an initial projection's candidate: central sync's, unless it holds what routes need, then the version of the
-/// library's route rows: the account's rows themselves (R19), the routes this device keeps for the publish step to turn into such rows
-/// (R64a), or what its grant requests taught it (R8). The initial publication requires exactly this version.
+/// library's route rows: the account's rows themselves, the routes this device keeps for the publish step to turn into such rows,
+/// or what its grant requests taught it. The initial publication requires exactly this version.
 pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
     if crate::sync::pam_records::has_data(candidate) {
         crate::sync::pam_records::STATE_VERSION
@@ -58,12 +58,12 @@ pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
     }
 }
 
-/// What this device keeps by host id, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate (R8, design
-/// 2026-10-26, Existing routes move in): its routes, which the publish step moves into the library while it has their hosts (R64a), and
+/// What this device keeps by host id, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate:
+/// its routes, which the publish step moves into the library while it has their hosts, and
 /// what its grant requests taught it.
 /// - A first publication (`host_ids` is `None`) keeps every host's id, so it keeps both as they are.
 /// - An adoption or a replacement gives the hosts new ids (`host_ids`): every route that applies on the source, a replaced library's
-///   included (R22), follows its host as this device's own, with its grant memory; one whose host does not survive goes
+///   included, follows its host as this device's own, with its grant memory; one whose host does not survive goes
 ///   (`transports::follow_hosts`).
 ///
 /// A route whose host the library's Catalog already holds a route for gives way to it, as a delta projection decides. The candidate
@@ -83,7 +83,7 @@ fn keep_routes(
             transports::follow_hosts(source, candidate, host_ids, now).map_err(|_| invalid())?
         }
     }
-    // Search scopes and grant memory name no host: they stay as they are, for the publish step to move in (design 2026-10-27). The
+    // Search scopes and grant memory name no host: they stay as they are, for the publish step to move in. The
     // library's own, from its Catalog, give way to none of them: a memory or scope of the same id the library holds wins.
     crate::sync::pam_records::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
     if let Some(account) = &candidate.account {
@@ -197,7 +197,7 @@ impl Candidate {
         shadow.local.groups = cache.groups;
         shadow.local.group_order = cache.group_order;
         shadow.local.tunnel_rules.clear();
-        // This device's routes and what its grant requests taught it stay out of the shadow (R8): with the owner cut over, the delta
+        // This device's routes and what its grant requests taught it stay out of the shadow: with the owner cut over, the delta
         // rebuilt from the shadow would take a route whose host the library has for a change left to capture, and the version above
         // is below theirs. `finish` keeps them in the final candidate, under the host ids an adoption gives (`keep_routes`).
         shadow.local.transports.clear();
@@ -214,7 +214,7 @@ impl Candidate {
         shadow.migration_gate = None;
         shadow.legacy_v1_backup = None;
         shadow.shared_writes_blocked = false;
-        // The library's routes are rows of the account now (R19).
+        // The library's routes are rows of the account now.
         shadow.version = candidate_version(&shadow);
         let ledger = Ledger::initial(&projected, &shadow, keys)
             .map_err(|_| AppError::Other("Initial projection ledger is invalid.".into()))?;
@@ -561,7 +561,7 @@ pub(in crate::sync) mod tests {
         }
     }
 
-    // ---- This device's routes and grant memory (design 2026-10-26, Existing routes move in; R8) ----
+    // ---- This device's routes and grant memory ----
 
     /// The host the routes below name; `fixture_with_host`'s library holds it.
     const HOST: &str = "0000000000000001";
@@ -632,8 +632,8 @@ pub(in crate::sync) mod tests {
             .clone()
     }
 
-    /// Design 2026-10-26 (Existing routes move in): the first publication keeps the routes this device saved, as its own, for the
-    /// publish step to move into the library (R64a); the shadow, from which the delta is rebuilt, holds none (R8).
+    /// The first publication keeps the routes this device saved, as its own, for the
+    /// publish step to move into the library; the shadow, from which the delta is rebuilt, holds none.
     #[test]
     fn first_publication_keeps_the_devices_routes_local_for_the_publish_step() {
         let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
@@ -670,7 +670,7 @@ pub(in crate::sync) mod tests {
         );
     }
 
-    /// R8: what grant requests taught this device stays through the first publication, which used to refuse such a source.
+    /// What grant requests taught this device stays through the first publication, which used to refuse such a source.
     #[test]
     fn first_publication_keeps_what_grant_requests_taught_this_device() {
         let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
@@ -697,7 +697,7 @@ pub(in crate::sync) mod tests {
         records_v3::validate_state(&projected).unwrap();
     }
 
-    /// R8: a kept route gives way to the route the library's Catalog already holds for its host, as a delta projection decides (an
+    /// A kept route gives way to the route the library's Catalog already holds for its host, as a delta projection decides (an
     /// adopted library may hold one); a route for a host the Catalog holds none for stays.
     #[test]
     fn a_kept_route_gives_way_to_the_librarys_route_for_its_host() {

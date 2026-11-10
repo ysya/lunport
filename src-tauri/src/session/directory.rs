@@ -1,7 +1,7 @@
-//! Where the broker finds saved hosts (own-ssh spec §5.1, §6.2 step 1, §7.1): a host by alias or by host id, resolved into the jump chain
+//! Where the broker finds saved hosts: a host by alias or by host id, resolved into the jump chain
 //! the engine connects through, with the pinned host keys in `Hop::pinned`; pinning a key the person trusted; and the keychain account
-//! of a host's saved password. In this version the hosts are the app's ssh_config blocks, through a temporary adapter
-//! (`ssh_config_directory.rs`; plan 1c replaces it with host records). The broker sees only this trait.
+//! of a host's saved password. The hosts are the library's host records (`record_directory.rs`).
+//! The broker sees only this trait.
 
 use std::fmt;
 use std::time::SystemTime;
@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use super::protocol::HostQuery;
 use crate::ssh::{HostId, HostKey, HopRef, Target};
 
-/// What `HostDirectory::prepare` learned that the broker needs to explain a refusal (design 2026-10-25): `recent_grant` is a Privileged
+/// What `HostDirectory::prepare` learned that the broker needs to explain a refusal: `recent_grant` is a Privileged
 /// Access Manager grant that became active within the last two minutes, which IAP can take about 1½ minutes to see; `granted_at` is when
 /// the grant in flight was given (never ahead of this clock; now, for a grant still activating), for the broker's wait on IAP.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct Prepared {
     pub granted_at: Option<SystemTime>,
 }
 
-/// A Privileged Access Manager grant the connection needs and nobody holds (design 2026-10-25, PAM grant requests): everything the
+/// A Privileged Access Manager grant the connection needs and nobody holds: everything the
 /// broker needs to ask the person and to request one. `entitlement` is the first the transport lists (the one requested); `entitlements`
 /// are all of them, for the refusal sentence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +69,7 @@ pub struct PinnedKey {
 pub enum DirectoryError {
     /// No saved host matches.
     NotFound(String),
-    /// Several saved hosts have this alias; the client has to name one by its id (spec §7.1).
+    /// Several saved hosts have this alias; the client has to name one by its id.
     Ambiguous(String),
     /// The host is saved, but Lunport's own client cannot connect to it as it is saved: it uses a ProxyCommand, or its key is not in
     /// Lunport, or its chain of jump hosts loops, includes a host that is not saved, names one host twice, has more than five jump hosts
@@ -77,10 +77,10 @@ pub enum DirectoryError {
     Unsupported(String),
     /// Reading the saved hosts or the pins, or writing a pin, failed.
     Failed(String),
-    /// The account may not connect as the host is saved (design 2026-10-25): OS Login names another user, Google refused the call, or a
+    /// The account may not connect as the host is saved: OS Login names another user, Google refused the call, or a
     /// grant could not be had. The broker reports it as a login failure.
     Denied(String),
-    /// No Privileged Access Manager grant is in flight for the host's transport (design 2026-10-25, PAM grant requests): a connection a
+    /// No Privileged Access Manager grant is in flight for the host's transport: a connection a
     /// person drives asks them and requests one; automation gets `for_automation`'s refusal.
     GrantNeeded(Box<GrantNeed>),
 }
@@ -130,7 +130,7 @@ pub trait HostDirectory: Send + Sync {
     /// Public resolution for approval and noninteractive connections. Implementations must not read private material here.
     fn resolve_public(&self, query:&HostQuery)->Result<Target,DirectoryError>{self.resolve(query)}
 
-    /// Everything a resolved target needs settled with the outside world before the engine connects (design 2026-10-25): for a first hop
+    /// Everything a resolved target needs settled with the outside world before the engine connects: for a first hop
     /// that goes through Google Cloud IAP, the Privileged Access Manager grant check and OS Login (the key registration, the username
     /// check). Reads `target`, changes nothing, may wait on the network for a while; called on the broker's thread between the resolve and
     /// the connect, never while a lock is held. `public_key` is the vault's OpenSSH public line for a key id. The default does nothing: a
@@ -140,7 +140,7 @@ pub trait HostDirectory: Send + Sync {
     }
 
     /// Requests the grant `prepare` said was needed, with the person's `justification` and `duration_secs`, and waits for it to be
-    /// active (design 2026-10-25, PAM grant requests). A directory without Google has nothing to request from.
+    /// active. A directory without Google has nothing to request from.
     fn request_grant(&self, _need: &GrantNeed, _justification: &str, _duration_secs: u32, _cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
         Err(DirectoryError::Unsupported("Requesting a grant is not available here.".into()))
     }
@@ -178,7 +178,7 @@ pub trait HostDirectory: Send + Sync {
     fn replace_pin_for(&self, hop: &HopRef, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
         self.replace_pin(&hop.id, previous, key)
     }
-    /// The key saved for `hop`'s endpoint, whether or not this device approved it (design 2026-11-09, saved pins). Records keep one pin
+    /// The key saved for `hop`'s endpoint, whether or not this device approved it. Records keep one pin
     /// per host in the library: another device may have saved it, or this one before its approval lapsed (a changed user, a new device
     /// identity), and `pinned_for` shows only a pin this device approved. It tells the person what was saved; it never makes a key
     /// trusted. A directory without device-local approval saves exactly what it pins: the default. A directory that wraps another must
@@ -208,7 +208,7 @@ pub trait HostDirectory: Send + Sync {
             None => self.pin_for(hop, key),
         }
     }
-    /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
+    /// The keychain account of the saved password of `host` (`host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;
     /// Saved secrets remain native; Records can supply authenticated encrypted library material.
     fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {

@@ -1,9 +1,9 @@
-//! The local IPC protocol between the broker and its clients (own-ssh spec §7.1). A frame is `u32 length | u8 type | payload`, the
+//! The local IPC protocol between the broker and its clients. A frame is `u32 length | u8 type | payload`, the
 //! length big-endian and counting the type byte and the payload. A control frame (`CONTROL`) carries one JSON message; a data frame
 //! (`DATA`) carries raw bytes: keystrokes from the client, terminal output (stdout and stderr merged by the PTY) from the broker.
 //!
 //! This version speaks the shell subset: client → broker `hello`, `open_shell`, `window_change`, `answer`, `close` and data; broker →
-//! client `opened`, `question`, `event`, `exited` and data. `exec` and the MCP client are phase 2: they are read, so that the broker can
+//! client `opened`, `question`, `event`, `exited` and data. `exec` and the MCP client are not served yet: they are read, so that the broker can
 //! refuse them by name. Both sides are this same executable, but after an update the CLI on disk can be newer than the app that is
 //! running, so `hello` carries `PROTOCOL_VERSION`.
 
@@ -147,11 +147,11 @@ pub fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T, String> {
 pub enum ClientKind {
     /// `lunport connect`.
     Connect,
-    /// The MCP adapter (phase 2).
+    /// The MCP adapter (not served yet).
     Mcp,
 }
 
-/// Which saved host: by alias, or by host id (spec §7.1; an alias that several hosts share is refused, and the client is told to use the id).
+/// Which saved host: by alias, or by host id (an alias that several hosts share is refused, and the client is told to use the id).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostQuery {
@@ -181,7 +181,7 @@ pub struct PtyRequest {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// The first message on a connection. `client_info` is what an MCP client says about itself (phase 2).
+    /// The first message on a connection. `client_info` is what an MCP client says about itself (not served yet).
     Hello {
         client: ClientKind,
         version: u32,
@@ -189,7 +189,7 @@ pub enum ClientMessage {
         client_info: Option<serde_json::Value>,
     },
     OpenShell { host: HostQuery, pty: PtyRequest },
-    /// A command without a terminal (phase 2). Read so that it can be refused by name; its fields are not looked at.
+    /// A command without a terminal (not served yet). Read so that it can be refused by name; its fields are not looked at.
     Exec {},
     /// The client's terminal was resized.
     WindowChange { cols: u16, rows: u16 },
@@ -234,17 +234,17 @@ impl fmt::Debug for ClientMessage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionKind {
-    /// Not a question: the host key is being confirmed in the app's window (spec §7.2); the client shows the text and sends no answer.
+    /// Not a question: the host key is being confirmed in the app's window; the client shows the text and sends no answer.
     HostKeyNotice,
     Passphrase,
     Password,
     Interactive,
-    /// Lunport's own question (design 2026-10-25, PAM grant requests): `text` is a `GrantPrompt` as JSON, the answer a `GrantAnswer`
+    /// Lunport's own question: `text` is a `GrantPrompt` as JSON, the answer a `GrantAnswer`
     /// as encoded. It is answered in the app's window, never typed at a terminal.
     Grant,
 }
 
-/// A question for the person at the client's terminal (spec §7.1).
+/// A question for the person at the client's terminal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
     pub question_id: String,
@@ -285,7 +285,7 @@ impl GrantPrompt {
     }
 }
 
-/// The AI client whose request asks a question in one of Lunport's windows (design 2026-11-09, native windows for AI requests): the host
+/// The AI client whose request asks a question in one of Lunport's windows: the host
 /// key window and the authentication window name it, and in Auto-log say what goes ahead without per-command review once the person
 /// agrees.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,9 +351,9 @@ impl GrantAnswer {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     Connected,
-    /// The connection ended without the shell reporting how; `reason` is the sentence to show (spec §11).
+    /// The connection ended without the shell reporting how; `reason` is the sentence to show.
     Disconnected { reason: String },
-    /// Something failed; `text` is the sentence to show (spec §11), `kind` a short word for programs (`kinds`).
+    /// Something failed; `text` is the sentence to show, `kind` a short word for programs (`kinds`).
     Error { kind: String, text: String },
     /// The server's banner, with control characters already replaced.
     Banner { text: String },
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn client_messages_read_and_write_as_the_spec_names_them() {
+    fn client_messages_read_and_write_by_their_wire_names() {
         let cases: Vec<(&str, ClientMessage)> = vec![
             (
                 r#"{"type":"hello","client":"connect","version":1,"client_info":null}"#,
@@ -510,7 +510,7 @@ mod tests {
             assert_eq!(decode::<ClientMessage>(json.as_bytes()), Ok(message.clone()), "{json}");
             assert_eq!(serde_json::to_string(&message).unwrap(), json);
         }
-        // Phase 2's messages and the fields 1b does not know are read, so the broker can refuse them by name.
+        // Messages of a later version and the fields this one does not know are read, so the broker can refuse them by name.
         assert_eq!(
             decode::<ClientMessage>(br#"{"type":"exec","host":{"alias":"web"},"command":"uptime","timeout_secs":60}"#),
             Ok(ClientMessage::Exec {})
@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn server_messages_read_and_write_as_the_spec_names_them() {
+    fn server_messages_read_and_write_by_their_wire_names() {
         let cases: Vec<(&str, ServerMessage)> = vec![
             (r#"{"type":"opened","session_id":"7"}"#, ServerMessage::Opened { session_id: "7".into() }),
             (

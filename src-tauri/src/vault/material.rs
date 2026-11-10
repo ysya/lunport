@@ -1,4 +1,4 @@
-//! 私鑰的解析、解密與簽章(金鑰保管庫 spec §5.2、§5.5、§15)。只收 OpenSSH 格式。`ssh-key` 0.6.7 的 RSA 簽章有錯(組私鑰時把 `p` 傳了兩次),
+//! 私鑰的解析、解密與簽章。只收 OpenSSH 格式。`ssh-key` 0.6.7 的 RSA 簽章有錯(組私鑰時把 `p` 傳了兩次),
 //! RSA 改用 `rsa` 套件從 n、e、d、p、q 組私鑰;Ed25519 與 ECDSA 用 `ssh-key` 自己的簽章。`ssh-key` 0.6.7 也讀不懂純量短了的 ECDSA 金鑰(OpenSSH 省掉 mpint 的
 //! 前導零),`parse` 與 `open` 的解密在它讀不懂時交給 `short_scalar` 補零再讀。解開的私鑰只在記憶體,`ssh-key` 的私密欄位 drop 時清掉。
 
@@ -14,7 +14,7 @@ use crate::vault::short_scalar;
 pub const SSH_AGENT_RSA_SHA2_256: u32 = 0x02;
 pub const SSH_AGENT_RSA_SHA2_512: u32 = 0x04;
 
-/// `ssh-key` 0.6.7 解得開的私鑰加密方式(spike 實測)。不在清單上的(例如 3des-cbc)不必問 passphrase:一定解不開。
+/// `ssh-key` 0.6.7 解得開的私鑰加密方式(實測)。不在清單上的(例如 3des-cbc)不必問 passphrase:一定解不開。
 pub const SUPPORTED_CIPHERS: &[&str] = &[
     "aes128-ctr",
     "aes192-ctr",
@@ -363,7 +363,7 @@ mod tests {
     fn a_key_ssh_key_rejects_is_not_readable_by_the_agent() {
         use crate::sync::slot_rules::inspect_private_key;
         let broken = test_keys::unreadable_comment();
-        assert!(inspect_private_key(&broken).is_ok(), "setup: SP3 reads its header and public key");
+        assert!(inspect_private_key(&broken).is_ok(), "setup: inspect_private_key reads its header and public key");
         assert_eq!(open(&broken, None).err(), Some(OpenError::Unreadable), "setup: but the agent's parser does not");
         assert!(!agent_can_read(&broken));
         assert!(!agent_can_read("not a key"));

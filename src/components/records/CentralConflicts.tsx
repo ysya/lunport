@@ -10,7 +10,7 @@ import { CATALOG_CHOICE_NOTE, CATALOG_TITLE, CatalogConflictView, catalogChoiceT
 
 type Option = "local" | "remote" | "copy_remote";
 
-/** One record in conflict: the Catalog as its colliding items (design 2026-10-27), any other record as its two versions. */
+/** One record in conflict: the Catalog as its colliding items, any other record as its two versions. */
 export function ConflictRow({row, overview, disabled, busy, pick}: {row:CentralConflict; overview?:RecordOverview; disabled:boolean; busy:boolean; pick:(row:CentralConflict, option:Option)=>void}) {
   const pending=!row.can_resolve&&<p className="text-sm text-muted-foreground">Sync must verify the pending write receipt before this conflict can be resolved.</p>;
   if(row.catalog) return <div className="space-y-2 rounded-md border p-3">

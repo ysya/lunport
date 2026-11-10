@@ -1,4 +1,4 @@
-//! Google Cloud IAP transports (design 2026-10-25): a first hop reached through the relay instead of TCP. The relay is a fake
+//! Google Cloud IAP transports: a first hop reached through the relay instead of TCP. The relay is a fake
 //! (`gcp::testing::FakeRelay`) in front of a scratch sshd; the tunnel itself is tested in `gcp::iap`.
 
 use std::sync::Arc;
@@ -98,7 +98,7 @@ fn output_survives_a_dropped_websocket() {
     assert!(session.is_alive());
 }
 
-/// Design 2026-10-25, "Error texts": when the relay ends the session, the connection's reason is the relay's sentence, not russh's
+/// When the relay ends the session, the connection's reason is the relay's sentence, not russh's
 /// end-of-file on the pipe.
 #[test]
 fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
@@ -116,8 +116,7 @@ fn a_relay_that_ends_the_session_is_why_the_connection_ended() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!session.is_alive(), "the relay ended the session");
-    // The tunnel wrote down why it ended before the connection saw its end, so the first look after `is_alive` turned false has it
-    // (design 2026-10-26, Tunnels through a host that needs a grant).
+    // The tunnel wrote down why it ended before the connection saw its end, so the first look after `is_alive` turned false has it.
     assert_eq!(session.tunnel_end(), Some(IapError::Closed { code: 4033, reason: "not authorized".into() }));
     let reason = session.disconnect_reason().expect("a dead session says why");
     assert_eq!((reason.kind, reason.detail.as_str()), (DisconnectKind::ConnectionLost, "the relay closed the tunnel (4033: not authorized)"));

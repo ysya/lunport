@@ -2304,7 +2304,7 @@ fn second_device_merge_preserves_tunnel_rules_and_remaps_their_source_host() {
     });
 }
 
-/// R13: adopting a library whose Catalog holds a route keeps the route, as the library's. The initial projection writes it into the
+/// Adopting a library whose Catalog holds a route keeps the route, as the library's. The initial projection writes it into the
 /// account, from which its ledger rebuilds the Catalog; the ledger used to refuse such a library ("Initial projection ledger is
 /// invalid.").
 #[test]
@@ -2328,8 +2328,8 @@ fn adopting_a_library_whose_catalog_holds_a_route_keeps_the_route() {
     });
 }
 
-/// Design 2026-10-26 (Existing routes move in): adoption keeps the routes this device saved, and what its grant requests taught it,
-/// under the ids the merge gives their hosts. They stay this device's until the publish step moves them into the library (R64a).
+/// Adoption keeps the routes this device saved, and what its grant requests taught it,
+/// under the ids the merge gives their hosts. They stay this device's until the publish step moves them into the library.
 #[test]
 fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
     use crate::sync::{
@@ -2356,7 +2356,7 @@ fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
         migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
         finish(&f, &scope);
         let adopted = record_runtime::snapshot(&f.peer.env()).unwrap().0;
-        // The id the merge wrote for the host, read back from the adopted library (R24).
+        // The id the merge wrote for the host, read back from the adopted library.
         let new_id = merged_host_id(&adopted, "peer-local-host");
         assert_eq!(
             new_id,
@@ -2398,7 +2398,7 @@ fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
     });
 }
 
-/// R11: this device brings no routes, so the library's routes are no part of what its merge owns. A rebase on another device's
+/// This device brings no routes, so the library's routes are no part of what its merge owns. A rebase on another device's
 /// Catalog edit carries them as they are instead of pausing the merge ("Imported collection names or ordering changed on another
 /// device"), and the adoption keeps them.
 #[test]
@@ -2424,7 +2424,7 @@ fn a_rebased_adoption_into_a_library_whose_catalog_holds_a_route_keeps_the_route
     });
 }
 
-/// Design 2026-10-26 (Room in the Catalog): a merge whose Catalog would not fit in one sync record is refused with the room sentence,
+/// A merge whose Catalog would not fit in one sync record is refused with the room sentence,
 /// before anything is sent.
 #[test]
 fn an_adoption_merge_that_would_not_fit_is_refused() {
@@ -2473,7 +2473,7 @@ fn an_adoption_merge_that_would_not_fit_is_refused() {
     });
 }
 
-/// R24: `followed_host_ids` reads hosts from the rows the merge rewrites, not from the source's own tables, which are empty here as a
+/// `followed_host_ids` reads hosts from the rows the merge rewrites, not from the source's own tables, which are empty here as a
 /// replacement's history view leaves them. A host that a route (this device's own or the library's) or grant memory names is followed
 /// when exactly one of its identities ends live in those rows, under the id the merge gives that identity. A host live in two scopes,
 /// one whose last row is a tombstone and a missing one are not followed: what names them goes.
@@ -2563,9 +2563,9 @@ fn followed_host_ids_come_from_the_rows_the_merge_rewrites() {
     );
 }
 
-/// R22: a replacement keeps the replaced library's routes. The route of a host that survives becomes this device's own, under the
-/// host's new id, for the publish step to move into the new library (R64a); a route whose host does not survive is gone. The merge itself
-/// brings no routes (R11).
+/// A replacement keeps the replaced library's routes. The route of a host that survives becomes this device's own, under the
+/// host's new id, for the publish step to move into the new library; a route whose host does not survive is gone. The merge itself
+/// brings no routes.
 #[test]
 fn a_replacement_keeps_the_replaced_librarys_route_of_a_surviving_host_as_this_devices_own() {
     use crate::sync::{
@@ -2596,7 +2596,7 @@ fn a_replacement_keeps_the_replaced_librarys_route_of_a_surviving_host_as_this_d
         migration_flow::confirm(&env, &scope, &ticket).unwrap();
         finish(&f, &scope);
         let after = record_runtime::snapshot(&env).unwrap().0;
-        // The id the merge wrote for the host, read back from the reconciled library (R24).
+        // The id the merge wrote for the host, read back from the reconciled library.
         let moved = merged_host_id(&after, "old-local-edit");
         assert_eq!(
             moved,
@@ -2639,7 +2639,7 @@ fn merged_host_id(state: &SyncStateV3, alias: &str) -> String {
     row.record.id.clone()
 }
 
-/// R24: a route follows its host to exactly the id the merge writes for it, whatever the host's scope. Here the host is in a
+/// A route follows its host to exactly the id the merge writes for it, whatever the host's scope. Here the host is in a
 /// collection of the replaced library, and its merged id is read back from the reconciled library.
 #[test]
 fn a_replacement_moves_a_collection_hosts_route_to_the_id_the_merge_wrote() {
@@ -2715,7 +2715,7 @@ fn a_replacement_moves_a_collection_hosts_route_to_the_id_the_merge_wrote() {
     });
 }
 
-/// R26: the room check runs on a merged Catalog that is otherwise valid. A Catalog refused for another reason, here one tunnel past the
+/// The room check runs on a merged Catalog that is otherwise valid. A Catalog refused for another reason, here one tunnel past the
 /// 256 a library holds, keeps its own refusal rather than the room sentence.
 #[test]
 fn an_adoption_merge_past_the_tunnel_count_is_not_refused_as_out_of_room() {

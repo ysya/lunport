@@ -1,4 +1,4 @@
-//! A scripted engine for the tests of the broker, the MCP adapter and the CLI (own-ssh spec §12). It implements the same traits as the
+//! A scripted engine for the tests of the broker, the MCP adapter and the CLI. It implements the same traits as the
 //! russh engine and touches no network: the "server" is a script, and what the code under test did is recorded for the assertions.
 //! Where the broker relies on how the real engine behaves (the order of the password question, the login sequence, the deadline of a
 //! prompt, how shells end), the fake behaves the same way, and `ssh/parity_tests.rs` runs the same scenarios against both.

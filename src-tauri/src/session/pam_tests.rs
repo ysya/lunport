@@ -85,7 +85,7 @@ fn names(overview: &PamOverview) -> Vec<(Option<&str>, &str)> {
     overview.entitlements.iter().map(|row| (row.account.as_deref(), row.name.as_str())).collect()
 }
 
-/// Design 2026-10-27: routes' projects are searched as their accounts (none: the active one), added scopes as theirs, each place once;
+/// Routes' projects are searched as their accounts (none: the active one), added scopes as theirs, each place once;
 /// every entitlement found or named by a route is a row, one per account and name, with the hosts that need it.
 #[test]
 fn the_overview_searches_route_and_added_scopes_and_lists_each_entitlement_once_per_account() {

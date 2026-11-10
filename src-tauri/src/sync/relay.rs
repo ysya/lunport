@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 pub use crate::sync::record::Envelope;
 
-/// `POST /legacy/v1/pull` 一次最多幾條 chain(spec §6.1);更多就由呼叫端分批。
+/// `POST /legacy/v1/pull` 一次最多幾條 chain;更多就由呼叫端分批。
 pub const MAX_BATCH_PULL: usize = 64;
-/// 輪詢間隔的下限與每條 chain 的增量(spec §6.4)。
+/// 輪詢間隔的下限與每條 chain 的增量。
 const MIN_POLL_INTERVAL: Duration = Duration::from_secs(45);
 const POLL_INTERVAL_PER_CHAIN: Duration = Duration::from_secs(2);
-/// `429` 之後的退避:90 秒起每次加倍,最長 15 分鐘(spec §6.4)。`backoff_delay` 把加倍的次數以 `.min(10)` 封頂:
+/// `429` 之後的退避:90 秒起每次加倍,最長 15 分鐘。`backoff_delay` 把加倍的次數以 `.min(10)` 封頂:
 /// 90 秒 × 2^9 早已超過 15 分鐘的上限,不封頂的話連續 65 輪以上會讓 `<<` 的位移量超過 63(debug 建置直接 panic)。
 const FIRST_BACKOFF_SECS: u64 = 90;
 const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
@@ -37,7 +37,7 @@ pub struct PullResponse {
     pub latest_seq: u64,
 }
 
-/// 一般的輪詢間隔(spec §6.4):max(45 秒, 2 秒 × 本輪要查的 chain 數);chain 數含帳戶 chain。
+/// 一般的輪詢間隔:max(45 秒, 2 秒 × 本輪要查的 chain 數);chain 數含帳戶 chain。
 /// 單台電腦每小時的 `pull` 項數因此維持在約 1,800 以下。
 pub fn poll_interval(chains: usize) -> Duration {
     let chains = u32::try_from(chains).unwrap_or(u32::MAX);
@@ -50,7 +50,7 @@ pub const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// 這段時間內有操作(app 存檔、Sync 命令、視窗回到前景)就算「正在用」。
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(5 * 60);
 
-/// 連續 `consecutive_failures` 輪以 `429`(整批或 `rate_limited`)、relay `5xx` 或 keychain 失敗收尾之後的退避(spec §6.4):90 秒起每輪加倍,最長 15 分鐘;沒有失敗 → 0。
+/// 連續 `consecutive_failures` 輪以 `429`(整批或 `rate_limited`)、relay `5xx` 或 keychain 失敗收尾之後的退避:90 秒起每輪加倍,最長 15 分鐘;沒有失敗 → 0。
 /// 同步引擎的背景執行緒在這段時間內不讓順便的喚醒(存檔、視窗取得焦點)提早開始一輪(`engine::wake_implicit`)。
 pub fn backoff_delay(consecutive_failures: u32) -> Duration {
     match consecutive_failures {
@@ -59,7 +59,7 @@ pub fn backoff_delay(consecutive_failures: u32) -> Duration {
     }
 }
 
-/// 下一輪之前等多久(spec §6.4 + relay 配額):
+/// 下一輪之前等多久(連同 relay 配額):
 /// - 正在用(`focused`,或 `ACTIVE_WINDOW` 內有操作 —— `last_activity_ms` 比 `now_ms` 晚也算,但晚超過一個 `ACTIVE_WINDOW`
 ///   的不算:那是時鐘倒退之後留下的舊戳記,算的話間隔會一直是一般間隔,直到時鐘追上它):一般間隔 max(45 秒, 2 秒 × chain 數);
 /// - 閒置:max(5 分, 2 秒 × chain 數);
@@ -79,7 +79,7 @@ pub enum RelayError {
     /// 404:chain 不存在或權杖不符(relay 刻意不區分)。
     #[error("sync chain not found on the relay (or the sync code does not match)")]
     NotFound,
-    /// 429:整個請求被限流(每 IP 或每 chain);呼叫端依 spec §6.4 退避。
+    /// 429:整個請求被限流(每 IP 或每 chain);呼叫端要退避。
     #[error("the relay is rate-limiting this device; try again later")]
     RateLimited,
     /// 413:請求太大(單筆密文超過 64 KiB、上傳的 body 超過 1 MiB、批次查詢的 body 超過 64 KiB),或 chain 的儲存額度已滿
@@ -114,7 +114,7 @@ impl From<RelayError> for AppError {
     }
 }
 
-/// `GET /legacy/v1/info` 的結果(spec §6.3)。
+/// `GET /legacy/v1/info` 的結果。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelayInfo {
     /// relay 回報的版本;None = 舊版 relay(沒有這個端點,也就沒有任何新功能)。
@@ -142,7 +142,7 @@ impl std::fmt::Debug for BatchPullItem {
     }
 }
 
-/// 批次查詢裡一條 chain 的結果(spec §6.1)。
+/// 批次查詢裡一條 chain 的結果。
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchPullResult {
     /// 與 `GET /legacy/v1/chains/{id}/records?since=` 相同的內容。
@@ -151,7 +151,7 @@ pub enum BatchPullResult {
     NotFound,
     /// 這條 chain 超過每分鐘 120 次的限制。
     RateLimited,
-    /// 這批回應已達預算、這項沒有執行:cursor 不推進,呼叫端把它排在下一批最前面立刻再查(spec §6.4)。
+    /// 這批回應已達預算、這項沒有執行:cursor 不推進,呼叫端把它排在下一批最前面立刻再查。
     Deferred,
 }
 

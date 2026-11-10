@@ -86,7 +86,7 @@ fn creation_always_needs_approval_including_auto_log_and_never_grants_ai_or_pins
         assert!(r.records_active.lock().unwrap().is_empty());
     }
 }
-/// The window words each proposal by its kind (design 2026-10-26, AI edits): a creation says so.
+/// The window words each proposal by its kind: a creation says so.
 #[test]
 fn the_creation_proposal_says_which_kind_it_is() {
     let d = device();
@@ -268,7 +268,7 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         )
         .unwrap();
         assert_eq!(value["fingerprint"], default_server_key().fingerprint);
-        // The window names the AI client (design 2026-11-09, native windows for AI requests); nothing runs after a verification, so it
+        // The window names the AI client; nothing runs after a verification, so it
         // has no Auto-log note.
         assert_eq!(
             confirmer.asked().into_iter().map(|question| question.ai).collect::<Vec<_>>(),
@@ -282,8 +282,8 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         assert!(r.records_active.lock().unwrap().is_empty());
     }
 }
-/// verify_host_key on a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window (design
-/// 2026-11-09, native windows for AI requests), in both modes, and then shows the server key.
+/// verify_host_key on a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window,
+/// in both modes, and then shows the server key.
 #[test]
 fn verification_asks_for_the_grant_its_host_needs() {
     use crate::session::testing::{grant_answer, grant_need, NeedsGrant};
@@ -421,7 +421,7 @@ fn native_creation_review_discloses_existing_group_access_and_rejects_stale_gran
     }
 }
 
-// ---- update_host (design 2026-10-26, AI edits) ----
+// ---- update_host ----
 
 /// A host the client may use: `fixture-web`, created through `create` with consent and then allowed individually.
 fn created(d: &TestDevice, r: &McpRuntime) -> String {
@@ -597,7 +597,7 @@ fn an_update_rejects_private_data_group_moves_and_a_loop_through_itself() {
     assert_eq!(host_of(&d, &id).effective_payload.hostname, "fixture.invalid");
 }
 
-// ---- set_transport / remove_transport (design 2026-10-26, AI edits) ----
+// ---- set_transport / remove_transport ----
 
 fn transport_of(d: &TestDevice, id: &str) -> Option<crate::sync::transports::HostTransport> {
     crate::sync::transports::get(&snapshot(d), id)
@@ -672,7 +672,7 @@ fn a_transport_change_keeps_what_was_not_sent_and_shows_old_to_new() {
     let (_, _, instance, _, _, pam) = kind_of(&transport_of(&d, &id).unwrap());
     let pam = pam.unwrap();
     assert_eq!((instance.as_str(), pam.entitlements.clone(), pam.duration_secs, pam.justification.as_deref()), ("jumpbox", vec!["prod-admin".to_string()], 2700, None));
-    // What the person last asked for is device memory beside the route (design 2026-10-26), not part of it: the AI's edit leaves it be.
+    // What the person last asked for is device memory beside the route, not part of it: the AI's edit leaves it be.
     assert_eq!(crate::sync::transports::grant_memory(&snapshot(&d), &id), Some(crate::sync::transports::GrantMemory { justification: "restart app-api".into(), duration_secs: 1800 }));
     set_transport(&d.env(), &r, &json!({"alias":"fixture-web","pam":null}), RequestContext::default(), &CancelToken::default(), &|q| {
         assert!(rows(q).contains(&("PAM entitlements".into(), "prod-admin → none".into())), "{:?}", rows(q));
@@ -760,7 +760,7 @@ fn a_transport_changed_meanwhile_is_refused() {
     assert_eq!(kind_of(&transport_of(&d, &id).unwrap()).1, "asia-east1-c", "the other change stands");
 }
 
-/// A library that uses central sync holds its routes and tunnels in one record (design 2026-10-26, Room in the Catalog): a route that
+/// A library that uses central sync holds its routes and tunnels in one record: a route that
 /// would not fit is refused with the sentence, before any window.
 #[test]
 fn set_transport_refuses_a_route_that_does_not_fit() {
@@ -777,7 +777,7 @@ fn set_transport_refuses_a_route_that_does_not_fit() {
     assert!(transport_of(&d, &id).is_none());
 }
 
-/// R18: a library whose writes are paused refuses a route edit in the sentence the host editor shows for it, whether the pause is there
+/// A library whose writes are paused refuses a route edit in the sentence the host editor shows for it, whether the pause is there
 /// before the window opens or begins while it is open.
 #[test]
 fn transport_tools_in_a_paused_library_say_sync_is_paused() {
@@ -822,7 +822,7 @@ fn transport_tools_need_the_hosts_ai_permission() {
 }
 
 /// A host whose Group inheritance is broken is not edited by any of the tools: the refusal is `metadata`'s, before any window, and
-/// the audit cannot contradict a save that happened (Review Focus 2).
+/// the audit cannot contradict a save that happened.
 #[test]
 fn tools_refuse_a_host_whose_group_needs_review_before_the_window() {
     let d = device();

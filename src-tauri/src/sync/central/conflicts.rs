@@ -32,7 +32,7 @@ pub struct View {
     can_resolve: bool,
     can_remote: bool,
     can_copy: bool,
-    /// The Catalog's items both devices changed (design 2026-10-27); `None` for every other record.
+    /// The Catalog's items both devices changed; `None` for every other record.
     catalog: Option<super::catalog_conflict::CatalogReview>,
 }
 #[derive(Deserialize, Clone, Copy)]
@@ -252,7 +252,7 @@ fn candidate(
     if local.identity != other.identity {
         return Err(invalid());
     }
-    // The Catalog merges both versions; the choice settles only the items both devices changed (design 2026-10-27).
+    // The Catalog merges both versions; the choice settles only the items both devices changed.
     if local.identity.kind == "meta" {
         use super::catalog_conflict::{apply, Outcome};
         use super::catalog_merge::Side;
@@ -908,7 +908,7 @@ mod tests {
         );
     }
 
-    /// Design 2026-10-27 (Collisions: the review): the Catalog's row lists only the items both devices changed differently, and each
+    /// The Catalog's row lists only the items both devices changed differently, and each
     /// choice keeps every other change of both.
     mod catalog_review {
         use super::super::super::{
@@ -1031,7 +1031,7 @@ mod tests {
             assert!(candidate(&state, &keys, &signer, &id, Choice::CopyRemote, Some("copy"), 300).is_err());
         }
 
-        /// Review Focus 3: a Catalog choice keeps its recovery snapshot, and a later Catalog collision on the same device resolves
+        /// A Catalog choice keeps its recovery snapshot, and a later Catalog collision on the same device resolves
         /// too, reusing the record's archive key.
         #[cfg(any(unix, windows))]
         #[test]

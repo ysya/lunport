@@ -3,7 +3,7 @@ import type { HostTransport } from "./HostTransport";
 import type { TransportKind } from "./TransportKind";
 
 /**
- * The route half of a combined host save (design 2026-10-26, Commands): the route as the editor displayed it (`expected`, none for a
+ * The route half of a combined host save: the route as the editor displayed it (`expected`, none for a
  * host without one) and the route to save (`kind`, none to remove the route). It names no host: the command that carries it supplies
  * the id, so a new host's route takes the new host's id.
  */

@@ -1,4 +1,4 @@
-//! Tunnels through MCP (design 2026-11-08): a client reads, saves, starts and stops the tunnels of the hosts it may use. Saving always
+//! Tunnels through MCP: a client reads, saves, starts and stops the tunnels of the hosts it may use. Saving always
 //! asks the person; starting follows Ask or Auto-log as `ssh_exec` does; stopping never asks.
 use super::management::{active, find_host, live, route_label};
 use super::*;
@@ -591,8 +591,8 @@ pub(super) type Launch<'a> =
 /// The most tunnels that run on one device at once (`Tunnels::prepare` refuses the next).
 const MAX_ACTIVE: usize = 16;
 
-/// `start_tunnel`: a saved tunnel of the client's started on this computer under Ask or Auto-log, as `ssh_exec` connects (design
-/// 2026-11-08). The call waits until the tunnel runs or fails, up to `START_WAIT`.
+/// `start_tunnel`: a saved tunnel of the client's started on this computer under Ask or Auto-log, as `ssh_exec` connects.
+/// The call waits until the tunnel runs or fails, up to `START_WAIT`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start(
     env: &SyncEnv,
@@ -657,7 +657,7 @@ pub(super) fn start(
             return Err(TUNNEL_CHANGED.into());
         }
         approved.check(connector, &query)?;
-        // A server key this device has not verified is decided here (design 2026-11-09), before the tunnel launches: its worker would
+        // A server key this device has not verified is decided here, before the tunnel launches: its worker would
         // ask while this call waits only `START_WAIT`. A rule changed meanwhile is refused by the launch.
         let confirmer = records::ClientConfirmer::new(connector.confirmer, records::asker(&context, mode, Unreviewed::Tunnel));
         let host_still_allowed = || -> Result<(), String> {
@@ -700,7 +700,7 @@ pub(super) fn start(
 }
 
 /// Waits until the started tunnel `entry` runs or fails, up to `wait`, and answers it as last seen. While its connection has one of
-/// Lunport's windows open for the person (a server key, a password, a grant; design 2026-11-09, native windows for AI requests), it waits
+/// Lunport's windows open for the person (a server key, a password, a grant), it waits
 /// on past `wait`: the windows' own limits end the wait, and a client that cancels stops the tunnel, which withdraws them.
 fn wait_for_start(entry: &Entry, cancel: &CancelToken, wait: Duration) -> Result<TunnelLive, String> {
     let deadline = Instant::now() + wait;
@@ -796,7 +796,7 @@ pub(super) fn launcher(app: &AppHandle) -> impl Fn(&TunnelRule, records::Approve
     move |rule, approved, mode, started_by| {
         let host_id = rule.host_id.clone();
         let worker_app = app.clone();
-        // Who asks in the windows the tunnel's connection opens (design 2026-11-09, native windows for AI requests): the client, and in
+        // Who asks in the windows the tunnel's connection opens: the client, and in
         // Auto-log that the tunnel then starts without review.
         let asker = AiAsker { client: started_by, unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Tunnel) };
         let for_worker = asker.clone();

@@ -93,7 +93,7 @@ pub(crate) fn confirm(
         .map_err(failed)?;
     match current.as_ref().map(|p| &p.key) {
         // A key confirmed as new never replaces a saved one, approved on this device or not: a pin another device saved is asked about as
-        // the changed key it is, and `previous` names it (design 2026-11-09, saved pins).
+        // the changed key it is, and `previous` names it.
         Some(current) if current != key && previous != Some(current) => {
             return Err(failed("The confirmed host key changed; connect again."))
         }
@@ -221,7 +221,7 @@ mod tests {
         let state = record_runtime::snapshot(env).unwrap().0;
         repo::get_host(&state, HOST).unwrap().host.payload.host_key
     }
-    /// Design 2026-11-09 (saved pins): a key trusted as new (`previous: None`) never replaces a pin saved for the host, even one this device
+    /// A key trusted as new (`previous: None`) never replaces a pin saved for the host, even one this device
     /// has not approved (another device saved it): the person was not shown that pin. Accepted as the changed key it is (`previous` names
     /// the saved pin), the key replaces the pin and is approved here.
     #[test]

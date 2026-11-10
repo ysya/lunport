@@ -54,7 +54,7 @@ fn a_saved_transport_is_read_back_by_host_and_raises_the_state_version() {
 #[test]
 fn saving_requires_the_displayed_value() {
     let one = set(&state(), A, None, Some(iap(A)), 1).unwrap();
-    // The refusal reads as the sentence itself wherever it is shown (R16), not as a wrapped validation reason.
+    // The refusal reads as the sentence itself wherever it is shown, not as a wrapped validation reason.
     assert_eq!(set(&one, A, None, Some(iap(A)), 2).unwrap_err(), RepositoryError::RouteChanged, "somebody saved first");
     let changed = with_zone(iap(A), "asia-east1-c");
     assert_eq!(set(&one, A, Some(&changed), Some(iap(A)), 2).unwrap_err().to_string(), ROUTE_CHANGED, "the displayed value is stale");
@@ -128,7 +128,7 @@ fn validation_rejects_bad_fields() {
     assert_eq!(edit(|_, _, _, _, _, p| *p = pam(&["a", "b", "c", "d", "e", "f", "g", "h", "i"], "global")), Some("Enter at most 8 PAM entitlements.".to_string()));
 }
 
-/// A transport with the PAM check of the design's example, for the grant-request tests.
+/// A transport with a PAM check, for the grant-request tests.
 pub(crate) fn with_pam(host: &str) -> HostTransport {
     let mut transport = iap(host);
     let TransportKind::GcpIap { pam, .. } = &mut transport.kind;
@@ -136,7 +136,7 @@ pub(crate) fn with_pam(host: &str) -> HostTransport {
     transport
 }
 
-/// Design 2026-10-25 (PAM grant requests), as design 2026-10-26 (Grant requests) revises it: the route keeps the grant length, and the
+/// The route keeps the grant length, and the
 /// last justification is no longer kept in it (the device remembers that, see `remember_grant_request_writes_device_memory_not_the_route`),
 /// though a record an earlier release wrote can still carry one. A record without the fields decodes to the defaults, and the length and
 /// a justification found in the route keep the rules a request cannot break.
@@ -176,7 +176,7 @@ fn reason(error: RepositoryError) -> String {
     }
 }
 
-/// Design 2026-10-26 (Grant requests): what a request teaches stays on this device, beside the route, in the state's own map. The route
+/// What a request teaches stays on this device, beside the route, in the state's own map. The route
 /// is not edited, so a request never touches what the host's route syncs.
 #[test]
 fn remember_grant_request_writes_device_memory_not_the_route() {
@@ -369,7 +369,7 @@ fn leaving_an_account_keeps_the_transports_of_the_hosts_that_stay_and_drops_the_
     assert_eq!(nothing.version, 4, "no transport, no version bump");
 }
 
-// ---- Routes in a library that uses central sync (design 2026-10-26, Inside Lunport, routes take tunnel rules' central path) ----
+// ---- Routes in a library that uses central sync ----
 
 const HOST: &str = A;
 const OTHER: &str = B;
@@ -463,7 +463,7 @@ fn a_blocked_library_refuses_route_edits() {
     assert!(set(&blocked(chain_account_with_host(HOST)), HOST, None, Some(iap(HOST)), 1).is_ok(), "a route on this device obeys no library's block");
 }
 
-/// Design 2026-10-26 (Tests): version 10 is what a library's route rows need, as grant memory does, so a state holding one, tombstones
+/// Version 10 is what a library's route rows need, as grant memory does, so a state holding one, tombstones
 /// included, below it is refused; and the state file's route rows are validated as its tunnel rows are.
 #[test]
 fn a_library_route_row_below_version_ten_or_failing_its_rules_is_refused() {
@@ -484,7 +484,7 @@ fn a_library_route_row_below_version_ten_or_failing_its_rules_is_refused() {
     assert!(validate_state(&other_host).is_err(), "a row whose payload names another host than its id");
 }
 
-/// R7: a library holds at most `MAX_ROUTES` routes. One more is refused with the room sentence rather than the Catalog's own refusal,
+/// A library holds at most `MAX_ROUTES` routes. One more is refused with the room sentence rather than the Catalog's own refusal,
 /// and a library holding that many still takes an edit.
 #[test]
 fn a_library_holding_the_most_routes_refuses_another_but_takes_an_edit() {
@@ -496,7 +496,7 @@ fn a_library_holding_the_most_routes_refuses_another_but_takes_an_edit() {
     assert!(set(&full, first, Some(&iap(first)), Some(with_zone(iap(first), "asia-east1-c")), 2).is_ok());
 }
 
-/// R7: a Catalog that cannot be built refuses the save with its own sentence.
+/// A Catalog that cannot be built refuses the save with its own sentence.
 #[test]
 fn a_library_whose_catalog_cannot_be_built_refuses_a_route_with_that_reason() {
     let mut state = central_with_host(HOST);
@@ -525,7 +525,7 @@ fn a_route_saved_on_this_device_gives_way_to_the_librarys_row() {
     assert!(row.dirty && row.record.deleted, "a tombstone for the next capture to publish");
 }
 
-/// R10: removing a route forgets what grant requests taught this device about its host, whether the route was this device's or the
+/// Removing a route forgets what grant requests taught this device about its host, whether the route was this device's or the
 /// library's. An edit keeps it.
 #[test]
 fn removing_a_route_forgets_the_grant_memory_of_its_host() {
@@ -540,7 +540,7 @@ fn removing_a_route_forgets_the_grant_memory_of_its_host() {
     }
 }
 
-// ---- What this device keeps by host id follows its hosts (design 2026-10-26, Existing routes move in; Leaving sync) ----
+// ---- What this device keeps by host id follows its hosts ----
 
 /// A host id no fixture holds before a leave or an adoption gives it to a host.
 const NEW: &str = "0000000000000005";
@@ -576,7 +576,7 @@ fn leave_preserving(before: &SyncStateV3, moves: &[(&str, &str)]) -> SyncStateV3
     next
 }
 
-/// Design 2026-10-26 (Leaving sync): the library's route for a host that stays is kept as a route saved on this device, under the
+/// The library's route for a host that stays is kept as a route saved on this device, under the
 /// host's new id. The account itself goes before `preserve_on_leave` runs, as in `record_leave`.
 #[test]
 fn leaving_keeps_a_synced_route_of_a_preserved_host_as_a_local_route() {
@@ -589,7 +589,7 @@ fn leaving_keeps_a_synced_route_of_a_preserved_host_as_a_local_route() {
     validate_state(&left).unwrap();
 }
 
-/// R8: what grant requests taught this device follows the hosts that stay, under their new ids, and goes with the hosts that go.
+/// What grant requests taught this device follows the hosts that stay, under their new ids, and goes with the hosts that go.
 #[test]
 fn leaving_keeps_the_grant_memory_of_the_hosts_that_stay_under_their_new_ids() {
     let routes = set(&set(&central_with_host(HOST), HOST, None, Some(with_pam(HOST)), 1).unwrap(), OTHER, None, Some(with_pam(OTHER)), 2).unwrap();
@@ -602,7 +602,7 @@ fn leaving_keeps_the_grant_memory_of_the_hosts_that_stay_under_their_new_ids() {
     validate_state(&left).unwrap();
 }
 
-/// R22: what an adoption or a replacement keeps of a source's routes. Every route that applies there, the library's as well as this
+/// What an adoption or a replacement keeps of a source's routes. Every route that applies there, the library's as well as this
 /// device's own, becomes one saved on this device under its host's new id, with its grant memory; a route or memory whose host the map
 /// does not name goes, and so does a tombstone, which is no route.
 #[test]
@@ -626,7 +626,7 @@ fn routes_follow_the_merged_hosts_as_this_devices_own() {
     assert_eq!(next.local.transport_grants.len(), 1, "C's memory goes with its host");
 }
 
-// ---- A route saved with its host (design 2026-10-26, Commands) ----
+// ---- A route saved with its host ----
 
 /// The route half of a combined host save names no host: the command that carries it supplies the id. It saves, removes, or refuses on
 /// an `expected` that is not the route now.
@@ -677,7 +677,7 @@ fn a_route_change_decodes_from_what_the_editor_sends() {
     assert!(serde_json::from_value::<RouteChange>(json!({"expected": null, "kind": null, "host_id": HOST})).is_err(), "a change names no host");
 }
 
-/// R16 and R18: a refused route write reads as a sentence where it is shown. The blocked library's is the host editor's own.
+/// A refused route write reads as a sentence where it is shown. The blocked library's is the host editor's own.
 #[test]
 fn a_refused_route_write_reads_as_a_sentence() {
     let change = RouteChange { expected: None, kind: Some(iap(HOST).kind) };
@@ -708,7 +708,7 @@ fn the_librarys_row_leaves_out_the_justification_an_earlier_release_kept() {
     assert!(synced(&saved, HOST) && saved.local.transports.is_empty());
 }
 
-// ---- The room check measures the Catalog after the save (final review, deferred Task 5 test) ----
+// ---- The room check measures the Catalog after the save ----
 
 /// `state` with library tunnels added until the Catalog it publishes still fits in one sync record, but would not with what `more`
 /// adds to it: the boundary at which a room check that measured the Catalog before the save instead of after it would let the save
@@ -752,7 +752,7 @@ fn a_route_that_would_push_the_catalog_past_one_record_is_refused_though_it_fits
     assert_eq!(set(&brink, OTHER, None, Some(iap(OTHER)), 2).unwrap_err().to_string(), NO_ROOM);
 }
 
-// ---- The publish step (design 2026-10-26, Existing routes move in; R64a) ----
+// ---- The publish step ----
 
 /// A route as an earlier release could save it: names at their longest, the most entitlements and the justification of its last grant
 /// request inside, about 1.2 KB in the Catalog.

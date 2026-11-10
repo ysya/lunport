@@ -1,4 +1,4 @@
-//! `lunport connect` over the broker's named pipe (plan 1b-3 Task 3): the loop (`run::run`) on Windows against the real broker, served
+//! `lunport connect` over the broker's named pipe: the loop (`run::run`) on Windows against the real broker, served
 //! on a pipe of the test's own (`pipe_windows::listen`, reached with `pipe_windows::connect` as the CLI reaches it), with a fake engine
 //! and a fake console under the real `Tty`. The keys are typed into the fake console and read by the keys thread
 //! (`run::console_keys_thread`), so they go through the reads that no change of mode may span; the terminal's output goes to writers that
@@ -145,7 +145,7 @@ fn finish(setup: Setup) -> (i32, bool, Setup) {
     (code, restored, Setup { engine, broker, console, stdout, stderr, events, fired, run: std::thread::spawn(|| (0, true)), _dir })
 }
 
-/// Spec §7.3 on Windows: over the pipe a shell opens, the console goes raw, what is typed on it (and what was typed before the shell
+/// Over the pipe a shell opens, the console goes raw, what is typed on it (and what was typed before the shell
 /// opened, which stayed in the console) reaches the shell, the shell's output reaches the console, a new window size reaches the shell,
 /// and the shell's status is the program's, with the console back at its start.
 #[test]
@@ -187,7 +187,7 @@ fn a_question_is_asked_on_the_console_and_the_answer_gets_in() {
     assert!(restored, "the console is as it was");
 }
 
-/// Final wave (F11): Lunport quits while a hidden question waits for its answer. The console layer ends the question's line read with an
+/// Lunport quits while a hidden question waits for its answer. The console layer ends the question's line read with an
 /// Enter of its own, on which a real console moves to the next line (`QUESTION_READ_ENDS_ITS_LINE`): the reason follows the prompt with no
 /// line break of the CLI's own (this fake console has no cursor). A console that refuses that Enter leaves the question's line read going,
 /// and its prompt the last line: the CLI starts the next line itself before the reason.
@@ -211,7 +211,7 @@ fn an_end_under_a_question_starts_the_reason_on_a_line_of_its_own_when_the_conso
     }
 }
 
-/// `--pause-on-error` on Windows (spec §7.3): a connect that fails before the shell opens leaves its reason and the prompt on the console,
+/// `--pause-on-error` on Windows: a connect that fails before the shell opens leaves its reason and the prompt on the console,
 /// and the Enter that ends the pause is read in a line read that hides what is typed (the console reads nothing while it is cooked); the
 /// line typed while connecting was thrown away first, so it does not end the pause. The console ends the line on Enter itself (no line
 /// break of the CLI's own), and the program ends with 255, the console back at its start.

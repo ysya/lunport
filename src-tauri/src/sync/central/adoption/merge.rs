@@ -186,8 +186,8 @@ pub(super) fn history(
                 }
             }
             Data::Catalog(value) => {
-                // The library's routes stay as they are: this device brings none (R11). The routes that apply on it, a replaced
-                // library's included (R22), stay on it under the ids its hosts get here (`route_host_ids`) until a capture
+                // The library's routes stay as they are: this device brings none. The routes that apply on it, a replaced
+                // library's included, stay on it under the ids its hosts get here (`route_host_ids`) until a capture
                 // publishes them.
                 let mut merged = remote.clone();
                 if has_local {
@@ -229,8 +229,8 @@ pub(super) fn history(
                     merged.tunnels.push(rule);
                 }
                 merged.validate()?;
-                // The merged Catalog is published as one record (design 2026-10-26, Room in the Catalog). It is checked once it is
-                // valid, so that only its size reads as the room sentence (R26).
+                // The merged Catalog is published as one record. It is checked once it is
+                // valid, so that only its size reads as the room sentence.
                 if !payload::catalog_fits(&merged) {
                     return Err(AppError::Other(crate::sync::transports::NO_ROOM.into()));
                 }
@@ -448,9 +448,9 @@ pub(super) fn owned_collections(
     Ok(owned)
 }
 /// The ids this merge gives the hosts that routes and grant memory name on the source (old → new): this device's own routes and, in a
-/// replacement, the replaced library's too (`transports::view`). They follow their hosts as this device's own (design 2026-10-26,
-/// Existing routes move in; R22) until the publish step moves them into the library (R64a). Hosts are read from the rows `history` rewrites, not from the
-/// source's own tables (R24), so a route lands on exactly the id the merge writes for its host.
+/// replacement, the replaced library's too (`transports::view`). They follow their hosts as this device's own
+/// until the publish step moves them into the library. Hosts are read from the rows `history` rewrites, not from the
+/// source's own tables, so a route lands on exactly the id the merge writes for its host.
 pub(super) fn route_host_ids(
     package: &super::super::source_package::Package,
     keys: &VaultKeys,

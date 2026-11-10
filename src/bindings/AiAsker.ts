@@ -2,7 +2,7 @@
 import type { Unreviewed } from "./Unreviewed";
 
 /**
- * The AI client whose request asks a question in one of Lunport's windows (design 2026-11-09, native windows for AI requests): the host
+ * The AI client whose request asks a question in one of Lunport's windows: the host
  * key window and the authentication window name it, and in Auto-log say what goes ahead without per-command review once the person
  * agrees.
  */

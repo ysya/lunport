@@ -74,7 +74,7 @@ fn local_definitions_round_trip_without_running_state_or_host_schema_changes() {
     assert!(view(&deleted).is_empty());
     assert!(set(&deleted, None, A, Some(&rule), None, 12).is_err());
 }
-/// Tunnels share the Catalog's room with routes in a library that uses central sync (design 2026-10-26, Room in the Catalog).
+/// Tunnels share the Catalog's room with routes in a library that uses central sync.
 #[test]
 fn a_full_catalog_refuses_one_more_tunnel_in_central_mode() {
     use crate::sync::transports::{
@@ -101,7 +101,7 @@ fn a_full_catalog_refuses_one_more_tunnel_in_central_mode() {
     );
 }
 /// A tunnel's save is refused when the Catalog would not fit after it, though it fits before: the room check measures the state the
-/// save makes, not the one it starts from (final review, deferred Task 5 test).
+/// save makes, not the one it starts from.
 #[test]
 fn a_tunnel_that_would_push_the_catalog_past_one_record_is_refused_though_it_fits_before() {
     use crate::sync::transports::{

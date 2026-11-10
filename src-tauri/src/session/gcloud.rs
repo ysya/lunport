@@ -1,4 +1,4 @@
-//! The Google Cloud page's account actions (design 2026-10-27, The Accounts tab): sign an account in again, add one, make one gcloud's
+//! The Google Cloud page's account actions: sign an account in again, add one, make one gcloud's
 //! active account, remove one. Each runs gcloud itself (`gcp::cli`), since each changes gcloud's own state for every tool on this computer;
 //! the page asks the person first, in words that say so. Every account named is an email address (`transports::is_email`), checked here
 //! before gcloud starts, and gcloud gets it as an argument of its own. One action runs at a time, bounded and cancellable.
@@ -167,7 +167,7 @@ pub async fn gcp_cli_locate_again(window: tauri::WebviewWindow) -> Result<Gcloud
     gcp_cli_status(window).await
 }
 
-/// Runs one account action (design 2026-10-27, The Accounts tab) and answers how it ended. The page confirmed it with the person first.
+/// Runs one account action and answers how it ended. The page confirmed it with the person first.
 /// While gcloud waits for the browser, each sign-in page address it prints goes to the main window as `SIGN_IN_URL_EVENT`.
 #[tauri::command]
 pub async fn gcp_account_action(app: tauri::AppHandle, window: tauri::WebviewWindow, action: AccountAction) -> Result<AccountActionView, String> {

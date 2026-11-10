@@ -16,7 +16,7 @@ const queryClient = new QueryClient();
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element #root not found in index.html");
 
-// The authentication window and the host key window (own-ssh spec §10) are windows of their own that load the same page.
+// The authentication window and the host key window are windows of their own that load the same page.
 // Outside Tauri (a plain-browser `vite dev`) there is no window to ask, so the page is the app.
 const windowLabel = (() => {
   try {

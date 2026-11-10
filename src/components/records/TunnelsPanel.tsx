@@ -36,7 +36,7 @@ function firstHop(overview: RecordOverview, hostId: string): string | null {
 }
 
 /**
- * The grant a tunnel's first hop needs, on the tunnel's row (design 2026-10-26, Tunnels through a host that needs a grant): read when
+ * The grant a tunnel's first hop needs, on the tunnel's row: read when
  * the panel opens and every minute through the host's `pamStatusQuery`, so the rows that share a first hop (and its details pane) share
  * one read. Drawn only for a first hop whose route has a PAM check; the other rows hold no query. A read that fails shows its error in
  * place of whatever an earlier read found, as the details pane does.

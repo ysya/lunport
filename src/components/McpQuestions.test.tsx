@@ -140,7 +140,7 @@ describe("AI edit proposals", () => {
     expect(create).toContain("New record");
   });
 
-  it("titles, describes and labels each kind of tunnel proposal (design 2026-11-08)", () => {
+  it("titles, describes and labels each kind of tunnel proposal", () => {
     const add = renderReview({ request: proposal("create_tunnel", [["Listens on", "127.0.0.1:15432 on this computer"], ["Reachable from", "This computer only"]]) });
     expect(add).toContain("Add this tunnel?");
     expect(add).toContain("Saving does not start it or connect");

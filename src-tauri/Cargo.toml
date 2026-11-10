@@ -88,7 +88,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 sha1 = { version = "0.10", features = ["oid"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 signature = "2"
-# SSH engine (src/ssh/): russh is imported by src/ssh/russh_engine.rs only. Pinned to the exact version the phase-0 spike measured.
+# SSH engine (src/ssh/): russh is imported by src/ssh/russh_engine.rs only. Pinned to the exact version its behaviour was measured against.
 russh = "=0.64.1"
 # russh runs on tokio. The engine owns a dedicated runtime (rt-multi-thread, net, time) and drives it with block_on; `macros` is for select!.
 # `signal`: `lunport connect` follows the terminal's size (SIGWINCH), stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT, and puts the
@@ -109,7 +109,7 @@ tauri-plugin-autostart = "2.5.1"
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-single-instance = "~2.4.5"
 
-# SP3 金鑰插槽:Windows 上把插槽目錄與私鑰設成只有目前使用者能存取(src/sync/slot_files_windows.rs)。
+# 金鑰插槽:Windows 上把插槽目錄與私鑰設成只有目前使用者能存取(src/sync/slot_files_windows.rs)。
 # 0.61 已在 Cargo.lock(tempfile 等的相依),不需下載。Win32_Storage_FileSystem 與 Win32_System_SystemServices 只為了
 # FILE_ALL_ACCESS 與 SECURITY_DESCRIPTOR_REVISION 兩個常數。
 # 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):Win32_System_Diagnostics_ToolHelp 給程序快照(找父程序),

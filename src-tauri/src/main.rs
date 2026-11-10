@@ -38,7 +38,7 @@ fn main() {
     let _ = migration;
 
     match entry {
-        // `lunport connect <alias>`: the terminal's end of a session in the app (own-ssh spec §7.3), nothing of Tauri.
+        // `lunport connect <alias>`: the terminal's end of a session in the app, nothing of Tauri.
         Entry::Connect => std::process::exit(lunport_lib::cli::run_connect(&args[2..])),
         Entry::Mcp => lunport_lib::mcp::run_stdio(),
         Entry::Desktop => lunport_lib::run_desktop(host, start_hidden),

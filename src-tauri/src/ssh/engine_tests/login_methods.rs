@@ -1,5 +1,5 @@
-//! Logging in with a password and with keyboard-interactive, and what happens to a prompt that is cancelled, late or slow (spec §6.2
-//! step 4). A scratch OpenSSH has no PAM and cannot do either, so the same test bodies run against two servers:
+//! Logging in with a password and with keyboard-interactive, and what happens to a prompt that is cancelled, late or slow.
+//! A scratch OpenSSH has no PAM and cannot do either, so the same test bodies run against two servers:
 //! - `toy`: a small SSH server in process (`russh_engine::toy_server`), everywhere, always;
 //! - `pam`: a real OpenSSH with PAM in a container (`src-tauri/tests/pam-sshd`), when `LUNPORT_PAM_PORT`, `LUNPORT_PAM_USER` and
 //!   `LUNPORT_PAM_PASSWORD` say where it is. Without them the `pam` tests print "skipped" and pass, unless `LUNPORT_REQUIRE_PAM=1`

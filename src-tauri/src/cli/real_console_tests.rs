@@ -1,4 +1,4 @@
-//! A real console (plan 1b-3 Task 3): what the Windows keys reader is built on, measured and kept as a regression test, and the reader,
+//! A real console: what the Windows keys reader is built on, measured and kept as a regression test, and the reader,
 //! the console's restore on a panic, and the console's own reads and wakes (`StdConsole`) on a real console. Each case runs again in a
 //! child process with a console of its own (`CREATE_NEW_CONSOLE`: the console of the process that runs the tests is never touched), where
 //! the test types into that console's input buffer itself (`WriteConsoleInputW`, where a terminal's keys arrive too) and reads its screen
@@ -24,11 +24,11 @@
 //! - Raw mode with virtual terminal input gives an arrow as `ESC [ A`; a surrogate pair typed as two records comes in one read.
 //! - Once the console is freed, new reads fail. FreeConsole does not promise cancellation of an already pending synchronous read;
 //!   cancellation and process-exit behavior are checked separately below.
-//! - (Fix round 1, measured in a console shared with another process, as the shell shares its console with `lunport connect`.) A read a
+//! - (Measured in a console shared with another process, as the shell shares its console with `lunport connect`.) A read a
 //!   process leaves in progress when it ends ends with it: neither a raw read nor a hidden line read with "hun" typed into it takes the
 //!   key or the line typed next, and "hun" never shows; so `lunport connect`'s own end, which leaves its keys thread in a read, leaves
 //!   the next key to the shell.
-//! - (Final wave, measured the same way.) So does a read on the console input the process was given as its standard input
+//! - (Measured the same way.) So does a read on the console input the process was given as its standard input
 //!   (`StdConsole::new`'s standard handle: `lunport connect` reads the input its shell and `lunport-cli.exe` hand it), an input that
 //!   stays open when the process ends (the process that started it keeps a handle of the same input, and reads it next): a raw read and a
 //!   hidden line read with "hun" typed into it, left by a process that returns or that the watchdog ends from another thread, take
@@ -514,7 +514,7 @@ fn case(name: &str) {
             drop(tty);
             assert_eq!(settings(), start, "the console is back at its start");
         }
-        // Spec §7.3: a panic puts the console back (the hook `restore_on_panic` installs), all four settings, after the console was taken
+        // A panic puts the console back (the hook `restore_on_panic` installs), all four settings, after the console was taken
         // over and set raw; the panic is then reported as usual (the parent looks for its message).
         "a_panic_puts_the_real_console_back" => {
             let start = settings();
@@ -554,7 +554,7 @@ fn case(name: &str) {
             flush(control).unwrap();
             assert!(!signalled(), "flushed");
         }
-        // Fix round 1: a session that ends under a hidden question (`Mode::Cooked`, throwing what was typed away) leaves nothing behind:
+        // A session that ends under a hidden question (`Mode::Cooked`, throwing what was typed away) leaves nothing behind:
         // what was typed into the question's read is not shown and not given to the loop, and no read is left in progress (one would
         // take what is typed next, and show it once the console echoes again).
         "an_end_under_a_question_leaves_nothing_behind" => {
@@ -582,7 +582,7 @@ fn case(name: &str) {
             assert_eq!(gave(&read), "x");
             drop(tty);
         }
-        // Fix round 1, measured: a read another process left in progress when it ended, in the console this one shares with it (the
+        // Measured: a read another process left in progress when it ended, in the console this one shares with it (the
         // shell's console, after `lunport connect` ended), takes nothing of what is typed next: neither a raw read, nor a hidden line read
         // with a part of a password typed into it. The process that leaves them is this test binary again, run without a console of its
         // own, so that it shares this one.
@@ -631,7 +631,7 @@ fn case(name: &str) {
             std::thread::sleep(SETTLE);
             assert!(read.try_recv().is_err(), "the line read waits, \"hun\" in its line");
         }
-        // Fix round 1: what is typed after `lunport connect` ended is the shell's, whole: the program's own end (its run puts the console
+        // What is typed after `lunport connect` ended is the shell's, whole: the program's own end (its run puts the console
         // back, then its `Tty` goes) leaves no read of its own in the console it shares with the shell, also when it ended under a hidden
         // question with a part of the answer typed.
         "the_keys_after_the_cli_ended_are_the_shells" => {
@@ -680,7 +680,7 @@ fn case(name: &str) {
             tty.restore();
             drop(tty);
         }
-        // Final wave (F9): the same on the input the ending process was GIVEN as its standard input, the way `lunport connect`
+        // The same on the input the ending process was GIVEN as its standard input, the way `lunport connect`
         // reads the console input its shell and `lunport-cli.exe` hand it (`StdConsole::new`, the standard handle). That input stays
         // open when the process ends (this process, its "shell", keeps a handle of the same input and reads it next), so a read left in
         // progress could live on with the input rather than end with the process. First the check is shown to see a read that lives on (a
@@ -752,7 +752,7 @@ fn case(name: &str) {
         "a_raw_read_at_the_watchdogs_exit" => end_with_a_read(control, Mode::Raw, "", true),
         "a_hidden_line_read_at_the_end" => end_with_a_read(control, Mode::Prompt { echo: false }, "hun", false),
         "a_hidden_line_read_at_the_watchdogs_exit" => end_with_a_read(control, Mode::Prompt { echo: false }, "hun", true),
-        // Spec §7.3: the console is given whole characters: what the terminal writer writes to it (`Output::console` over `ConsoleText`,
+        // The console is given whole characters: what the terminal writer writes to it (`Output::console` over `ConsoleText`,
         // `WriteConsoleW`) shows a character whole when it was cut between two writes, here é (two bytes) and € (three). Written as they
         // come, each write on its own, the cut characters show as U+FFFD: so a cut one would show here.
         "a_character_cut_between_two_writes_reaches_the_console_whole" => {
@@ -879,7 +879,7 @@ fn pair_profile() -> crate::app_profile::AppProfile {
 /// The full name of `the_pair_in_a_console_of_its_own`, which its children run again.
 const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_own";
 
-/// Final wave (F10): `lunport connect`'s way into a console as a terminal gives it, which no other test takes: the console helper
+/// `lunport connect`'s way into a console as a terminal gives it, which no other test takes: the console helper
 /// started in a console of its own with that console's own buffers as its standard input, output and error (not a test's pipes), as a
 /// shell in the console starts a program, and `lunport.exe` on the console handles it inherits through the helper (`StdConsole::new`'s
 /// standard handles; a release build is a GUI program, which attaches to the helper's console first). Each case runs in a child with a
@@ -950,7 +950,7 @@ fn pair_case(name: &str) {
             assert!(screen.contains(&refused), "the refusal is not on the console:\n{screen}");
             assert_eq!(code, 1);
         }
-        // Residual R2 (own-ssh spec §7.3): a `lunport.exe` ended from outside puts nothing back; its helper does, once it has ended.
+        // A `lunport.exe` ended from outside puts nothing back; its helper does, once it has ended.
         // The pair's helper is copied next to a stand-in `lunport.exe` (`KILLED_PROGRAM`). First the stand-in alone: the console's four
         // settings are left changed, so the check sees a console that was not put back. Then through the helper, as a terminal runs it.
         "the_helper_puts_back_the_console_a_killed_program_changed" => {

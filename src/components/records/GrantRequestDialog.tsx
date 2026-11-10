@@ -41,7 +41,7 @@ export function grantRequestReady(justification: string, minutes: string, max = 
 export const maxMinutesOf = (row: Pick<PamEntitlementView, "max_duration_secs">) =>
   row.max_duration_secs === null ? MAX_MINUTES : Math.max(1, Math.min(MAX_MINUTES, Math.floor(row.max_duration_secs / 60)));
 
-/** What a request on an entitlement starts from: the library's memory of its last request, else its default length (design 2026-10-27). */
+/** What a request on an entitlement starts from: the library's memory of its last request, else its default length. */
 export function entitlementRequestDefaults(row: PamEntitlementView): { justification: string; minutes: string } {
   const max = maxMinutesOf(row);
   if (row.memory) return { justification: row.memory.justification, minutes: String(Math.min(max, Math.round(row.memory.duration_secs / 60))) };
@@ -154,7 +154,7 @@ export function GrantRequestCardView({ transport, entitlement: named, alias, sub
 }
 
 /**
- * The Request-a-grant dialog (design 2026-10-25, PAM grant requests; 2026-10-26, Commands): a justification and a duration, prefilled
+ * The Request-a-grant dialog: a justification and a duration, prefilled
  * from what this computer remembers of its last request for the host (`memory`), else the route's default length; requested on
  * `entitlement`, else the route's first as the connect would; the grant's state, or the refusal, shows inside once Lunport has waited
  * for it. Mount it for one request at a time, keyed by what the request is for, so another starts afresh: the details pane keys the
@@ -218,7 +218,7 @@ export function GrantRequestDialog({ transport, entitlement, memory, alias, onCl
 }
 
 /**
- * The Request-a-grant dialog of the Access tab (design 2026-10-27): a request on the entitlement of `row`, as its account, prefilled from
+ * The Request-a-grant dialog of the Access tab: a request on the entitlement of `row`, as its account, prefilled from
  * the library's memory of its last request, else its default length, and capped by its own maximum. Mount it for one request at a time,
  * keyed by the row, so another starts afresh.
  */

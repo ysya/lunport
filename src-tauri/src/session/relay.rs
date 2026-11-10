@@ -1,7 +1,7 @@
-//! A shell between the engine and a client (own-ssh spec §7.2): open it at the client's last known size and send that size again once
+//! A shell between the engine and a client: open it at the client's last known size and send that size again once
 //! it is ready, pump its output to the client, take the client's keystrokes and resizes, and say how it ended (`exited`, after an
 //! `event` that explains a lost connection or a refused shell; a lost connection is never exit status 0). When the client goes away the
-//! shell and the session are closed from a plain thread, after the shell's first output or a few seconds (plan 1b R22: a shell closed
+//! shell and the session are closed from a plain thread, after the shell's first output or a few seconds (a shell closed
 //! before its prompt can strand a process on a macOS sshd). The app ends a session when it quits, and that can happen at any step, the
 //! opening of the shell included: `ShellControl::end` leaves the reason, and the step the session is at looks for it, as it does for a
 //! client that has gone away.
@@ -19,7 +19,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// How long a shell the client left is given to print something before it is closed anyway (plan 1b R22).
+/// How long a shell the client left is given to print something before it is closed anyway.
 pub const SETTLE: Duration = Duration::from_secs(3);
 
 /// The longest signal name that is passed on to the client: the names of RFC 4254 §6.10 have at most 6 characters, `RTMIN+31` has 8.
@@ -168,7 +168,7 @@ impl ShellControl {
         }
     }
 
-    /// The client's terminal has this size: remembered, and sent to the shell when it is open (spec §7.2). Sent under the lock of the
+    /// The client's terminal has this size: remembered, and sent to the shell when it is open. Sent under the lock of the
     /// remembered size, so that a size cannot overtake a newer one on its way to the shell (`send_size` does the same).
     pub fn resize(&self, cols: u16, rows: u16) {
         let mut size = locked(&self.size);
@@ -183,7 +183,7 @@ impl ShellControl {
     }
 
     /// Sends the shell the size the client sent last, or `opened_with` when it sent none: once the PTY exists, because a resize sent
-    /// before that is ignored by the server (spec §7.2).
+    /// before that is ignored by the server.
     fn send_size(&self, shell: &dyn ShellChannel, opened_with: (u16, u16)) {
         let size = locked(&self.size);
         let (cols, rows) = size.unwrap_or(opened_with);
@@ -298,7 +298,7 @@ impl ShellControl {
     }
 }
 
-/// The sentence for a connection that ended (spec §11), about the hop that recorded the end; a dead keepalive says how many seconds went
+/// The sentence for a connection that ended, about the hop that recorded the end; a dead keepalive says how many seconds went
 /// without an answer: (`keepalive_max_missed` + 1) × `keepalive_secs` of that hop. The detail is the engine's text, which can quote what
 /// a server sent: it is made printable when it is sent (`tell`).
 pub fn lost_sentence(reason: &DisconnectReason, target: &Target) -> String {
@@ -316,7 +316,7 @@ pub fn lost_sentence(reason: &DisconnectReason, target: &Target) -> String {
     }
 }
 
-/// How the end of a connection is told: spec §11's sentence for the hop that recorded it.
+/// How the end of a connection is told: the sentence for the hop that recorded it.
 fn connection_lost(session: &dyn Session, target: &Target, alias: &str) -> String {
     match session.disconnect_reason() {
         Some(reason) => lost_sentence(&reason, target),
@@ -408,7 +408,7 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
     }
     if forwarding {
         // The size the client sent while the shell was being opened, or the one it was opened with: sent once more now that the PTY exists
-        // (spec §7.2: a resize before the shell is ready is ignored by the server).
+        // (a resize before the shell is ready is ignored by the server).
         control.send_size(shell.as_ref(), (cols, rows));
     }
     std::thread::scope(|scope| {
@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(messages, [ServerMessage::Opened { session_id: "7".into() }, ServerMessage::Exited { code: Some(3), signal: None }]);
         let events = running.engine.events();
         assert!(events.contains(&FakeEvent::ShellOpened { term: "xterm-256color".into(), cols: 100, rows: 30 }), "opened at the size the client sent last: {events:?}");
-        assert!(events.contains(&FakeEvent::WindowChange { cols: 100, rows: 30 }), "and that size sent again once the shell is ready (spec §7.2)");
+        assert!(events.contains(&FakeEvent::WindowChange { cols: 100, rows: 30 }), "and that size sent again once the shell is ready");
         assert_eq!(events.last(), Some(&FakeEvent::Closed), "the session is closed after its shell");
     }
 
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(running.link.split().1.last(), Some(&ServerMessage::Exited { code: None, signal: Some("KILL".into()) }));
     }
 
-    /// A lost connection is a disconnect with its reason, never exit status 0 (spec §7.1, §11).
+    /// A lost connection is a disconnect with its reason, never exit status 0.
     #[test]
     fn a_lost_connection_is_reported_with_its_reason_and_no_exit_status() {
         let mut running = start(FakeEngine::new(), ShellControl::new());
@@ -660,7 +660,7 @@ mod tests {
         );
     }
 
-    /// Spec §11: `{n}` = (`keepalive_max_missed` + 1) × `keepalive_secs` of the hop that went silent.
+    /// `{n}` = (`keepalive_max_missed` + 1) × `keepalive_secs` of the hop that went silent.
     #[test]
     fn a_link_that_stopped_answering_keepalives_says_for_how_long() {
         let reason = |kind, detail: &str| DisconnectReason { hop: target().hops[0].reference(), kind, detail: detail.into() };
@@ -700,7 +700,7 @@ mod tests {
         );
     }
 
-    /// Plan 1b R22: the client left right after the shell opened; the shell is closed once it has printed something, not before.
+    /// The client left right after the shell opened; the shell is closed once it has printed something, not before.
     #[test]
     fn when_the_client_goes_away_the_shell_is_closed_after_its_first_output_and_nothing_more_is_sent() {
         let mut running = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_secs(5)));
@@ -752,7 +752,7 @@ mod tests {
     }
 
     /// What a client is shown outside the shell's own output may carry bytes a server chose (an error's text quotes the peer's bytes, a
-    /// signal has whatever name the server gave it): none of it reaches the terminal as an escape sequence (spec §7.1's `printable` rule).
+    /// signal has whatever name the server gave it): none of it reaches the terminal as an escape sequence (the `printable` rule).
     #[test]
     fn every_text_the_relay_frames_is_printable_wherever_it_came_from() {
         let escape = "\u{1b}[2J\u{1b}]0;x\u{7}";
@@ -876,7 +876,7 @@ mod tests {
         [ServerMessage::Event(Event::Disconnected { reason: QUIT.into() }), ServerMessage::Exited { code: None, signal: None }]
     }
 
-    /// Plan 1b-1 review, Task 10 Important 2: the app ends the session before the shell is open. No shell is opened for it, the client
+    /// The app ends the session before the shell is open. No shell is opened for it, the client
     /// is told why, and the session is closed.
     #[test]
     fn a_session_the_app_ended_before_its_shell_opened_gets_no_shell_and_the_client_is_told_why() {
@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(running.link.split().1, [ServerMessage::Exited { code: Some(0), signal: None }]);
     }
 
-    /// Plan 1b-1 review, Task 10 Minor 1: the client leaves while the shell is being opened. It is not told the shell opened, and the
+    /// The client leaves while the shell is being opened. It is not told the shell opened, and the
     /// shell is closed once it has printed (not after the whole settle time, with the thread that reads its output waiting for it).
     #[test]
     fn a_client_that_leaves_while_the_shell_opens_is_not_told_it_opened_and_the_shell_is_closed_after_its_first_output() {
@@ -990,7 +990,7 @@ mod tests {
         fn close(&self) {}
     }
 
-    /// Plan 1b-1 review, Task 10 Minor 4: the size sent again once the shell is open and a resize that comes meanwhile are sent one after
+    /// The size sent again once the shell is open and a resize that comes meanwhile are sent one after
     /// the other, in the order the sizes were set: the shell must not be left with the older one.
     #[test]
     fn a_resize_that_comes_while_the_size_is_sent_again_is_not_overtaken_by_it() {
@@ -1017,8 +1017,8 @@ mod tests {
         assert_eq!(*locked(&sizes), [(100, 30), (120, 40)], "the size set last is the size sent last");
     }
 
-    /// Plan 1b-1 review, Task 10 Minor 6: the connection was gone when the shell was to be opened. That is a lost connection, said as one
-    /// (spec §11), and not "could not open a shell … The connection is closed."; and a reason that is only a clause of a sentence does
+    /// The connection was gone when the shell was to be opened. That is a lost connection, said as one,
+    /// and not "could not open a shell … The connection is closed."; and a reason that is only a clause of a sentence does
     /// not begin with a capital.
     #[test]
     fn a_shell_that_cannot_be_opened_on_a_lost_connection_says_how_it_was_lost() {
@@ -1047,7 +1047,7 @@ mod tests {
         );
     }
 
-    /// Plan 1b-1 review, Task 10 Minor 5: a shell the server closed without an exit status while the connection lives.
+    /// A shell the server closed without an exit status while the connection lives.
     #[test]
     fn a_shell_the_server_ended_without_a_status_while_the_connection_lives_says_so() {
         let mut running = start(FakeEngine::new(), ShellControl::new());

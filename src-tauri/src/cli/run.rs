@@ -1,4 +1,4 @@
-//! The I/O of `lunport connect` (own-ssh spec §7.3). Threads of their own read the broker's frames, the person's keys and the signals
+//! The I/O of `lunport connect`. Threads of their own read the broker's frames, the person's keys and the signals
 //! (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT), and put what happened in one queue; the loop takes it out in order,
 //! the client (`client.rs`) says what to do with each, and the loop does it without waiting on anything that can stall: what goes to
 //! the terminal and what goes to the broker is written by a writer thread of each. A terminal that is slow, or a broker that stops
@@ -9,7 +9,7 @@
 //!
 //! Nothing piles up in the CLI without a bound. A frame from the broker counts against a budget until the terminal has taken it, and
 //! the thread that reads the frames waits while the budget is spent. The broker's relay then waits to write to the CLI and stops taking
-//! from the engine's queue for the shell, which never waits (spec §6.3): once that queue is full, the output that does not fit is
+//! from the engine's queue for the shell, which never waits: once that queue is full, the output that does not fit is
 //! dropped, and the stream says in a line how many bytes are missing. SSH's window is not involved, and the remote is not slowed down.
 //! What was typed counts against another budget until the broker has taken it, and the keys stay in the terminal meanwhile. A size
 //! that waits for the broker gives way to a newer one. And a watchdog ends the program when its loop does not (`Watchdog`).
@@ -70,7 +70,7 @@ const MOVING_CHECK: Duration = Duration::from_millis(100);
 /// long a piece it is writing is waited for (`TerminalWriter::stop`).
 #[cfg(any(windows, test))]
 const STOP_WAIT: Duration = Duration::from_millis(200);
-/// How often the console window's size is looked at (Windows has no SIGWINCH; spec §7.3).
+/// How often the console window's size is looked at (Windows has no SIGWINCH).
 #[cfg(any(windows, test))]
 pub const SIZE_CHECK: Duration = Duration::from_millis(250);
 
@@ -450,7 +450,7 @@ pub struct Output {
     writer: Box<dyn Write + Send>,
     #[cfg(unix)]
     descriptor: Option<RawFd>,
-    /// The console (Windows): no write gives it a part of a character (spec §7.3). A character cut at the end of what is written waits
+    /// The console (Windows): no write gives it a part of a character. A character cut at the end of what is written waits
     /// for the rest; at the end of the run it is written as it is (`Output::end`).
     #[cfg(any(windows, test))]
     pieces: Option<super::console_inputs::Utf8Pieces>,
@@ -1020,7 +1020,7 @@ impl Drop for Watch {
     }
 }
 
-/// Windows: the window's size, looked at every `every` (Windows has no SIGWINCH; spec §7.3): a size that differs from the last one is
+/// Windows: the window's size, looked at every `every` (Windows has no SIGWINCH): a size that differs from the last one is
 /// queued as a resize, which is what SIGWINCH queues on Unix, and a size that stays the same is not. The watch ends when the returned
 /// `SizeWatch` is dropped, or the loop is gone.
 #[cfg(any(windows, test))]
@@ -1177,7 +1177,7 @@ impl Over {
     }
 }
 
-/// Windows: what the console's control events (`SetConsoleCtrlHandler`) do, as the signal thread does with signals on Unix (spec §7.3).
+/// Windows: what the console's control events (`SetConsoleCtrlHandler`) do, as the signal thread does with signals on Unix.
 /// Ctrl-C (a signal only while the input is not raw: in raw mode it is a key for the shell) and Ctrl-Break are SIGINT: a question is
 /// cancelled, and without one the program ends. The console closed is SIGHUP, log-off and shut-down SIGTERM (only services get those
 /// two; they are handled all the same): they end the program, and arm the watchdog. Windows ends the process when the handler returns
@@ -1335,7 +1335,7 @@ mod shared_tests {
         }
     }
 
-    /// Spec §7.3: the console is never given a part of a character, whether the character is cut between two of the broker's frames or
+    /// The console is never given a part of a character, whether the character is cut between two of the broker's frames or
     /// between two of the writer's pieces; at the end of the run what waits for the rest of its character is written as it is.
     #[test]
     fn the_console_is_given_whole_characters_and_at_the_end_what_waits() {
@@ -1408,7 +1408,7 @@ mod shared_tests {
         Tty::new(api).unwrap()
     }
 
-    /// Spec §7.3, Windows: the console's keys reach the shell as UTF-8, a character typed as a surrogate pair that two reads split
+    /// Windows: the console's keys reach the shell as UTF-8, a character typed as a surrogate pair that two reads split
     /// included; at a question Ctrl-Z at the start of the line (Windows' end of input) cancels it as Ctrl-D does on Unix; the read a change
     /// of mode ended gives nothing; and a console that went away ends the session as SIGHUP does, with the watchdog armed.
     #[test]
@@ -1502,7 +1502,7 @@ mod shared_tests {
         eventually("the handler to give up waiting", 10, || handling.is_finished());
     }
 
-    /// Windows has no SIGWINCH (spec §7.3): the window's size is looked at every so often, and a resize is queued when it changed, never
+    /// Windows has no SIGWINCH: the window's size is looked at every so often, and a resize is queued when it changed, never
     /// when it stayed the same; a size that cannot be read is no resize. The watch ends with its `SizeWatch`.
     #[test]
     fn the_window_size_is_queued_when_it_changes_and_only_then() {
@@ -2320,7 +2320,7 @@ mod tests {
 
     /// The remote prints far faster than the terminal takes it (here: not at all). What waits for the terminal in the CLI is bounded: the
     /// CLI stops reading its connection, and the broker's writes to it wait (the broker's relay then stops taking from the engine's queue,
-    /// which drops what does not fit; spec §6.3). And a key does not wait behind that output: Ctrl-C reaches the broker at once, as
+    /// which drops what does not fit). And a key does not wait behind that output: Ctrl-C reaches the broker at once, as
     /// OpenSSH sends it.
     #[test]
     fn keys_overtake_output_that_waits_for_the_terminal_and_what_waits_is_bounded() {
