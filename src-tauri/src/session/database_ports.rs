@@ -371,18 +371,23 @@ pub(crate) fn password_account(id: &str) -> String {
     format!("database:port-password:{id}")
 }
 
-/// The password of the database `id`'s port: the one `keychain` holds, else a new one, stored before it is answered. A new password is
-/// `PASSWORD_BYTES` random bytes as URL-safe base64 without padding, 32 characters an app takes as they are, in a connection URL too.
+/// The password of the database `id`'s port: the one `keychain` holds, else a new one, stored before it is answered.
 pub(crate) fn ensure_password(keychain: &dyn Keychain, id: &str) -> Result<Zeroizing<String>, String> {
-    let account = password_account(id);
-    let stored = keychain.get(&account).map_err(|error| format!("The database's password could not be read from the keychain: {error}"))?;
-    if let Some(stored) = stored.filter(|stored| !stored.is_empty()) {
-        return Ok(Zeroizing::new(stored));
+    let stored = keychain.get(&password_account(id)).map_err(|error| format!("The database's password could not be read from the keychain: {error}"))?;
+    match stored.filter(|stored| !stored.is_empty()) {
+        Some(stored) => Ok(Zeroizing::new(stored)),
+        None => replace_password(keychain, id),
     }
+}
+
+/// Makes a new password for the database `id`'s port and stores it in `keychain` in place of the one held, before it is answered: when
+/// the keychain cannot keep it, the caller still has the old one. A new password is `PASSWORD_BYTES` random bytes as URL-safe base64
+/// without padding, 32 characters an app takes as they are, in a connection URL too.
+pub(crate) fn replace_password(keychain: &dyn Keychain, id: &str) -> Result<Zeroizing<String>, String> {
     let mut bytes = Zeroizing::new([0u8; PASSWORD_BYTES]);
     getrandom::fill(&mut bytes[..]).map_err(|_| "Could not make a password for the database.".to_string())?;
     let password = Zeroizing::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[..]));
-    keychain.set(&account, &password).map_err(|error| format!("The database's password could not be saved in the keychain: {error}"))?;
+    keychain.set(&password_account(id), &password).map_err(|error| format!("The database's password could not be saved in the keychain: {error}"))?;
     Ok(password)
 }
 
@@ -508,10 +513,12 @@ impl DatabasePorts {
         }
     }
 
-    /// The password the database `id`'s port asks of the connections that come from now on; those that are open go on.
+    /// The password the database `id`'s port asks of the connections that come from now on, while the port starts or runs; those that
+    /// are open go on. A port that does not run holds no password, and its next start is given the one the keychain holds.
     pub fn set_password(&self, id: &str, password: Zeroizing<String>) {
-        if let Some(port) = locked(&self.ports).get(id) {
-            *locked(&port.password) = password;
+        let port = locked(&self.ports).get(id).cloned();
+        if let Some(port) = port {
+            port.set_password(password);
         }
     }
 
@@ -590,6 +597,16 @@ impl Port {
 
     fn password(&self) -> Zeroizing<String> {
         locked(&self.password).clone()
+    }
+
+    /// Asks `password` of the apps that connect from now on, while the port starts or runs. A port that stopped or failed holds no password,
+    /// and `forget_password` is the last thing it does with one, so a password written after that would stay: the phase is held while the
+    /// password is written, so that it cannot change in between.
+    fn set_password(&self, password: Zeroizing<String>) {
+        let state = locked(&self.state);
+        if matches!(state.phase, DatabasePhase::Starting | DatabasePhase::Running) {
+            *locked(&self.password) = password;
+        }
     }
 
     /// It listens on `port`; running, unless it was stopped meanwhile.

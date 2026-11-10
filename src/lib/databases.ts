@@ -10,6 +10,10 @@ export const listDatabases = () => tauriInvoke<DatabaseView[]>("databases_list")
 /** Saves the database (a new one when its id is empty) and answers it as the list shows it from then on: pass that as the next `expected`. */
 export const saveDatabase = (database: SavedDatabase, expected: SavedDatabase | null) => tauriInvoke<SavedDatabase>("databases_save", { database, expected });
 export const deleteDatabase = (expected: SavedDatabase) => tauriInvoke<void>("databases_delete", { expected });
+/** The password apps sign in to the database's local port with; the first ask makes it, so it is there before the database starts. */
+export const databasePassword = (id: string) => tauriInvoke<string>("databases_port_password", { id });
+/** Replaces the port's password and answers the new one. Connections that are open go on; new ones need it. */
+export const rotateDatabasePassword = (id: string) => tauriInvoke<string>("databases_rotate_port_password", { id });
 
 /** A database to fill in: PostgreSQL over the public address, labelled dev, offered on no local port. */
 export function newDatabase(): SavedDatabase {

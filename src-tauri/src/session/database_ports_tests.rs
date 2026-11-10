@@ -212,10 +212,10 @@ impl Upstream for FakeUpstream {
 // ---- An app ----
 
 /// An app that connects to the port as psql or DataGrip does: plain TCP on 127.0.0.1, every read bounded by `LIMIT`.
-struct App(std::net::TcpStream);
+pub(crate) struct App(std::net::TcpStream);
 
 impl App {
-    fn connect(port: u16) -> App {
+    pub(crate) fn connect(port: u16) -> App {
         let stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("the port takes connections");
         stream.set_read_timeout(Some(LIMIT)).unwrap();
         App(stream)
@@ -233,24 +233,24 @@ impl App {
         self.0.write_all(bytes).expect("the port reads");
     }
 
-    fn startup(&mut self, pairs: &[(&str, &str)]) {
+    pub(crate) fn startup(&mut self, pairs: &[(&str, &str)]) {
         self.send(&startup_wire(PROTOCOL_3_0, pairs));
     }
 
     /// Answers Lunport's request for the password with `password` and expects to be signed in: Cloud SQL's AuthenticationOk and
     /// ReadyForQuery, passed on.
-    fn sign_in(&mut self, password: &str) {
+    pub(crate) fn sign_in(&mut self, password: &str) {
         self.asked_for_password();
         self.password(password);
         assert_eq!(self.message(), (b'R', 0u32.to_be_bytes().to_vec()), "signed in");
         assert_eq!(self.message(), (b'Z', b"I".to_vec()), "ready for a query");
     }
 
-    fn asked_for_password(&mut self) {
+    pub(crate) fn asked_for_password(&mut self) {
         assert_eq!(self.message(), (b'R', 3u32.to_be_bytes().to_vec()), "Lunport asks for the password in clear text");
     }
 
-    fn password(&mut self, password: &str) {
+    pub(crate) fn password(&mut self, password: &str) {
         let mut body = password.as_bytes().to_vec();
         body.push(0);
         self.send(&typed(b'p', &body));
@@ -270,7 +270,7 @@ impl App {
     }
 
     /// The SQLSTATE and the message of the ErrorResponse that comes next, which is fatal.
-    fn error(&mut self) -> (String, String) {
+    pub(crate) fn error(&mut self) -> (String, String) {
         let (kind, body) = self.message();
         assert_eq!(kind, b'E', "an ErrorResponse: {:?}", String::from_utf8_lossy(&body));
         let mut fields = BTreeMap::new();
@@ -306,14 +306,14 @@ impl App {
     }
 
     /// Sends `bytes` through the port and expects them back: the fake Cloud SQL sends back what it gets.
-    fn round_trip(&mut self, bytes: &[u8]) {
+    pub(crate) fn round_trip(&mut self, bytes: &[u8]) {
         self.send(bytes);
         assert_eq!(self.bytes(bytes.len()), bytes, "the port relays both ways");
     }
 }
 
 /// Waits until `done`, at most `LIMIT`.
-fn wait_until(what: &str, done: impl Fn() -> bool) {
+pub(crate) fn wait_until(what: &str, done: impl Fn() -> bool) {
     let end = Instant::now() + LIMIT;
     while !done() {
         assert!(Instant::now() < end, "timed out waiting until {what}");
@@ -750,6 +750,63 @@ fn a_new_password_is_asked_of_new_connections_only() {
     new.startup(&[("user", "frank"), ("database", "orders")]);
     new.sign_in(rotated);
     open.round_trip(b"select 1");
+}
+
+#[test]
+fn a_stopped_port_is_not_given_a_password() {
+    let ports = DatabasePorts::new(fake());
+    let rotated = "bmV3LXBvcnQtcGFzc3dvcmQtZm9yLWFu";
+    // A database that never ran has no port to give one to.
+    ports.set_password(ID, Zeroizing::new(rotated.into()));
+    assert_eq!(ports.live(ID), DatabaseLive::default());
+    running(&ports, &orders());
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    assert!(locked(&ports.ports)[ID].password().is_empty(), "the stopped port keeps no password");
+    ports.set_password(ID, Zeroizing::new(rotated.into()));
+    assert!(locked(&ports.ports)[ID].password().is_empty(), "and is not given one");
+    // It asks for the password it is started with next.
+    ports.start(&orders(), Zeroizing::new(rotated.into()), CancelToken::default(), Box::new(())).unwrap();
+    let port = ports.live(ID).port.unwrap();
+    let mut old = App::connect(port);
+    old.startup(&[("user", "frank"), ("database", "orders")]);
+    old.asked_for_password();
+    old.password(PASSWORD);
+    assert_eq!(old.error().0, "28P01");
+    let mut new = App::connect(port);
+    new.startup(&[("user", "frank"), ("database", "orders")]);
+    new.sign_in(rotated);
+}
+
+#[test]
+fn a_failed_port_is_not_given_a_password() {
+    let held = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let db = SavedDatabase { local_port: Some(held.local_addr().unwrap().port()), ..orders() };
+    let ports = DatabasePorts::new(fake());
+    ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(())).unwrap_err();
+    assert_eq!(ports.live(ID).phase, DatabasePhase::Error);
+    ports.set_password(ID, Zeroizing::new("bmV3LXBvcnQtcGFzc3dvcmQtZm9yLWFu".into()));
+    assert!(locked(&ports.ports)[ID].password().is_empty(), "a port that failed is not given a password");
+}
+
+#[test]
+fn a_port_takes_a_new_password_while_it_starts_or_runs_only() {
+    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default());
+    assert_eq!(port.live().phase, DatabasePhase::Starting);
+    port.set_password(Zeroizing::new("first".into()));
+    assert_eq!(*port.password(), "first", "a port that starts takes it");
+    port.listening(6543);
+    port.set_password(Zeroizing::new("second".into()));
+    assert_eq!(*port.password(), "second", "a port that runs takes it");
+    // A port that stops wipes its password once its connections are closed: a password it took meanwhile could be written after the wipe.
+    port.stop();
+    assert_eq!(port.live().phase, DatabasePhase::Stopping);
+    port.set_password(Zeroizing::new("third".into()));
+    assert_eq!(*port.password(), "second", "a port that stops does not");
+    port.forget_password();
+    port.stopped();
+    port.set_password(Zeroizing::new("fourth".into()));
+    assert!(port.password().is_empty(), "nor does one that stopped");
 }
 
 // ---- Port passwords ----

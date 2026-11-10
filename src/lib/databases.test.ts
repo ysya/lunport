@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "./test-ipc";
 import {
   connectionName,
+  databasePassword,
   databasesKey,
   deleteDatabase,
   listDatabases,
   newDatabase,
   parseConnectionName,
+  rotateDatabasePassword,
   saveDatabase,
   type DatabaseView,
   type SavedDatabase,
@@ -103,6 +105,20 @@ describe("saved databases", () => {
       ["databases_save", { database: { ...ORDERS, id: "" }, expected: null }],
       ["databases_save", { database: renamed, expected: ORDERS }],
       ["databases_delete", { expected: renamed }],
+    ]);
+  });
+
+  it("asks for and rotates a port password by the database's identity", async () => {
+    const replies: Record<string, unknown> = {
+      databases_port_password: "c3RvcmVkLXBvcnQtcGFzc3dvcmQtMDEy",
+      databases_rotate_port_password: "bmV3LXBvcnQtcGFzc3dvcmQtZm9yLWFu",
+    };
+    const calls = stubBackend(async (cmd) => replies[cmd]);
+    expect(await databasePassword(ORDERS.id)).toBe("c3RvcmVkLXBvcnQtcGFzc3dvcmQtMDEy");
+    expect(await rotateDatabasePassword(ORDERS.id)).toBe("bmV3LXBvcnQtcGFzc3dvcmQtZm9yLWFu");
+    expect(calls).toEqual([
+      ["databases_port_password", { id: ORDERS.id }],
+      ["databases_rotate_port_password", { id: ORDERS.id }],
     ]);
   });
 });
