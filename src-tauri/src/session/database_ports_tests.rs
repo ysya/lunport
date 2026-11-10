@@ -564,6 +564,30 @@ fn a_port_in_use_fails_with_a_sentence() {
     App::signed_in(taken).round_trip(b"select 1");
 }
 
+/// Starts `Orders` on the port `occupant` listens on, and expects it to fail as a port in use.
+fn refused_for(occupant: std::net::TcpListener) {
+    let taken = occupant.local_addr().unwrap().port();
+    let ports = DatabasePorts::new(fake());
+    let db = SavedDatabase { local_port: Some(taken), ..orders() };
+    let sentence = format!("Port {taken} is already in use on this computer.");
+    assert_eq!(ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(())), Err(sentence.clone()));
+    assert_eq!((ports.live(ID).phase, ports.live(ID).error), (DatabasePhase::Error, Some(sentence)));
+    drop(occupant);
+}
+
+#[test]
+fn a_program_listening_on_every_address_holds_the_port() {
+    // As Docker's `-p 5432:5432` listens: on 0.0.0.0, which does not make a bind to 127.0.0.1 fail on macOS.
+    refused_for(std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap());
+}
+
+#[test]
+fn a_program_listening_on_the_ipv6_loopback_holds_the_port() {
+    // Apps that dial `localhost` may try ::1 first. A computer without IPv6 has nothing to try here.
+    let Ok(occupant) = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)) else { return };
+    refused_for(occupant);
+}
+
 #[test]
 fn a_database_without_a_local_port_or_over_the_limit_does_not_start() {
     let ports = DatabasePorts::new(fake());

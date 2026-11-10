@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
@@ -69,6 +69,8 @@ const QUIT_POLL: Duration = Duration::from_millis(250);
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 /// How long a cancel request may take to reach Cloud SQL and be taken.
 const CANCEL_WITHIN: Duration = Duration::from_secs(10);
+/// How long a look at whether a program already answers on a port may take, for each loopback address.
+const PROBE_WITHIN: Duration = Duration::from_millis(300);
 const RELAY_BUFFER_BYTES: usize = 16 * 1024;
 /// How many random bytes a port's password is made of.
 const PASSWORD_BYTES: usize = 24;
@@ -653,16 +655,30 @@ impl Drop for Slot {
     }
 }
 
-/// Listens on 127.0.0.1 at `number` on `runtime`.
+/// Listens on 127.0.0.1 at `number` on `runtime`, unless another program takes connections there already.
 fn listen(number: u16, runtime: &tokio::runtime::Runtime) -> Result<TcpListener, String> {
+    let in_use = || format!("Port {number} is already in use on this computer.");
+    // A program that listens on every address (Docker's `-p 5432:5432`, for one) does not make the bind below fail everywhere (on macOS
+    // it does not), yet it would still answer the apps that dial `localhost` over IPv6.
+    if number != 0 && answers(number) {
+        return Err(in_use());
+    }
     let could_not = |error: io::Error| format!("Lunport could not open port {number}: {error}.");
     let listener = std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], number))).map_err(|error| match error.kind() {
-        io::ErrorKind::AddrInUse => format!("Port {number} is already in use on this computer."),
+        io::ErrorKind::AddrInUse => in_use(),
         _ => could_not(error),
     })?;
     listener.set_nonblocking(true).map_err(could_not)?;
     let _entered = runtime.enter();
     TcpListener::from_std(listener).map_err(could_not)
+}
+
+/// Whether a program takes connections at `number` on 127.0.0.1 or on ::1 already. A refused connection, one that does not come in time,
+/// and a computer without IPv6 say it does not.
+fn answers(number: u16) -> bool {
+    [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
+        .into_iter()
+        .any(|ip| std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, number), PROBE_WITHIN).is_ok())
 }
 
 /// Runs a port: takes the apps that connect until the port stops or the app quits, then lets go of the address, closes every connection,
