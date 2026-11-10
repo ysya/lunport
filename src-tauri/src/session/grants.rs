@@ -373,6 +373,12 @@ mod tests {
         let _ = HostId::from("unused");
     }
 
+    /// The Access tab, a host's route and the connections all request a grant at this pace: it is named once.
+    #[test]
+    fn a_requested_grant_is_read_back_every_two_seconds_for_up_to_a_minute() {
+        assert_eq!((POLL_EVERY, ACTIVE_WITHIN), (Duration::from_secs(2), Duration::from_secs(60)));
+    }
+
     #[test]
     fn the_default_grace_is_two_minutes_in_steps_of_ten_seconds() {
         let grace = Grace::default();

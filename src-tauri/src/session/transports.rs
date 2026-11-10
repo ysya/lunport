@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::Manager;
 
+use super::grants::{ACTIVE_WITHIN, POLL_EVERY};
 use crate::connection_probe::{BUSY, CHECKS};
 use crate::gcp::auth;
 use crate::gcp::iap::{self, IapError};
@@ -180,7 +181,7 @@ pub(crate) fn live_routes(records: &SyncStateV3) -> Result<Vec<HostTransport>, S
 /// (or, for an entitlement an approver approves, for it to wait for the approver) and answers its state. `pam_request_with` takes the
 /// polling and the wait.
 pub fn pam_request(gcp: &dyn GcpClient, remember: &dyn Fn(&str, &str, u32) -> Result<(), String>, transport: &HostTransport, justification: &str, duration_secs: u32, entitlement: Option<&str>) -> Result<PamStatusView, String> {
-    pam_request_with(gcp, remember, transport, justification, duration_secs, entitlement, &|| false, Duration::from_secs(2), Duration::from_secs(60))
+    pam_request_with(gcp, remember, transport, justification, duration_secs, entitlement, &|| false, POLL_EVERY, ACTIVE_WITHIN)
 }
 
 #[allow(clippy::too_many_arguments)]
