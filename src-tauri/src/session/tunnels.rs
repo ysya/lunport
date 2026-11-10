@@ -568,6 +568,19 @@ pub async fn tunnels_list(
     .await
     .map_err(|e| e.to_string())?
 }
+/// The library's state after saving (`Some`) or deleting (`None`) the rule `id`, provided `expected` is the rule as the panel shows it. A
+/// refusal is an error whose message is the sentence the panel shows.
+fn change(
+    state: &SyncStateV3,
+    keys: Option<&crate::sync::crypto::ChainKeys>,
+    id: &str,
+    expected: Option<&TunnelRule>,
+    rule: Option<TunnelRule>,
+    now: u64,
+) -> Result<SyncStateV3, crate::error::AppError> {
+    crate::sync::tunnel_rules::set(state, keys, id, expected, rule, now)
+        .map_err(|e| crate::error::AppError::Other(transports::refusal(e)))
+}
 fn edit(
     app: &tauri::AppHandle,
     id: &str,
@@ -579,15 +592,7 @@ fn edit(
         crate::sync::engine::with_env(app, |env| {
             let keys = env.runtime.core.lock().unwrap().account_keys.clone();
             crate::sync::record_commands::edit_records(env, |state, now| {
-                crate::sync::tunnel_rules::set(
-                    state,
-                    keys.as_ref(),
-                    id,
-                    expected.as_ref(),
-                    rule.clone(),
-                    now,
-                )
-                .map_err(|e| crate::error::AppError::Other(e.to_string()))
+                change(state, keys.as_ref(), id, expected.as_ref(), rule.clone(), now)
             })
         })
         .map_err(|e| e.to_string())?
@@ -1444,5 +1449,29 @@ mod tests {
         assert_eq!(main_window_only("main", "Database"), Ok(()));
         assert_eq!(main_window_only("auth", "Tunnel"), Err("Tunnel management is available in the main window only.".to_string()));
         assert_eq!(main_window_only("hostkey", "Database"), Err("Database management is available in the main window only.".to_string()));
+    }
+
+    /// A refused save or delete reaches the panel as the sentence the library gives, not as the repository error's debug text.
+    #[test]
+    fn a_refused_tunnel_save_reads_as_its_sentence() {
+        let (state, rule) = saved();
+        let refused = |result: Result<SyncStateV3, crate::error::AppError>| result.unwrap_err().to_string();
+        // A save and a delete from a rule that is no longer the stored one.
+        let outdated = TunnelRule { name: "Outdated".into(), ..rule.clone() };
+        let changed_elsewhere = "This tunnel changed on another device. Refresh and try again.";
+        assert_eq!(refused(change(&state, None, &rule.id, Some(&outdated), Some(rule.clone()), 11)), changed_elsewhere);
+        assert_eq!(refused(change(&state, None, &rule.id, Some(&outdated), None, 11)), changed_elsewhere);
+        // A rule the checks refuse.
+        let unnamed = TunnelRule { name: " ".into(), ..rule.clone() };
+        assert_eq!(refused(change(&state, None, &rule.id, Some(&rule), Some(unnamed), 11)), "Enter a tunnel name (up to 128 characters).");
+        // A library whose writes are paused.
+        let mut paused = state.clone();
+        paused.account = Some(crate::sync::state_v2::AccountState::new(&"a".repeat(64)));
+        paused.shared_writes_blocked = true;
+        assert_eq!(refused(change(&paused, None, &rule.id, Some(&rule), None, 11)), transports::SYNC_PAUSED);
+        // A rule that is accepted is saved.
+        let renamed = TunnelRule { name: "Renamed".into(), ..rule.clone() };
+        let saved = change(&state, None, &rule.id, Some(&rule), Some(renamed.clone()), 11).unwrap();
+        assert_eq!(tunnel_rules::view(&saved).into_iter().map(|row| row.rule).collect::<Vec<_>>(), vec![renamed]);
     }
 }

@@ -5,8 +5,8 @@ use crate::{
     sync::{
         databases::{self, SavedDatabase},
         env::SyncEnv,
-        record_repository::RepositoryError,
-        records_v3::{RecordValidationError, SyncStateV3},
+        records_v3::SyncStateV3,
+        transports,
     },
 };
 use serde::Serialize;
@@ -68,20 +68,12 @@ fn views(state: &SyncStateV3) -> Vec<DatabaseView> {
     views
 }
 
-/// A refused write as the sentence the editor shows: the reason the database checks gave, else the library's own sentence.
-fn refusal(error: RepositoryError) -> String {
-    match error {
-        RepositoryError::Validation(RecordValidationError::Invalid { reason, .. }) => reason,
-        other => crate::sync::transports::refusal(other),
-    }
-}
-
 /// Saves (`Some`) or removes (`None`) the database `id` in one edit of the library, provided `expected` is what the list shows. A saved
 /// database is answered as that edit stored it, which is how the list shows it from then on.
 fn edit(env: &SyncEnv, id: &str, expected: Option<&SavedDatabase>, database: Option<SavedDatabase>) -> Result<Option<SavedDatabase>, String> {
     let stored = RefCell::new(None);
     crate::sync::record_commands::edit_records(env, |state, now| {
-        let next = databases::set(state, id, expected, database.clone(), now).map_err(|error| AppError::Other(refusal(error)))?;
+        let next = databases::set(state, id, expected, database.clone(), now).map_err(|error| AppError::Other(transports::refusal(error)))?;
         *stored.borrow_mut() = databases::view(&next).into_iter().find(|row| row.database.id == id).map(|row| row.database);
         Ok(next)
     })
@@ -142,10 +134,9 @@ mod tests {
             tests::{database, state},
             DatabaseEnvironment,
         },
-        record_repository::RepositoryError,
         record_runtime, records_v3,
         testkit::{TestClock, TestDevice},
-        transports::{tests::in_central_mode, PamCheck, NO_ROOM, SYNC_PAUSED},
+        transports::{tests::in_central_mode, PamCheck},
     };
     use serde_json::json;
 
@@ -294,13 +285,5 @@ mod tests {
         delete(&d.env(), saved.clone()).unwrap();
         assert_eq!(listed(&d).iter().map(|view| view.database.clone()).collect::<Vec<_>>(), vec![other]);
         assert_eq!(delete(&d.env(), saved), Err(STALE.to_string()), "it is gone already");
-    }
-
-    #[test]
-    fn the_librarys_own_refusals_read_as_sentences() {
-        assert_eq!(refusal(RepositoryError::NoRoom), NO_ROOM);
-        assert_eq!(refusal(RepositoryError::ReadOnlyAccount), SYNC_PAUSED);
-        let invalid = databases::set(&state(), ORDERS, None, Some(SavedDatabase { name: " ".into(), ..database(ORDERS) }), 1).unwrap_err();
-        assert_eq!(refusal(invalid), "Enter a database name (up to 128 characters).");
     }
 }
