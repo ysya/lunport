@@ -89,10 +89,18 @@ pub(crate) trait Upstream: Send + Sync {
     /// port calls it on a blocking thread. `cancel` is set when the port stops.
     fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<String, String>;
     /// Dials the instance of the database `db_id` with the material `prepare` got for it.
-    fn connect(&self, db_id: &str) -> BoxFuture<'static, io::Result<BoxStream>>;
-    /// A connection dialled with the material of `db_id` failed before Cloud SQL answered its start-up message (in TLS 1.3 a refused client
-    /// certificate shows only then): that material is not used again, and the next connection gets new material.
-    fn forget(&self, db_id: &str);
+    fn connect(&self, db_id: &str) -> Dialling;
+    /// A connection to `db_id` dialled with `material` failed before Cloud SQL answered its start-up message (in TLS 1.3 a refused client
+    /// certificate shows only then): that material is not used again, and the next connection gets new material. Newer material that
+    /// another connection got meanwhile stays.
+    fn forget(&self, db_id: &str, material: u64);
+}
+
+/// A connection to an instance under way.
+pub(crate) struct Dialling {
+    /// Which of the database's material it dials with, for `Upstream::forget`; `None` when there was none to dial with.
+    pub material: Option<u64>,
+    pub stream: BoxFuture<'static, io::Result<BoxStream>>,
 }
 
 // ---- The Cloud SQL upstream ----
@@ -122,11 +130,14 @@ pub(crate) struct CloudSqlUpstream {
     dial: Dialer,
     /// What each database's connections share, by the database's id.
     routes: Mutex<HashMap<String, Arc<Route>>>,
+    /// The number of the next material fetched, counted from 1.
+    generations: AtomicU64,
 }
 
-/// What one database's connections share.
-#[derive(Default)]
+/// What the connections to one database, as it was saved, share. A database saved anew (another account, instance or grant check) gets a
+/// route of its own: a connection still on its way with the route before cannot leave anything in it.
 struct Route {
+    database: SavedDatabase,
     /// Held while the material is fetched, so that connections that start together share one fetch.
     fetching: Mutex<()>,
     kept: Mutex<Kept>,
@@ -135,8 +146,6 @@ struct Route {
 /// What was had for a database, kept for its next connections.
 #[derive(Default)]
 struct Kept {
-    /// The database as it was saved when this was had: one saved anew (another account, instance or grant check) starts over.
-    database: Option<SavedDatabase>,
     grant: Option<CheckedGrant>,
     dial: Option<Dial>,
     /// The Google account of the last certificate, as the token source resolved it.
@@ -149,7 +158,7 @@ impl Kept {
     fn keep_for(&mut self, account: &Option<String>) {
         let other = self.grant.as_ref().is_some_and(|check| check.for_account != *account) || self.dial.as_ref().is_some_and(|dial| dial.for_account != *account);
         if other {
-            *self = Kept { database: self.database.take(), ..Kept::default() };
+            *self = Kept::default();
         }
     }
 }
@@ -172,6 +181,8 @@ impl CheckedGrant {
 
 /// What a connection dials the instance with.
 struct Dial {
+    /// Which material this is: a connection that failed with it takes back this one only.
+    generation: u64,
     /// The account the connections signed in as when it was fetched.
     for_account: Option<String>,
     iam_user: String,
@@ -223,18 +234,18 @@ impl CloudSqlUpstream {
                 Box::pin(async move { cloudsql_tls::dial(ip, config, name).await.map(|stream| Box::new(stream) as BoxStream) })
             }),
             routes: Mutex::default(),
+            generations: AtomicU64::new(1),
         }
     }
 
-    /// What `db`'s connections share, started over when `db` was saved anew since.
+    /// What `db`'s connections share: a new route when `db` was saved anew since the last one.
     fn route(&self, db: &SavedDatabase) -> Arc<Route> {
-        let route = Arc::clone(locked(&self.routes).entry(db.id.clone()).or_default());
-        {
-            let mut kept = locked(&route.kept);
-            if kept.database.as_ref() != Some(db) {
-                *kept = Kept { database: Some(db.clone()), ..Kept::default() };
-            }
+        let mut routes = locked(&self.routes);
+        if let Some(route) = routes.get(&db.id).filter(|route| route.database == *db) {
+            return Arc::clone(route);
         }
+        let route = Arc::new(Route { database: db.clone(), fetching: Mutex::new(()), kept: Mutex::default() });
+        routes.insert(db.id.clone(), Arc::clone(&route));
         route
     }
 
@@ -291,6 +302,7 @@ impl CloudSqlUpstream {
         }
         kept.account = Some(material.cert.account.clone());
         kept.dial = Some(Dial {
+            generation: self.generations.fetch_add(1, Ordering::Relaxed),
             for_account: account.clone(),
             iam_user: material.iam_user.clone(),
             expires_at: material.cert.expires_at,
@@ -321,21 +333,24 @@ impl Upstream for CloudSqlUpstream {
         }
     }
 
-    fn connect(&self, db_id: &str) -> BoxFuture<'static, io::Result<BoxStream>> {
+    fn connect(&self, db_id: &str) -> Dialling {
         let route = locked(&self.routes).get(db_id).cloned();
-        let target = route.and_then(|route| locked(&route.kept).dial.as_ref().map(|dial| (dial.ip, Arc::clone(&dial.config), dial.name.clone())));
-        let dialling = target.map(|(ip, config, name)| (self.dial)(ip, config, name));
-        Box::pin(async move {
-            match dialling {
-                Some(dialling) => dialling.await,
-                None => Err(io::Error::new(io::ErrorKind::NotFound, "no certificate is ready for it. Connect again.")),
-            }
-        })
+        let target = route.and_then(|route| locked(&route.kept).dial.as_ref().map(|dial| (dial.generation, dial.ip, Arc::clone(&dial.config), dial.name.clone())));
+        match target {
+            Some((generation, ip, config, name)) => Dialling { material: Some(generation), stream: (self.dial)(ip, config, name) },
+            None => Dialling {
+                material: None,
+                stream: Box::pin(async { Err(io::Error::new(io::ErrorKind::NotFound, "no certificate is ready for it. Connect again.")) }),
+            },
+        }
     }
 
-    fn forget(&self, db_id: &str) {
+    fn forget(&self, db_id: &str, material: u64) {
         if let Some(route) = locked(&self.routes).get(db_id) {
-            locked(&route.kept).dial = None;
+            let mut kept = locked(&route.kept);
+            if kept.dial.as_ref().is_some_and(|dial| dial.generation == material) {
+                kept.dial = None;
+            }
         }
     }
 }
@@ -729,10 +744,17 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
         return refuse(&mut app, "08P01", TOO_LONG).await;
     }
     let connection = port.db.connection_name();
-    let mut server = match upstream.connect(&port.db.id).await {
+    let Dialling { material, stream } = upstream.connect(&port.db.id);
+    // What failed before Cloud SQL answered is not dialled with again: in TLS 1.3 a refused certificate shows only then.
+    let forget = || {
+        if let Some(material) = material {
+            upstream.forget(&port.db.id, material);
+        }
+    };
+    let mut server = match stream.await {
         Ok(server) => server,
         Err(error) => {
-            upstream.forget(&port.db.id);
+            forget();
             return refuse(&mut app, "08006", &unreachable(&connection, &error)).await;
         }
     };
@@ -748,7 +770,7 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
     let (auth, first) = match answered {
         Ok(answer) => answer,
         Err(error) => {
-            upstream.forget(&port.db.id);
+            forget();
             return refuse(&mut app, "08006", &unreachable(&connection, &error)).await;
         }
     };
@@ -793,7 +815,7 @@ async fn refuse_unreadable(app: &mut TcpStream, error: &io::Error) {
 /// the request. The app's connection closes after it, which tells the app that the request was handled.
 async fn pass_on_cancel(upstream: &dyn Upstream, db_id: &str, request: &[u8]) {
     let passed = async {
-        let mut server = upstream.connect(db_id).await?;
+        let mut server = upstream.connect(db_id).stream.await?;
         server.write_all(request).await?;
         server.flush().await?;
         let mut rest = [0u8; 64];

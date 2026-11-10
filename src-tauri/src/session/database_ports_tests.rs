@@ -183,22 +183,23 @@ impl Upstream for FakeUpstream {
         }
     }
 
-    fn connect(&self, _db_id: &str) -> BoxFuture<'static, io::Result<BoxStream>> {
-        self.dialled.fetch_add(1, Ordering::SeqCst);
+    fn connect(&self, _db_id: &str) -> Dialling {
+        let material = self.dialled.fetch_add(1, Ordering::SeqCst) as u64 + 1;
         let unreachable = self.unreachable.load(Ordering::SeqCst);
         let answer = *self.answer.lock().unwrap();
         let received = Arc::clone(&self.received);
-        Box::pin(async move {
+        let stream: BoxFuture<'static, io::Result<BoxStream>> = Box::pin(async move {
             if unreachable {
                 return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "Cloud SQL refused the connection."));
             }
             let (near, far) = tokio::io::duplex(64 * 1024);
             tokio::spawn(fake_cloud_sql(far, answer, received));
             Ok(Box::new(near) as BoxStream)
-        })
+        });
+        Dialling { material: Some(material), stream }
     }
 
-    fn forget(&self, _db_id: &str) {
+    fn forget(&self, _db_id: &str, _material: u64) {
         self.forgotten.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -733,7 +734,6 @@ const HOUR: Duration = Duration::from_secs(3600);
 /// What the person answers in the Request-a-grant window: thirty minutes, and why.
 const ANSWER: &str = "30\nCheck unpaid orders";
 const OPERATE: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
-const DNS_NAME: &str = "a1b2c3d4e5f6.asia-east1.sql.goog";
 const PUBLIC_IP: &str = "198.51.100.5";
 
 /// The test's own clock, which only the test moves.
@@ -822,32 +822,60 @@ fn authority() -> Authority {
     CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap()
 }
 
-/// The Cloud SQL Admin API as the tests script it: the instance's connect settings, and for every key a certificate signed by `authority`
-/// that is good for an hour of the test's clock, for `account`.
+/// The name an instance's server certificate is made out to, in the tests.
+fn dns_name(instance: &str) -> String {
+    format!("{instance}.asia-east1.sql.goog")
+}
+
+/// The Cloud SQL Admin API as the tests script it: an instance's connect settings, and for every key a certificate signed by `authority`
+/// that is good for an hour of the test's clock, for `account`. When `holding` is set, the first certificate request waits until
+/// `released` is (at most `LIMIT`), so that a test can hold a fetch half done.
+#[derive(Default)]
 struct Admin {
-    authority: Authority,
-    clock: Clock,
+    authority: Option<Authority>,
+    clock: Option<Clock>,
     account: Mutex<String>,
+    settings: AtomicUsize,
     certificates: AtomicUsize,
+    holding: AtomicBool,
+    released: AtomicBool,
+}
+
+impl Admin {
+    fn authority(&self) -> &Authority {
+        self.authority.as_ref().expect("an authority")
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
 }
 
 impl SqlAdmin for Admin {
-    fn connect_settings(&self, _: Option<&str>, _: &InstanceRef) -> Result<ConnectSettings, GcpError> {
+    fn connect_settings(&self, _: Option<&str>, at: &InstanceRef) -> Result<ConnectSettings, GcpError> {
+        self.settings.fetch_add(1, Ordering::SeqCst);
         Ok(ConnectSettings {
             public_ip: Some(PUBLIC_IP.parse().unwrap()),
-            server_ca_pem: self.authority.pem(),
-            dns_name: Some(DNS_NAME.into()),
+            server_ca_pem: self.authority().pem(),
+            dns_name: Some(dns_name(&at.instance)),
             database_version: "POSTGRES_16".into(),
         })
     }
 
     fn ephemeral_cert(&self, _: Option<&str>, _: &InstanceRef, key: &EphemeralKey) -> Result<EphemeralCert, GcpError> {
-        self.certificates.fetch_add(1, Ordering::SeqCst);
+        let first = self.certificates.fetch_add(1, Ordering::SeqCst) == 0;
+        if first && self.holding.load(Ordering::SeqCst) {
+            let end = Instant::now() + LIMIT;
+            while !self.released.load(Ordering::SeqCst) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
         let key = KeyPair::try_from(&key.private_der()).expect("rcgen reads the connection's key");
         let mut params = CertificateParams::default();
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        let cert = params.signed_by(&key, &self.authority).unwrap();
-        Ok(EphemeralCert { cert_pem: cert.pem(), expires_at: self.clock.now() + HOUR, account: self.account.lock().unwrap().clone() })
+        let cert = params.signed_by(&key, self.authority()).unwrap();
+        let clock = self.clock.as_ref().expect("a clock");
+        Ok(EphemeralCert { cert_pem: cert.pem(), expires_at: clock.now() + HOUR, account: self.account.lock().unwrap().clone() })
     }
 
     fn list_instances(&self, _: Option<&str>, _: &str) -> Result<Vec<InstanceSummary>, GcpError> {
@@ -882,6 +910,8 @@ struct Cloud {
     owner: Arc<FakeOwner>,
     remembered: Arc<Mutex<Vec<(String, String, u32)>>>,
     dialled: Arc<Mutex<Vec<(IpAddr, ServerName<'static>)>>>,
+    /// How many of the next dials Cloud SQL refuses.
+    refusing: Arc<Mutex<usize>>,
     received: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
@@ -891,12 +921,13 @@ impl Cloud {
         let clock = Clock::new();
         Cloud {
             pam: Arc::new(Pam { clock: clock.clone(), held: Mutex::new(Vec::new()), looked: AtomicUsize::new(0), created: AtomicUsize::new(0) }),
-            admin: Arc::new(Admin { authority: authority(), clock: clock.clone(), account: Mutex::new(IAM_USER.into()), certificates: AtomicUsize::new(0) }),
+            admin: Arc::new(Admin { authority: Some(authority()), clock: Some(clock.clone()), account: Mutex::new(IAM_USER.into()), ..Admin::default() }),
             clock,
             active: Arc::new(Mutex::new(Some(IAM_USER.into()))),
             owner: Arc::new(owner),
             remembered: Arc::default(),
             dialled: Arc::default(),
+            refusing: Arc::default(),
             received: Arc::default(),
         }
     }
@@ -907,7 +938,7 @@ impl Cloud {
         let clock = self.clock.clone();
         let active = Arc::clone(&self.active);
         let remembered = Arc::clone(&self.remembered);
-        let (dialled, received) = (Arc::clone(&self.dialled), Arc::clone(&self.received));
+        let (dialled, refusing, received) = (Arc::clone(&self.dialled), Arc::clone(&self.refusing), Arc::clone(&self.received));
         CloudSqlUpstream {
             gcp: self.pam.clone(),
             sql: self.admin.clone(),
@@ -921,14 +952,26 @@ impl Cloud {
             }),
             dial: Arc::new(move |ip: IpAddr, _config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
                 dialled.lock().unwrap().push((ip, name));
+                let refused = {
+                    let mut left = refusing.lock().unwrap();
+                    let refused = *left > 0;
+                    if refused {
+                        *left -= 1;
+                    }
+                    refused
+                };
                 let received = Arc::clone(&received);
                 Box::pin(async move {
+                    if refused {
+                        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "Cloud SQL refused the connection."));
+                    }
                     let (near, far) = tokio::io::duplex(64 * 1024);
                     tokio::spawn(fake_cloud_sql(far, Answer::SignsIn, received));
                     Ok(Box::new(near) as BoxStream)
                 })
             }),
             routes: Mutex::default(),
+            generations: AtomicU64::new(1),
         }
     }
 
@@ -1012,7 +1055,7 @@ fn a_grant_that_ended_drops_the_cached_certificate_and_asks_again() {
     open.round_trip(b"select 1");
     assert!(cloud.owner.asked().is_empty(), "the grant was held");
     assert_eq!(cloud.certificates(), 1);
-    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(DNS_NAME).unwrap())], "the instance, by its name");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-pg")).unwrap())], "the instance, by its name");
     // The grant ends; the certificate, good for an hour, would still be.
     *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ENDED", t0() - 10 * MINUTE)];
     cloud.clock.at(21 * MINUTE);
@@ -1098,4 +1141,92 @@ fn a_cancel_request_through_cloud_sql_uses_the_cached_certificate() {
     assert!(cancel.closed());
     assert_eq!(cloud.received.lock().unwrap().last(), Some(&cancel_request()));
     assert_eq!(cloud.certificates(), 1, "no certificate is fetched for a cancel request");
+}
+
+#[test]
+fn a_failed_dial_is_followed_by_a_new_certificate() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    let port = running(&ports, &orders());
+    // Cloud SQL refuses the first dial, as it does a certificate it does not take.
+    *cloud.refusing.lock().unwrap() = 1;
+    let mut refused = App::connect(port);
+    refused.startup(&[("user", "frank"), ("database", "orders")]);
+    refused.asked_for_password();
+    refused.password(PASSWORD);
+    assert_eq!(refused.error(), ("08006".to_string(), format!("Lunport could not reach {CONNECTION}: Cloud SQL refused the connection.")));
+    assert_eq!(cloud.certificates(), 1);
+    // The next connection does not dial with that certificate again: it gets a new one, and gets in.
+    App::signed_in(port).round_trip(b"select 1");
+    assert_eq!(cloud.certificates(), 2);
+    assert_eq!(cloud.dialled.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn connections_that_start_together_share_one_certificate() {
+    let cloud = Cloud::new(FakeOwner::default());
+    cloud.admin.holding.store(true, Ordering::SeqCst);
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let users = std::thread::scope(|scope| {
+        let first = scope.spawn(|| upstream.prepare(&orders(), &cancel));
+        wait_until("the first connection fetches", || cloud.certificates() == 1);
+        let second = scope.spawn(|| upstream.prepare(&orders(), &cancel));
+        // Were the second not waiting for the first one's fetch, it would be fetching too by now.
+        let end = Instant::now() + Duration::from_millis(300);
+        while cloud.admin.settings.load(Ordering::SeqCst) < 2 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        cloud.admin.release();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(users, (Ok(IAM_USER.to_string()), Ok(IAM_USER.to_string())));
+    assert_eq!(cloud.admin.settings.load(Ordering::SeqCst), 1, "one fetch");
+    assert_eq!(cloud.certificates(), 1, "one certificate for both");
+}
+
+#[test]
+fn a_late_forget_leaves_newer_material_in_place() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    upstream.prepare(&orders(), &cancel).unwrap();
+    let first = upstream.connect(ID).material.expect("material to dial with");
+    // A connection dials with it and waits for Cloud SQL's answer; meanwhile the certificate is renewed for the next connections.
+    cloud.clock.at(HOUR - REFRESH_AHEAD);
+    upstream.prepare(&orders(), &cancel).unwrap();
+    let second = upstream.connect(ID).material.expect("material to dial with");
+    assert_ne!(first, second);
+    // The first connection fails late: only what it dialled with goes.
+    upstream.forget(ID, first);
+    assert_eq!(upstream.connect(ID).material, Some(second));
+    upstream.prepare(&orders(), &cancel).unwrap();
+    assert_eq!(cloud.certificates(), 2, "nothing was fetched for the failure of the connection before");
+    // A failure with the newer material takes that back.
+    upstream.forget(ID, second);
+    assert_eq!(upstream.connect(ID).material, None);
+}
+
+#[test]
+fn a_prepare_that_finishes_after_the_database_changed_leaves_nothing_for_it() {
+    let cloud = Cloud::new(FakeOwner::default());
+    cloud.admin.holding.store(true, Ordering::SeqCst);
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let prod = orders();
+    // The same database, stopped, saved anew as a dev database on another instance, and started again.
+    let dev = SavedDatabase { environment: DatabaseEnvironment::Dev, instance: "orders-dev-pg".into(), ..orders() };
+    std::thread::scope(|scope| {
+        // A connection of the port before is still on its way: its fetch for the prod instance is half done.
+        let stale = scope.spawn(|| upstream.prepare(&prod, &cancel));
+        wait_until("the stale fetch is under way", || cloud.certificates() == 1);
+        assert_eq!(upstream.prepare(&dev, &cancel), Ok(IAM_USER.to_string()), "a connection to the new database gets ready meanwhile");
+        cloud.admin.release();
+        assert_eq!(stale.join().unwrap(), Ok(IAM_USER.to_string()));
+    });
+    assert_eq!(cloud.certificates(), 2);
+    // The new database's connections dial the dev instance: the stale fetch left nothing for them.
+    cloud.dialled.lock().unwrap().clear();
+    let _dialling = upstream.connect(ID);
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
 }
