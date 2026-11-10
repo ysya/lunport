@@ -91,6 +91,7 @@ test("release profile boundaries run only when their build inputs or assertions 
     "src-tauri/src/legacy_identity.rs",
     "src-tauri/src/write_policy.rs",
     "src-tauri/src/lib.rs",
+    "src-tauri/src/sync/central/controller.rs",
     "src-tauri/tests/app_profile_build.rs",
     "src-tauri/Cargo.toml",
     "src-tauri/Cargo.lock",

@@ -51,7 +51,7 @@ export function selectChecks(files, readRevision, force = false) {
     // The release-profile test links the app library and checks profile selection,
     // identity, guarded writes and central sync. Other Rust changes use the full
     // platform debug suites without rebuilding both release profiles.
-    if (/^src-tauri\/(?:Cargo\.(?:toml|lock)|build\.rs|tauri(?:\.dev)?\.conf\.json|tests\/app_profile_build\.rs|src\/(?:app_profile|identity|legacy_identity|write_policy|lib)\.rs)$/.test(path) || path.startsWith("vendor/tauri-runtime-wry/")) checks.profiles = true;
+    if (/^src-tauri\/(?:Cargo\.(?:toml|lock)|build\.rs|tauri(?:\.dev)?\.conf\.json|tests\/app_profile_build\.rs|src\/(?:app_profile|identity|legacy_identity|write_policy|lib)\.rs)$/.test(path) || path.startsWith("src-tauri/src/sync/central/") || path.startsWith("vendor/tauri-runtime-wry/")) checks.profiles = true;
     // The Rust tests compare legacy_identity with scripts/legacy-identity.json; the Linux upgrade check reads it and scripts/identity.mjs.
     if (path.startsWith("src-tauri/") || path.startsWith("vendor/tauri-runtime-wry/") || /^scripts\/(validate-group-order-compat\.sh|compat\/|validate-windows-startup\.ps1|legacy-identity\.json$)/.test(path)) checks.native = true;
     if (/^src-tauri\/(tauri.*\.json$|icons\/|installers\/)/.test(path) || /^scripts\/(validate-linux-rebrand\.py|identity\.mjs|legacy-identity\.json)$/.test(path) || path === ".github/workflows/rebrand-package-check.yml") checks.packages = true;

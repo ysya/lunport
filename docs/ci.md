@@ -28,7 +28,8 @@ so dispatch scripts and Rust caches continue to work.
 - Rust changes run native suites without rebuilding the UI. Changes spanning both
   areas run both. Rust dependency changes also run credential checks.
 - Release-profile boundary builds run on all three desktop platforms when their
-  profile, identity, write policy, library entry point, build configuration or test
+  profile, identity, write policy, central sync capability, library entry point,
+  build configuration or test
   changes. Other Rust changes keep the full platform debug suites and skip the
   extra production and development release builds.
 - Docs changes run the inexpensive policy/version/workflow check.
