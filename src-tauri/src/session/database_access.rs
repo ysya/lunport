@@ -19,6 +19,7 @@ use crate::gcp::rest::{GcpClient, GcpError};
 use crate::sync::databases::SavedDatabase;
 use crate::sync::pam_records;
 use crate::sync::records_v3::SyncStateV3;
+use crate::sync::transports::PamCheck;
 
 pub(crate) use super::grants::Grace;
 
@@ -72,7 +73,7 @@ pub(crate) fn obtain_grant(
         minutes: memory.as_ref().map_or(pam.duration_secs, |memory| memory.duration_secs) / 60,
         justification: memory.map(|memory| memory.justification),
     };
-    let key = GateKey { account: db.account.clone(), project: db.project.clone(), location: pam.location.clone(), entitlement: first.clone() };
+    let key = gate_key(db, pam, first);
     let refusal = refusal_sentence(&pam.entitlements, first, &pam.location, &db.project);
     gates.obtain(key, cancel, &refusal, || {
         ask_and_request(
@@ -88,6 +89,12 @@ pub(crate) fn obtain_grant(
             },
         )
     })
+}
+
+/// The gate of the grant `db` asks for on `entitlement` (one of `pam`'s, by its id): the very one a host's connection takes when its route
+/// names the same account, project, location and entitlement (`GateKey::of`), so that the two ask the person once.
+fn gate_key(db: &SavedDatabase, pam: &PamCheck, entitlement: &str) -> GateKey {
+    GateKey::new(db.account.as_deref(), &db.project, &pam.location, entitlement)
 }
 
 /// What a connection to the database needs from Google, fetched together.
@@ -174,10 +181,10 @@ mod tests {
     use crate::gcp::cloudsql::{InstanceRef, InstanceSummary};
     use crate::gcp::pam::{duration_text, rfc3339, EntitlementName, Grant};
     use crate::session::auth::Reply;
+    use crate::session::directory::GrantNeed;
     use crate::session::protocol::{GrantPrompt, QuestionKind};
-    use crate::session::testing::FakeOwner;
+    use crate::session::testing::{grant_need, FakeOwner};
     use crate::sync::databases::tests::{database, state};
-    use crate::sync::transports::PamCheck;
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -517,6 +524,29 @@ mod tests {
         assert_eq!((first, second), (Err(gcloud_refusal()), Err(gcloud_refusal())));
         assert_eq!(person.inner.asked().len(), 1, "the waiter asked nothing");
         assert_eq!(google.created(), 0);
+    }
+
+    /// Hosts and databases share a gate only while they name a grant the same way: by the account, the project, the location and the id of
+    /// the entitlement (not its full name).
+    #[test]
+    fn a_host_and_a_database_that_need_the_same_grant_take_the_same_gate() {
+        let db = guarded();
+        let pam = db.pam.clone().expect("a grant check");
+        // What a host's connection reports when its route names the same account, project, location and first entitlement (`prepare`).
+        let need = GrantNeed { account: db.account.clone(), location: pam.location.clone(), entitlements: pam.entitlements.clone(), ..grant_need("web", &db.project) };
+        assert_eq!(need.entitlement, "prod-operate");
+        assert_eq!(GateKey::of(&need), gate_key(&db, &pam, "prod-operate"));
+        // Another account, project, location or entitlement is another grant.
+        let others = [
+            gate_key(&SavedDatabase { account: Some("ops@example.com".into()), ..db.clone() }, &pam, "prod-operate"),
+            gate_key(&SavedDatabase { account: None, ..db.clone() }, &pam, "prod-operate"),
+            gate_key(&SavedDatabase { project: "acme-dev-654321".into(), ..db.clone() }, &pam, "prod-operate"),
+            gate_key(&db, &PamCheck { location: "europe-west1".into(), ..pam.clone() }, "prod-operate"),
+            gate_key(&db, &pam, "prod-admin"),
+        ];
+        for other in &others {
+            assert_ne!(&GateKey::of(&need), other);
+        }
     }
 
     /// The connection that leads goes away (its client is gone) as the person answers: the request ends there, and the connection that

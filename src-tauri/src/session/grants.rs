@@ -44,8 +44,14 @@ pub struct GateKey {
 }
 
 impl GateKey {
+    /// The key of the grant on the entitlement `entitlement` (its id, as a route lists it, not its full name) in `location` of `project`,
+    /// for `account` (`None`: gcloud's active account). Whatever asks for that grant, a host or a database, names it through here.
+    pub fn new(account: Option<&str>, project: &str, location: &str, entitlement: &str) -> GateKey {
+        GateKey { account: account.map(str::to_string), project: project.to_string(), location: location.to_string(), entitlement: entitlement.to_string() }
+    }
+
     pub fn of(need: &GrantNeed) -> GateKey {
-        GateKey { account: need.account.clone(), project: need.project.clone(), location: need.location.clone(), entitlement: need.entitlement.clone() }
+        GateKey::new(need.account.as_deref(), &need.project, &need.location, &need.entitlement)
     }
 }
 
