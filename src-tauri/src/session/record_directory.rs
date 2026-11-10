@@ -127,12 +127,10 @@ impl RecordDirectory {
                 let _ = remember(&need.host, &name, justification, duration_secs);
             }
         };
-        let grant = crate::gcp::pam::request_and_wait(gcp, &place, justification, duration_secs, &remember, poll_every, wait, &|| cancel.is_cancelled(), false).map_err(|error| match error {
+        super::grants::request_active_grant(gcp, &place, &need.entitlement, justification, duration_secs, &remember, cancel, poll_every, wait).map_err(|error| match error {
             crate::gcp::pam::RequestError::Cancelled => DirectoryError::Failed(error.sentence(&need.entitlement)),
             other => DirectoryError::Denied(other.sentence(&need.entitlement)),
-        })?;
-        let (granted_at, active_until) = crate::gcp::pam::active_span(&grant, SystemTime::now(), duration_secs);
-        Ok(GrantReceipt { entitlement: need.entitlement.clone(), granted_at, active_until })
+        })
     }
     pub(crate) fn with_password_reader(mut self, read: Box<PasswordReader>) -> Self {
         self.password_reader = Some(read);
@@ -335,23 +333,11 @@ impl HostDirectory for RecordDirectory {
         let who = account.as_deref().unwrap_or("the active gcloud account");
         let mut prepared = nothing;
         if let Some(pam) = &pam {
-            let mut in_flight = false;
-            for entitlement in &pam.entitlements {
-                let name = crate::gcp::pam::EntitlementName::in_project(&project, &pam.location, entitlement).full();
-                let grants = gcp.grants(account.as_deref(), &name).map_err(denied)?;
-                let current = crate::gcp::pam::in_flight(&grants);
-                if !current.is_empty() {
-                    in_flight = true;
-                    // IAP can take about 1½ minutes to see a grant: the broker waits on IAP, and says so, after a grant this young. The
-                    // freshest in-flight grant dates it; one still activating, or timed by a clock ahead of this one, is as fresh as now.
-                    let now = SystemTime::now();
-                    let dated = current.iter().filter_map(|grant| crate::gcp::pam::granted_at(grant, now)).max();
-                    prepared.recent_grant = dated.is_some_and(|granted| now.duration_since(granted).map_or(true, |age| age <= Duration::from_secs(120)));
-                    prepared.granted_at = dated;
-                    break;
-                }
-            }
-            if !in_flight {
+            let current = super::grants::current_grant(gcp, account.as_deref(), &project, pam, SystemTime::now()).map_err(denied)?;
+            // IAP can take about 1½ minutes to see a grant: the broker waits on IAP, and says so, after a grant this young.
+            prepared.recent_grant = current.is_some_and(|current| current.recent);
+            prepared.granted_at = current.and_then(|current| current.granted_at);
+            if current.is_none() {
                 // The question starts from what was last asked for on the entitlement it requests (the justification and the length,
                 // the library's grant memory), else from what this computer last asked for on the host, as an earlier
                 // release remembered it; an entitlement never asked for gets the route's own default length and nothing to prefill.
@@ -402,7 +388,7 @@ impl HostDirectory for RecordDirectory {
         Ok(prepared)
     }
     fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
-        self.request_grant_with(need, justification, duration_secs, cancel, Duration::from_secs(2), Duration::from_secs(60))
+        self.request_grant_with(need, justification, duration_secs, cancel, super::grants::POLL_EVERY, super::grants::ACTIVE_WITHIN)
     }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?
