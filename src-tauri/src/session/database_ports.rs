@@ -105,13 +105,16 @@ type Dialer = Arc<dyn Fn(IpAddr, Arc<ClientConfig>, ServerName<'static>) -> BoxF
 /// How the app's ports reach Cloud SQL. The grant a database asks for is requested through the gates hosts use, so that a host and a
 /// database that need the same grant ask the person once; the connection material comes from the Cloud SQL Admin API. Both are kept for a
 /// database's next connections while they last: a check that the grant is held for five minutes at most and never past the grant's end,
-/// the material until `REFRESH_AHEAD` before its certificate stops being useful. A grant that ended takes the material had under it along.
+/// the material until `REFRESH_AHEAD` before its certificate stops being useful. Both are for the Google account the connections sign in
+/// as, and go when it changes; a grant that ended takes the material had under it along.
 pub(crate) struct CloudSqlUpstream {
     gcp: Arc<dyn GcpClient>,
     sql: Arc<dyn SqlAdmin>,
     gates: Arc<GrantGates>,
     make_owner: MakeOwner,
     now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+    /// gcloud's active account as it is now, which a database saved without an account signs in as.
+    active_account: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     /// The library as it is now, whose grant memory a grant question starts from.
     library: Arc<dyn Fn() -> Result<SyncStateV3, String> + Send + Sync>,
     /// Remembers a grant the person asked for: the entitlement's full name, the justification and the length in seconds.
@@ -140,9 +143,22 @@ struct Kept {
     account: Option<String>,
 }
 
+impl Kept {
+    /// Lets go of what was had for another account than `account`, the one the connections sign in as now (`None`: gcloud has no active
+    /// account, and the token source falls back to its default credentials).
+    fn keep_for(&mut self, account: &Option<String>) {
+        let other = self.grant.as_ref().is_some_and(|check| check.for_account != *account) || self.dial.as_ref().is_some_and(|dial| dial.for_account != *account);
+        if other {
+            *self = Kept { database: self.database.take(), ..Kept::default() };
+        }
+    }
+}
+
 /// A check that found the grant held. One that found it given moments before is not kept: every connection checks such a grant again, so
 /// that the time Google is given to see it ends when the grant is no longer that fresh.
 struct CheckedGrant {
+    /// The account the connections signed in as when it was checked.
+    for_account: Option<String>,
     until: Option<SystemTime>,
     checked_at: SystemTime,
 }
@@ -156,6 +172,8 @@ impl CheckedGrant {
 
 /// What a connection dials the instance with.
 struct Dial {
+    /// The account the connections signed in as when it was fetched.
+    for_account: Option<String>,
     iam_user: String,
     /// When the certificate stops being useful (`EphemeralCert::expires_at`).
     expires_at: SystemTime,
@@ -186,6 +204,8 @@ impl CloudSqlUpstream {
                 })
             }),
             now: Arc::new(SystemTime::now),
+            // Two small files of gcloud's, read for every connection: what the token source signs in as when it is given no account.
+            active_account: Arc::new(|| crate::gcp::auth::active_account(&super::transports::gcloud_config_dir())),
             library: Arc::new(move || snapshot(&for_library)),
             // What the person asked for is remembered for the entitlement on this device, as for a host; a memory that cannot be written
             // does not fail the connection.
@@ -218,20 +238,21 @@ impl CloudSqlUpstream {
         route
     }
 
-    /// Whether the grant `db` asks for is held; PAM is asked when the last check no longer stands. When none is, the material had under the
-    /// grant that ended goes, and the person is asked for a grant in Lunport's window. Answers whether the grant was given moments ago.
-    fn grant(&self, db: &SavedDatabase, route: &Route, cancel: &CancelToken) -> Result<bool, String> {
+    /// Whether the grant `db` asks for is held for `account`; PAM is asked when the last check no longer stands. When none is, the material
+    /// had under the grant that ended goes, and the person is asked for a grant in Lunport's window. Answers whether the grant was given
+    /// moments ago.
+    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken) -> Result<bool, String> {
         if db.pam.is_none() {
             return Ok(false);
         }
         let now = (self.now)();
-        if locked(&route.kept).grant.as_ref().is_some_and(|check| check.stands(now)) {
+        if locked(&route.kept).grant.as_ref().is_some_and(|check| check.for_account == *account && check.stands(now)) {
             return Ok(false);
         }
         match grant_state(self.gcp.as_ref(), db, now)? {
             GrantState::NotNeeded => Ok(false),
             GrantState::Held { recent, until } => {
-                locked(&route.kept).grant = (!recent).then_some(CheckedGrant { until, checked_at: now });
+                locked(&route.kept).grant = (!recent).then(|| CheckedGrant { for_account: account.clone(), until, checked_at: now });
                 Ok(recent)
             }
             GrantState::Needed => {
@@ -249,12 +270,14 @@ impl CloudSqlUpstream {
         }
     }
 
-    /// The database user of `db`'s connections, with the material to dial it kept until `REFRESH_AHEAD` before its certificate stops being
-    /// useful, and fetched anew after that (`recent_grant`: the grant it relies on was given moments ago). Also answers whether the new
-    /// certificate is for another account than the last one: gcloud's active account changed, and the grant was checked for the other one.
-    fn material(&self, db: &SavedDatabase, route: &Route, recent_grant: bool, cancel: &CancelToken) -> Result<(String, bool), String> {
+    /// The database user of `db`'s connections as `account`, with the material to dial it kept until `REFRESH_AHEAD` before its
+    /// certificate stops being useful, and fetched anew after that (`recent_grant`: the grant it relies on was given moments ago). Also
+    /// answers whether the new certificate is for another account than the last one although `account` reads the same: the token source's
+    /// credentials changed under it, and the grant was checked for the other account.
+    fn material(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, recent_grant: bool, cancel: &CancelToken) -> Result<(String, bool), String> {
         let _fetching = locked(&route.fetching);
-        if let Some(dial) = locked(&route.kept).dial.as_ref().filter(|dial| (self.now)() + REFRESH_AHEAD < dial.expires_at) {
+        let usable = |dial: &&Dial| dial.for_account == *account && (self.now)() + REFRESH_AHEAD < dial.expires_at;
+        if let Some(dial) = locked(&route.kept).dial.as_ref().filter(usable) {
             return Ok((dial.iam_user.clone(), false));
         }
         let material = fetch_material(self.sql.as_ref(), db, recent_grant, Grace::default(), cancel)?;
@@ -267,7 +290,14 @@ impl CloudSqlUpstream {
             kept.grant = None;
         }
         kept.account = Some(material.cert.account.clone());
-        kept.dial = Some(Dial { iam_user: material.iam_user.clone(), expires_at: material.cert.expires_at, ip, config, name: server_name(&identity) });
+        kept.dial = Some(Dial {
+            for_account: account.clone(),
+            iam_user: material.iam_user.clone(),
+            expires_at: material.cert.expires_at,
+            ip,
+            config,
+            name: server_name(&identity),
+        });
         Ok((material.iam_user.clone(), other_account))
     }
 }
@@ -275,10 +305,13 @@ impl CloudSqlUpstream {
 impl Upstream for CloudSqlUpstream {
     fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<String, String> {
         let route = self.route(db);
+        // The account the connection signs in as: the database's own, else gcloud's active one, which the person can switch at any time.
+        let account = db.account.clone().or_else(|| (self.active_account)());
+        locked(&route.kept).keep_for(&account);
         let mut checked_for_new_account = false;
         loop {
-            let recent_grant = self.grant(db, &route, cancel)?;
-            let (iam_user, other_account) = self.material(db, &route, recent_grant, cancel)?;
+            let recent_grant = self.grant(db, &route, &account, cancel)?;
+            let (iam_user, other_account) = self.material(db, &route, &account, recent_grant, cancel)?;
             // A certificate for another account than the last one is used once the grant was checked for its account.
             if other_account && db.pam.is_some() && !checked_for_new_account {
                 checked_for_new_account = true;

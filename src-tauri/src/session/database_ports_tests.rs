@@ -877,6 +877,8 @@ struct Cloud {
     clock: Clock,
     pam: Arc<Pam>,
     admin: Arc<Admin>,
+    /// gcloud's active account.
+    active: Arc<Mutex<Option<String>>>,
     owner: Arc<FakeOwner>,
     remembered: Arc<Mutex<Vec<(String, String, u32)>>>,
     dialled: Arc<Mutex<Vec<(IpAddr, ServerName<'static>)>>>,
@@ -891,6 +893,7 @@ impl Cloud {
             pam: Arc::new(Pam { clock: clock.clone(), held: Mutex::new(Vec::new()), looked: AtomicUsize::new(0), created: AtomicUsize::new(0) }),
             admin: Arc::new(Admin { authority: authority(), clock: clock.clone(), account: Mutex::new(IAM_USER.into()), certificates: AtomicUsize::new(0) }),
             clock,
+            active: Arc::new(Mutex::new(Some(IAM_USER.into()))),
             owner: Arc::new(owner),
             remembered: Arc::default(),
             dialled: Arc::default(),
@@ -902,6 +905,7 @@ impl Cloud {
     fn upstream(&self) -> CloudSqlUpstream {
         let owner = Arc::clone(&self.owner);
         let clock = self.clock.clone();
+        let active = Arc::clone(&self.active);
         let remembered = Arc::clone(&self.remembered);
         let (dialled, received) = (Arc::clone(&self.dialled), Arc::clone(&self.received));
         CloudSqlUpstream {
@@ -910,6 +914,7 @@ impl Cloud {
             gates: Arc::new(GrantGates::default()),
             make_owner: Arc::new(move |_: &CancelToken| -> Box<dyn Owner + Send> { Box::new(Shared(Arc::clone(&owner))) }),
             now: Arc::new(move || clock.now()),
+            active_account: Arc::new(move || active.lock().unwrap().clone()),
             library: Arc::new(|| -> Result<SyncStateV3, String> { Ok(state()) }),
             remember: Arc::new(move |name: &str, justification: &str, secs: u32| {
                 remembered.lock().unwrap().push((name.to_string(), justification.to_string(), secs));
@@ -1034,8 +1039,8 @@ fn another_account_or_another_database_is_not_served_what_was_had_for_the_one_be
     let active = SavedDatabase { account: None, ..guarded() };
     assert_eq!(upstream.prepare(&active, &cancel), Ok(IAM_USER.to_string()));
     assert_eq!((cloud.looked(), cloud.certificates()), (1, 1));
-    // gcloud's active account changes. The certificate that replaces the first one near its end comes for that account, so the grant,
-    // checked for the account before, is checked again before the certificate is used.
+    // The token source's credentials change under the active account, which reads the same: the certificate that replaces the first one
+    // near its end comes for another account, so the grant, checked for the account before, is checked again before it is used.
     *cloud.admin.account.lock().unwrap() = "ops@example.com".into();
     *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() + 50 * MINUTE)];
     cloud.clock.at(HOUR - REFRESH_AHEAD);
@@ -1048,6 +1053,33 @@ fn another_account_or_another_database_is_not_served_what_was_had_for_the_one_be
     let moved = SavedDatabase { instance: "billing-pg".into(), ..active.clone() };
     upstream.prepare(&moved, &cancel).unwrap();
     assert_eq!((cloud.looked(), cloud.certificates()), (4, 3));
+}
+
+#[test]
+fn a_changed_account_drops_the_cached_certificate() {
+    let cloud = Cloud::new(FakeOwner::default());
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() - 10 * MINUTE)];
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    // Saved without an account: gcloud's active account signs in.
+    let active = SavedDatabase { account: None, ..guarded() };
+    assert_eq!(upstream.prepare(&active, &cancel), Ok(IAM_USER.to_string()));
+    upstream.prepare(&active, &cancel).unwrap();
+    assert_eq!((cloud.looked(), cloud.certificates()), (1, 1), "kept while the account stays");
+    // The person makes ops@example.com gcloud's active account. The certificate is fresh, but frank's: it goes, and so does the grant check.
+    *cloud.active.lock().unwrap() = Some("ops@example.com".into());
+    *cloud.admin.account.lock().unwrap() = "ops@example.com".into();
+    cloud.clock.at(MINUTE);
+    assert_eq!(upstream.prepare(&active, &cancel), Ok("ops@example.com".to_string()));
+    assert_eq!((cloud.looked(), cloud.certificates()), (2, 2), "the grant was checked and a certificate fetched for ops@example.com");
+    upstream.prepare(&active, &cancel).unwrap();
+    assert_eq!((cloud.looked(), cloud.certificates()), (2, 2), "then kept for it");
+    // A database saved with an account signs in as that one, whatever gcloud's active account is.
+    let saved_with_one = guarded();
+    upstream.prepare(&saved_with_one, &cancel).unwrap();
+    *cloud.active.lock().unwrap() = Some("frank@example.com".into());
+    upstream.prepare(&saved_with_one, &cancel).unwrap();
+    assert_eq!(cloud.certificates(), 3, "one certificate for the database saved with frank@example.com");
 }
 
 #[test]
