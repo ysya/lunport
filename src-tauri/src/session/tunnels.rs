@@ -535,7 +535,7 @@ fn finish(entry: &Entry, result: Result<(), String>) {
     }
 }
 /// Refuses a command that does not come from the main window, in a sentence about what it manages (`subject`, such as "Tunnel").
-pub(super) fn main_only(window: &tauri::WebviewWindow, subject: &str) -> Result<(), String> {
+pub(crate) fn main_only(window: &tauri::WebviewWindow, subject: &str) -> Result<(), String> {
     main_window_only(window.label(), subject)
 }
 fn main_window_only(label: &str, subject: &str) -> Result<(), String> {

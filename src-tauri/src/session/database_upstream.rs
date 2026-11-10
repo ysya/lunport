@@ -18,7 +18,7 @@ use super::auth_window::{NativeOwner, TauriAuthSurface};
 use super::broker::Broker;
 use super::connect::CancelToken;
 use super::database_access::{fetch_material, grant_state, obtain_grant, Grace, GrantState};
-use super::database_ports::{locked, BoxStream, Dialling, Upstream};
+use super::database_ports::{locked, BoxStream, Dialling, Prepared, Upstream};
 use super::grants::GrantGates;
 use super::tunnels::snapshot;
 use crate::error::AppError;
@@ -210,15 +210,15 @@ impl CloudSqlUpstream {
         }
     }
 
-    /// The database user of `db`'s connections as `account`, with the material to dial it kept until `REFRESH_AHEAD` before its
-    /// certificate stops being useful, and fetched anew after that (`recent_grant`: the grant it relies on was given moments ago). Also
-    /// answers whether the new certificate is for another account than the last one although `account` reads the same: the token source's
-    /// credentials changed under it, and the grant was checked for the other account.
-    fn material(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, recent_grant: bool, cancel: &CancelToken) -> Result<(String, bool), String> {
+    /// The database user of `db`'s connections as `account`, and the number of the material to dial it with, kept until `REFRESH_AHEAD`
+    /// before its certificate stops being useful and fetched anew after that (`recent_grant`: the grant it relies on was given moments
+    /// ago). Also answers whether the new certificate is for another account than the last one although `account` reads the same: the
+    /// token source's credentials changed under it, and the grant was checked for the other account.
+    fn material(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, recent_grant: bool, cancel: &CancelToken) -> Result<(String, u64, bool), String> {
         let _fetching = locked(&route.fetching);
         let usable = |dial: &&Dial| dial.for_account == *account && (self.now)() + REFRESH_AHEAD < dial.expires_at;
         if let Some(dial) = locked(&route.kept).dial.as_ref().filter(usable) {
-            return Ok((dial.iam_user.clone(), false));
+            return Ok((dial.iam_user.clone(), dial.generation, false));
         }
         let material = fetch_material(self.sql.as_ref(), db, recent_grant, Grace::default(), cancel)?;
         let identity = ServerIdentity { dns_name: material.settings.dns_name.clone(), project: db.project.clone(), instance: db.instance.clone() };
@@ -230,8 +230,9 @@ impl CloudSqlUpstream {
             kept.grant = None;
         }
         kept.account = Some(material.cert.account.clone());
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
         kept.dial = Some(Dial {
-            generation: self.generations.fetch_add(1, Ordering::Relaxed),
+            generation,
             for_account: account.clone(),
             iam_user: material.iam_user.clone(),
             expires_at: material.cert.expires_at,
@@ -239,12 +240,12 @@ impl CloudSqlUpstream {
             config,
             name: server_name(&identity),
         });
-        Ok((material.iam_user.clone(), other_account))
+        Ok((material.iam_user.clone(), generation, other_account))
     }
 }
 
 impl Upstream for CloudSqlUpstream {
-    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<String, String> {
+    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, String> {
         let route = self.route(db);
         // The account the connection signs in as: the database's own, else gcloud's active one, which the person can switch at any time.
         let account = db.account.clone().or_else(|| (self.active_account)());
@@ -252,19 +253,24 @@ impl Upstream for CloudSqlUpstream {
         let mut checked_for_new_account = false;
         loop {
             let recent_grant = self.grant(db, &route, &account, cancel)?;
-            let (iam_user, other_account) = self.material(db, &route, &account, recent_grant, cancel)?;
+            let (iam_user, material, other_account) = self.material(db, &route, &account, recent_grant, cancel)?;
             // A certificate for another account than the last one is used once the grant was checked for its account.
             if other_account && db.pam.is_some() && !checked_for_new_account {
                 checked_for_new_account = true;
                 continue;
             }
-            return Ok(iam_user);
+            return Ok(Prepared { iam_user, material });
         }
     }
 
-    fn connect(&self, db_id: &str) -> Dialling {
+    fn connect(&self, db_id: &str, material: Option<u64>) -> Dialling {
         let route = locked(&self.routes).get(db_id).cloned();
-        let target = route.and_then(|route| locked(&route.kept).dial.as_ref().map(|dial| (dial.generation, dial.ip, Arc::clone(&dial.config), dial.name.clone())));
+        // The material the connection got ready with, or none: another certificate could be for another account than its user.
+        let target = route.and_then(|route| {
+            let kept = locked(&route.kept);
+            let dial = kept.dial.as_ref().filter(|dial| material.is_none_or(|material| dial.generation == material))?;
+            Some((dial.generation, dial.ip, Arc::clone(&dial.config), dial.name.clone()))
+        });
         match target {
             Some((generation, ip, config, name)) => Dialling { material: Some(generation), stream: (self.dial)(ip, config, name) },
             None => Dialling {

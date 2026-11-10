@@ -8,13 +8,14 @@ use crate::gcp::pam::{duration_text, rfc3339, Grant};
 use crate::gcp::rest::GcpError;
 use crate::session::auth::Reply;
 use crate::session::database_ports::tests::{cancel_request, fake_cloud_sql, orders, running, t0, wait_until, Answer, App, Clock, CONNECTION, IAM_USER, ID, LIMIT, PASSWORD};
-use crate::session::database_ports::DatabasePorts;
+use crate::session::database_ports::{DatabasePorts, Prepared};
 use crate::session::databases::DatabasePhase;
 use crate::session::protocol::QuestionKind;
 use crate::session::testing::FakeOwner;
 use crate::sync::databases::tests::state;
 use crate::sync::databases::DatabaseEnvironment;
 use crate::sync::transports::PamCheck;
+use futures_util::FutureExt;
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
@@ -237,7 +238,7 @@ impl Cloud {
                         return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "Cloud SQL refused the connection."));
                     }
                     let (near, far) = tokio::io::duplex(64 * 1024);
-                    tokio::spawn(fake_cloud_sql(far, Answer::SignsIn, received));
+                    tokio::spawn(fake_cloud_sql(far, Answer::SignsIn, received, Arc::default()));
                     Ok(Box::new(near) as BoxStream)
                 })
             }),
@@ -263,20 +264,25 @@ fn guarded() -> SavedDatabase {
     }
 }
 
+/// The database user a connection got ready as, or why it could not.
+fn user(prepared: Result<Prepared, String>) -> Result<String, String> {
+    prepared.map(|prepared| prepared.iam_user)
+}
+
 #[test]
 fn the_certificate_is_renewed_four_minutes_before_it_expires() {
     assert_eq!(REFRESH_AHEAD, Duration::from_secs(4 * 60));
     let cloud = Cloud::new(FakeOwner::default());
     let upstream = cloud.upstream();
     let cancel = CancelToken::default();
-    assert_eq!(upstream.prepare(&orders(), &cancel), Ok(IAM_USER.to_string()));
+    assert_eq!(user(upstream.prepare(&orders(), &cancel)), Ok(IAM_USER.to_string()));
     assert_eq!(cloud.certificates(), 1);
     // The certificate is good for an hour: it is used until four minutes before that.
     cloud.clock.at(HOUR - REFRESH_AHEAD - Duration::from_secs(1));
-    assert_eq!(upstream.prepare(&orders(), &cancel), Ok(IAM_USER.to_string()));
+    assert_eq!(user(upstream.prepare(&orders(), &cancel)), Ok(IAM_USER.to_string()));
     assert_eq!(cloud.certificates(), 1, "still the first certificate");
     cloud.clock.at(HOUR - REFRESH_AHEAD);
-    assert_eq!(upstream.prepare(&orders(), &cancel), Ok(IAM_USER.to_string()));
+    assert_eq!(user(upstream.prepare(&orders(), &cancel)), Ok(IAM_USER.to_string()));
     assert_eq!(cloud.certificates(), 2, "renewed four minutes ahead");
     // The new one came at that moment and is good for an hour from then.
     let renewed = HOUR - REFRESH_AHEAD;
@@ -351,14 +357,14 @@ fn another_account_or_another_database_is_not_served_what_was_had_for_the_one_be
     let cancel = CancelToken::default();
     // Saved without an account: gcloud's active account signs in.
     let active = SavedDatabase { account: None, ..guarded() };
-    assert_eq!(upstream.prepare(&active, &cancel), Ok(IAM_USER.to_string()));
+    assert_eq!(user(upstream.prepare(&active, &cancel)), Ok(IAM_USER.to_string()));
     assert_eq!((cloud.looked(), cloud.certificates()), (1, 1));
     // The token source's credentials change under the active account, which reads the same: the certificate that replaces the first one
     // near its end comes for another account, so the grant, checked for the account before, is checked again before it is used.
     *cloud.admin.account.lock().unwrap() = "ops@example.com".into();
     *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() + 50 * MINUTE)];
     cloud.clock.at(HOUR - REFRESH_AHEAD);
-    assert_eq!(upstream.prepare(&active, &cancel), Ok("ops@example.com".to_string()));
+    assert_eq!(user(upstream.prepare(&active, &cancel)), Ok("ops@example.com".to_string()));
     assert_eq!(cloud.certificates(), 2);
     assert_eq!(cloud.looked(), 3, "checked when its time was up, and again for the new account");
     upstream.prepare(&active, &cancel).unwrap();
@@ -377,14 +383,14 @@ fn a_changed_account_drops_the_cached_certificate() {
     let cancel = CancelToken::default();
     // Saved without an account: gcloud's active account signs in.
     let active = SavedDatabase { account: None, ..guarded() };
-    assert_eq!(upstream.prepare(&active, &cancel), Ok(IAM_USER.to_string()));
+    assert_eq!(user(upstream.prepare(&active, &cancel)), Ok(IAM_USER.to_string()));
     upstream.prepare(&active, &cancel).unwrap();
     assert_eq!((cloud.looked(), cloud.certificates()), (1, 1), "kept while the account stays");
     // The person makes ops@example.com gcloud's active account. The certificate is fresh, but frank's: it goes, and so does the grant check.
     *cloud.active.lock().unwrap() = Some("ops@example.com".into());
     *cloud.admin.account.lock().unwrap() = "ops@example.com".into();
     cloud.clock.at(MINUTE);
-    assert_eq!(upstream.prepare(&active, &cancel), Ok("ops@example.com".to_string()));
+    assert_eq!(user(upstream.prepare(&active, &cancel)), Ok("ops@example.com".to_string()));
     assert_eq!((cloud.looked(), cloud.certificates()), (2, 2), "the grant was checked and a certificate fetched for ops@example.com");
     upstream.prepare(&active, &cancel).unwrap();
     assert_eq!((cloud.looked(), cloud.certificates()), (2, 2), "then kept for it");
@@ -449,7 +455,7 @@ fn connections_that_start_together_share_one_certificate() {
             std::thread::sleep(Duration::from_millis(2));
         }
         cloud.admin.release();
-        (first.join().unwrap(), second.join().unwrap())
+        (user(first.join().unwrap()), user(second.join().unwrap()))
     });
     assert_eq!(users, (Ok(IAM_USER.to_string()), Ok(IAM_USER.to_string())));
     assert_eq!(cloud.admin.settings.load(Ordering::SeqCst), 1, "one fetch");
@@ -461,21 +467,48 @@ fn a_late_forget_leaves_newer_material_in_place() {
     let cloud = Cloud::new(FakeOwner::default());
     let upstream = cloud.upstream();
     let cancel = CancelToken::default();
-    upstream.prepare(&orders(), &cancel).unwrap();
-    let first = upstream.connect(ID).material.expect("material to dial with");
+    let first = upstream.prepare(&orders(), &cancel).unwrap().material;
+    assert_eq!(upstream.connect(ID, Some(first)).material, Some(first));
     // A connection dials with it and waits for Cloud SQL's answer; meanwhile the certificate is renewed for the next connections.
     cloud.clock.at(HOUR - REFRESH_AHEAD);
-    upstream.prepare(&orders(), &cancel).unwrap();
-    let second = upstream.connect(ID).material.expect("material to dial with");
+    let second = upstream.prepare(&orders(), &cancel).unwrap().material;
     assert_ne!(first, second);
     // The first connection fails late: only what it dialled with goes.
     upstream.forget(ID, first);
-    assert_eq!(upstream.connect(ID).material, Some(second));
-    upstream.prepare(&orders(), &cancel).unwrap();
+    assert_eq!(upstream.connect(ID, Some(second)).material, Some(second));
+    assert_eq!(upstream.prepare(&orders(), &cancel).unwrap().material, second);
     assert_eq!(cloud.certificates(), 2, "nothing was fetched for the failure of the connection before");
     // A failure with the newer material takes that back.
     upstream.forget(ID, second);
-    assert_eq!(upstream.connect(ID).material, None);
+    assert_eq!(upstream.connect(ID, None).material, None);
+}
+
+#[test]
+fn a_connection_dials_the_material_its_preparing_got() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    // Saved without an account: gcloud's active account signs in.
+    let active = SavedDatabase { account: None, ..orders() };
+    let frank = upstream.prepare(&active, &cancel).unwrap();
+    assert_eq!(frank.iam_user, IAM_USER);
+    // Before that connection dials, the person makes ops@example.com gcloud's active account, and another connection gets ready as ops.
+    *cloud.active.lock().unwrap() = Some("ops@example.com".into());
+    *cloud.admin.account.lock().unwrap() = "ops@example.com".into();
+    let ops = upstream.prepare(&active, &cancel).unwrap();
+    assert_eq!(ops.iam_user, "ops@example.com");
+    assert_ne!(ops.material, frank.material);
+    // The first connection would sign in as frank@example.com with ops@example.com's certificate: it dials nothing and is told to
+    // connect again, and the material of the second stays.
+    let stale = upstream.connect(ID, Some(frank.material));
+    assert_eq!(stale.material, None);
+    let error = stale.stream.now_or_never().expect("it fails at once").err().expect("it fails");
+    assert_eq!(error.to_string(), "no certificate is ready for it. Connect again.");
+    assert!(cloud.dialled.lock().unwrap().is_empty(), "nothing was dialled");
+    // The second dials with its own, and so does a cancel request, which takes the material the database has now.
+    assert_eq!(upstream.connect(ID, Some(ops.material)).material, Some(ops.material));
+    assert_eq!(upstream.connect(ID, None).material, Some(ops.material));
+    assert_eq!(cloud.dialled.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -491,14 +524,14 @@ fn a_prepare_that_finishes_after_the_database_changed_leaves_nothing_for_it() {
         // A connection of the port before is still on its way: its fetch for the prod instance is half done.
         let stale = scope.spawn(|| upstream.prepare(&prod, &cancel));
         wait_until("the stale fetch is under way", || cloud.certificates() == 1);
-        assert_eq!(upstream.prepare(&dev, &cancel), Ok(IAM_USER.to_string()), "a connection to the new database gets ready meanwhile");
+        assert_eq!(user(upstream.prepare(&dev, &cancel)), Ok(IAM_USER.to_string()), "a connection to the new database gets ready meanwhile");
         cloud.admin.release();
-        assert_eq!(stale.join().unwrap(), Ok(IAM_USER.to_string()));
+        assert_eq!(user(stale.join().unwrap()), Ok(IAM_USER.to_string()));
     });
     assert_eq!(cloud.certificates(), 2);
     // The new database's connections dial the dev instance: the stale fetch left nothing for them.
     cloud.dialled.lock().unwrap().clear();
-    let _dialling = upstream.connect(ID);
+    let _dialling = upstream.connect(ID, None);
     assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
 }
 

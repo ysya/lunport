@@ -79,15 +79,77 @@ pub(crate) enum Answer {
     /// AuthenticationOk and ReadyForQuery `I`; then it sends back whatever it is sent.
     #[default]
     SignsIn,
+    /// AuthenticationOk and ReadyForQuery `I`; then it answers each simple query as a server does (see `Queries`).
+    Queries,
     /// AuthenticationCleartextPassword, as an instance without IAM database authentication answers an IAM user.
     AsksForPassword,
     /// It closes the connection without a word, as an instance does when it refuses the client certificate.
     HangsUp,
 }
 
+/// The simple queries the fake Cloud SQL of `Answer::Queries` was sent, and the answers it holds back. It answers a query with
+/// CommandComplete and a ReadyForQuery whose status is `T` from `begin` until `commit` or `rollback`, and `I` otherwise. A query that
+/// starts with `wait` is answered once the test releases an answer; to `garble` it sends a ReadyForQuery with a length no message has,
+/// after which nobody can tell where its messages begin. It hangs up on any other message.
+pub(crate) struct Queries {
+    /// The text of each query, as they came.
+    pub sent: Mutex<Vec<String>>,
+    /// One permit for each answer to a `wait` query that may go.
+    answers: tokio::sync::Semaphore,
+}
+
+impl Default for Queries {
+    fn default() -> Self {
+        Queries { sent: Mutex::default(), answers: tokio::sync::Semaphore::new(0) }
+    }
+}
+
+impl Queries {
+    /// Lets the answer to one `wait` query go.
+    pub(crate) fn release(&self) {
+        self.answers.add_permits(1);
+    }
+
+    /// Answers the simple queries that come on `stream` until it closes, or a message that is no simple query comes.
+    async fn answer(&self, stream: &mut DuplexStream) {
+        let mut status = b'I';
+        loop {
+            let mut head = [0u8; 5];
+            if stream.read_exact(&mut head).await.is_err() || head[0] != b'Q' {
+                return;
+            }
+            let mut body = vec![0u8; (u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize).saturating_sub(4)];
+            if stream.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let text = String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body)).into_owned();
+            self.sent.lock().unwrap().push(text.clone());
+            if text.starts_with("wait") {
+                match self.answers.acquire().await {
+                    Ok(permit) => permit.forget(),
+                    Err(_) => return,
+                }
+            }
+            let answer = if text == "garble" {
+                vec![b'Z', 0, 0, 0, 3]
+            } else {
+                status = match text.as_str() {
+                    "begin" => b'T',
+                    "commit" | "rollback" => b'I',
+                    _ => status,
+                };
+                [typed(b'C', b"OK\0"), typed(b'Z', &[status])].concat()
+            };
+            if stream.write_all(&answer).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// Cloud SQL at the far end of `stream`: it records the first message it gets as it came, answers a start-up message as `answer` says
-/// and takes a cancel request without a word.
-pub(crate) async fn fake_cloud_sql(mut stream: DuplexStream, answer: Answer, received: Arc<Mutex<Vec<Vec<u8>>>>) {
+/// and takes a cancel request without a word. In `Answer::Queries` it answers as `queries` says.
+pub(crate) async fn fake_cloud_sql(mut stream: DuplexStream, answer: Answer, received: Arc<Mutex<Vec<Vec<u8>>>>, queries: Arc<Queries>) {
     let mut length = [0u8; 4];
     if stream.read_exact(&mut length).await.is_err() {
         return;
@@ -110,11 +172,14 @@ pub(crate) async fn fake_cloud_sql(mut stream: DuplexStream, answer: Answer, rec
                 let _ = stream.read(&mut [0u8; 1]).await;
             }
         }
-        Answer::SignsIn => {
+        Answer::SignsIn | Answer::Queries => {
             let mut signed_in = typed(b'R', &0u32.to_be_bytes());
             signed_in.extend(typed(b'Z', b"I"));
             if stream.write_all(&signed_in).await.is_err() {
                 return;
+            }
+            if answer == Answer::Queries {
+                return queries.answer(&mut stream).await;
             }
             let mut buffer = [0u8; 4096];
             loop {
@@ -131,8 +196,12 @@ pub(crate) async fn fake_cloud_sql(mut stream: DuplexStream, answer: Answer, rec
     }
 }
 
-/// An upstream for the port's own tests: `prepare` answers `frank@example.com` (or the sentence it is told to fail with), and `connect`
-/// pipes to a `fake_cloud_sql` that answers as `answer` says. What it was asked to do is counted.
+/// The first material number the fake upstream's `prepare` hands out, apart from any count of dials.
+const FIRST_MATERIAL: u64 = 1001;
+
+/// An upstream for the port's own tests: `prepare` answers `frank@example.com` with material numbered from `FIRST_MATERIAL` (or the
+/// sentence it is told to fail with), and `connect` pipes to a `fake_cloud_sql` that answers as `answer` says. What it was asked to do is
+/// counted.
 #[derive(Default)]
 pub(crate) struct FakeUpstream {
     /// `prepare` fails with this sentence.
@@ -143,52 +212,64 @@ pub(crate) struct FakeUpstream {
     /// `connect` fails.
     pub unreachable: AtomicBool,
     pub prepared: AtomicUsize,
-    /// How many `prepare` calls gave up because their connection was cancelled.
+    /// How many `prepare` calls gave up because their connection was cancelled; one that waited `LIMIT` in vain is not counted.
     pub cancelled: AtomicUsize,
     pub dialled: AtomicUsize,
+    /// The material each `connect` was asked to dial with, in order.
+    pub dialled_with: Mutex<Vec<Option<u64>>>,
     pub forgotten: AtomicUsize,
     pub released: AtomicUsize,
     /// The first message each connection to the fake Cloud SQL carried, as it came.
     pub received: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// The fake Cloud SQL's queries in `Answer::Queries`.
+    pub queries: Arc<Queries>,
 }
 
 impl FakeUpstream {
     pub(crate) fn received(&self) -> Vec<Vec<u8>> {
         self.received.lock().unwrap().clone()
     }
+
+    /// Whether the fake Cloud SQL was sent the query `text`.
+    fn was_sent(&self, text: &str) -> bool {
+        self.queries.sent.lock().unwrap().iter().any(|sent| sent == text)
+    }
 }
 
 impl Upstream for FakeUpstream {
-    fn prepare(&self, _db: &SavedDatabase, cancel: &CancelToken) -> Result<String, String> {
-        self.prepared.fetch_add(1, Ordering::SeqCst);
+    fn prepare(&self, _db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, String> {
+        let material = FIRST_MATERIAL + self.prepared.fetch_add(1, Ordering::SeqCst) as u64;
         if self.waiting.load(Ordering::SeqCst) {
             let end = Instant::now() + LIMIT;
             while !cancel.is_cancelled() && Instant::now() < end {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            self.cancelled.fetch_add(1, Ordering::SeqCst);
+            if cancel.is_cancelled() {
+                self.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
             return Err("The connection was cancelled.".into());
         }
         match self.refusing.lock().unwrap().clone() {
             Some(sentence) => Err(sentence),
-            None => Ok(IAM_USER.into()),
+            None => Ok(Prepared { iam_user: IAM_USER.into(), material }),
         }
     }
 
-    fn connect(&self, _db_id: &str) -> Dialling {
-        let material = self.dialled.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+    fn connect(&self, _db_id: &str, material: Option<u64>) -> Dialling {
+        self.dialled.fetch_add(1, Ordering::SeqCst);
+        self.dialled_with.lock().unwrap().push(material);
         let unreachable = self.unreachable.load(Ordering::SeqCst);
         let answer = *self.answer.lock().unwrap();
-        let received = Arc::clone(&self.received);
+        let (received, queries) = (Arc::clone(&self.received), Arc::clone(&self.queries));
         let stream: BoxFuture<'static, io::Result<BoxStream>> = Box::pin(async move {
             if unreachable {
                 return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "Cloud SQL refused the connection."));
             }
             let (near, far) = tokio::io::duplex(64 * 1024);
-            tokio::spawn(fake_cloud_sql(far, answer, received));
+            tokio::spawn(fake_cloud_sql(far, answer, received, queries));
             Ok(Box::new(near) as BoxStream)
         });
-        Dialling { material: Some(material), stream }
+        Dialling { material, stream }
     }
 
     fn forget(&self, _db_id: &str, _material: u64) {
@@ -301,6 +382,37 @@ impl App {
         self.send(bytes);
         assert_eq!(self.bytes(bytes.len()), bytes, "the port relays both ways");
     }
+
+    /// Sends `sql` as a simple query, as psql sends what is typed, without waiting for the answer.
+    fn send_query(&mut self, sql: &str) {
+        let mut body = sql.as_bytes().to_vec();
+        body.push(0);
+        self.send(&typed(b'Q', &body));
+    }
+
+    /// Reads the answer to a query up to the ReadyForQuery that ends it, and answers its status: `I` idle, `T` in a transaction.
+    fn answer(&mut self) -> u8 {
+        loop {
+            let (kind, body) = self.message();
+            if kind == b'Z' {
+                return body[0];
+            }
+        }
+    }
+
+    /// Runs `sql` through the port (to `Answer::Queries`) and answers the status of the ReadyForQuery that ends its answer.
+    fn query(&mut self, sql: &str) -> u8 {
+        self.send_query(sql);
+        self.answer()
+    }
+
+    /// Whether the connection is still open: nothing comes from the port for a moment, and the port did not close it.
+    fn still_open(&mut self) -> bool {
+        self.0.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let read = self.0.read(&mut [0u8; 1]);
+        self.0.set_read_timeout(Some(LIMIT)).unwrap();
+        matches!(read, Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
+    }
 }
 
 /// Waits until `done`, at most `LIMIT`.
@@ -362,6 +474,9 @@ fn the_startup_reaches_cloud_sql_with_the_iam_user_and_the_prod_lock() {
     bare.startup(&[("user", "frank"), ("database", "orders")]);
     bare.sign_in(PASSWORD);
     assert_eq!(upstream.received()[1], startup_wire(PROTOCOL_3_0, &[("user", IAM_USER), ("database", "orders"), ("options", LOCK)]));
+    // Each connection dials with the material its own preparing got.
+    let first = Some(FIRST_MATERIAL);
+    assert_eq!(*upstream.dialled_with.lock().unwrap(), vec![first, first.map(|material| material + 1)]);
 }
 
 #[test]
@@ -679,6 +794,7 @@ fn stopping_closes_every_connection_and_frees_the_port() {
     assert!(silent.closed(), "an app that had not signed in");
     // Its preparing gives up when the port stops, and it may be refused for that before its connection is closed.
     assert!(asking.ended(), "an app waiting for its connection to be prepared");
+    // The fake counts only a preparing whose connection was cancelled: one that waited out its own limit would not show here.
     wait_until("the preparing was cancelled with the port", || upstream.cancelled.load(Ordering::SeqCst) == 1);
     assert_eq!(ports.live(ID), DatabaseLive::default());
     assert!(!ports.running(ID));
@@ -782,7 +898,7 @@ fn a_failed_port_is_not_given_a_password() {
 
 #[test]
 fn a_port_takes_a_new_password_while_it_starts_or_runs_only() {
-    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default());
+    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Arc::new(SystemTime::now));
     assert_eq!(port.live().phase, DatabasePhase::Starting);
     port.set_password(Zeroizing::new("first".into()));
     assert_eq!(*port.password(), "first", "a port that starts takes it");
@@ -848,4 +964,250 @@ impl Clock {
     pub(crate) fn at(&self, elapsed: Duration) {
         *self.0.lock().unwrap() = t0() + elapsed;
     }
+}
+
+// ---- The writable window ----
+
+/// How often the ports of these tests look at their window: the tests do not wait a second for each look.
+const TICKING: Duration = Duration::from_millis(10);
+const SECOND: Duration = Duration::from_secs(1);
+const MINUTE: Duration = Duration::from_secs(60);
+
+/// `Orders` running on ports over a fake Cloud SQL that answers queries, on a clock of the test's own; and the port it listens on.
+fn writable() -> (DatabasePorts, Arc<FakeUpstream>, Clock, u16) {
+    let upstream = fake();
+    *upstream.answer.lock().unwrap() = Answer::Queries;
+    let clock = Clock::new();
+    let now = clock.clone();
+    let ports = DatabasePorts::new(upstream.clone()).timed_by(Arc::new(move || now.now()), TICKING);
+    let port = running(&ports, &orders());
+    (ports, upstream, clock, port)
+}
+
+/// `time` in milliseconds since the Unix epoch, as `writable_until_ms` carries it.
+fn ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// The start-up message Cloud SQL gets from `App::signed_in`, with Cloud SQL's read-only lock or without it.
+fn startup_for(locked: bool) -> Vec<u8> {
+    let mut pairs = vec![("user", IAM_USER), ("database", "orders")];
+    if locked {
+        pairs.push(("options", LOCK));
+    }
+    startup_wire(PROTOCOL_3_0, &pairs)
+}
+
+/// Waits until the port of `Orders` has looked at its window and its connections twice since this was called: the second look began
+/// after the clock was set.
+fn ticked(ports: &DatabasePorts) {
+    let seen = ports.ticks(ID);
+    wait_until("the port looked at its window", || ports.ticks(ID) >= seen + 2);
+}
+
+#[test]
+fn unlocking_lets_new_prod_connections_write_for_fifteen_minutes() {
+    assert_eq!(WRITABLE_WINDOW, Duration::from_secs(15 * 60));
+    let (ports, upstream, clock, port) = writable();
+    let mut before = App::signed_in(port);
+    assert_eq!(ports.live(ID).writable_until_ms, None, "prod is locked until it is unlocked");
+    let until = ms(t0() + WRITABLE_WINDOW);
+    assert_eq!(ports.unlock(ID, clock.now()), Ok(until));
+    assert_eq!(ports.live(ID).writable_until_ms, Some(until));
+    let mut writer = App::signed_in(port);
+    assert_eq!(writer.query("update orders set paid = true where id = 7"), b'I');
+    // A second before the end, a new connection still comes without the lock.
+    clock.at(WRITABLE_WINDOW - SECOND);
+    App::signed_in(port);
+    assert_eq!(ports.live(ID).writable_until_ms, Some(until));
+    // At the end the window is closed: a new connection is locked, whether or not the port has looked at its window yet.
+    clock.at(WRITABLE_WINDOW);
+    App::signed_in(port);
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+    assert_eq!(upstream.received(), vec![startup_for(true), startup_for(false), startup_for(false), startup_for(true)]);
+    // The connection that was open before the unlock kept its lock, and goes on.
+    assert_eq!(before.query("select count(*) from orders"), b'I');
+}
+
+#[test]
+fn when_the_window_ends_idle_unlocked_connections_close_and_new_ones_are_locked() {
+    let (ports, upstream, clock, port) = writable();
+    let mut locked_before = App::signed_in(port);
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut idle = App::signed_in(port);
+    assert_eq!(idle.query("update orders set paid = true where id = 7"), b'I');
+    // The app sent a query that Cloud SQL has not answered yet: Cloud SQL's stream reads as idle, but the connection is not.
+    let mut asking = App::signed_in(port);
+    asking.send_query("wait for the monthly report");
+    wait_until("Cloud SQL has the query", || upstream.was_sent("wait for the monthly report"));
+    clock.at(WRITABLE_WINDOW);
+    assert!(idle.closed(), "an idle unlocked connection closes when the window ends");
+    ticked(&ports);
+    assert!(asking.still_open(), "a query that is not answered yet keeps its connection open");
+    assert!(locked_before.still_open(), "a locked connection is not touched");
+    let mut fresh = App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(true)), "a new connection is locked");
+    // The answer comes: the app gets it, and the connection, idle now, closes.
+    upstream.queries.release();
+    assert_eq!(asking.answer(), b'I');
+    assert!(asking.closed());
+    assert_eq!(locked_before.query("select 1"), b'I');
+    assert_eq!(fresh.query("select 1"), b'I');
+    wait_until("only the locked connections are left", || ports.live(ID).connections == 2);
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+}
+
+#[test]
+fn an_unlocked_connection_in_a_transaction_closes_when_it_becomes_idle() {
+    let (ports, _upstream, clock, port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut idle = App::signed_in(port);
+    let mut writer = App::signed_in(port);
+    assert_eq!(writer.query("begin"), b'T');
+    assert_eq!(writer.query("update orders set paid = true where id = 7"), b'T');
+    clock.at(WRITABLE_WINDOW);
+    assert!(idle.closed(), "the window ended");
+    ticked(&ports);
+    assert!(writer.still_open(), "a connection in a transaction is not cut off");
+    // The transaction goes on to its end, and the connection closes once the app has the answer that leaves it idle.
+    assert_eq!(writer.query("update orders set paid = true where id = 8"), b'T');
+    assert_eq!(writer.query("commit"), b'I');
+    assert!(writer.closed());
+}
+
+#[test]
+fn an_unlocked_connection_that_never_turns_idle_closes_ten_minutes_after_the_window() {
+    assert_eq!(CLOSE_UNLOCKED_WITHIN, Duration::from_secs(10 * 60));
+    let (ports, _upstream, clock, port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut idle = App::signed_in(port);
+    let mut open_transaction = App::signed_in(port);
+    assert_eq!(open_transaction.query("begin"), b'T');
+    // Cloud SQL's stream breaks the framing: nobody can tell any more where its messages begin, so it never reads as idle again.
+    let mut garbled = App::signed_in(port);
+    garbled.send_query("garble");
+    assert_eq!(garbled.bytes(5), [b'Z', 0, 0, 0, 3]);
+    clock.at(WRITABLE_WINDOW);
+    assert!(idle.closed(), "the window ended");
+    clock.at(WRITABLE_WINDOW + CLOSE_UNLOCKED_WITHIN - SECOND);
+    ticked(&ports);
+    assert!(open_transaction.still_open() && garbled.still_open(), "open until the limit");
+    clock.at(WRITABLE_WINDOW + CLOSE_UNLOCKED_WITHIN);
+    assert!(open_transaction.closed(), "closed in its transaction, which Cloud SQL rolls back");
+    assert!(garbled.closed());
+    wait_until("no connection is left", || ports.live(ID).connections == 0);
+}
+
+#[test]
+fn locking_ends_the_window_at_once() {
+    let (ports, upstream, clock, port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut idle = App::signed_in(port);
+    let mut finishing = App::signed_in(port);
+    assert_eq!(finishing.query("begin"), b'T');
+    let mut endless = App::signed_in(port);
+    assert_eq!(endless.query("begin"), b'T');
+    // Five minutes in, the person locks.
+    clock.at(5 * MINUTE);
+    ports.lock(ID);
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+    assert!(idle.closed(), "an idle unlocked connection closes");
+    App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(true)), "a new connection is locked");
+    assert_eq!(finishing.query("commit"), b'I');
+    assert!(finishing.closed(), "one in a transaction closes once it ends");
+    // One that never turns idle closes ten minutes after the lock, not after the end the window would have had.
+    clock.at(5 * MINUTE + CLOSE_UNLOCKED_WITHIN - SECOND);
+    ticked(&ports);
+    assert!(endless.still_open());
+    clock.at(5 * MINUTE + CLOSE_UNLOCKED_WITHIN);
+    assert!(endless.closed());
+    // Locking what is locked changes nothing.
+    ports.lock(ID);
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+}
+
+#[test]
+fn reconnect_closes_only_idle_locked_connections() {
+    let (ports, upstream, clock, port) = writable();
+    let mut idle_locked = App::signed_in(port);
+    assert_eq!(idle_locked.query("select count(*) from orders"), b'I');
+    let mut busy_locked = App::signed_in(port);
+    assert_eq!(busy_locked.query("begin"), b'T');
+    let mut asking_locked = App::signed_in(port);
+    asking_locked.send_query("wait for the monthly report");
+    wait_until("Cloud SQL has the query", || upstream.was_sent("wait for the monthly report"));
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut unlocked = App::signed_in(port);
+    assert_eq!(ports.reconnect_locked(ID), 1);
+    assert!(idle_locked.closed(), "the idle locked connection closes, so that its app connects again");
+    assert!(busy_locked.still_open(), "a locked connection in a transaction stays");
+    assert!(asking_locked.still_open(), "a locked connection waiting for an answer stays");
+    assert!(unlocked.still_open(), "an unlocked connection stays");
+    // The app connects again, and can write now.
+    let mut again = App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(false)));
+    assert_eq!(again.query("update orders set paid = true where id = 7"), b'I');
+    // Once its transaction ended, the next reconnect closes the other one too.
+    assert_eq!(busy_locked.query("commit"), b'I');
+    assert_eq!(ports.reconnect_locked(ID), 1);
+    assert!(busy_locked.closed());
+    assert!(asking_locked.still_open() && unlocked.still_open());
+    assert_eq!(ports.reconnect_locked(OTHER), 0, "a database that does not run has no connection to close");
+}
+
+#[test]
+fn unlock_is_refused_for_dev_and_staging() {
+    for environment in [DatabaseEnvironment::Dev, DatabaseEnvironment::Staging] {
+        let ports = DatabasePorts::new(fake());
+        let db = SavedDatabase { environment, project: "acme-dev-654321".into(), ..orders() };
+        let port = running(&ports, &db);
+        assert_eq!(ports.unlock(ID, SystemTime::now()), Err("Only prod databases are locked.".to_string()), "{environment:?}");
+        assert_eq!(ports.live(ID).writable_until_ms, None);
+        // Its connections are never locked, so reconnecting closes none.
+        let _app = App::signed_in(port);
+        assert_eq!(ports.reconnect_locked(ID), 0);
+    }
+    // A prod database is unlocked only while it runs.
+    let ports = DatabasePorts::new(fake());
+    let not_running = Err("Start the database before you unlock writes.".to_string());
+    assert_eq!(ports.unlock(ID, SystemTime::now()), not_running);
+    running(&ports, &orders());
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    assert_eq!(ports.unlock(ID, SystemTime::now()), not_running);
+}
+
+#[test]
+fn stopping_ends_the_window() {
+    let (ports, upstream, clock, _port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    // A database is edited or deleted only once it is stopped, which ends its window.
+    assert_eq!(ports.edit(ID, || Ok(())), Err("Stop Orders before you change it.".to_string()));
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+    // Started again within the fifteen minutes, it is locked.
+    let port = running(&ports, &orders());
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+    App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(true)));
+}
+
+#[test]
+fn unlocking_again_lets_the_unlocked_connections_go_on() {
+    let (ports, _upstream, clock, port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut writer = App::signed_in(port);
+    assert_eq!(writer.query("begin"), b'T');
+    clock.at(WRITABLE_WINDOW);
+    ticked(&ports);
+    // The window ended while the transaction was open; the person unlocks again before it ends.
+    assert_eq!(ports.unlock(ID, clock.now()), Ok(ms(t0() + 2 * WRITABLE_WINDOW)));
+    assert_eq!(writer.query("commit"), b'I');
+    ticked(&ports);
+    assert!(writer.still_open(), "an idle unlocked connection stays while a window is open");
+    // When that window ends, it closes as any idle unlocked connection does.
+    clock.at(2 * WRITABLE_WINDOW);
+    assert!(writer.closed());
 }

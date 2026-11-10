@@ -24,6 +24,7 @@ pub mod macos_health;
 pub mod macos_install;
 pub mod mcp;
 mod mcp_setup;
+mod os_auth;
 mod process;
 mod prompt_window;
 mod quick_connect;
@@ -419,6 +420,10 @@ fn run_app(host: bool, start_hidden: bool) {
             session::databases::databases_stop,
             session::databases::databases_port_password,
             session::databases::databases_rotate_port_password,
+            session::databases::databases_unlock_writes,
+            session::databases::databases_lock_writes,
+            session::databases::databases_reconnect_locked,
+            os_auth::os_unlock_method,
             session::transports::transports_oslogin_profile,
             session::transports::transports_pam_status,
             session::transports::transports_pam_request,

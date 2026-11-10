@@ -6,10 +6,14 @@ import {
   databasesKey,
   deleteDatabase,
   listDatabases,
+  lockDatabaseWrites,
   newDatabase,
   parseConnectionName,
+  reconnectLockedConnections,
   rotateDatabasePassword,
   saveDatabase,
+  unlockDatabaseWrites,
+  unlockMethod,
   type DatabaseView,
   type SavedDatabase,
 } from "./databases";
@@ -119,6 +123,29 @@ describe("saved databases", () => {
     expect(calls).toEqual([
       ["databases_port_password", { id: ORDERS.id }],
       ["databases_rotate_port_password", { id: ORDERS.id }],
+    ]);
+  });
+
+  it("unlocks, locks and reconnects by the database's identity, and asks how this computer confirms", async () => {
+    const until = 1_800_000_900_000;
+    const replies: Record<string, unknown> = {
+      os_unlock_method: "system",
+      databases_unlock_writes: until,
+      databases_lock_writes: null,
+      databases_reconnect_locked: 2,
+    };
+    const calls = stubBackend(async (cmd) => replies[cmd]);
+    expect(await unlockMethod()).toBe("system");
+    expect(await unlockDatabaseWrites(ORDERS.id, false)).toBe(until);
+    expect(await unlockDatabaseWrites(ORDERS.id, true)).toBe(until);
+    await lockDatabaseWrites(ORDERS.id);
+    expect(await reconnectLockedConnections(ORDERS.id)).toBe(2);
+    expect(calls).toEqual([
+      ["os_unlock_method", {}],
+      ["databases_unlock_writes", { id: ORDERS.id, confirmedInApp: false }],
+      ["databases_unlock_writes", { id: ORDERS.id, confirmedInApp: true }],
+      ["databases_lock_writes", { id: ORDERS.id }],
+      ["databases_reconnect_locked", { id: ORDERS.id }],
     ]);
   });
 });

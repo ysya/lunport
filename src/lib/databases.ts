@@ -3,7 +3,8 @@ import type { SavedDatabase } from "@/bindings/SavedDatabase";
 import type { DatabaseView } from "@/bindings/DatabaseView";
 import type { DatabaseLive } from "@/bindings/DatabaseLive";
 import type { DatabasePhase } from "@/bindings/DatabasePhase";
-export type { SavedDatabase, DatabaseView, DatabaseLive, DatabasePhase };
+import type { UnlockMethod } from "@/bindings/UnlockMethod";
+export type { SavedDatabase, DatabaseView, DatabaseLive, DatabasePhase, UnlockMethod };
 
 export const databasesKey = ["databases"] as const;
 export const listDatabases = () => tauriInvoke<DatabaseView[]>("databases_list");
@@ -14,6 +15,14 @@ export const deleteDatabase = (expected: SavedDatabase) => tauriInvoke<void>("da
 export const databasePassword = (id: string) => tauriInvoke<string>("databases_port_password", { id });
 /** Replaces the port's password and answers the new one. Connections that are open go on; new ones need it. */
 export const rotateDatabasePassword = (id: string) => tauriInvoke<string>("databases_rotate_port_password", { id });
+/** How this computer confirms an unlock: "system" asks for Touch ID or the Mac's password itself; "dialog" needs the page's own confirmation first. */
+export const unlockMethod = () => tauriInvoke<UnlockMethod>("os_unlock_method");
+/** Unlocks writes on a running prod database's local port for 15 minutes and answers when they lock again, in milliseconds since the Unix epoch. Pass `confirmedInApp` once the page's own dialog was confirmed; where the system asks, it is not enough. */
+export const unlockDatabaseWrites = (id: string, confirmedInApp: boolean) => tauriInvoke<number>("databases_unlock_writes", { id, confirmedInApp });
+/** Locks writes on the database's local port again before the 15 minutes are up. */
+export const lockDatabaseWrites = (id: string) => tauriInvoke<void>("databases_lock_writes", { id });
+/** Closes the database's idle locked connections, so that their apps connect again (unlocked while writes are), and answers how many it closed. */
+export const reconnectLockedConnections = (id: string) => tauriInvoke<number>("databases_reconnect_locked", { id });
 
 /** A database to fill in: PostgreSQL over the public address, labelled dev, offered on no local port. */
 export function newDatabase(): SavedDatabase {

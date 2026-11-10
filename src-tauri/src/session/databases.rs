@@ -1,9 +1,10 @@
-//! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them, and
-//! show, replace and remove the password of a database's local port.
+//! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them,
+//! show, replace and remove the password of a database's local port, and unlock and lock writes to a prod database through that port.
 use super::connect::CancelToken;
-use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT};
+use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
 use super::tunnels::{main_only, snapshot};
+use crate::os_auth::{self, UnlockMethod};
 use crate::{
     error::AppError,
     state::AppState,
@@ -21,6 +22,8 @@ use zeroize::Zeroizing;
 
 /// What a command is refused with when the database it names is not there.
 const GONE: &str = "The saved database no longer exists.";
+/// What an unlock the person did not confirm is refused with.
+const STAY_LOCKED: &str = "Writes stay locked.";
 
 /// Where the local port of a database stands on this device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -175,6 +178,23 @@ fn rotate_port_password(ports: &DatabasePorts, keychain: &dyn Keychain, id: &str
     Ok(revealed(password))
 }
 
+/// Unlocks writes on the prod database `id`'s port for `WRITABLE_WINDOW` once the person confirms it, and answers when the window ends,
+/// in milliseconds since the Unix epoch. Where the system can ask (`UnlockMethod::System`), `confirm` asks for Touch ID or the Mac's
+/// password, and blocks until the person answers; what the page says does not count there. Elsewhere the page asks in a dialog of its
+/// own first (`confirmed_in_app`). A database that cannot be unlocked is refused before anybody is asked, and the window counts from the
+/// moment the person confirmed.
+fn unlock_writes(ports: &DatabasePorts, id: &str, method: UnlockMethod, confirmed_in_app: bool, confirm: impl FnOnce(&str) -> Result<bool, String>) -> Result<u64, String> {
+    let name = ports.unlockable(id)?;
+    let confirmed = match method {
+        UnlockMethod::System => confirm(&format!("unlock writes on {name} (PROD) for {} minutes", WRITABLE_WINDOW.as_secs() / 60)) == Ok(true),
+        UnlockMethod::Dialog => confirmed_in_app,
+    };
+    if !confirmed {
+        return Err(STAY_LOCKED.to_string());
+    }
+    ports.unlock(id, ports.now())
+}
+
 /// Starts the saved database `id` on its local port, with the password this device keeps for it. The port is registered with the broker,
 /// so that quitting the app stops it, and its grant questions go through the broker's gates, which hosts use as well.
 fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
@@ -261,6 +281,36 @@ pub async fn databases_rotate_port_password(app: tauri::AppHandle, window: tauri
     tauri::async_runtime::spawn_blocking(move || rotate_port_password(&app.state::<AppState>().session.databases, &OsKeychain, &id, || snapshot(&app)))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Unlocks writes on a running prod database's local port for fifteen minutes, and answers when they lock again, in milliseconds since
+/// the Unix epoch. Where the system can ask, the person confirms with Touch ID or the Mac's password; elsewhere the page confirms first,
+/// in a dialog of its own, and says so with `confirmed_in_app`.
+#[tauri::command]
+pub async fn databases_unlock_writes(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String, confirmed_in_app: bool) -> Result<u64, String> {
+    main_only(&window, "Database")?;
+    // The system's question waits for the person for up to two minutes: on a blocking thread, never on the main thread or the async
+    // runtime.
+    tauri::async_runtime::spawn_blocking(move || {
+        unlock_writes(&app.state::<AppState>().session.databases, &id, os_auth::unlock_method(), confirmed_in_app, os_auth::confirm)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Locks writes on the database's local port again before its fifteen minutes are up.
+#[tauri::command]
+pub fn databases_lock_writes(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    app.state::<AppState>().session.databases.lock(&id);
+    Ok(())
+}
+
+/// Closes the database's idle connections that carry the read-only lock, so that their apps connect again, and answers how many.
+#[tauri::command]
+pub fn databases_reconnect_locked(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<u32, String> {
+    main_only(&window, "Database")?;
+    Ok(app.state::<AppState>().session.databases.reconnect_locked(&id))
 }
 
 #[cfg(test)]

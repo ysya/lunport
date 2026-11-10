@@ -4,6 +4,10 @@
 //! SQL signs), dials the instance over TLS, passes the app's start-up message on as the IAM database user, with Cloud SQL's read-only lock
 //! for a prod database, and relays the session.
 //!
+//! The lock stays with a session for as long as it lasts. Once the person unlocks writes, for `WRITABLE_WINDOW`, the new connections to a
+//! prod database come without it; the locked ones go on until their apps connect again. When the window ends, the connections that came
+//! without the lock close as soon as they are idle, and `CLOSE_UNLOCKED_WITHIN` after the window at the latest.
+//!
 //! The ports run on one small runtime of their own. What blocks (Google's APIs, a grant question that waits for the person) runs on its
 //! blocking threads. Each port is registered with the broker while it runs, so quitting the app stops it.
 
@@ -11,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use futures_util::future::BoxFuture;
@@ -19,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
+use tokio::time::MissedTickBehavior;
 use zeroize::Zeroizing;
 
 use super::auth::printable;
@@ -32,6 +37,11 @@ use crate::sync::env::Keychain;
 pub const MAX_PORT_CONNECTIONS: usize = 64;
 /// The most databases that run at once on this device.
 pub const MAX_RUNNING_DATABASES: usize = 16;
+/// How long a prod database takes writes through its port once the person unlocks them.
+pub const WRITABLE_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// How long after its writable window ended a connection that came without the lock is closed at the latest, idle or not: a transaction
+/// it still has open is rolled back.
+pub const CLOSE_UNLOCKED_WITHIN: Duration = Duration::from_secs(10 * 60);
 
 /// What a database without a local port is refused with when it is started.
 pub(crate) const NO_LOCAL_PORT: &str = "Turn on Let other apps connect and choose a port first.";
@@ -59,6 +69,13 @@ const PASSWORD_BYTES: usize = 24;
 const ERROR_CHARS: usize = 512;
 const TOO_LONG: &str = "The connection settings are too long for Cloud SQL. Remove some options and connect again.";
 const UNAVAILABLE: &str = "Lunport's database service is unavailable. Restart Lunport and try again.";
+const ONLY_PROD: &str = "Only prod databases are locked.";
+const NOT_RUNNING: &str = "Start the database before you unlock writes.";
+/// How often a port looks whether its writable window ended and whether a connection that came without the lock is past its time.
+const TICK: Duration = Duration::from_secs(1);
+
+/// The clock of the ports: the time now.
+pub(crate) type Now = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
 /// A byte stream both ways: the connection to Cloud SQL as the port relays it.
 pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -68,17 +85,27 @@ pub type BoxStream = Box<dyn Duplex>;
 /// Where a port's connections reach Cloud SQL from.
 pub(crate) trait Upstream: Send + Sync {
     /// Gets what a connection to `db` needs (the grant it asks for, the connection material) and answers the database user the connection
-    /// signs in as; an error is the sentence the app is refused with. It blocks (Google's APIs, a question that waits for the person), so the
-    /// port calls it on a blocking thread. `cancel` is set when the port stops.
-    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<String, String>;
-    /// Dials the instance of the database `db_id` with the material `prepare` got for it.
-    fn connect(&self, db_id: &str) -> Dialling;
+    /// signs in as with the material it got; an error is the sentence the app is refused with. It blocks (Google's APIs, a question that
+    /// waits for the person), so the port calls it on a blocking thread. `cancel` is set when the port stops.
+    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, String>;
+    /// Dials the instance of the database `db_id` with the material numbered `material`, the one `prepare` got for the connection, and
+    /// with none when that material is gone: the user it signs in as goes with that material's certificate. A cancel request, which signs
+    /// in as nobody, passes `None` and dials with the material the database's connections have now.
+    fn connect(&self, db_id: &str, material: Option<u64>) -> Dialling;
     /// A connection to `db_id` dialled with `material` failed before Cloud SQL answered its start-up message (in TLS 1.3 a refused client
     /// certificate shows only then): that material is not used again, and the next connection gets new material. Newer material that
     /// another connection got meanwhile stays.
     fn forget(&self, db_id: &str, material: u64);
     /// The database `db_id` stopped, or was deleted: everything kept for it goes, its certificate and the key that was made for it too.
     fn release(&self, db_id: &str);
+}
+
+/// What a connection to a database got ready with.
+pub(crate) struct Prepared {
+    /// The database user it signs in as.
+    pub iam_user: String,
+    /// Which of the database's material it dials with (`Upstream::connect`).
+    pub material: u64,
 }
 
 /// A connection to an instance under way.
@@ -126,11 +153,21 @@ pub(crate) struct DatabasePorts {
     edits: Mutex<()>,
     ports: Mutex<BTreeMap<String, Arc<Port>>>,
     sign_in_within: Duration,
+    now: Now,
+    tick: Duration,
 }
 
 impl Default for DatabasePorts {
     fn default() -> Self {
-        DatabasePorts { upstream: OnceLock::new(), runtime: OnceLock::new(), edits: Mutex::new(()), ports: Mutex::default(), sign_in_within: SIGN_IN_WITHIN }
+        DatabasePorts {
+            upstream: OnceLock::new(),
+            runtime: OnceLock::new(),
+            edits: Mutex::new(()),
+            ports: Mutex::default(),
+            sign_in_within: SIGN_IN_WITHIN,
+            now: Arc::new(SystemTime::now),
+            tick: TICK,
+        }
     }
 }
 
@@ -178,6 +215,60 @@ impl DatabasePorts {
         self
     }
 
+    /// The ports on the clock `now`, looking at their writable windows every `tick` (the tests move a clock of their own, and do not wait a
+    /// second for each look).
+    #[cfg(test)]
+    pub(crate) fn timed_by(mut self, now: Now, tick: Duration) -> Self {
+        self.now = now;
+        self.tick = tick;
+        self
+    }
+
+    /// How many times the database `id`'s port has looked at its window (the tests wait for a look after they move their clock).
+    #[cfg(test)]
+    pub(crate) fn ticks(&self, id: &str) -> usize {
+        self.port(id).map_or(0, |port| port.ticks.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// The time now, by the ports' clock.
+    pub(crate) fn now(&self) -> SystemTime {
+        (self.now)()
+    }
+
+    /// The name of the database `id`, provided writes can be unlocked on it now: it is a prod database, and its port runs. The person is
+    /// asked to confirm after this, and `unlock` looks again.
+    pub(crate) fn unlockable(&self, id: &str) -> Result<String, String> {
+        let port = self.port(id).ok_or(NOT_RUNNING)?;
+        port.unlockable(&locked(&port.state))?;
+        Ok(port.db.name.clone())
+    }
+
+    /// Opens the writable window of the prod database `id`, whose port runs, for `WRITABLE_WINDOW` from `now`, and answers when it ends,
+    /// in milliseconds since the Unix epoch. Until then the connections that come are not locked; the open ones keep their lock. A window
+    /// that is open already starts again from `now`.
+    pub fn unlock(&self, id: &str, now: SystemTime) -> Result<u64, String> {
+        let port = self.port(id).ok_or(NOT_RUNNING)?;
+        port.unlock(now).map(millis)
+    }
+
+    /// Ends the writable window of the database `id` now, when it is open: new connections are locked, and those that came without the lock
+    /// close as soon as they are idle.
+    pub fn lock(&self, id: &str) {
+        if let Some(port) = self.port(id) {
+            port.lock((self.now)());
+        }
+    }
+
+    /// Closes the connections to the database `id` that carry the lock and are idle, so that their apps connect again (without the lock
+    /// while the window is open), and answers how many it closed. One in a transaction, or waiting for an answer, stays.
+    pub fn reconnect_locked(&self, id: &str) -> u32 {
+        self.port(id).map_or(0, |port| port.reconnect_locked())
+    }
+
+    fn port(&self, id: &str) -> Option<Arc<Port>> {
+        locked(&self.ports).get(id).cloned()
+    }
+
     fn runtime(&self) -> Result<&tokio::runtime::Runtime, String> {
         self.runtime.get_or_init(PortRuntime::new).as_ref().map(PortRuntime::get).ok_or_else(|| UNAVAILABLE.to_string())
     }
@@ -198,7 +289,7 @@ impl DatabasePorts {
             if ports.values().filter(|port| port.busy()).count() >= MAX_RUNNING_DATABASES {
                 return Err(format!("Lunport runs up to {MAX_RUNNING_DATABASES} databases at once."));
             }
-            let port = Arc::new(Port::new(db.clone(), password, quit));
+            let port = Arc::new(Port::new(db.clone(), password, quit, Arc::clone(&self.now)));
             ports.insert(db.id.clone(), Arc::clone(&port));
             port
         };
@@ -210,7 +301,7 @@ impl DatabasePorts {
             }
         };
         port.listening(listener.local_addr().map_or(number, |address| address.port()));
-        runtime.spawn(serve(port, listener, upstream, self.sign_in_within, hold));
+        runtime.spawn(serve(port, listener, upstream, self.sign_in_within, self.tick, hold));
         Ok(())
     }
 
@@ -287,9 +378,16 @@ struct Port {
     quit: CancelToken,
     /// Wakes the port's listener when `stop` cancels `quit`; for the broker's cancel it looks every `QUIT_POLL`.
     woken: Notify,
+    /// Taken before `writes` where both are held.
     state: Mutex<PortState>,
     /// How many of its `MAX_PORT_CONNECTIONS` slots are held.
     open: Mutex<usize>,
+    /// The clock its writable window goes by.
+    now: Now,
+    writes: Mutex<Writes>,
+    /// How many times it looked at its window (`DatabasePorts::ticks`).
+    #[cfg(test)]
+    ticks: std::sync::atomic::AtomicUsize,
 }
 
 struct PortState {
@@ -299,7 +397,7 @@ struct PortState {
 }
 
 impl Port {
-    fn new(db: SavedDatabase, password: Zeroizing<String>, quit: CancelToken) -> Port {
+    fn new(db: SavedDatabase, password: Zeroizing<String>, quit: CancelToken, now: Now) -> Port {
         Port {
             db,
             password: Mutex::new(password),
@@ -307,13 +405,18 @@ impl Port {
             woken: Notify::new(),
             state: Mutex::new(PortState { phase: DatabasePhase::Starting, port: None, error: None }),
             open: Mutex::new(0),
+            now,
+            writes: Mutex::default(),
+            #[cfg(test)]
+            ticks: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     fn live(&self) -> DatabaseLive {
         let state = locked(&self.state);
         let connections = u32::try_from(*locked(&self.open)).unwrap_or(u32::MAX);
-        DatabaseLive { phase: state.phase, port: state.port, connections, writable_until_ms: None, error: state.error.clone() }
+        let writable_until_ms = locked(&self.writes).open_until((self.now)()).map(millis);
+        DatabaseLive { phase: state.phase, port: state.port, connections, writable_until_ms, error: state.error.clone() }
     }
 
     fn busy(&self) -> bool {
@@ -360,6 +463,7 @@ impl Port {
         *locked(&self.password) = Zeroizing::new(String::new());
     }
 
+    /// Stops it, and ends its writable window: it closes every connection, and starts locked the next time.
     fn stop(&self) {
         {
             let mut state = locked(&self.state);
@@ -367,17 +471,19 @@ impl Port {
                 return;
             }
             state.phase = DatabasePhase::Stopping;
+            locked(&self.writes).until = None;
         }
         self.quit.cancel();
         self.woken.notify_one();
     }
 
-    /// Its listener ended (stopped, or the app quits).
+    /// Its listener ended (stopped, or the app quits), and so did its writable window.
     fn stopping(&self) {
         let mut state = locked(&self.state);
         if state.phase.busy() {
             state.phase = DatabasePhase::Stopping;
         }
+        locked(&self.writes).until = None;
     }
 
     fn stopped(&self) {
@@ -392,6 +498,216 @@ impl Port {
         }
         *open += 1;
         Some(Slot(Arc::clone(self)))
+    }
+
+    /// Whether writes can be unlocked on its database while the port is in `state`: a prod database, whose port runs.
+    fn unlockable(&self, state: &PortState) -> Result<(), String> {
+        if !self.db.is_prod() {
+            Err(ONLY_PROD.to_string())
+        } else if state.phase != DatabasePhase::Running {
+            Err(NOT_RUNNING.to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Opens its writable window from `now`, and answers when it ends. A connection that came without the lock and was to close since an
+    /// earlier window ended goes on while this one is open. The phase is held meanwhile, so that a port that stops keeps no window.
+    fn unlock(&self, now: SystemTime) -> Result<SystemTime, String> {
+        let state = locked(&self.state);
+        self.unlockable(&state)?;
+        let until = now + WRITABLE_WINDOW;
+        let mut writes = locked(&self.writes);
+        writes.until = Some(until);
+        for connection in writes.connections.values().filter(|connection| !connection.locked) {
+            connection.reprieve();
+        }
+        Ok(until)
+    }
+
+    /// Ends its writable window at `now`, when it is open.
+    fn lock(&self, now: SystemTime) {
+        let mut writes = locked(&self.writes);
+        if let Some(until) = writes.until.take() {
+            writes.window_ended(now.min(until));
+        }
+    }
+
+    /// Looks at its window at `now`: when the window has ended, it ends it as `lock` does; and it closes the connections past their time.
+    fn tick(&self, now: SystemTime) {
+        {
+            let mut writes = locked(&self.writes);
+            if let Some(until) = writes.until.filter(|until| now >= *until) {
+                writes.until = None;
+                writes.window_ended(until);
+            }
+            for connection in writes.connections.values() {
+                connection.close_if_due(now);
+            }
+        }
+        #[cfg(test)]
+        self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Closes the idle connections that carry the lock, and answers how many.
+    fn reconnect_locked(&self) -> u32 {
+        let writes = locked(&self.writes);
+        let closed = writes.connections.values().filter(|connection| connection.locked && connection.close_if_idle()).count();
+        u32::try_from(closed).unwrap_or(u32::MAX)
+    }
+
+    /// Registers a connection that is about to pass its start-up message on to Cloud SQL, until the registration is dropped. It carries
+    /// the lock unless the database is not prod or the window is open now; the window is held meanwhile, so that it cannot end in between
+    /// and miss the connection.
+    fn register(self: &Arc<Port>) -> Registered {
+        let mut writes = locked(&self.writes);
+        let lock = self.db.is_prod() && writes.open_until((self.now)()).is_none();
+        let connection = Arc::new(Connection::new(lock));
+        let number = writes.next;
+        writes.next += 1;
+        writes.connections.insert(number, Arc::clone(&connection));
+        Registered { port: Arc::clone(self), number, connection }
+    }
+}
+
+/// The writable window of a port, and the connections it decides about.
+#[derive(Default)]
+struct Writes {
+    /// When the window ends, while it is open.
+    until: Option<SystemTime>,
+    /// The connections whose start-up message goes, or went, to Cloud SQL, by number.
+    connections: BTreeMap<u64, Arc<Connection>>,
+    next: u64,
+}
+
+impl Writes {
+    /// When the window ends, provided it is open at `now`.
+    fn open_until(&self, now: SystemTime) -> Option<SystemTime> {
+        self.until.filter(|until| now < *until)
+    }
+
+    /// The window ended at `ended`: each connection that came without the lock closes as soon as it is idle, and `CLOSE_UNLOCKED_WITHIN`
+    /// after `ended` at the latest.
+    fn window_ended(&self, ended: SystemTime) {
+        for connection in self.connections.values().filter(|connection| !connection.locked) {
+            connection.close_by(ended + CLOSE_UNLOCKED_WITHIN);
+        }
+    }
+}
+
+/// A connection's place among its port's, which it gives up when it is dropped.
+struct Registered {
+    port: Arc<Port>,
+    number: u64,
+    connection: Arc<Connection>,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        locked(&self.port.writes).connections.remove(&self.number);
+    }
+}
+
+/// One app's connection as its relay and its port share it.
+struct Connection {
+    /// Whether it carries Cloud SQL's read-only lock, which it keeps for as long as it lasts.
+    locked: bool,
+    flow: Mutex<Flow>,
+    /// Wakes its relay when it is to close.
+    closing: Notify,
+}
+
+/// What went through a connection, as far as its closing goes.
+#[derive(Default)]
+struct Flow {
+    /// Follows Cloud SQL's side.
+    server: ReadyTracker,
+    /// How many times Cloud SQL had said the session is idle (`ReadyTracker::idle_readies`) when the app last sent something.
+    sent_after: Option<u64>,
+    /// When it closes at the latest: the window it came in ended. It closes as soon as it is idle before then.
+    close_by: Option<SystemTime>,
+    closed: bool,
+}
+
+impl Flow {
+    /// Whether the session is idle: Cloud SQL's side is between messages after a ReadyForQuery that said so, and the app has sent nothing
+    /// since. Cloud SQL's side alone does not show a query that was sent and is not answered yet.
+    fn idle(&self) -> bool {
+        self.server.idle() && self.sent_after != Some(self.server.idle_readies())
+    }
+}
+
+impl Connection {
+    fn new(locked: bool) -> Connection {
+        Connection { locked, flow: Mutex::default(), closing: Notify::new() }
+    }
+
+    /// Closes it: its relay ends, and both its sides with it.
+    fn close(&self, flow: &mut Flow) {
+        if !flow.closed {
+            flow.closed = true;
+            self.closing.notify_one();
+        }
+    }
+
+    /// Cloud SQL sent `bytes`. They are followed before the app gets them, so that what the app sends after them counts as sent after
+    /// them.
+    fn from_server(&self, bytes: &[u8]) {
+        locked(&self.flow).server.feed(bytes);
+    }
+
+    /// The app got what Cloud SQL sent. Once its window ended, a connection closes as soon as that leaves it idle.
+    fn passed_on(&self) {
+        let mut flow = locked(&self.flow);
+        if flow.close_by.is_some() && flow.idle() {
+            self.close(&mut flow);
+        }
+    }
+
+    /// Whether what the app sent goes on to Cloud SQL. Nothing does once the connection closes, nor once its window ended while it is
+    /// idle: what the app sent then would start something new, and the connection closes instead.
+    fn may_send(&self) -> bool {
+        let mut flow = locked(&self.flow);
+        if flow.close_by.is_some() && flow.idle() {
+            self.close(&mut flow);
+        }
+        if flow.closed {
+            return false;
+        }
+        flow.sent_after = Some(flow.server.idle_readies());
+        true
+    }
+
+    /// The window it came in ended: it closes as soon as it is idle, and at `by` at the latest.
+    fn close_by(&self, by: SystemTime) {
+        let mut flow = locked(&self.flow);
+        flow.close_by = Some(by);
+        if flow.idle() {
+            self.close(&mut flow);
+        }
+    }
+
+    /// A window is open again: it goes on.
+    fn reprieve(&self) {
+        locked(&self.flow).close_by = None;
+    }
+
+    /// Closes it when it is past its time at `now`.
+    fn close_if_due(&self, now: SystemTime) {
+        let mut flow = locked(&self.flow);
+        if flow.close_by.is_some_and(|by| now >= by) {
+            self.close(&mut flow);
+        }
+    }
+
+    /// Closes it when it is idle, and answers whether it did.
+    fn close_if_idle(&self) -> bool {
+        let mut flow = locked(&self.flow);
+        let idle = !flow.closed && flow.idle();
+        if idle {
+            self.close(&mut flow);
+        }
+        idle
     }
 }
 
@@ -430,15 +746,19 @@ fn answers(number: u16) -> bool {
         .any(|ip| std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, number), PROBE_WITHIN).is_ok())
 }
 
-/// Runs a port: takes the apps that connect until the port stops or the app quits, then lets go of the address, closes every connection,
-/// lets go of what was kept for the database (its password, its certificate) and of `hold`.
-async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstream>, sign_in_within: Duration, hold: Box<dyn Send>) {
+/// Runs a port: takes the apps that connect until the port stops or the app quits, and looks at its writable window every `tick`; then
+/// lets go of the address, closes every connection, lets go of what was kept for the database (its password, its certificate) and of
+/// `hold`.
+async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstream>, sign_in_within: Duration, tick: Duration, hold: Box<dyn Send>) {
     let mut apps = JoinSet::new();
     let mut poll = tokio::time::interval(QUIT_POLL);
+    let mut ticker = tokio::time::interval(tick);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     while !port.quit.is_cancelled() {
         tokio::select! {
             () = port.woken.notified() => {}
             _ = poll.tick() => {}
+            _ = ticker.tick() => port.tick((port.now)()),
             accepted = listener.accept() => match accepted {
                 Ok((app, _)) => {
                     apps.spawn(serve_app(Arc::clone(&port), app, Arc::clone(&upstream), sign_in_within));
@@ -524,19 +844,21 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
     }
     drop(password);
     let (db, quit, preparing) = (port.db.clone(), port.quit.clone(), Arc::clone(&upstream));
-    let iam_user = match tokio::task::spawn_blocking(move || preparing.prepare(&db, &quit)).await {
-        Ok(Ok(iam_user)) => iam_user,
+    let prepared = match tokio::task::spawn_blocking(move || preparing.prepare(&db, &quit)).await {
+        Ok(Ok(prepared)) => prepared,
         Ok(Err(sentence)) => return refuse(&mut app, "28000", &cut(&sentence)).await,
         Err(_) => return refuse(&mut app, "28000", "Lunport could not get the connection ready.").await,
     };
-    let startup = startup.with_user(&iam_user);
-    let startup = if locks(&port.db) { startup.with_read_only_lock() } else { startup };
+    // Whether the session carries the lock is decided here, and the port follows the connection from here on.
+    let registered = port.register();
+    let startup = startup.with_user(&prepared.iam_user);
+    let startup = if registered.connection.locked { startup.with_read_only_lock() } else { startup };
     let message = startup.encode();
     if message.len() - 4 > MAX_CLOUD_SQL_STARTUP_BYTES {
         return refuse(&mut app, "08P01", TOO_LONG).await;
     }
     let connection = port.db.connection_name();
-    let Dialling { material, stream } = upstream.connect(&port.db.id);
+    let Dialling { material, stream } = upstream.connect(&port.db.id, Some(prepared.material));
     // What failed before Cloud SQL answered is not dialled with again: in TLS 1.3 a refused certificate shows only then.
     let forget = || {
         if let Some(material) = material {
@@ -569,7 +891,7 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
     match auth {
         ServerAuth::Ok => {
             if app.write_all(&first).await.is_ok() {
-                relay(app, server, &first).await;
+                relay(app, server, &first, &registered.connection).await;
             }
         }
         ServerAuth::NeedsPassword => {
@@ -582,12 +904,6 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
             let _ = app.shutdown().await;
         }
     }
-}
-
-/// Whether a new connection to `db` gets Cloud SQL's read-only lock: every connection to a prod database does, since writes through the
-/// port cannot be unlocked.
-fn locks(db: &SavedDatabase) -> bool {
-    db.is_prod()
 }
 
 /// Ends the app's connection with a fatal ErrorResponse.
@@ -607,7 +923,7 @@ async fn refuse_unreadable(app: &mut TcpStream, error: &io::Error) {
 /// the request. The app's connection closes after it, which tells the app that the request was handled.
 async fn pass_on_cancel(upstream: &dyn Upstream, db_id: &str, request: &[u8]) {
     let passed = async {
-        let mut server = upstream.connect(db_id).stream.await?;
+        let mut server = upstream.connect(db_id, None).stream.await?;
         server.write_all(request).await?;
         server.flush().await?;
         let mut rest = [0u8; 64];
@@ -617,15 +933,27 @@ async fn pass_on_cancel(upstream: &dyn Upstream, db_id: &str, request: &[u8]) {
     let _ = tokio::time::timeout(CANCEL_WITHIN, passed).await;
 }
 
-/// Relays a signed-in session both ways until either side ends it. The server's side feeds a `ReadyTracker`, from Cloud SQL's first
-/// answer (`first`, passed on already) on, which follows whether the session is idle.
-async fn relay(app: TcpStream, server: BoxStream, first: &[u8]) {
-    let mut tracker = ReadyTracker::default();
-    tracker.feed(first);
+/// Relays a signed-in session both ways until either side ends it or the port closes `connection`. Both sides are followed for whether
+/// the session is idle: Cloud SQL's from its first answer (`first`, passed on already) on, before the app gets what it sends, and the
+/// app's before what it sends goes on.
+async fn relay(app: TcpStream, server: BoxStream, first: &[u8], connection: &Connection) {
+    connection.from_server(first);
     let (mut from_app, mut to_app) = app.into_split();
     let (mut from_server, mut to_server) = tokio::io::split(server);
     let upward = async {
-        let _ = tokio::io::copy(&mut from_app, &mut to_server).await;
+        let mut buffer = vec![0u8; RELAY_BUFFER_BYTES];
+        loop {
+            let read = match from_app.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            if !connection.may_send() {
+                return;
+            }
+            if to_server.write_all(&buffer[..read]).await.is_err() || to_server.flush().await.is_err() {
+                break;
+            }
+        }
         let _ = to_server.shutdown().await;
     };
     let downward = async {
@@ -635,16 +963,18 @@ async fn relay(app: TcpStream, server: BoxStream, first: &[u8]) {
                 Ok(0) | Err(_) => break,
                 Ok(read) => read,
             };
-            tracker.feed(&buffer[..read]);
+            connection.from_server(&buffer[..read]);
             if to_app.write_all(&buffer[..read]).await.is_err() {
                 break;
             }
+            connection.passed_on();
         }
         let _ = to_app.shutdown().await;
     };
     tokio::select! {
         () = upward => {}
         () = downward => {}
+        () = connection.closing.notified() => {}
     }
 }
 
@@ -657,6 +987,11 @@ fn unreachable(connection: &str, error: &io::Error) -> String {
     let reason = reason.trim();
     let end = if reason.ends_with('.') { "" } else { "." };
     cut(&format!("Lunport could not reach {connection}: {reason}{end}"))
+}
+
+/// `time` in milliseconds since the Unix epoch, as the page reads it.
+fn millis(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// `text` as an error sentence carries it: printable, and at most `ERROR_CHARS` characters.

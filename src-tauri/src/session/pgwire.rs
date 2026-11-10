@@ -376,11 +376,14 @@ async fn read_server_message<R: AsyncRead + Unpin>(r: &mut R, raw: &mut Vec<u8>)
 /// length) and counts off the body of each message it has no use for, so that a result of any size costs the same. A stream that breaks
 /// the framing is never idle again.
 ///
-/// It sees only what the server sends: a query that was sent and has not been answered yet does not show.
+/// It sees only what the server sends: a query that was sent and has not been answered yet does not show. It counts the ReadyForQuery
+/// messages that said idle, so that a reader who also follows what was sent can tell which came last.
 #[derive(Debug, Default)]
 pub struct ReadyTracker {
     position: Position,
     idle: bool,
+    /// How many ReadyForQuery messages with the status `I` it has read.
+    idle_readies: u64,
 }
 
 /// Where in the framing of the server's stream the next byte is.
@@ -425,11 +428,20 @@ impl ReadyTracker {
                 }
                 Position::Status => {
                     self.idle = byte == b'I';
+                    if self.idle {
+                        self.idle_readies = self.idle_readies.wrapping_add(1);
+                    }
                     self.position = Position::Type;
                     bytes = rest;
                 }
             }
         }
+    }
+
+    /// How many ReadyForQuery messages with the status `I` it has read. A whole answer that comes in one read leaves `idle` as it was
+    /// before it, but not this count.
+    pub fn idle_readies(&self) -> u64 {
+        self.idle_readies
     }
 
     /// Whether the session is idle: the stream is between two messages, the last ReadyForQuery had the status `I`, outside a transaction,
@@ -1202,6 +1214,35 @@ mod tests {
                 assert!(tracker.idle(), "{what}: whole, cut at {cut}");
             }
         }
+    }
+
+    #[test]
+    fn each_ready_for_query_that_says_idle_is_counted() {
+        let mut tracker = ReadyTracker::default();
+        assert_eq!(tracker.idle_readies(), 0);
+        tracker.feed(&ready(b'I'));
+        assert_eq!(tracker.idle_readies(), 1);
+        // A whole answer in one read: the session is idle before it and after it, and the count shows that it was not in between.
+        tracker.feed(&[typed(b'C', b"SELECT 1\0"), ready(b'I')].concat());
+        assert!(tracker.idle());
+        assert_eq!(tracker.idle_readies(), 2);
+        // A notice, a setting or a notification leaves the count as it is, and so does a ReadyForQuery inside a transaction or after an
+        // error.
+        tracker.feed(&[typed(b'N', b"SNOTICE\0\0"), typed(b'S', b"TimeZone\0UTC\0"), typed(b'A', &[0, 0, 0, 1, 0, 0])].concat());
+        tracker.feed(&[typed(b'C', b"BEGIN\0"), ready(b'T'), ready(b'E')].concat());
+        assert_eq!(tracker.idle_readies(), 2);
+        // Split a byte at a time, a ReadyForQuery counts once, when its status is in.
+        let wire = ready(b'I');
+        for byte in &wire[..wire.len() - 1] {
+            tracker.feed(&[*byte]);
+            assert_eq!(tracker.idle_readies(), 2);
+        }
+        tracker.feed(&wire[wire.len() - 1..]);
+        assert_eq!(tracker.idle_readies(), 3);
+        // A stream that lost the framing counts nothing more.
+        tracker.feed(&[b'D', 0, 0, 0, 3]);
+        tracker.feed(&ready(b'I'));
+        assert_eq!(tracker.idle_readies(), 3);
     }
 
     #[test]

@@ -1,7 +1,9 @@
-//! The Databases page's commands as the page uses them: the list, saving and deleting, and the password of a database's local port.
+//! The Databases page's commands as the page uses them: the list, saving and deleting, the password of a database's local port, and
+//! unlocking writes to a prod database.
 
 use super::*;
-use crate::session::database_ports::tests::{wait_until, App, FakeUpstream};
+use crate::session::database_ports::tests::{t0, wait_until, App, Clock, FakeUpstream};
+use crate::session::database_ports::WRITABLE_WINDOW;
 use crate::sync::{
     databases::{
         tests::{database, state},
@@ -13,7 +15,7 @@ use crate::sync::{
 };
 use serde_json::json;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 const ORDERS: &str = "00000000000000a1";
@@ -441,4 +443,72 @@ fn a_password_the_keychain_will_not_release_is_reported_once_the_database_is_gon
     assert_eq!(error, "The database was deleted, but its password could not be removed from the keychain: keychain error: denied");
     assert!(!error.contains(password.as_str()));
     assert!(listed(&d).is_empty(), "the record is gone");
+}
+
+// ---- Unlocking writes ----
+
+const STAY_LOCKED: &str = "Writes stay locked.";
+
+/// Ports on `clock` with `database` running on a port the system picks.
+fn running_on(clock: &Clock, database: SavedDatabase) -> DatabasePorts {
+    let now = clock.clone();
+    let ports = DatabasePorts::new(Arc::new(FakeUpstream::default())).timed_by(Arc::new(move || now.now()), Duration::from_millis(10));
+    let started = SavedDatabase { local_port: Some(0), ..database };
+    ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    ports
+}
+
+/// `time` in milliseconds since the Unix epoch.
+fn ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+#[test]
+fn the_dialog_method_requires_an_in_app_confirmation() {
+    let clock = Clock::new();
+    let ports = running_on(&clock, database(ORDERS));
+    let not_asked = |_: &str| -> Result<bool, String> { panic!("the system is not asked where Lunport's dialog confirms") };
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::Dialog, false, not_asked), Err(STAY_LOCKED.to_string()));
+    assert_eq!(ports.live(ORDERS).writable_until_ms, None, "nothing was unlocked");
+    let until = ms(t0() + WRITABLE_WINDOW);
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::Dialog, true, not_asked), Ok(until));
+    assert_eq!(ports.live(ORDERS).writable_until_ms, Some(until));
+}
+
+#[test]
+fn the_system_method_asks_the_person_whatever_the_page_says() {
+    let clock = Clock::new();
+    let ports = running_on(&clock, database(ORDERS));
+    let asked = RefCell::new(Vec::new());
+    // The person answers the system's question after `taking`.
+    let answers = |answer: Result<bool, String>, taking: Duration| {
+        let (asked, clock) = (&asked, &clock);
+        move |reason: &str| {
+            asked.borrow_mut().push(reason.to_string());
+            clock.at(taking);
+            answer
+        }
+    };
+    // Cancelled, or a Mac that cannot ask after all: writes stay locked, even where the page says it confirmed.
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::System, true, answers(Ok(false), Duration::ZERO)), Err(STAY_LOCKED.to_string()));
+    let unavailable = Err("Touch ID is not available.".to_string());
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::System, true, answers(unavailable, Duration::ZERO)), Err(STAY_LOCKED.to_string()));
+    assert_eq!(ports.live(ORDERS).writable_until_ms, None);
+    // Confirmed after a minute and a half: the fifteen minutes count from then.
+    let taking = Duration::from_secs(90);
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::System, false, answers(Ok(true), taking)), Ok(ms(t0() + taking + WRITABLE_WINDOW)));
+    assert_eq!(*asked.borrow(), vec!["unlock writes on Orders (PROD) for 15 minutes"; 3]);
+}
+
+#[test]
+fn nobody_is_asked_to_unlock_what_cannot_be_unlocked() {
+    let never = |_: &str| -> Result<bool, String> { panic!("the person is not asked") };
+    // A database that does not run.
+    let stopped = DatabasePorts::new(Arc::new(FakeUpstream::default()));
+    let not_running = Err("Start the database before you unlock writes.".to_string());
+    assert_eq!(unlock_writes(&stopped, ORDERS, UnlockMethod::System, true, never), not_running);
+    // A dev database.
+    let dev = running_on(&Clock::new(), named(ANALYTICS, "Analytics"));
+    assert_eq!(unlock_writes(&dev, ANALYTICS, UnlockMethod::System, true, never), Err("Only prod databases are locked.".to_string()));
+    assert_eq!(unlock_writes(&dev, ANALYTICS, UnlockMethod::Dialog, true, never), Err("Only prod databases are locked.".to_string()));
 }
