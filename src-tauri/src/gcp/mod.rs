@@ -8,13 +8,15 @@
 //! Lunport runs gcloud.
 //!
 //! `cloudsql` is the Cloud SQL Admin API behind the saved databases: an instance's connect settings, the client certificate Cloud SQL
-//! signs for a key made for one connection, and a project's PostgreSQL instances.
+//! signs for a key made for one connection, and a project's PostgreSQL instances. `cloudsql_tls` dials the instance with that
+//! certificate, over TLS 1.3, and checks the server certificate against the instance's own certificate authorities.
 //!
 //! `relay.rs` and `iap.rs` are ported from gcloud (Apache License 2.0); see `NOTICE.md` in this directory.
 
 pub mod auth;
 pub mod cli;
 pub mod cloudsql;
+pub mod cloudsql_tls;
 pub mod credentials;
 pub mod iap;
 pub mod oslogin;
