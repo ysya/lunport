@@ -90,6 +90,8 @@ type Options = {
   error?: string | null;
   /** What the account field and the suggestions read; by default a client that has read gcloud's accounts. */
   client?: QueryClient;
+  /** What Google is asked about; by default the draft's account and project, as when typing has paused. */
+  lookup?: { account: string | null; project: string };
 };
 
 /** The view of the dialog over `initial`, with the state the dialog keeps for it: pressing a control changes `kept` as the dialog's state setters do. */
@@ -102,6 +104,7 @@ function editor(initial: SavedDatabase, options: Options = {}) {
     mode: kept.mode,
     connection: kept.connection,
     instances: options.instances ?? { state: "waiting" },
+    lookup: options.lookup ?? { account: kept.draft.account, project: kept.draft.project },
     used: options.used ?? [],
     busy: options.busy ?? false,
     error: options.error ?? null,
@@ -436,6 +439,17 @@ describe("the New database dialog", () => {
     expect(instancesRead(DEV, { data: undefined, isError: true, error: `Sign in\u202e again.` })).toEqual({ state: "failed", message: "Sign in⟨U+202E⟩ again." });
   });
 
+  it("reads_the_list_as_loading_while_the_project_or_account_is_still_being_typed", () => {
+    const found = [ORDERS_PG];
+    // What the query holds is for the project the dialog settled on, which is not the one typed now: not shown as this project's.
+    expect(instancesRead(DEV, { data: found, isError: false, error: null }, false)).toEqual({ state: "loading" });
+    expect(instancesRead(DEV, { data: undefined, isError: true, error: "Sign in again." }, false)).toEqual({ state: "loading" });
+    expect(instancesRead(DEV, { data: found, isError: false, error: null }, true)).toEqual(listed(found));
+    // A text that is not a project is not waited for: nothing will be asked about it.
+    expect(instancesRead("acme", { data: found, isError: false, error: null }, false)).toEqual({ state: "waiting" });
+    expect(instancesRead("", { data: found, isError: false, error: null }, false)).toEqual({ state: "waiting" });
+  });
+
   it("offers_the_three_environments_as_one_choice", () => {
     const dialog = editor(newDatabase());
     const html = dialog.markup();
@@ -497,6 +511,18 @@ describe("the New database dialog", () => {
     switchOf(dialog.tree(), "Let other apps connect").onCheckedChange(false);
     expect(dialog.kept.draft.local_port).toBeNull();
     expect(hasField(dialog.tree(), "Port on 127.0.0.1")).toBe(false);
+  });
+
+  it("asks_about_the_settled_project_and_account_not_every_keystroke_but_shows_the_account_as_it_is", () => {
+    const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
+    // The project typed so far, and the one typing last paused on.
+    const dialog = editor({ ...newDatabase(), account: "ops@example.com", project: "acme-prod-1234", pam: check }, { lookup: { account: "frank@example.com", project: PROD } });
+    expect(propsOf(elementsOf(dialog.tree(), EntitlementSuggestions)[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check });
+    // The account field shows what was chosen or typed, whatever Google was last asked about.
+    expect(propsOf(elementsOf(dialog.tree(), GoogleAccountField)[0])).toMatchObject({ account: "ops@example.com" });
+    // Without a lookup that differs from the draft, it is the draft's.
+    const same = editor({ ...newDatabase(), account: "frank@example.com", project: PROD, pam: check });
+    expect(propsOf(elementsOf(same.tree(), EntitlementSuggestions)[0])).toMatchObject({ account: "frank@example.com", project: PROD });
   });
 
   it("hands_the_google_account_field_the_drafts_account_and_takes_its_choice_back", () => {
@@ -591,6 +617,16 @@ describe("the dialog as the Databases page mounts it", () => {
     expect(saved.draft).toEqual(SAVED);
     expect(text(renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial: SAVED })} /></QueryClientProvider>))).toContain("Connection name");
     expect(renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial: SAVED })} /></QueryClientProvider>)).toContain(`value="${CONNECTION}"`);
+  });
+
+  it("looks_up_the_account_and_project_it_opens_with_at_once_and_lists_while_the_rest_is_typed", () => {
+    const client = cache((c) => c.setQueryData(databaseInstancesQuery("frank@example.com", PROD).queryKey, [ORDERS_PG]));
+    // Nothing is waited for at mount: the list is the one for the project and account the dialog opened with.
+    const opened = viewOf(client, { initial: newInProd }).props;
+    expect(opened.lookup).toEqual({ account: "frank@example.com", project: PROD });
+    expect(opened.instances).toEqual(listed([ORDERS_PG]));
+    expect(viewOf(client, { initial: newDatabase() }).props.lookup).toEqual({ account: null, project: "" });
+    expect(viewOf(client, { initial: SAVED }).props.lookup).toEqual({ account: SAVED.account, project: SAVED.project });
   });
 
   it("skips_the_ports_of_the_other_databases_and_hands_over_what_it_was_given", () => {

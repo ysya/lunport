@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { TaskDialogBody } from "@/components/app/TaskDialog";
 import { revealHidden } from "@/lib/reveal-hidden";
+import { useDebounced } from "@/lib/use-debounced";
 import { cn, errorMessage } from "@/lib/utils";
 import {
   connectionName,
@@ -45,10 +46,12 @@ export type InstancesRead =
 
 /**
  * The list as its query left it for `project`: nothing to read until the project reads as one; then loading; the sentence the read
- * failed with, in place of any list an earlier read found; or the instances.
+ * failed with, in place of any list an earlier read found; or the instances. While typing in the project or account is still going on
+ * (`settled` is false) the query holds the answer for what was typed before, which is not shown as this project's: the list is loading.
  */
-export function instancesRead(project: string, query: { data: InstanceSummary[] | undefined; isError: boolean; error: unknown }): InstancesRead {
+export function instancesRead(project: string, query: { data: InstanceSummary[] | undefined; isError: boolean; error: unknown }, settled = true): InstancesRead {
   if (!isProjectId(project)) return { state: "waiting" };
+  if (!settled) return { state: "loading" };
   if (query.isError) return { state: "failed", message: revealHidden(errorMessage(query.error)) };
   return query.data ? { state: "listed", instances: query.data } : { state: "loading" };
 }
@@ -174,6 +177,8 @@ export type DatabaseEditorViewProps = {
   /** The connection name as typed, which may not read as one yet. */
   connection: string;
   instances: InstancesRead;
+  /** The account and project Google is asked about for the grant check's suggestions: the draft's, once typing in them has paused. */
+  lookup: { account: string | null; project: string };
   /** The local ports the other databases hold. */
   used: number[];
   busy: boolean;
@@ -190,7 +195,7 @@ export type DatabaseEditorViewProps = {
  * The dialog's body and its buttons, drawn from the draft. No hooks: exported for the tests. Every control hands the whole next draft
  * to `onDraft`. Saving is held back while the database is nowhere, and while a save is under way every control is off.
  */
-export function DatabaseEditorView({ draft, mode, connection, instances, used, busy, error, onDraft, onMode, onConnection, onSave, onCancel }: DatabaseEditorViewProps) {
+export function DatabaseEditorView({ draft, mode, connection, instances, lookup, used, busy, error, onDraft, onMode, onConnection, onSave, onCancel }: DatabaseEditorViewProps) {
   const patch = (changes: Partial<SavedDatabase>) => onDraft({ ...draft, ...changes });
   const ready = located(draft);
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
@@ -283,8 +288,8 @@ export function DatabaseEditorView({ draft, mode, connection, instances, used, b
                 <RecordField label="Entitlements">
                   <EntitlementsInput value={draft.pam.entitlements} disabled={busy} onChange={(entitlements) => onDraft(withEntitlements(draft, entitlements))} />
                   <EntitlementSuggestions
-                    account={draft.account}
-                    project={draft.project}
+                    account={lookup.account}
+                    project={lookup.project}
                     pam={draft.pam}
                     disabled={busy}
                     onAdd={(id) => onDraft(withEntitlements(draft, [...(draft.pam?.entitlements ?? []), id]))}
@@ -349,21 +354,30 @@ export type DatabaseEditorProps = {
   onCancel: () => void;
 };
 
+/** How long typing in the project or account must pause before Google is asked about what was typed. */
+const LOOKUP_DELAY_MS = 400;
+
 /**
  * The body and buttons of the New database / Edit database dialog, over `initial`. A saved database opens at its connection name, a new
- * one at the list of instances. The instances are read only while the list is shown, for the draft's account and project.
+ * one at the list of instances. The instances are read only while the list is shown. Google is asked about the account and project the
+ * draft holds once typing in them has paused (`LOOKUP_DELAY_MS`), not about every start of a project id typed by hand; the dialog opens
+ * with what it was given, without waiting.
  */
 export function DatabaseEditor({ initial, existing, busy, error, onSave, onCancel }: DatabaseEditorProps) {
   const [draft, setDraft] = useState(initial);
   const [mode, setMode] = useState<Mode>(() => (initial.instance === "" ? "pick" : "manual"));
   const [connection, setConnection] = useState(() => (located(initial) ? connectionName(initial) : ""));
-  const list = useQuery({ ...databaseInstancesQuery(draft.account, draft.project), enabled: mode === "pick" && isProjectId(draft.project) });
+  const project = useDebounced(draft.project, LOOKUP_DELAY_MS);
+  const account = useDebounced(draft.account, LOOKUP_DELAY_MS);
+  const settled = project === draft.project && account === draft.account;
+  const list = useQuery({ ...databaseInstancesQuery(account, project), enabled: mode === "pick" && isProjectId(project) });
   return (
     <DatabaseEditorView
       draft={draft}
       mode={mode}
       connection={connection}
-      instances={instancesRead(draft.project, list)}
+      instances={instancesRead(draft.project, list, settled)}
+      lookup={{ account, project }}
       used={usedPorts(existing)}
       busy={busy}
       error={error}
