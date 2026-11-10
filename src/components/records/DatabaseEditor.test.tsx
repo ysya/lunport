@@ -15,6 +15,7 @@ import {
   DatabaseEditorView,
   instanceProblem,
   instancesRead,
+  opening,
   pickInstance,
   withConnectionName,
   withProject,
@@ -493,6 +494,31 @@ describe("the New database dialog", () => {
     expect(propsOf(elementsOf(editor({ ...newDatabase(), pam: check }, { busy: true }).tree(), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
   });
 
+  it("a_new_database_opens_offered_to_other_apps_on_the_first_free_port_and_a_saved_one_keeps_its_own_setting", () => {
+    const other = (id: string, local_port: number | null): SavedDatabase => ({ ...SAVED, id, local_port });
+    // A new database has no identity yet: it is shared from the first port the other databases leave free.
+    expect(opening(newDatabase(), [])).toEqual({ ...newDatabase(), local_port: 6543 });
+    expect(opening(newDatabase(), [other("00000000000000a2", 6543), other("00000000000000a3", null), other("00000000000000a4", 6544)])).toEqual({ ...newDatabase(), local_port: 6545 });
+    expect(opening(newDatabase(), [other("00000000000000a2", 6544)]).local_port).toBe(6543);
+    // A saved database is opened as it is saved: not shared stays not shared, and its own port stays its own.
+    const unshared = { ...SAVED, local_port: null };
+    expect(opening(unshared, [other("00000000000000a2", 6543)])).toBe(unshared);
+    expect(opening(SAVED, [other("00000000000000a2", 6543)])).toBe(SAVED);
+  });
+
+  it("the_dialog_of_a_new_database_shows_sharing_on_with_the_port_proposed_and_a_saved_one_as_it_is", () => {
+    const client = cache();
+    const other = (id: string, local_port: number | null): SavedDatabase => ({ ...SAVED, id, local_port });
+    const shown = (initial: SavedDatabase, existing: SavedDatabase[] = []) => {
+      const tree = DatabaseEditorView(viewOf(client, { initial, existing }).props);
+      return { sharing: switchOf(tree, "Let other apps connect").checked, port: hasField(tree, "Port on 127.0.0.1") ? valueOf(tree, "Port on 127.0.0.1") : null };
+    };
+    expect(shown(newDatabase())).toEqual({ sharing: true, port: 6543 });
+    expect(shown(newDatabase(), [other("00000000000000a2", 6543), other("00000000000000a3", 6544)])).toEqual({ sharing: true, port: 6545 });
+    expect(shown({ ...SAVED, local_port: null }, [other("00000000000000a2", 6543)])).toEqual({ sharing: false, port: null });
+    expect(shown(SAVED, [other("00000000000000a2", 6544)])).toEqual({ sharing: true, port: 6543 });
+  });
+
   it("sharing_proposes_the_first_free_port_and_off_offers_none", () => {
     const dialog = editor(newDatabase(), { used: [6543, 6544] });
     expect(switchOf(dialog.tree(), "Let other apps connect").checked).toBe(false);
@@ -610,7 +636,7 @@ describe("the dialog as the Databases page mounts it", () => {
     const fresh = viewOf(client).props;
     expect(fresh.mode).toBe("pick");
     expect(fresh.connection).toBe("");
-    expect(fresh.draft).toEqual(newDatabase());
+    expect(fresh.draft).toEqual({ ...newDatabase(), local_port: 6543 });
     const saved = viewOf(client, { initial: SAVED }).props;
     expect(saved.mode).toBe("manual");
     expect(saved.connection).toBe(CONNECTION);

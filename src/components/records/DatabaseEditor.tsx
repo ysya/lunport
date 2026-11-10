@@ -106,6 +106,15 @@ const finished = (draft: SavedDatabase): SavedDatabase => ({ ...draft, name: dra
 /** The local ports the other databases hold. */
 const usedPorts = (existing: SavedDatabase[]) => existing.flatMap((database) => database.local_port ?? []);
 
+/**
+ * The draft a dialog opens with: the database as it is, except a new one (it has no identity yet), which starts offered to other apps on
+ * the first free port from 6543, since the local port is the only way to use a saved database in this release. A saved database keeps
+ * its own setting.
+ */
+export function opening(initial: SavedDatabase, existing: SavedDatabase[]): SavedDatabase {
+  return initial.id === "" ? { ...initial, local_port: suggestPort(usedPorts(existing)) } : initial;
+}
+
 /** What the version of an instance reads as in the list: `POSTGRES_16` is PostgreSQL 16; a version in another form is shown as Google gives it. */
 const versionName = (version: string) => {
   const major = /^POSTGRES_(\d+)$/.exec(version)?.[1];
@@ -358,13 +367,13 @@ export type DatabaseEditorProps = {
 const LOOKUP_DELAY_MS = 400;
 
 /**
- * The body and buttons of the New database / Edit database dialog, over `initial`. A saved database opens at its connection name, a new
- * one at the list of instances. The instances are read only while the list is shown. Google is asked about the account and project the
+ * The body and buttons of the New database / Edit database dialog, over `initial`. A saved database opens as it is saved, at its
+ * connection name; a new one at the list of instances, offered to other apps (`opening`). The instances are read only while the list is shown. Google is asked about the account and project the
  * draft holds once typing in them has paused (`LOOKUP_DELAY_MS`), not about every start of a project id typed by hand; the dialog opens
  * with what it was given, without waiting.
  */
 export function DatabaseEditor({ initial, existing, busy, error, onSave, onCancel }: DatabaseEditorProps) {
-  const [draft, setDraft] = useState(initial);
+  const [draft, setDraft] = useState(() => opening(initial, existing));
   const [mode, setMode] = useState<Mode>(() => (initial.instance === "" ? "pick" : "manual"));
   const [connection, setConnection] = useState(() => (located(initial) ? connectionName(initial) : ""));
   const project = useDebounced(draft.project, LOOKUP_DELAY_MS);
