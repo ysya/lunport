@@ -34,9 +34,9 @@ export function connectionName(d: SavedDatabase): string {
   return `${d.project}:${d.region}:${d.instance}`;
 }
 
-/** The three parts of a pasted connection name, or null when the text is not exactly three non-empty parts. Their values are judged when the database is saved. */
+/** The three parts of a pasted connection name, each trimmed, or null when the text is not exactly three parts with something in each. Their values are judged when the database is saved. */
 export function parseConnectionName(text: string): { project: string; region: string; instance: string } | null {
-  const parts = text.trim().split(":");
+  const parts = text.split(":").map((part) => part.trim());
   if (parts.length !== 3 || parts.some((part) => part === "")) return null;
   const [project, region, instance] = parts;
   return { project, region, instance };

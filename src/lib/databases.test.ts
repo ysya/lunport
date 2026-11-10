@@ -59,7 +59,15 @@ describe("saved databases", () => {
     expect(parseConnectionName(connectionName(ORDERS))).toEqual({ project: ORDERS.project, region: ORDERS.region, instance: ORDERS.instance });
   });
 
+  it("trims each part of what was pasted", () => {
+    expect(parseConnectionName(" acme-prod-123456 : asia-east1 : orders-pg ")).toEqual({ project: "acme-prod-123456", region: "asia-east1", instance: "orders-pg" });
+    expect(parseConnectionName("acme-prod-123456\t:\tasia-east1\n:\u00a0orders-pg")).toEqual({ project: "acme-prod-123456", region: "asia-east1", instance: "orders-pg" });
+  });
+
   it("rejects text that is not exactly three non-empty parts", () => {
+    expect(parseConnectionName("acme-prod-123456: :orders-pg")).toBeNull();
+    expect(parseConnectionName(" : asia-east1 : orders-pg")).toBeNull();
+    expect(parseConnectionName("acme-prod-123456 : asia-east1 :  ")).toBeNull();
     expect(parseConnectionName("acme-prod-123456:orders-pg")).toBeNull();
     expect(parseConnectionName("acme-prod-123456:asia-east1:orders-pg:extra")).toBeNull();
     expect(parseConnectionName("acme-prod-123456::orders-pg")).toBeNull();
