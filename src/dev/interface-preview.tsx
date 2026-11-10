@@ -58,19 +58,38 @@ else {
   // Aliases without spaces, which the host editor accepts on save.
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate" || scenario === "iap") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
   let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/lunport", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
+  // The `mcp-audit` scenario: AI activity of every kind, today and yesterday, on the fixture hosts and on one no longer in the library.
+  let activity: McpAuditEntry[] = [];
   if (scenario === "mcp-audit") {
-    const entry: McpAuditEntry = {
-      id: "fixture-command", client: "Example AI client", host_id: overview.hosts[0].id,
-      alias: "Production web", command: "uptime", mode: "ask", requested_by: ["Example AI client"],
-      requester_id: "fixture-client", client_info: { name: "Example AI client", title: null, version: "1" },
-      at_ms: Date.parse("2026-10-21T23:59:58.000Z"), completed_at_ms: Date.parse("2026-10-22T00:00:02.000Z"),
+    const today = new Date();
+    const at = (daysAgo: number, hour: number, minute: number) =>
+      new Date(today.getFullYear(), today.getMonth(), today.getDate() - daysAgo, hour, minute).getTime();
+    const [web, replica, bastion] = overview.hosts;
+    const done: McpAuditEntry = {
+      id: "fixture-command", client: "mcp", host_id: web.id, alias: web.payload.alias, command: "uptime", mode: "ask",
+      requested_by: ["Terminal", "claude"], requester_id: "4242", client_info: { name: "Example AI client", title: null, version: "1" },
+      at_ms: at(0, 9, 41) - 1_200, completed_at_ms: at(0, 9, 41),
       outcome: "allowed", ended: "exited", exit_code: 0, signal: null, detail: null,
-      review: null, stop: null, tunnel: null,
+      review: "approved", stop: null, tunnel: null,
     };
-    mcp = { ...mcp, enabled: true, recent: [entry, {
-      ...entry, id: "fixture-legacy-command", alias: "Database replica", command: "hostname",
-      at_ms: 0, completed_at_ms: Date.parse("2026-10-21T23:55:30.000Z"),
-    }] };
+    const notRun = { ended: null, exit_code: null };
+    activity = [
+      { ...done, ...notRun, id: "fixture-tunnel", command: "", mode: "auto_log", review: "auto_log", outcome: "tunnel_started", tunnel: "Database",
+        at_ms: at(0, 10, 5) - 2_400, completed_at_ms: at(0, 10, 5) },
+      { ...done, ...notRun, id: "fixture-error", host_id: replica.id, alias: replica.payload.alias, command: "df -h /var", outcome: "error",
+        stop: { kind: "error", window: null, reason: "Connection refused (os error 61)" }, at_ms: at(0, 9, 58) - 3_100, completed_at_ms: at(0, 9, 58) },
+      { ...done, id: "fixture-failed", command: "systemctl status nginx", exit_code: 3, at_ms: at(0, 9, 50) - 900, completed_at_ms: at(0, 9, 50) },
+      done,
+      { ...done, ...notRun, id: "fixture-key-refused", host_id: bastion.id, alias: bastion.payload.alias, command: "cat /etc/os-release", outcome: "denied",
+        stop: { kind: "refused", window: "server_key", reason: `The server key of ${bastion.payload.alias} was denied in Lunport's trust window; nothing was saved.` },
+        at_ms: at(1, 18, 12) - 14_000, completed_at_ms: at(1, 18, 12) },
+      { ...done, ...notRun, id: "fixture-proposal", host_id: "000000000000000a", alias: "web-2", command: "", outcome: "host_creation_not_completed",
+        review: "no_answer", stop: { kind: "no_answer", window: "approval", reason: "Host creation approval timed out." },
+        at_ms: at(1, 17, 30) - 120_000, completed_at_ms: at(1, 17, 30) },
+      { ...done, id: "fixture-deleted-host", host_id: "0000000000000009", alias: "web-1", mode: "auto_log", review: "auto_log",
+        at_ms: at(1, 16, 2) - 700, completed_at_ms: at(1, 16, 2) },
+    ];
+    mcp = { ...mcp, enabled: true, recent: activity.slice(0, 10) };
   }
   const updateOverview = (patch: Partial<RecordOverview>) => {
     overview = { ...overview, ...patch, generation: String(BigInt(overview.generation) + 1n) };
@@ -375,6 +394,7 @@ else {
         }
         if (command === "mcp_setup_overview") return { sandbox: true, executable: "/fixture/lunport", clients: ["codex", "claude_code", "claude_desktop", "cursor", "vscode"].map(client => ({ client, state: "not_added", config_path: null, message: null })) };
         if (command === "mcp_status") return mcp;
+        if (command === "mcp_activity") return { revision: 1, entries: args.since === 1 ? null : activity, audit_error: mcp.audit_error };
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
         if (command === "mcp_set_group_allowed") {
           if (args.generation !== overview.generation) throw new Error("The fixture library changed. Refresh AI Access and try again.");

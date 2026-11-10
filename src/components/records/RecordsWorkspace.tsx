@@ -773,6 +773,11 @@ export function RecordsWorkspace({
           setActiveTerminal(null);
           setPanel("account");
         }}
+        onOpenActivity={() => {
+          setSettingsOpen(false);
+          setActiveTerminal(null);
+          setPanel("activity");
+        }}
       />
     </div>
   );

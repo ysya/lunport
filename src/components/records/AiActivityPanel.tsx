@@ -1,3 +1,4 @@
+import "./ai-activity.css";
 import { useMemo, useState } from "react";
 import { Bot, Search } from "lucide-react";
 import type { McpAuditEntry } from "@/bindings/McpAuditEntry";

@@ -41,7 +41,7 @@ const SEARCH_ENTRIES: SearchEntry[] = [
   { category: "ai", title: "Command approval", detail: "Ask and Auto-log risk acknowledgement", section: "Command approval" },
   { category: "ai", title: "Connect Codex", detail: "Copy MCP client setup command", section: "Connect Codex" },
   { category: "ai", title: "Allowed hosts", detail: "Allow individual hosts or Groups and subgroups; grant or revoke AI permissions", section: "Allowed hosts" },
-  { category: "ai", title: "Recent activity", detail: "Public audit log and command results", section: "Recent activity" },
+  { category: "ai", title: "Activity", detail: "Latest AI activity and the AI activity page with every result", section: "Activity" },
   { category: "updates", title: "Software update", detail: "Installed version, check, download, install and restart", section: "" },
   { category: "updates", title: "Update preferences", detail: "Stable or Beta release channel and automatic checks", section: "Update preferences" },
   { category: "about", title: "About Lunport", detail: "Your SSH workspace, version, GitHub, release notes, support, license and Frank Sung", section: "" },
