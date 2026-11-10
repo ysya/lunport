@@ -76,8 +76,15 @@ pub(crate) struct Entry {
     /// How many of Lunport's windows its connection has open for the person:
     /// `start_tunnel` keeps waiting while one is.
     asking: std::sync::atomic::AtomicUsize,
+    /// For an AI client's tunnel, the first of Lunport's windows its connection opened that the person declined or left unanswered:
+    /// what `start_tunnel` records as having stopped the start.
+    declines: crate::mcp::activity::Declines,
 }
 impl Entry {
+    /// The first window its connection opened that the person declined or left unanswered, for an AI client's tunnel.
+    pub(crate) fn declines(&self) -> &crate::mcp::activity::Declines {
+        &self.declines
+    }
     /// Whether its connection has one of Lunport's windows open for the person now.
     pub(crate) fn asking(&self) -> bool {
         self.asking.load(Ordering::SeqCst) > 0
@@ -245,6 +252,7 @@ impl Tunnels {
             }),
             ended_for: Mutex::new(None),
             asking: Default::default(),
+            declines: Default::default(),
         });
         entries.insert(rule.id.clone(), Arc::clone(&entry));
         Ok((rule, entry, self.next.fetch_add(1, Ordering::Relaxed)))
@@ -436,7 +444,10 @@ pub(crate) fn run_for_ai(
     // The windows the connection opens count on the entry while they wait for the person: `start_tunnel` waits for
     // the person instead of answering that the tunnel is still connecting.
     let window = CountedWindow { inner: base.confirmer, entry };
-    let owner = CountedOwner { inner: owner, entry };
+    let counted = CountedOwner { inner: owner, entry };
+    // A credential or grant question the person declines or leaves unanswered is noted on the entry as they answer it: what
+    // `start_tunnel` records as having stopped the start.
+    let owner = crate::mcp::activity::NotingOwner { inner: &counted, declines: entry.declines() };
     let confirmer = ClientConfirmer::new(&window, ai.asker.clone());
     let guarded = Connector {
         engine: &engine,
@@ -471,6 +482,10 @@ pub(crate) fn run_for_ai(
         let _done = Done(&done);
         run(rule, entry, &guarded, &owner, &watch)
     });
+    // A server key question that ended without trust, noted before the worker ends the tunnel (`finish`), when `start_tunnel` reads it.
+    if let Some((kind, asked_in)) = confirmer.declined() {
+        entry.declines().note(kind, asked_in);
+    }
     // `start_tunnel` passes a "needs interaction:" answer on as it is and prefixes the others with "The tunnel could not start".
     result.map_err(|error| confirmer.answer(None).unwrap_or(error))
 }
@@ -920,6 +935,7 @@ mod tests {
             }),
             ended_for: Mutex::new(None),
             asking: Default::default(),
+            declines: Default::default(),
         };
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -1097,6 +1113,7 @@ mod tests {
             live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, started_by: Some("Claude".into()), ..Default::default() }),
             ended_for: Mutex::new(None),
             asking: Default::default(),
+            declines: Default::default(),
         };
         let ai = AiApproval { approved: &approved, asker: claude(auto_log), allowed, revoked };
         let ran = std::sync::atomic::AtomicBool::new(false);
@@ -1279,6 +1296,7 @@ mod tests {
             live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
             ended_for: Mutex::new(None),
             asking: Default::default(),
+            declines: Default::default(),
         };
         let window = Window { entry: &entry, seen: Mutex::new(Vec::new()) };
         let person = Person { entry: &entry, seen: Mutex::new(Vec::new()) };
@@ -1327,6 +1345,7 @@ mod tests {
             live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
             ended_for: Mutex::new(None),
             asking: Default::default(),
+            declines: Default::default(),
         };
         let owner = FakeOwner::typing(&[&grant_answer(60, "open the database tunnel")]);
         let ai = AiApproval { approved: &approved, asker: claude(true), allowed: &|| Ok(()), revoked: &|| None };
@@ -1390,6 +1409,7 @@ mod tests {
             live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
             ended_for: Mutex::new(None),
             asking: Default::default(),
+            declines: Default::default(),
         };
         let (asked, withdrawn) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
         // The access ends once the password window is open.
@@ -1415,6 +1435,7 @@ mod tests {
                 live: Mutex::new(TunnelLive { phase: TunnelPhase::Running, ..Default::default() }),
                 ended_for: Mutex::new(None),
                 asking: Default::default(),
+                declines: Default::default(),
             };
             match reason {
                 Some(reason) => entry.stop_because(reason.into()),
@@ -1430,5 +1451,62 @@ mod tests {
         finish(&ended, Ok(()));
         assert!(matches!(ended.live().phase, TunnelPhase::Error));
         assert_eq!(ended.live().forwarding.error.as_deref(), Some(AI_ACCESS_ENDED));
+    }
+
+    // ---- What an AI client's tunnel notes on its entry, for the AI activity page ----
+
+    use crate::mcp::{McpStopKind, McpWindow};
+
+    /// A tunnel to `db` over `directory` and `engine`, its server key questions answered by `confirmer` and its credential questions by
+    /// `owner`, run as an AI client's (`run_for_ai`) or, when `ai` is false, as a person's (`run`): the window its entry noted as declined.
+    fn noted(directory: &FakeDirectory, engine: &FakeEngine, confirmer: &FakeConfirmer, owner: &FakeOwner, ai: bool) -> Option<(McpStopKind, McpWindow)> {
+        let (keys, keychain, grants) = (FakeKeys::new(), MemKeychain::default(), GrantGates::default());
+        let connector = Connector { engine, directory, keys: &keys, keychain: &keychain, confirmer, grants: &grants };
+        let rule = TunnelRule { host_id: "id-db".into(), ..saved().1 };
+        let entry = Entry {
+            rule: rule.clone(),
+            account_id: None,
+            cancel: CancelToken::default(),
+            live: Mutex::new(TunnelLive { phase: TunnelPhase::Connecting, ..Default::default() }),
+            ended_for: Mutex::new(None),
+            asking: Default::default(),
+            declines: Default::default(),
+        };
+        let result = if ai {
+            let approved = crate::mcp::records::ApprovedTarget::capture(
+                &crate::session::directory::HostDirectory::resolve_public(directory, &HostQuery::Id("id-db".into())).unwrap(),
+                &keys,
+            )
+            .unwrap();
+            let ai = AiApproval { approved: &approved, asker: claude(true), allowed: &|| Ok(()), revoked: &|| None };
+            run_for_ai(&rule, &entry, &connector, owner, &ai, &|| None, &|_| false)
+        } else {
+            run(&rule, &entry, &connector, owner, &Watch::of_a_person(&|| None, &|_| false))
+        };
+        assert!(result.is_err(), "the tunnel did not start");
+        entry.declines().first()
+    }
+
+    #[test]
+    fn an_ai_tunnel_worker_notes_a_refused_password_on_its_entry() {
+        use crate::session::auth::Reply;
+        use crate::ssh::fake::{FakeLogin, FakeMethods};
+        let directory = FakeDirectory::new().with_host("db", AuthMethod::Password).with_pin("db", default_server_key());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+        let answering = |reply: Reply| FakeOwner::answering(vec![reply]);
+        let window = FakeConfirmer::default();
+        assert_eq!(noted(&directory, &engine, &window, &answering(Reply::Cancelled), true), Some((McpStopKind::Refused, McpWindow::Credentials)));
+        assert_eq!(noted(&directory, &engine, &window, &answering(Reply::TimedOut), true), Some((McpStopKind::NoAnswer, McpWindow::Credentials)));
+        // A person's own tunnel is no AI request: nothing is noted.
+        assert_eq!(noted(&directory, &engine, &window, &answering(Reply::Cancelled), false), None);
+    }
+
+    #[test]
+    fn an_ai_tunnel_worker_notes_a_refused_server_key_on_its_entry() {
+        use crate::session::testing::Decision;
+        let directory = FakeDirectory::new().with_host("db", key());
+        let refusing = || FakeConfirmer::deciding(vec![Decision::Refuse]);
+        assert_eq!(noted(&directory, &FakeEngine::new(), &refusing(), &FakeOwner::default(), true), Some((McpStopKind::Refused, McpWindow::ServerKey)));
+        assert_eq!(noted(&directory, &FakeEngine::new(), &refusing(), &FakeOwner::default(), false), None);
     }
 }

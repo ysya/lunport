@@ -255,9 +255,12 @@ pub(super) fn create(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let mut decision = None;
     let result = (|| {
         // Saving connection data is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err("Host creation approval timed out.".into()),
             ApprovalDecision::Cancel => return Err("Host creation was canceled.".into()),
@@ -295,6 +298,8 @@ pub(super) fn create(
             "host_creation_not_completed"
         }
         .into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result
@@ -521,9 +526,12 @@ pub(super) fn update(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let mut decision = None;
     let result = (|| {
         // Saving connection data is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err("Host update approval timed out.".into()),
             ApprovalDecision::Cancel => return Err("Host update was canceled.".into()),
@@ -562,6 +570,8 @@ pub(super) fn update(
         requester_id: context.requester_id,
         client_info: context.client_info,
         outcome: if result.is_ok() { "host_updated" } else { "host_update_not_completed" }.into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result
@@ -781,9 +791,12 @@ fn transport_change(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let mut decision = None;
     let result = (|| {
         // Saving connection data is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err(words.timed_out.into()),
             ApprovalDecision::Cancel => return Err(words.canceled.into()),
@@ -816,6 +829,8 @@ fn transport_change(
         requester_id: context.requester_id,
         client_info: context.client_info,
         outcome: if result.is_ok() { words.saved } else { words.not_saved }.into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result

@@ -928,3 +928,80 @@ fn a_denied_timed_out_or_cancelled_transport_change_changes_nothing_and_is_audit
         assert!(r.records_active.lock().unwrap().is_empty());
     }
 }
+
+/// What the AI activity page reads of a proposal: how the person reviewed it in the approval window, and what stopped it when it was
+/// not saved, apart from an error.
+#[test]
+fn proposals_record_their_review_and_stop_apart_from_errors() {
+    use crate::mcp::{McpReview, McpStopKind, McpWindow};
+    let last = |r: &McpRuntime| r.recent.lock().unwrap().front().unwrap().clone();
+    let stop_of = |entry: &McpAuditEntry| entry.stop.as_ref().map(|stop| (stop.kind, stop.window));
+    for (decision, review, stop) in [
+        (ApprovalDecision::Deny, Some(McpReview::Refused), Some((McpStopKind::Refused, Some(McpWindow::Approval)))),
+        (ApprovalDecision::TimedOut, Some(McpReview::NoAnswer), Some((McpStopKind::NoAnswer, Some(McpWindow::Approval)))),
+        (ApprovalDecision::Cancel, None, Some((McpStopKind::Canceled, Some(McpWindow::Approval)))),
+        (ApprovalDecision::Allow, Some(McpReview::Approved), None),
+    ] {
+        let d = device();
+        let r = runtime(ApprovalMode::Ask);
+        let _ = create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|_| decision);
+        let entry = last(&r);
+        assert_eq!(entry.review, review, "{decision:?}");
+        assert_eq!(stop_of(&entry), stop, "{decision:?}");
+    }
+
+    // Allowed, then a conflicting host is saved while the window was open: an error, with its reason.
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let error = create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|_| {
+        crate::sync::record_commands::edit_records(&d.env(), |s, now| {
+            repo::create_host(s, "0000000000000001", HostScope::Local, payload(&input()).unwrap(), now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    let entry = last(&r);
+    assert_eq!(entry.review, Some(McpReview::Approved));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Error, None)));
+    assert_eq!(entry.stop.and_then(|stop| stop.reason), Some(crate::mcp::activity::reason_text(&error)));
+
+    // Allowed, then AI access is turned off before the save, while no token is cancelled yet: withdrawn, not an error.
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|_| {
+        r.policy.lock().unwrap().enabled = false;
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    let entry = last(&r);
+    assert_eq!(entry.review, Some(McpReview::Approved));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Canceled, None)));
+
+    // update_host and set_transport: a refusal is the person's, in the approval window.
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"192.0.2.8"}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err();
+    assert_eq!(last(&r).review, Some(McpReview::Refused));
+    assert_eq!(stop_of(&last(&r)), Some((McpStopKind::Refused, Some(McpWindow::Approval))));
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err();
+    assert_eq!(stop_of(&last(&r)), Some((McpStopKind::Refused, Some(McpWindow::Approval))));
+
+    // An update over a host changed while the window was open: an error, with its reason.
+    update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"192.0.2.8"}), RequestContext::default(), &CancelToken::default(), &|_| {
+        crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+            let host = repo::get_host(state, &id).map_err(|e| AppError::Other(e.to_string()))?;
+            let mut payload = host.host.payload.clone();
+            payload.hostname = "other.invalid".into();
+            repo::update_host(state, &id, &host.revision, payload, now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    let entry = last(&r);
+    assert_eq!(entry.review, Some(McpReview::Approved));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Error, None)));
+    assert_eq!(entry.stop.and_then(|stop| stop.reason).as_deref(), Some("The host changed while the request was open; read it again and retry."));
+}
