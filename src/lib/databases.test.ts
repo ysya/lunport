@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "./test-ipc";
-import type { PamStatusView } from "./transports";
+import { pamStatusOptions, pamStatusQuery, type PamStatusView } from "./transports";
 import {
   GRANT_ENDING_SOON_MS,
   connectionName,
@@ -202,6 +202,12 @@ describe("the Databases page's reads and actions", () => {
     expect(await new QueryClient().fetchQuery(grant)).toEqual(status);
     expect(calls).toEqual([["databases_pam_status", { id: ORDERS.id }]]);
     expect(databasePamStatusQuery("00000000000000a2").queryKey).not.toEqual(grant.queryKey);
+  });
+
+  it("keeps a database's grant exactly as a host's is kept", () => {
+    expect(databasePamStatusQuery(ORDERS.id)).toMatchObject(pamStatusOptions);
+    const kept = ({ queryKey, queryFn, ...options }: { queryKey: unknown; queryFn?: unknown }) => options;
+    expect(kept(databasePamStatusQuery(ORDERS.id))).toEqual(kept(pamStatusQuery("0000000000000001")));
   });
 
   it("calls a database busy while its port starts, runs or stops", () => {

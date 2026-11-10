@@ -47,19 +47,22 @@ export const fetchOsLoginProfile = (account: string | null, project: string, key
   tauriInvoke<OsLoginProfileView>("transports_oslogin_profile", { account, project, keyId });
 export const fetchPamStatus = (hostId: string) => tauriInvoke<PamStatusView>("transports_pam_status", { hostId });
 /**
- * A host's Access grant as the details pane keeps it: read when the pane opens, every minute while it stays open, and when the window
- * becomes visible again after background polling stopped. Not retried (the next minute reads it again), and read even
- * when the webview thinks it is offline, since the answer comes from this app's backend, which says in its own sentence when Google
- * cannot be reached.
+ * How a grant read is kept wherever it shows (a host's, a database's): read every minute while it stays shown, and when the window
+ * becomes visible again after background polling stopped. Not retried (the next minute reads it again), and read even when the webview
+ * thinks it is offline, since the answer comes from this app's backend, which says in its own sentence when Google cannot be reached.
  */
+export const pamStatusOptions = {
+  refetchInterval: 60_000,
+  refetchOnWindowFocus: true,
+  retry: false,
+  networkMode: "always",
+} as const;
+/** A host's Access grant as the details pane keeps it: read when the pane opens, and kept as `pamStatusOptions` keeps a grant. */
 export const pamStatusQuery = (hostId: string) =>
   queryOptions({
     queryKey: ["gcp", "pam-status", hostId],
     queryFn: () => fetchPamStatus(hostId),
-    refetchInterval: 60_000,
-    refetchOnWindowFocus: true,
-    retry: false,
-    networkMode: "always",
+    ...pamStatusOptions,
   });
 /** Requests a grant for the host's route and waits for it: on `entitlement`, which the route must list, else on the first it lists. */
 export const requestPamGrant = (hostId: string, justification: string, durationSecs: number, entitlement?: string) =>

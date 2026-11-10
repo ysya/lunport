@@ -28,6 +28,7 @@ import {
   osLoginOutcome,
   pamPlaceholder,
   pamStatusLine,
+  pamStatusOptions,
   pamStatusQuery,
   parseEntitlements,
   probeIap,
@@ -195,6 +196,11 @@ describe("transports", () => {
     expect(pamStatusQuery(HOST).queryKey).not.toEqual(pamStatusQuery("0000000000000002").queryKey);
     expect(pamStatusQuery(HOST).refetchInterval).toBe(60_000);
     expect(pamStatusQuery(HOST).refetchOnWindowFocus).toBe(true);
+  });
+
+  it("keeps a grant read the same way wherever it shows: every minute and on window focus, not retried, even offline", () => {
+    expect(pamStatusOptions).toEqual({ refetchInterval: 60_000, refetchOnWindowFocus: true, retry: false, networkMode: "always" });
+    expect(pamStatusQuery(HOST)).toMatchObject(pamStatusOptions);
   });
 
   it("expires a cached active grant at its deadline without waiting for a Google response", () => {

@@ -1,6 +1,6 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import { tauriInvoke } from "./ipc";
-import { grantHeld, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
+import { grantHeld, pamStatusOptions, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
 import { revealHidden } from "./reveal-hidden";
 import { errorMessage } from "./utils";
 import type { SavedDatabase } from "@/bindings/SavedDatabase";
@@ -71,19 +71,12 @@ export function parseConnectionName(text: string): { project: string; region: st
 
 /** The query key of the grant a database needs, under the keys of the hosts' grants. */
 export const databasePamStatusKey = (id: string) => ["gcp", "pam-status", "database", id] as const;
-/**
- * A database's grant as its row keeps it, as a host's is kept (`pamStatusQuery`): read when the row shows and every minute while it stays,
- * not retried, and read even when the webview thinks it is offline, since the answer comes from this app's backend, which says in its own
- * sentence when Google cannot be reached.
- */
+/** A database's grant as its row keeps it: read when the row shows, and kept as a host's grant is (`pamStatusOptions`). */
 export const databasePamStatusQuery = (id: string) =>
   queryOptions({
     queryKey: databasePamStatusKey(id),
     queryFn: () => tauriInvoke<PamStatusView>("databases_pam_status", { id }),
-    refetchInterval: 60_000,
-    refetchOnWindowFocus: true,
-    retry: false,
-    networkMode: "always",
+    ...pamStatusOptions,
   });
 
 /** How a phase reads in the Status column. */
