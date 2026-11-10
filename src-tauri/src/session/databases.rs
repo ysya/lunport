@@ -1,7 +1,8 @@
 //! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them, and
 //! show, replace and remove the password of a database's local port.
 use super::connect::CancelToken;
-use super::database_ports::{ensure_password, password_account, replace_password, CloudSqlUpstream, DatabasePorts, NO_LOCAL_PORT};
+use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT};
+use super::database_upstream::CloudSqlUpstream;
 use super::tunnels::{main_only, snapshot};
 use crate::{
     error::AppError,

@@ -48,6 +48,7 @@ pub mod tunnels;
 pub mod databases;
 pub(crate) mod database_access;
 pub(crate) mod database_ports;
+pub(crate) mod database_upstream;
 pub(crate) mod pgwire;
 pub mod embedded;
 pub mod auth;
