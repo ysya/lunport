@@ -524,6 +524,27 @@ fn other_statuses_are_reported_by_number() {
     assert_eq!(GcpError::Http { api: "Cloud SQL Admin", status: 503 }.to_string(), "The Cloud SQL Admin API answered 503.");
 }
 
+/// A redirect is an answer, not an instruction: `generateEphemeralCert` carries the access token in its body, and following a `307` or a
+/// `308` would send that body on to wherever the answer points.
+#[test]
+fn a_redirect_is_not_followed_and_is_reported_by_its_number() {
+    for status in [301usize, 302, 307, 308] {
+        let mut server = mockito::Server::new();
+        let elsewhere = format!("{}/elsewhere", server.url());
+        for (method, path) in [("GET", SETTINGS_PATH), ("POST", CERT_PATH), ("GET", LIST_PATH)] {
+            server.mock(method, path).match_query(Matcher::Any).with_status(status).with_header("location", &elsewhere).create();
+        }
+        // Where the answers point: nothing may arrive there.
+        let arrivals = ["GET", "POST"].map(|method| server.mock(method, "/elsewhere").with_body("{}").expect(0).create());
+        for error in errors_of(&admin(&server), Some(ACCOUNT)) {
+            assert_eq!(error, GcpError::Http { api: "Cloud SQL Admin", status: status as u16 });
+        }
+        for arrival in &arrivals {
+            arrival.assert();
+        }
+    }
+}
+
 #[test]
 fn a_server_that_cannot_be_reached_is_a_network_error_without_its_address() {
     // A port that was free a moment ago and has no listener now.

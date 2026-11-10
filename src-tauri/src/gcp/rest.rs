@@ -32,12 +32,14 @@ const MAX_ENTITLEMENTS: usize = 500;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GcpError {
     Auth(AuthError),
-    /// `401` or `403`: the account may not call this API (or the token lacks the scope).
+    /// `401` or `403`: the account may not call this API (or the token lacks the scope). Cloud SQL's `403` that says its API is not
+    /// enabled in the project is a `Refused` instead, since no account or grant makes the call work until the project enables the API.
     Denied { api: &'static str, status: u16, account: String },
     /// Any other unsuccessful status.
     Http { api: &'static str, status: u16 },
-    /// `400`: the API refused what was asked, and said why in its own words (a duration over the entitlement's maximum, a missing
-    /// justification).
+    /// The API refused what was asked, and said why in its own words: a `400` (a duration over the entitlement's maximum, a missing
+    /// justification), and for Cloud SQL also a `404` (no such instance) and the `403` that says its API is not enabled in the project.
+    /// The message may end in a period; the sentence made of it does not repeat it.
     Refused { api: &'static str, message: String },
     Network(String),
     /// The answer was not the JSON the API documents.

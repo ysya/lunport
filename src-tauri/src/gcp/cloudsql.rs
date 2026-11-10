@@ -29,7 +29,7 @@ const LIST_PAGES: usize = 10;
 /// The most characters of the API's own words that a refusal repeats.
 const REFUSAL_CHARS: usize = 256;
 const KEY_BITS: usize = 2048;
-/// The database flag that lets an instance sign in Google accounts (`on`), and the value that does.
+/// The database flag that lets an instance sign in Google accounts when it is `on`.
 const IAM_FLAG: &str = "cloudsql.iam_authentication";
 
 /// A Cloud SQL instance by the parts of its connection name, `project:region:instance`. The Admin API finds an instance by its project and
@@ -155,9 +155,16 @@ impl RestSqlAdmin {
         RestSqlAdmin::with_timeout(tokens, base, HTTP_TIMEOUT)
     }
 
-    /// `with_base` with the per-call timeout given (a test uses a short one).
+    /// `with_base` with the per-call timeout given (a test uses a short one). A redirect is not followed: `generateEphemeralCert` carries the
+    /// access token in its body, and following a `307` or a `308` would send that body on to wherever the answer points. A redirect is
+    /// reported like any other unexpected status.
     fn with_timeout(tokens: Arc<dyn TokenSource>, base: &str, timeout: Duration) -> RestSqlAdmin {
-        let http = reqwest::blocking::Client::builder().timeout(timeout).user_agent(user_agent()).build().expect("the REST client builds from fixed options");
+        let http = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .user_agent(user_agent())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("the REST client builds from fixed options");
         RestSqlAdmin { tokens, http, base: base.trim_end_matches('/').to_string() }
     }
 
