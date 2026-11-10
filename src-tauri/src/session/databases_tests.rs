@@ -511,3 +511,36 @@ fn nobody_is_asked_to_unlock_what_cannot_be_unlocked() {
     assert_eq!(unlock_writes(&dev, ANALYTICS, UnlockMethod::System, true, never), Err("Only prod databases are locked.".to_string()));
     assert_eq!(unlock_writes(&dev, ANALYTICS, UnlockMethod::Dialog, true, never), Err("Only prod databases are locked.".to_string()));
 }
+
+#[test]
+fn a_database_started_again_while_the_person_confirms_stays_locked() {
+    let clock = Clock::new();
+    let ports = running_on(&clock, database(ORDERS));
+    let start_again = || {
+        let started = SavedDatabase { local_port: Some(0), ..database(ORDERS) };
+        ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    };
+    let stop = || {
+        ports.stop(ORDERS);
+        wait_until("the port stopped", || ports.live(ORDERS).phase == DatabasePhase::Stopped);
+    };
+    // While the system's question is open, the person stops the database (and could edit it) and starts it again, then confirms: the
+    // port that runs now is not the one they were asked about.
+    let restarted = |_: &str| -> Result<bool, String> {
+        stop();
+        start_again();
+        Ok(true)
+    };
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::System, false, restarted), Err(STAY_LOCKED.to_string()));
+    assert_eq!(ports.live(ORDERS).phase, DatabasePhase::Running);
+    assert_eq!(ports.live(ORDERS).writable_until_ms, None, "the port that runs now is locked");
+    // Stopped and not started again, it is not running.
+    let stopped = |_: &str| -> Result<bool, String> {
+        stop();
+        Ok(true)
+    };
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::System, false, stopped), Err("Start the database before you unlock writes.".to_string()));
+    // The port it was asked about, still running, is unlocked.
+    start_again();
+    assert!(unlock_writes(&ports, ORDERS, UnlockMethod::System, false, |_: &str| Ok(true)).is_ok());
+}

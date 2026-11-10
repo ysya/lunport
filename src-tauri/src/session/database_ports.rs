@@ -71,6 +71,8 @@ const TOO_LONG: &str = "The connection settings are too long for Cloud SQL. Remo
 const UNAVAILABLE: &str = "Lunport's database service is unavailable. Restart Lunport and try again.";
 const ONLY_PROD: &str = "Only prod databases are locked.";
 const NOT_RUNNING: &str = "Start the database before you unlock writes.";
+/// What an unlock is refused with when the person did not confirm it, or confirmed it for a run of the database that has ended.
+pub(crate) const STAY_LOCKED: &str = "Writes stay locked.";
 /// How often a port looks whether its writable window ended and whether a connection that came without the lock is past its time.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -290,20 +292,23 @@ impl DatabasePorts {
         (self.clocks.wall)()
     }
 
-    /// The name of the database `id`, provided writes can be unlocked on it now: it is a prod database, and its port runs. The person is
-    /// asked to confirm after this, and `unlock` looks again.
-    pub(crate) fn unlockable(&self, id: &str) -> Result<String, String> {
+    /// The port of the database `id`, provided writes can be unlocked on it now: it is a prod database, and its port runs. The person is
+    /// asked to confirm after this, and `unlock` unlocks this port only.
+    pub(crate) fn unlockable(&self, id: &str) -> Result<Unlockable, String> {
         let port = self.port(id).ok_or(NOT_RUNNING)?;
         port.unlockable(&locked(&port.state))?;
-        Ok(port.db.name.clone())
+        Ok(Unlockable { port })
     }
 
-    /// Opens the writable window of the prod database `id`, whose port runs, for `WRITABLE_WINDOW` from `now`, and answers when it ends,
-    /// in milliseconds since the Unix epoch. Until then the connections that come are not locked; the open ones keep their lock. A window
-    /// that is open already starts again from `now`.
-    pub fn unlock(&self, id: &str, now: SystemTime) -> Result<u64, String> {
-        let port = self.port(id).ok_or(NOT_RUNNING)?;
-        port.unlock(Moment { wall: now, monotonic: (self.clocks.monotonic)() }).map(millis)
+    /// Opens the writable window of the port `checked` found for `WRITABLE_WINDOW` from `now`, and answers when it ends, in milliseconds
+    /// since the Unix epoch. Until then the connections that come are not locked; the open ones keep their lock. A window that is open
+    /// already starts again from `now`. A database that was stopped and started again since runs on another port, which nobody was asked
+    /// about, and stays locked.
+    pub fn unlock(&self, checked: &Unlockable, now: SystemTime) -> Result<u64, String> {
+        if !self.port(&checked.port.db.id).is_some_and(|port| Arc::ptr_eq(&port, &checked.port)) {
+            return Err(STAY_LOCKED.to_string());
+        }
+        checked.port.unlock(Moment { wall: now, monotonic: (self.clocks.monotonic)() }).map(millis)
     }
 
     /// Ends the writable window of the database `id` now, when it is open: new connections are locked, and those that came without the lock
@@ -420,6 +425,18 @@ impl DatabasePorts {
         let mut ports = locked(&self.ports);
         ports.retain(|id, port| saved(id) || port.busy());
         ports.iter().filter(|(id, _)| !saved(id)).map(|(_, port)| (port.db.clone(), port.live())).collect()
+    }
+}
+
+/// A database's port that could be unlocked when `DatabasePorts::unlockable` looked: the person is asked about this one.
+pub(crate) struct Unlockable {
+    port: Arc<Port>,
+}
+
+impl Unlockable {
+    /// The name of its database, for the question.
+    pub(crate) fn name(&self) -> &str {
+        &self.port.db.name
     }
 }
 

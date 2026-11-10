@@ -1017,6 +1017,11 @@ fn writable_ticking(tick: Duration) -> (DatabasePorts, Arc<FakeUpstream>, Clock,
     (ports, upstream, clock, port)
 }
 
+/// Unlocks writes on `Orders` as the command does once the person confirmed: the port that was checked is the one unlocked.
+fn unlock(ports: &DatabasePorts, now: SystemTime) -> Result<u64, String> {
+    ports.unlockable(ID).and_then(|checked| ports.unlock(&checked, now))
+}
+
 /// `time` in milliseconds since the Unix epoch, as `writable_until_ms` carries it.
 fn ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
@@ -1047,7 +1052,7 @@ fn unlocking_lets_new_prod_connections_write_for_fifteen_minutes() {
     let mut before = App::signed_in(port);
     assert_eq!(ports.live(ID).writable_until_ms, None, "prod is locked until it is unlocked");
     let until = ms(t0() + WRITABLE_WINDOW);
-    assert_eq!(ports.unlock(ID, clock.now()), Ok(until));
+    assert_eq!(unlock(&ports, clock.now()), Ok(until));
     assert_eq!(ports.live(ID).writable_until_ms, Some(until));
     let mut writer = App::signed_in(port);
     assert_eq!(writer.query("update orders set paid = true where id = 7"), b'I');
@@ -1069,7 +1074,7 @@ fn unlocking_lets_new_prod_connections_write_for_fifteen_minutes() {
 fn when_the_window_ends_idle_unlocked_connections_close_and_new_ones_are_locked() {
     let (ports, upstream, clock, port) = writable();
     let mut locked_before = App::signed_in(port);
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut idle = App::signed_in(port);
     assert_eq!(idle.query("update orders set paid = true where id = 7"), b'I');
     // The app sent a query that Cloud SQL has not answered yet: Cloud SQL's stream reads as idle, but the connection is not.
@@ -1096,7 +1101,7 @@ fn when_the_window_ends_idle_unlocked_connections_close_and_new_ones_are_locked(
 #[test]
 fn an_unlocked_connection_in_a_transaction_closes_when_it_becomes_idle() {
     let (ports, _upstream, clock, port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut idle = App::signed_in(port);
     let mut writer = App::signed_in(port);
     assert_eq!(writer.query("begin"), b'T');
@@ -1115,7 +1120,7 @@ fn an_unlocked_connection_in_a_transaction_closes_when_it_becomes_idle() {
 fn an_unlocked_connection_that_never_turns_idle_closes_ten_minutes_after_the_window() {
     assert_eq!(CLOSE_UNLOCKED_WITHIN, Duration::from_secs(10 * 60));
     let (ports, _upstream, clock, port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut idle = App::signed_in(port);
     let mut open_transaction = App::signed_in(port);
     assert_eq!(open_transaction.query("begin"), b'T');
@@ -1137,7 +1142,7 @@ fn an_unlocked_connection_that_never_turns_idle_closes_ten_minutes_after_the_win
 #[test]
 fn locking_ends_the_window_at_once() {
     let (ports, upstream, clock, port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut idle = App::signed_in(port);
     let mut finishing = App::signed_in(port);
     assert_eq!(finishing.query("begin"), b'T');
@@ -1173,7 +1178,7 @@ fn reconnect_closes_only_idle_locked_connections() {
     let mut asking_locked = App::signed_in(port);
     asking_locked.send_query("wait for the monthly report");
     wait_until("Cloud SQL has the query", || upstream.was_sent("wait for the monthly report"));
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut unlocked = App::signed_in(port);
     assert_eq!(ports.reconnect_locked(ID), 1);
     assert!(idle_locked.closed(), "the idle locked connection closes, so that its app connects again");
@@ -1198,7 +1203,7 @@ fn unlock_is_refused_for_dev_and_staging() {
         let ports = DatabasePorts::new(fake());
         let db = SavedDatabase { environment, project: "acme-dev-654321".into(), ..orders() };
         let port = running(&ports, &db);
-        assert_eq!(ports.unlock(ID, SystemTime::now()), Err("Only prod databases are locked.".to_string()), "{environment:?}");
+        assert_eq!(unlock(&ports, SystemTime::now()), Err("Only prod databases are locked.".to_string()), "{environment:?}");
         assert_eq!(ports.live(ID).writable_until_ms, None);
         // Its connections are never locked, so reconnecting closes none.
         let _app = App::signed_in(port);
@@ -1207,17 +1212,17 @@ fn unlock_is_refused_for_dev_and_staging() {
     // A prod database is unlocked only while it runs.
     let ports = DatabasePorts::new(fake());
     let not_running = Err("Start the database before you unlock writes.".to_string());
-    assert_eq!(ports.unlock(ID, SystemTime::now()), not_running);
+    assert_eq!(unlock(&ports, SystemTime::now()), not_running);
     running(&ports, &orders());
     ports.stop(ID);
     wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
-    assert_eq!(ports.unlock(ID, SystemTime::now()), not_running);
+    assert_eq!(unlock(&ports, SystemTime::now()), not_running);
 }
 
 #[test]
 fn stopping_ends_the_window() {
     let (ports, upstream, clock, _port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     // A database is edited or deleted only once it is stopped, which ends its window.
     assert_eq!(ports.edit(ID, || Ok(())), Err("Stop Orders before you change it.".to_string()));
     ports.stop(ID);
@@ -1233,13 +1238,13 @@ fn stopping_ends_the_window() {
 #[test]
 fn unlocking_again_lets_the_unlocked_connections_go_on() {
     let (ports, _upstream, clock, port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut writer = App::signed_in(port);
     assert_eq!(writer.query("begin"), b'T');
     clock.at(WRITABLE_WINDOW);
     ticked(&ports);
     // The window ended while the transaction was open; the person unlocks again before it ends.
-    assert_eq!(ports.unlock(ID, clock.now()), Ok(ms(t0() + 2 * WRITABLE_WINDOW)));
+    assert_eq!(unlock(&ports, clock.now()), Ok(ms(t0() + 2 * WRITABLE_WINDOW)));
     assert_eq!(writer.query("commit"), b'I');
     ticked(&ports);
     assert!(writer.still_open(), "an idle unlocked connection stays while a window is open");
@@ -1291,7 +1296,7 @@ fn an_answer_on_its_way_to_the_app_reaches_it_whole_before_the_connection_closes
 #[test]
 fn a_wall_clock_set_back_does_not_stretch_the_window() {
     let (ports, upstream, clock, port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut idle = App::signed_in(port);
     let mut endless = App::signed_in(port);
     assert_eq!(endless.query("begin"), b'T');
@@ -1317,7 +1322,7 @@ fn a_wall_clock_set_back_does_not_stretch_the_window() {
 fn a_computer_that_slept_through_the_window_ends_it_as_it_wakes() {
     // While the computer sleeps the wall clock goes on, and the monotonic clock does not.
     let (ports, upstream, clock, port) = writable();
-    ports.unlock(ID, clock.now()).unwrap();
+    unlock(&ports, clock.now()).unwrap();
     let mut idle = App::signed_in(port);
     let mut endless = App::signed_in(port);
     assert_eq!(endless.query("begin"), b'T');

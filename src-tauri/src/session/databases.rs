@@ -1,7 +1,7 @@
 //! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them,
 //! show, replace and remove the password of a database's local port, and unlock and lock writes to a prod database through that port.
 use super::connect::CancelToken;
-use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, WRITABLE_WINDOW};
+use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
 use super::tunnels::{main_only, snapshot};
 use crate::os_auth::{self, UnlockMethod};
@@ -22,8 +22,6 @@ use zeroize::Zeroizing;
 
 /// What a command is refused with when the database it names is not there.
 const GONE: &str = "The saved database no longer exists.";
-/// What an unlock the person did not confirm is refused with.
-const STAY_LOCKED: &str = "Writes stay locked.";
 
 /// Where the local port of a database stands on this device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -181,18 +179,20 @@ fn rotate_port_password(ports: &DatabasePorts, keychain: &dyn Keychain, id: &str
 /// Unlocks writes on the prod database `id`'s port for `WRITABLE_WINDOW` once the person confirms it, and answers when the window ends,
 /// in milliseconds since the Unix epoch. Where the system can ask (`UnlockMethod::System`), `confirm` asks for Touch ID or the Mac's
 /// password, and blocks until the person answers; what the page says does not count there. Elsewhere the page asks in a dialog of its
-/// own first (`confirmed_in_app`). A database that cannot be unlocked is refused before anybody is asked, and the window counts from the
-/// moment the person confirmed.
+/// own first (`confirmed_in_app`). A database that cannot be unlocked is refused before anybody is asked; the window opens on the port the
+/// person was asked about, and counts from the moment they confirmed.
 fn unlock_writes(ports: &DatabasePorts, id: &str, method: UnlockMethod, confirmed_in_app: bool, confirm: impl FnOnce(&str) -> Result<bool, String>) -> Result<u64, String> {
-    let name = ports.unlockable(id)?;
+    let checked = ports.unlockable(id)?;
     let confirmed = match method {
-        UnlockMethod::System => confirm(&format!("unlock writes on {name} (PROD) for {} minutes", WRITABLE_WINDOW.as_secs() / 60)) == Ok(true),
+        UnlockMethod::System => {
+            confirm(&format!("unlock writes on {} (PROD) for {} minutes", checked.name(), WRITABLE_WINDOW.as_secs() / 60)) == Ok(true)
+        }
         UnlockMethod::Dialog => confirmed_in_app,
     };
     if !confirmed {
         return Err(STAY_LOCKED.to_string());
     }
-    ports.unlock(id, ports.now())
+    ports.unlock(&checked, ports.now())
 }
 
 /// Starts the saved database `id` on its local port, with the password this device keeps for it. The port is registered with the broker,
