@@ -118,8 +118,10 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   const flight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<DatabaseView | null>(null);
-  // The database in the editor and the one it is compared against when saved (none for a new one), while the dialog is open.
-  const [editing, setEditing] = useState<{ initial: SavedDatabase; expected: SavedDatabase | null } | null>(null);
+  // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
+  // while the dialog is open. The opening keys the editor, so that one that is still mounted never shows the draft of an earlier opening.
+  const [editing, setEditing] = useState<{ key: number; initial: SavedDatabase; expected: SavedDatabase | null } | null>(null);
+  const openings = useRef(0);
   const [editorError, setEditorError] = useState<string | null>(null);
   // The dialog takes a moment to animate out once `editing` is null; its title and body keep what they showed until then.
   const shown = useLastNonNull(editing);
@@ -140,7 +142,8 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   // A new database, or a saved one, which is also what its save is compared against: nothing is saved over a version the list does not show.
   const edit = (row: DatabaseView | null) => {
     setEditorError(null);
-    setEditing(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null });
+    openings.current += 1;
+    setEditing({ key: openings.current, ...(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null }) });
   };
   const closeEditor = () => { if (!flight.current) setEditing(null); };
   const save = (next: SavedDatabase) => { if (editing) void action(async () => { await saveDatabase(next, editing.expected); }, true); };
@@ -176,7 +179,7 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     </div>}
     <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">
       <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
-      {shown && <DatabaseEditor initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} />}
+      {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} />}
     </TaskDialogContent></Dialog>
     <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleting && revealHidden(deleting.database.name)}?</AlertDialogTitle><AlertDialogDescription>{deleting?.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>;
