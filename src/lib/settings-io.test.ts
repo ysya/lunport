@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseSettingsEnvelope, SETTINGS_VERSION } from "./settings-io";
+import { SETTINGS_VERSION } from "@/stores/settings";
+
+import { parseSettingsEnvelope } from "./settings-io";
+
+afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 
 describe("parseSettingsEnvelope", () => {
   it("accepts a persist envelope with state and version", () => {
@@ -44,5 +48,62 @@ describe("parseSettingsEnvelope", () => {
     expect(() => parseSettingsEnvelope('{"state": {}, "version": "two"}')).toThrow(
       /invalid settings version/,
     );
+  });
+});
+
+/**
+ * A window where localStorage keeps what the settings store persists, and the backend's native save and open dialogs write one
+ * settings file and read it back. The returned function reads that file as the last export wrote it.
+ */
+function stubWindow(): () => string | null {
+  const stored = new Map<string, string>();
+  let file: string | null = null;
+  vi.stubGlobal("window", {
+    localStorage: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => { stored.set(key, value); },
+      removeItem: (key: string) => { stored.delete(key); },
+    },
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd: string, args: { json?: string }) => {
+        if (cmd === "settings_export") {
+          file = args.json ?? null;
+          return "lunport-settings.json";
+        }
+        if (cmd === "settings_import") return file;
+        return undefined; // the tray preferences an import sends to the backend again
+      },
+    },
+  });
+  vi.resetModules();
+  return () => file;
+}
+
+describe("a settings export", () => {
+  it("imports back into the build that exported it, every preference as it was", async () => {
+    stubWindow();
+    const { useSettingsStore } = await import("@/stores/settings");
+    const { applySettingsImport, exportSettings, pickSettingsImport } = await import("./settings-io");
+    // Chosen after version 1 made Lunport's own terminal everyone's default, so an import keeps it instead of resetting it as it
+    // does for a file from an older version.
+    useSettingsStore.getState().setTerminalId("iterm2");
+    useSettingsStore.getState().setFontSize(15);
+    await exportSettings();
+    useSettingsStore.getState().setFontSize(13);
+
+    const envelope = await pickSettingsImport();
+    await applySettingsImport(envelope!);
+
+    expect(useSettingsStore.getState()).toMatchObject({ fontSize: 15, terminalId: "iterm2" });
+  });
+
+  it("of untouched preferences carries the store's version, as persist would write it", async () => {
+    const exported = stubWindow();
+    const { useSettingsStore } = await import("@/stores/settings");
+    const { exportSettings } = await import("./settings-io");
+
+    await exportSettings();
+
+    expect(JSON.parse(exported()!).version).toBe(useSettingsStore.persist.getOptions().version);
   });
 });
