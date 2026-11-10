@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use super::error::{AuthError, ConnectError, SessionError};
-use super::types::{DisconnectReason, ExecResult, Exit, HopRef, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Secret, Signature, Target};
+use super::types::{DisconnectReason, ExecResult, Exit, HopRef, HostKey, HostKeyVerdict, Prompt, Pty, RemoteListing, RsaHash, Secret, Signature, Target};
 
 /// Opens connections. Implemented by the russh engine and by the fake used in broker, MCP and CLI tests.
 pub trait SshEngine: Send + Sync {
@@ -58,6 +58,11 @@ pub trait Session: Send + Sync {
     /// Reads one remote file into a caller-owned destination. An oversized file is rejected before its bytes are written.
     fn scp_download(&self, _remote_path: &str, _destination: &mut dyn Write, _max_bytes: u64, _timeout: Duration) -> Result<u64, SessionError> {
         Err(SessionError::Channel("SCP download is unavailable in this SSH engine.".into()))
+    }
+
+    /// Lists one remote directory using the server's SFTP subsystem.
+    fn sftp_list(&self, _remote_path: &str, _timeout: Duration) -> Result<RemoteListing, SessionError> {
+        Err(SessionError::Channel("SFTP browsing is unavailable in this SSH engine.".into()))
     }
 
     /// Whether the connection (every hop of it) is still up, judged from the connection's own state and never from an error variant.

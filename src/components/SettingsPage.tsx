@@ -788,9 +788,9 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
         </Section>
       )}
       {records && (
-        <Section title="File transfers" description="Set the largest single file an AI client can upload or download through Lunport SCP on this device.">
+        <Section title="File transfers" description="Set the largest single file you or an AI client can upload or download through Lunport SCP on this device.">
           <SettingsGroup>
-            <SettingsRow id="set-mcp-transfer-limit" label="Single-file transfer limit" description="1–10,240 MiB. The default is 1,024 MiB; changing the limit cancels active transfers.">
+            <SettingsRow id="set-mcp-transfer-limit" label="Single-file transfer limit" description="1–10,240 MiB. The default is 1,024 MiB; changing the limit cancels active AI transfers and applies to new Files transfers.">
               <form className="flex items-center gap-2" onSubmit={(event) => {
                 event.preventDefault();
                 if (transferLimitValid && status.data && transferLimit !== status.data.max_transfer_mib) setTransferLimit.mutate(transferLimit);

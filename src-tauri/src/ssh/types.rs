@@ -6,6 +6,19 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RemoteFileEntry {
+    pub name: String,
+    pub kind: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RemoteListing {
+    pub path: String,
+    pub entries: Vec<RemoteFileEntry>,
+}
+
 /// The defaults of a host record (`connect_timeout_secs` 15, `keepalive_secs` 30, `keepalive_max_missed` 3).
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_KEEPALIVE_EVERY: Duration = Duration::from_secs(30);

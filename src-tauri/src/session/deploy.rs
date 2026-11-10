@@ -437,7 +437,7 @@ use crate::{error::AppError, state::AppState};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-fn records_current(app: &AppHandle) -> Result<(), String> {
+pub(super) fn records_current(app: &AppHandle) -> Result<(), String> {
     crate::sync::engine::with_env(app, |env| {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
         crate::sync::record_round::require_no_pending_migration(env)?;
@@ -446,7 +446,7 @@ fn records_current(app: &AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
 }
-fn broker(app: &AppHandle) -> Result<Arc<super::broker::Broker>, String> {
+pub(super) fn broker(app: &AppHandle) -> Result<Arc<super::broker::Broker>, String> {
     let state = app.state::<AppState>();
     let broker = state.session.broker.lock().unwrap().clone();
     broker.ok_or("The native SSH service is unavailable.".into())

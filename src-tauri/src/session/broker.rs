@@ -188,7 +188,7 @@ impl Broker {
         Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref(),grants:&self.grants}
     }
 
-    /// Human deployments participate in the same quit barrier, without consulting MCP policy.
+    /// Human deployments and file operations participate in the quit barrier without consulting MCP policy.
     pub(crate) fn register_deployment(&self, cancel: CancelToken) -> Result<DeploymentRegistration<'_>, String> {
         let mut table = locked(&self.table);
         if table.quitting { cancel.cancel(); return Err("The application is quitting.".into()); }
