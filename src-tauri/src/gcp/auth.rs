@@ -25,7 +25,7 @@ const ADC_FILE: &str = "application_default_credentials.json";
 pub struct Token {
     pub value: Secret,
     pub account: String,
-    /// When the token expires, as the wall clock will read then; `None` when the source does not know.
+    /// When the token expires by the wall clock; `None` when the source does not know.
     pub expires_at: Option<SystemTime>,
 }
 
@@ -246,10 +246,21 @@ fn read_credentials(path: &Path, requested: Option<&str>) -> Result<Credentials,
     })
 }
 
+/// A token kept for later, with its end on both clocks. The monotonic clock (`Instant`) stands still while a Mac sleeps, so by itself it
+/// would serve a token that expired in the night; the wall clock, which may be set backwards, would serve one that is stale by the
+/// monotonic clock. A token is fresh only while both put its end more than `REFRESH_MARGIN` away.
 struct Cached {
     token: Secret,
     account: String,
     expires_at: Instant,
+    /// The end by the wall clock, as the token reports it; `None` when it does not fit the wall clock's range.
+    wall_expires_at: Option<SystemTime>,
+}
+
+impl Cached {
+    fn is_fresh(&self, now: Instant, wall_now: SystemTime) -> bool {
+        self.expires_at > now + REFRESH_MARGIN && self.wall_expires_at.is_none_or(|ends| ends > wall_now + REFRESH_MARGIN)
+    }
 }
 
 /// Tokens from gcloud's credential files, refreshed through Google's token endpoint and cached per file.
@@ -334,22 +345,20 @@ impl FileStore {
         Ok((Zeroizing::new(token.to_string()), Duration::from_secs(expires_in)))
     }
 
-    /// Pretends the token cached for `path` expires at `at` (tests).
+    /// Pretends the token cached for `path` expires at `at` on the monotonic clock (tests).
     #[cfg(test)]
     pub(crate) fn set_cached_expiry(&self, path: &Path, at: Instant) {
         if let Some(cached) = self.cache.lock().unwrap_or_else(PoisonError::into_inner).get_mut(path) {
             cached.expires_at = at;
         }
     }
-}
 
-/// The wall-clock time of `at`, an instant on the monotonic clock the cache keeps its expiries on, worked out from both clocks as they
-/// read now; `None` when it does not fit the wall clock's range.
-fn wall_clock(at: Instant) -> Option<SystemTime> {
-    let now = Instant::now();
-    match at.checked_duration_since(now) {
-        Some(ahead) => SystemTime::now().checked_add(ahead),
-        None => SystemTime::now().checked_sub(now.duration_since(at)),
+    /// Pretends the token cached for `path` expires at `at` by the wall clock (tests).
+    #[cfg(test)]
+    pub(crate) fn set_cached_wall_expiry(&self, path: &Path, at: SystemTime) {
+        if let Some(cached) = self.cache.lock().unwrap_or_else(PoisonError::into_inner).get_mut(path) {
+            cached.wall_expires_at = Some(at);
+        }
     }
 }
 
@@ -369,8 +378,8 @@ impl TokenSource for FileStore {
         {
             let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(cached) = cache.get(&path) {
-                if cached.expires_at > Instant::now() + REFRESH_MARGIN {
-                    return Ok(Token { value: cached.token.clone(), account: cached.account.clone(), expires_at: wall_clock(cached.expires_at) });
+                if cached.is_fresh(Instant::now(), SystemTime::now()) {
+                    return Ok(Token { value: cached.token.clone(), account: cached.account.clone(), expires_at: cached.wall_expires_at });
                 }
             }
         }
@@ -378,8 +387,9 @@ impl TokenSource for FileStore {
         let (token, lifetime) = self.refresh(&credentials)?;
         let account = credentials.account;
         let expires_at = Instant::now() + lifetime;
-        self.cache.lock().unwrap_or_else(PoisonError::into_inner).insert(path, Cached { token: token.clone(), account: account.clone(), expires_at });
-        Ok(Token { value: token, account, expires_at: wall_clock(expires_at) })
+        let wall_expires_at = SystemTime::now().checked_add(lifetime);
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner).insert(path, Cached { token: token.clone(), account: account.clone(), expires_at, wall_expires_at });
+        Ok(Token { value: token, account, expires_at: wall_expires_at })
     }
 }
 
@@ -555,7 +565,7 @@ mod tests {
     }
 
     /// A token says when it expires: a fresh one by the `expires_in` the token service answered (the mock's is 3599 seconds), and one
-    /// answered from the cache by the end the cache holds, not by a new hour.
+    /// answered from the cache by the wall-clock end the cache holds, the very one it was given when it was fetched.
     #[test]
     fn a_token_reports_when_it_expires() {
         let dir = tempfile::tempdir().unwrap();
@@ -569,11 +579,50 @@ mod tests {
         let lifetime = fresh.expires_at.expect("a token from the token service has an end").duration_since(asked).expect("the end is ahead");
         assert!((Duration::from_secs(3598)..=Duration::from_secs(3601)).contains(&lifetime), "{lifetime:?}");
 
-        store.set_cached_expiry(&path, Instant::now() + Duration::from_secs(1000));
         let cached = store.access_token(Some("frank@example.com")).unwrap();
-        let lifetime = cached.expires_at.expect("a cached token has an end too").duration_since(SystemTime::now()).expect("the end is ahead");
-        assert!((Duration::from_secs(998)..=Duration::from_secs(1001)).contains(&lifetime), "{lifetime:?}");
+        assert_eq!(cached.expires_at, fresh.expires_at, "the cache answers with the end it was given, not with a new hour");
+        let later = SystemTime::now() + Duration::from_secs(1000);
+        store.set_cached_wall_expiry(&path, later);
+        let cached = store.access_token(Some("frank@example.com")).unwrap();
+        assert_eq!(cached.expires_at, Some(later), "the end is the cache's own");
         assert_eq!(cached.value.as_str(), "ya29.frank", "the cached token is the one that was refreshed");
+    }
+
+    /// The monotonic clock stands still while a Mac sleeps, so by itself it serves a token that expired in the night: the wall clock has a
+    /// say too, and a token is served from the cache only while both clocks put its end more than five minutes away.
+    #[test]
+    fn a_cached_token_past_its_wall_clock_expiry_is_fetched_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "rt-frank"));
+        let mut server = mockito::Server::new();
+        let mock = token_mock(&mut server, "rt-frank", "ya29.frank").expect(2);
+        let store = store(dir.path(), None, &server);
+        store.access_token(Some("frank@example.com")).unwrap();
+        // The monotonic clock was not touched, and still puts the end an hour away; the wall clock says the token ended an hour ago.
+        store.set_cached_wall_expiry(&path, SystemTime::now() - Duration::from_secs(3600));
+        let again = store.access_token(Some("frank@example.com")).unwrap();
+        let lifetime = again.expires_at.expect("the new token has an end").duration_since(SystemTime::now()).expect("the end is ahead");
+        assert!(lifetime > Duration::from_secs(3000), "{lifetime:?}");
+        // The new token is fresh by both clocks: this one comes from the cache.
+        store.access_token(Some("frank@example.com")).unwrap();
+        mock.assert();
+    }
+
+    /// The five-minute margin applies to the wall clock as it does to the monotonic one.
+    #[test]
+    fn a_cached_token_within_five_minutes_of_its_wall_clock_expiry_is_fetched_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "rt-frank"));
+        let mut server = mockito::Server::new();
+        let mock = token_mock(&mut server, "rt-frank", "ya29.frank").expect(2);
+        let store = store(dir.path(), None, &server);
+        store.access_token(Some("frank@example.com")).unwrap();
+        store.set_cached_wall_expiry(&path, SystemTime::now() + Duration::from_secs(10 * 60));
+        store.access_token(Some("frank@example.com")).unwrap();
+        assert!(!mock.matched(), "ten minutes left: answered from the cache");
+        store.set_cached_wall_expiry(&path, SystemTime::now() + Duration::from_secs(4 * 60));
+        store.access_token(Some("frank@example.com")).unwrap();
+        mock.assert();
     }
 
     #[test]
