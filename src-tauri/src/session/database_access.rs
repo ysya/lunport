@@ -460,8 +460,13 @@ mod tests {
         assert_eq!(state_of(vec![grant("ACTIVE", Some(ago(600)))]), Ok(GrantState::Held { recent: false, until: until(1200) }));
         // Given thirty seconds ago: fresh, which is what lets Cloud SQL's refusal be put down to a grant it has not seen yet.
         assert_eq!(state_of(vec![grant("ACTIVE", Some(ago(30)))]), Ok(GrantState::Held { recent: true, until: until(1770) }));
-        // Still activating, it is as fresh as now, and lasts as long as was asked for.
-        assert_eq!(state_of(vec![grant("ACTIVATING", None)]), Ok(GrantState::Held { recent: true, until: until(1800) }));
+        // Still activating, it is as fresh as now and lasts as long as it was requested for: fifteen minutes here, not the thirty that the
+        // database asks for by default (another device, or gcloud, requested it for another length).
+        let short = Grant { requested_duration: Some("900s".into()), ..grant("ACTIVATING", None) };
+        assert_eq!(state_of(vec![short]), Ok(GrantState::Held { recent: true, until: until(900) }));
+        // One that says no length of its own gets the database's.
+        let unsaid = Grant { requested_duration: None, ..grant("ACTIVATING", None) };
+        assert_eq!(state_of(vec![unsaid]), Ok(GrantState::Held { recent: true, until: until(1800) }));
         // A grant time ahead of this clock (Google's is ahead) is fresh too, and ends when the grant says.
         let ahead = rfc3339(now() + Duration::from_secs(30));
         assert_eq!(state_of(vec![grant("ACTIVE", Some(ahead))]), Ok(GrantState::Held { recent: true, until: until(1830) }));

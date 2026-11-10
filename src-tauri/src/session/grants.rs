@@ -286,7 +286,8 @@ pub(crate) struct CurrentGrant {
     pub granted_at: Option<SystemTime>,
     /// Whether it was given within `RECENT_GRANT` of `now`.
     pub recent: bool,
-    /// When its access ends (`pam::active_span`); `None` for a grant PAM did not date.
+    /// When its access ends (`pam::active_span`: its own times, else the length it was requested for, else the route's default length);
+    /// `None` for a grant PAM did not date.
     pub until: Option<SystemTime>,
 }
 
