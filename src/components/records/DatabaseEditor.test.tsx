@@ -261,20 +261,43 @@ describe("the New database dialog", () => {
     expect(dialog.kept.draft).toMatchObject({ name: "Orders (prod)", instance: "orders-pg-2" });
   });
 
-  it("switching_to_the_connection_name_shows_the_instance_picked", () => {
+  it("switching_to_the_connection_name_shows_the_instance_picked_and_never_a_stale_name", () => {
     const dialog = editor({ ...newDatabase(), project: PROD }, { instances: listed([ORDERS_PG]) });
     radioOf(dialog.tree(), "orders-pg").onChange();
     groupOf(dialog.tree(), "How to choose the instance").onValueChange("manual");
     expect(dialog.kept.mode).toBe("manual");
     expect(dialog.kept.connection).toBe(CONNECTION);
-    // Nothing picked: the text that was typed stays.
-    const bare = editor(newDatabase(), { connection: "acme" });
-    groupOf(bare.tree(), "How to choose the instance").onValueChange("manual");
-    expect(bare.kept.connection).toBe("acme");
     // Back to the list, with nothing lost.
     groupOf(dialog.tree(), "How to choose the instance").onValueChange("pick");
     expect(dialog.kept.mode).toBe("pick");
     expect(dialog.kept.draft).toMatchObject({ project: PROD, instance: "orders-pg" });
+    // Nothing picked, nothing typed: the field starts empty, and the text that was typed before does not come back.
+    const bare = editor(newDatabase(), { connection: "acme" });
+    groupOf(bare.tree(), "How to choose the instance").onValueChange("manual");
+    expect(bare.kept.connection).toBe("");
+  });
+
+  it("a_connection_name_typed_before_the_pick_was_taken_back_does_not_come_back", () => {
+    // Typed as a name, then the list, then another project in the list (which takes the pick back), then the name again.
+    const dialog = editor({ ...newDatabase(), account: "frank@example.com" }, { mode: "manual", instances: listed([ORDERS_PG]) });
+    typeInto(dialog.tree(), "Connection name", CONNECTION);
+    expect(dialog.kept.draft).toMatchObject({ project: PROD, region: "asia-east1", instance: "orders-pg" });
+    groupOf(dialog.tree(), "How to choose the instance").onValueChange("pick");
+    typeInto(dialog.tree(), "Project", DEV);
+    expect(dialog.kept.draft).toMatchObject({ project: DEV, region: "", instance: "" });
+    groupOf(dialog.tree(), "How to choose the instance").onValueChange("manual");
+    expect(dialog.kept.mode).toBe("manual");
+    // The draft is nowhere, so the field says nothing; it does not keep naming an instance the draft no longer holds.
+    expect(dialog.kept.connection).toBe("");
+    expect(valueOf(dialog.tree(), "Connection name")).toBe("");
+    expect(buttonTag(dialog.markup(), "Save database")).toContain(DISABLED);
+    // Picking again in the list shows as that instance's name.
+    groupOf(dialog.tree(), "How to choose the instance").onValueChange("pick");
+    typeInto(dialog.tree(), "Project", PROD);
+    radioOf(dialog.tree(), "orders-pg").onChange();
+    groupOf(dialog.tree(), "How to choose the instance").onValueChange("manual");
+    expect(dialog.kept.connection).toBe(CONNECTION);
+    expect(valueOf(dialog.tree(), "Connection name")).toBe(CONNECTION);
   });
 
   it("saving_a_prod_database_sends_its_entitlement", () => {

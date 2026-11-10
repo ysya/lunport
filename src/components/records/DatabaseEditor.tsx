@@ -196,8 +196,8 @@ export function DatabaseEditorView({ draft, mode, connection, instances, used, b
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
   const chooseMode = (next: Mode) => {
     onMode(next);
-    // The instance picked shows as the connection name that names it.
-    if (next === "manual" && ready) onConnection(connectionName(draft));
+    // The field shows the connection name of the instance picked, or nothing: never a name typed before that pick was taken back.
+    if (next === "manual") onConnection(ready ? connectionName(draft) : "");
   };
   return (
     <>
