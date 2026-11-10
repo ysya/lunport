@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.0.0](https://github.com/ysya/lunport/compare/v1.14.4...v2.0.0) (2026-11-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* the command-line program is now `lunport` (for example `lunport connect`) and the MCP server is named `lunport`, so Claude Code and Codex ask again to approve its tools, and Cursor and VS Code need Lunport added again. Going back to a 1.x version after updating starts with an empty library.
+
+### Features
+
+* AI activity page ([c061e44](https://github.com/ysya/lunport/commit/c061e440058b4fc3137c7b0447c42981eed33639))
+* **mcp:** ask in Lunport's windows instead of failing in Auto-log ([71612e2](https://github.com/ysya/lunport/commit/71612e226802dbef97045d5fd126b10c94851246))
+* **mcp:** ask in Lunport's windows instead of failing in Auto-log ([e031d35](https://github.com/ysya/lunport/commit/e031d35b915cfabda2ed289142293a3157d22b94))
+* **mcp:** ask the trust window for a server key the AI meets first ([78bf05e](https://github.com/ysya/lunport/commit/78bf05e8f0563593ac1cb9a41419d854d1e8dd87))
+* **mcp:** ask the trust window for a server key the AI meets first ([76dfd16](https://github.com/ysya/lunport/commit/76dfd1694bbae459c6bc41334af03960d6137b34))
+* **mcp:** manage tunnels through MCP tools ([6884cb6](https://github.com/ysya/lunport/commit/6884cb62a6d5e944ff7849a0d1450e8930bbfadf))
+* **mcp:** manage tunnels through MCP tools ([0879fc0](https://github.com/ysya/lunport/commit/0879fc097fb2e3053f5e90959795537c8c3adeea))
+* **mcp:** record AI review and stop, keep 1,000 AI entries apart ([30bfa79](https://github.com/ysya/lunport/commit/30bfa7917bc62b266c97d2b97398bcf13ba703ba))
+* **mcp:** record proposal and tunnel decisions apart from errors ([abd9ee2](https://github.com/ysya/lunport/commit/abd9ee26d7cf04011e2b5aa10a4df160ca006e01))
+* **mcp:** record when ssh_exec started and why it stopped ([4e9a2e9](https://github.com/ysya/lunport/commit/4e9a2e99c049d075436a0c6d9648f2b5b703dc71))
+* move to the dev.ysya.lunport identity ([8c0115f](https://github.com/ysya/lunport/commit/8c0115fe71724f0f4b4e212e6c6e58bea92540e0))
+* **ui:** add AI activity result wording and query ([4995bc6](https://github.com/ysya/lunport/commit/4995bc6620f0da2a64642209b9128489039f8fba))
+* **ui:** add the AI activity page to the Library ([0a8d1a7](https://github.com/ysya/lunport/commit/0a8d1a7016e75238aa774eeb1b8efe9226594211))
+* **ui:** summarize AI activity in Settings and document the page ([0375937](https://github.com/ysya/lunport/commit/03759374dcea1e46bd7e38ab9d21aabb6885d699))
+
+
+### Bug Fixes
+
+* **mcp:** name hosts by their alias in update, route and server key entries ([d6abe3a](https://github.com/ysya/lunport/commit/d6abe3a0c03098285a744ed6ac283497e9c0f861))
+* **mcp:** record a tunnel still connecting when start_tunnel answers as tunnel_starting ([9b0ce24](https://github.com/ysya/lunport/commit/9b0ce240cdee84e602f9e76c9bf773e44efdd42b))
+* **session:** give the requests that shared a grant question the person's answer ([c4d1d70](https://github.com/ysya/lunport/commit/c4d1d70330dcb6ba5d5e275aed006150be431094))
+* **session:** warn when a server key differs from another device's saved key ([95cf0c9](https://github.com/ysya/lunport/commit/95cf0c98590331cad22947625c858f334378ad7d))
+* **session:** warn when a server key differs from another device's saved key ([be28b89](https://github.com/ysya/lunport/commit/be28b897eb7ec338df405c12ad3e93244800d3f9))
+* **settings:** import settings exported by this version ([20f161f](https://github.com/ysya/lunport/commit/20f161ffa87cd09b6e23b8afeb12826f8fe23534))
+* **settings:** import settings exported by this version ([52e3af4](https://github.com/ysya/lunport/commit/52e3af478e7998d42901da628a99e189387d87e2))
+* **ui:** show still-connecting tunnels and commands canceled after they ran as they happened ([3e98254](https://github.com/ysya/lunport/commit/3e98254b58ea80af94f0f99149a93321caaa0fe9))
+
 ## [1.14.4](https://github.com/ysya/lunport/compare/v1.14.3...v1.14.4) (2026-11-07)
 
 
