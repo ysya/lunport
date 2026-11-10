@@ -1,18 +1,16 @@
 import { tauriInvoke } from "@/lib/ipc";
 import { pushBackendSettings } from "@/lib/backend-settings";
-import { SETTINGS_STORAGE_KEY, useSettingsStore } from "@/stores/settings";
+import { SETTINGS_STORAGE_KEY, SETTINGS_VERSION, useSettingsStore } from "@/stores/settings";
 
 /**
- * The zustand-persist storage envelope for `lunport-settings`. The current
- * store has no explicit version, so persist writes `version: 0`.
+ * The zustand-persist storage envelope for `lunport-settings`, as persist
+ * writes it at the store's `SETTINGS_VERSION`. An import accepts that version
+ * and older ones, which the store migrates as it rehydrates.
  */
 export interface SettingsEnvelope {
   state: Record<string, unknown>;
   version?: number;
 }
-
-/** The persist schema version this build writes (zustand's default). */
-export const SETTINGS_VERSION = 0;
 
 /**
  * Parse + validate the contents of an imported settings file. Throws an
