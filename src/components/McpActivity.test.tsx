@@ -9,6 +9,7 @@ const entry: McpAuditEntry = {
   client_info: { name: null, title: null, version: null },
   at_ms: Date.parse("2026-10-23T03:12:12Z"), completed_at_ms: Date.parse("2026-10-23T03:12:12Z"),
   outcome: "canceled", ended: "canceled", exit_code: null, signal: null, detail: null,
+  review: null, stop: null, tunnel: null,
 };
 const render = (patch: Partial<McpAuditEntry> = {}) => renderToStaticMarkup(<McpActivity entries={[{ ...entry, ...patch }]} />);
 

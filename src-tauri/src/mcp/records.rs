@@ -688,6 +688,7 @@ pub(super) fn execute_context(
             .and_then(|n| i64::try_from(n).ok()),
         signal: value.and_then(|v| v["signal"].as_str().map(str::to_owned)),
         detail: None,
+        ..Default::default()
     });
     match result {
         Ok(mut value) => {

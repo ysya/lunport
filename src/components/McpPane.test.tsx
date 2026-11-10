@@ -18,6 +18,7 @@ const status: McpStatus = {
     id: "a", client: "mcp", host_id: "0000000000000001", alias: "web", command: "sleep 4", mode: "ask",
     requested_by: ["observed-process"], requester_id: "42", client_info: { name: "claimed-client", title: null, version: "1" },
     at_ms: 1, completed_at_ms: 2, outcome: "allowed", ended: "disconnected", exit_code: null, signal: null, detail: null,
+    review: null, stop: null, tunnel: null,
   }],
   executable: "/fixture/lunport", last_client_at_ms: null,
 };

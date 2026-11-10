@@ -65,6 +65,7 @@ else {
       requester_id: "fixture-client", client_info: { name: "Example AI client", title: null, version: "1" },
       at_ms: Date.parse("2026-10-21T23:59:58.000Z"), completed_at_ms: Date.parse("2026-10-22T00:00:02.000Z"),
       outcome: "allowed", ended: "exited", exit_code: 0, signal: null, detail: null,
+      review: null, stop: null, tunnel: null,
     };
     mcp = { ...mcp, enabled: true, recent: [entry, {
       ...entry, id: "fixture-legacy-command", alias: "Database replica", command: "hostname",

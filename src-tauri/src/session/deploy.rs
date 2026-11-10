@@ -552,6 +552,7 @@ fn audit(
         exit_code: matches!(result.outcome, Outcome::Added | Outcome::AlreadyPresent).then_some(0),
         detail: None,
         completed_at_ms: unix_ms(),
+        ..Default::default()
     })
 }
 
