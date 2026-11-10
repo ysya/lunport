@@ -6,9 +6,9 @@
 //! messages a start-up needs and follows the server's stream far enough to tell when a session is idle. It never reads a byte more than the
 //! message it was asked for, so whatever follows is left in the stream for the caller to copy.
 
-use std::hint::black_box;
 use std::io;
 
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zeroize::Zeroizing;
 
@@ -430,19 +430,16 @@ impl ReadyTracker {
     }
 }
 
-/// Whether the password the app gave is the one expected. Two passwords of the same length are compared byte for byte with no way out at
-/// the first difference, so the time does not tell where they differ; only a difference of length is told at once, and the generated
-/// password has a fixed length. Nobody gets in when no password is expected.
+/// Whether the password the app gave is the one expected. Two passwords of the same length are compared by the constant-time equality of
+/// the `subtle` crate, which goes over every byte and has no way out at the first difference, so the time does not tell where they
+/// differ; only a difference of length is told at once, and the generated password has a fixed length. Nobody gets in when no password is
+/// expected.
 pub fn passwords_match(expected: &str, given: &str) -> bool {
     let (expected, given) = (expected.as_bytes(), given.as_bytes());
     if expected.is_empty() || expected.len() != given.len() {
         return false;
     }
-    let mut difference = 0u8;
-    for (a, b) in expected.iter().zip(given) {
-        difference |= black_box(a ^ b);
-    }
-    black_box(difference) == 0
+    bool::from(expected.ct_eq(given))
 }
 
 #[cfg(test)]

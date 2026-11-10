@@ -61,6 +61,8 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 zeroize = "1"
+# Constant-time comparison of a database port's password (src/session/pgwire.rs). It is already in the lockfile through the crypto crates.
+subtle = "2"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 # Google Cloud IAP tunnels (src/gcp/): the relay's WebSocket. rustls, tokio-rustls, the native roots and url are already in the lockfile
 # through reqwest; only tungstenite and tokio-tungstenite are new. futures-util splits the socket into its read and write halves.
