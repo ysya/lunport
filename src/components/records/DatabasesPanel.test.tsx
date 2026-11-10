@@ -154,6 +154,20 @@ describe("the Databases page", () => {
     expect(iconButton(blocked, "Delete Orders")).toContain(DISABLED);
   });
 
+  it("names_start_stop_and_retry_by_their_database", () => {
+    const sentence = "Port 6543 is already in use on this computer.";
+    expect(buttonTag(render([row({}, { pam: null })]), "Start")).toContain('aria-label="Start Orders"');
+    expect(buttonTag(render([row({ live: live("running") }, { pam: null })]), "Stop")).toContain('aria-label="Stop Orders"');
+    expect(buttonTag(render([row({ live: live("error", { error: sentence }) }, { pam: null })]), "Retry")).toContain('aria-label="Retry Orders"');
+    // A row names its own button among several, and a name's hidden characters show as codes in the label too.
+    const two = render([row({}, { pam: null }), row({ live: live("running") }, { id: "00000000000000a2", name: "Ord\u202eers", pam: null })]);
+    expect(two).toContain('aria-label="Start Orders"');
+    expect(two).toContain('aria-label="Stop Ord⟨U+202E⟩ers"');
+    expect(two).not.toContain("\u202e");
+    // The removed row's Stop is named too.
+    expect(buttonTag(render([row({ live: live("running"), removed: true, blocked: true })]), "Stop")).toContain('aria-label="Stop Orders"');
+  });
+
   it("a_running_database_whose_saved_port_was_cleared_can_still_be_stopped", () => {
     // Another device cleared the port from the record while this computer's port went on running.
     const cleared = { local_port: null, pam: null };
