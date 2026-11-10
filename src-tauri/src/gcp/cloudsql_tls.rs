@@ -78,7 +78,9 @@ pub fn server_name(identity: &ServerIdentity) -> ServerName<'static> {
     ServerName::DnsName(dns_name.unwrap_or_else(|| DnsName::try_from(NO_DNS_NAME).expect("cloudsql.invalid is a valid DNS name")))
 }
 
-/// Opens the TLS connection to the instance at `ip`: TCP to port 3307 within 10 seconds, then the handshake within 10 more.
+/// Opens the TLS connection to the instance at `ip`: TCP to port 3307 within 10 seconds, then the handshake within 10 more. In TLS 1.3 the
+/// client finishes its side of the handshake before the server has checked the client certificate, so an `Ok` stream does not mean Cloud
+/// SQL accepted the certificate: a refusal arrives as an alert, and the first read or write after it fails.
 pub async fn dial(ip: IpAddr, config: Arc<ClientConfig>, name: ServerName<'static>) -> io::Result<TlsStream<TcpStream>> {
     dial_within(SocketAddr::new(ip, PORT), config, name, TCP_LIMIT, HANDSHAKE_LIMIT).await
 }
@@ -88,8 +90,9 @@ async fn dial_within(address: SocketAddr, config: Arc<ClientConfig>, name: Serve
     let socket = tokio::time::timeout(tcp_limit, TcpStream::connect(address))
         .await
         .map_err(|_| timed_out(format!("Cloud SQL did not answer at {address} within {tcp_limit:?}.")))??;
-    // Nagle is off: the PostgreSQL messages this carries are small, and each one waits for its answer.
-    socket.set_nodelay(true)?;
+    // Nagle is off: the PostgreSQL messages this carries are small, and each one waits for its answer. A socket that refuses the option
+    // still carries them, so the dial goes on without it.
+    let _ = socket.set_nodelay(true);
     tokio::time::timeout(handshake_limit, TlsConnector::from(config).connect(name, socket))
         .await
         .map_err(|_| timed_out(format!("The TLS handshake with Cloud SQL at {address} did not finish within {handshake_limit:?}.")))?
