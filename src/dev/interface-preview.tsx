@@ -80,6 +80,8 @@ else {
         stop: { kind: "error", window: null, reason: "Connection refused (os error 61)" }, at_ms: at(0, 9, 58) - 3_100, completed_at_ms: at(0, 9, 58) },
       { ...done, id: "fixture-failed", command: "systemctl status nginx", exit_code: 3, at_ms: at(0, 9, 50) - 900, completed_at_ms: at(0, 9, 50) },
       done,
+      { ...done, ...notRun, id: "fixture-tunnel-connecting", host_id: bastion.id, alias: bastion.payload.alias, command: "", mode: "auto_log", review: "auto_log",
+        outcome: "tunnel_starting", tunnel: "Metrics", at_ms: at(1, 18, 40) - 90_400, completed_at_ms: at(1, 18, 40) },
       { ...done, ...notRun, id: "fixture-key-refused", host_id: bastion.id, alias: bastion.payload.alias, command: "cat /etc/os-release", outcome: "denied",
         stop: { kind: "refused", window: "server_key", reason: `The server key of ${bastion.payload.alias} was denied in Lunport's trust window; nothing was saved.` },
         at_ms: at(1, 18, 12) - 14_000, completed_at_ms: at(1, 18, 12) },

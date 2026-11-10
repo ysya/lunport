@@ -23,6 +23,9 @@ export const NO_FILTERS: ActivityFilters = { search: "", client: null, host: nul
 
 const SUCCEEDED: ActivityResult = { kind: "succeeded", label: "Succeeded" };
 const UNKNOWN: ActivityResult = { kind: "unknown", label: "Result unavailable" };
+/** A tunnel still connecting when its start answered: how it went is not recorded. */
+const STARTING = "tunnel_starting";
+const STILL_CONNECTING: ActivityResult = { kind: "unknown", label: "Still connecting" };
 const NO_EXIT = "No exit status was recorded.";
 
 const STOPS: Record<McpStopKind, ActivityResult> = {
@@ -55,9 +58,10 @@ const OLDER = new Map<string, ActivityResult>([
 ]);
 const CHANGES = new Set(["host_created", "host_creation_not_completed", "host_updated", "host_update_not_completed"]);
 
-/** Whether the entry is of a command that ran: its end is what it records. */
+/** Whether the entry is of a command that ran: its end is what it records. A request canceled once its command was sent records how
+ * the command ended (`canceled`, or its own end when the cancel came after it), and only then. */
 function ranCommand(entry: McpAuditEntry): boolean {
-  return entry.outcome === "allowed" || (entry.outcome === "canceled" && entry.ended === "canceled");
+  return entry.outcome === "allowed" || (entry.outcome === "canceled" && entry.ended != null);
 }
 
 /** How a command that ran ended, and the sentence that says so. */
@@ -78,6 +82,7 @@ function ending(entry: McpAuditEntry): { result: ActivityResult; sentence: strin
 /** What became of the request: what stopped it, else what it recorded. Nothing is inferred from a missing exit status. */
 export function activityResult(entry: McpAuditEntry): ActivityResult {
   if (entry.stop) return STOPS[entry.stop.kind] ?? UNKNOWN;
+  if (entry.outcome === STARTING) return STILL_CONNECTING;
   const done = DONE.get(entry.outcome);
   if (done) return { kind: "succeeded", label: done };
   if (NOT_DONE.has(entry.outcome)) return { kind: "not_run", label: "Not completed" };
@@ -108,6 +113,7 @@ const TUNNEL_VERBS = new Map<string, Columns>([
   ...both("tunnel_updated", "tunnel_not_updated", ["Updated", "Proposed changes to", "Could not update"]),
   ...both("tunnel_deleted", "tunnel_not_deleted", ["Deleted", "Proposed deleting", "Could not delete"]),
   ...both("tunnel_started", "tunnel_not_started", ["Started", "Asked to start", "Could not start"]),
+  [STARTING, ["Starting", "Asked to start", "Could not start"]],
   ["tunnel_stopped", ["Stopped", "Stopped", "Stopped"]],
 ]);
 const COMMAND_TITLES: Columns = ["Ran a command on ", "Asked to run a command on ", "Could not run a command on "];
@@ -165,6 +171,7 @@ export function resultSentence(entry: McpAuditEntry, result: ActivityResult): st
     const where = entry.stop.window ? WINDOWS[entry.stop.window] : undefined;
     return where ? `${result.label} in ${where}.` : `${result.label}.`;
   }
+  if (entry.outcome === STARTING) return "Still connecting when Lunport answered; the Tunnels page shows how it went.";
   if (ranCommand(entry)) return ending(entry).sentence;
   if (result.kind === "unknown") return NO_EXIT;
   return `${result.label}.`;

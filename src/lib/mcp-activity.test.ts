@@ -56,6 +56,7 @@ describe("AI activity results", () => {
     [{ outcome: "tunnel_updated", command: "" }, "succeeded", "Tunnel updated"],
     [{ outcome: "tunnel_deleted", command: "" }, "succeeded", "Tunnel deleted"],
     [{ outcome: "tunnel_started", command: "" }, "succeeded", "Tunnel started"],
+    [{ outcome: "tunnel_starting", command: "" }, "unknown", "Still connecting"],
     [{ outcome: "tunnel_stopped", command: "" }, "succeeded", "Tunnel stopped"],
     ...[
       "host_creation_not_completed", "host_update_not_completed", "host_key_not_verified", "transport_not_set", "transport_not_removed",
@@ -72,7 +73,10 @@ describe("AI activity results", () => {
     [{}, "succeeded", "Succeeded"],
     [{ exit_code: null }, "unknown", "Result unavailable"],
     [{ ended: null, exit_code: null }, "unknown", "Result unavailable"],
-    [older({ outcome: "canceled", ended: "exited", exit_code: 0 }), "not_run", "Canceled"],
+    [{ outcome: "canceled", ended: "exited", exit_code: 0 }, "succeeded", "Succeeded"],
+    [{ outcome: "canceled", ended: "exited", exit_code: 3 }, "failed", "Failed · exit 3"],
+    [older({ outcome: "canceled", ended: "exited", exit_code: 0 }), "succeeded", "Succeeded"],
+    [older({ outcome: "canceled" }), "not_run", "Canceled"],
     [older({ outcome: "denied" }), "not_run", "Denied"],
     [older({ outcome: "timed_out" }), "not_run", "Timed out"],
     [older({ outcome: "error" }), "error", "Error"],
@@ -84,7 +88,7 @@ describe("AI activity results", () => {
 
   it.each([
     ["allowed", "command"], ["error", "command"], ["a_future_outcome", "command"],
-    ["tunnel_started", "tunnel"], ["tunnel_not_deleted", "tunnel"], ["tunnel_stopped", "tunnel"],
+    ["tunnel_started", "tunnel"], ["tunnel_starting", "tunnel"], ["tunnel_not_deleted", "tunnel"], ["tunnel_stopped", "tunnel"],
     ["host_key_verified", "server_key"], ["host_key_not_verified", "server_key"],
     ["host_created", "change"], ["host_creation_not_completed", "change"], ["host_updated", "change"], ["host_update_not_completed", "change"],
     ["transport_set", "change"], ["transport_not_removed", "change"],
@@ -101,8 +105,12 @@ describe("AI activity titles", () => {
     expect(activityTitle(command, "unknown").before).toBe("Ran a command on ");
     expect(activityTitle(command, "not_run").before).toBe("Asked to run a command on ");
     expect(activityTitle(command, "error").before).toBe("Could not run a command on ");
+    const canceledAfterItRan = entry({ outcome: "canceled", ended: "exited", exit_code: 0 });
+    expect(titleText(activityTitle(canceledAfterItRan, activityResult(canceledAfterItRan).kind))).toBe("Ran a command on web-1");
     const started = entry({ outcome: "tunnel_started", command: "", tunnel: "Database" });
     expect(activityTitle(started, "succeeded")).toEqual({ before: "Started tunnel Database through ", host: "web-1", after: "" });
+    const starting = entry({ outcome: "tunnel_starting", command: "", tunnel: "Database" });
+    expect(titleText(activityTitle(starting, activityResult(starting).kind))).toBe("Starting tunnel Database through web-1");
     const beforeTunnelNames = entry({ outcome: "tunnel_started", command: "", alias: "web-1 · Database", tunnel: null });
     expect(activityTitle(beforeTunnelNames, "succeeded")).toEqual({ before: "Started tunnel ", host: "web-1 · Database", after: "" });
     const proposed = entry({ outcome: "host_creation_not_completed", alias: "db-replica", command: "", review: null, stop: stop("refused", "approval") });
@@ -163,6 +171,7 @@ describe("AI activity review and result sentences", () => {
     [{ ended: "truncated", exit_code: 0 }, "Ran until the output limit and was stopped."],
     [{ ended: "disconnected", exit_code: null }, "Ran, then the connection was lost."],
     [{ outcome: "canceled", ended: "canceled", exit_code: null }, "Ran, then the request was canceled."],
+    [{ outcome: "canceled", ended: "exited", exit_code: 0 }, "Ran and exited with code 0."],
     [{ exit_code: null }, "No exit status was recorded."],
     [{ stop: stop("not_allowed"), review: null }, "This host is not allowed for AI access."],
     [{ stop: stop("refused", "approval") }, "Refused by you in the approval window."],
@@ -172,6 +181,7 @@ describe("AI activity review and result sentences", () => {
     [{ stop: stop("canceled") }, "Canceled."],
     [{ stop: stop("error") }, "Error."],
     [{ outcome: "tunnel_started", command: "", tunnel: "Database" }, "Tunnel started."],
+    [{ outcome: "tunnel_starting", command: "", tunnel: "Database" }, "Still connecting when Lunport answered; the Tunnels page shows how it went."],
     [older({ outcome: "tunnel_not_started", command: "" }), "Not completed."],
     [older({ outcome: "denied" }), "Denied."],
   ] satisfies [Partial<McpAuditEntry>, string][])("result sentence for %j", (patch, sentence) => {
