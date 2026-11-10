@@ -5,6 +5,7 @@ Lunport is a public repository. These rules apply to every coding agent that wor
 ## Keep internal notes out of the repository
 
 - Write design specs, implementation plans, review records, handoff notes and validation logs outside the repository, in your agent's own plans or scratch folder. Never commit them, and do not cite them from code comments, documentation, pull request descriptions or release notes.
+- A comment, test name or document says what it means on its own, never "see section N", a task, requirement or review-round number, or a design's date. The Policy job's `scripts/note-citation-guard.test-node.mjs` fails on such a citation in any tracked file.
 - `docs/` holds only `usage.md`, `development.md`, `ci.md` and `central-server-configuration.md`. Screenshots and review artifacts stay local.
 - Agent configuration folders such as `.claude/` stay untracked; shared agent instructions belong in this file.
 

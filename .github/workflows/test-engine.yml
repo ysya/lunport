@@ -38,6 +38,8 @@ jobs:
       - run: node --test scripts/ci-changes.test-node.mjs
       - name: Guard against names from before the rename
         run: node --test scripts/identity-guard.test-node.mjs
+      - name: Guard against citations of planning documents
+        run: node --test scripts/note-citation-guard.test-node.mjs
       # scripts/identity.mjs and the Windows builds' console helper step; the identity installs had before 2.0, which the installers and
       # scripts/legacy-identity.json each hold, for both profiles.
       - name: Identity values in scripts and installers

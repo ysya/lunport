@@ -72,6 +72,10 @@ node --test scripts/ci-changes.test-node.mjs
 The same job keeps identity values in one place. `scripts/identity-guard.test-node.mjs`
 scans every file git tracks and fails on a name from before 2.0 outside the places
 `scripts/identity-guard.mjs` allows.
+`scripts/note-citation-guard.test-node.mjs` scans the same files and fails on a citation of a
+planning document that is not in the repository: a section, task, requirement or review-round
+number of a spec, plan or design, or a design named by its date. `scripts/note-citation-guard.mjs`
+lists each form and the files that may hold one.
 `scripts/identity.test-node.mjs` checks what `scripts/identity.mjs` reads from the Tauri
 configurations, the console helper's crate, `src-tauri/src/identity.rs` and the frozen helper
 manifests;
