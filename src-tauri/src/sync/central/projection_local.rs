@@ -103,6 +103,7 @@ pub fn public_rows(
             RecordKind::Meta if crate::sync::tunnel_rules::is_id(&row.record.id) => {}
             RecordKind::Meta if transports::is_id(&row.record.id) => {}
             RecordKind::Meta if crate::sync::pam_records::is_id(&row.record.id) => {}
+            RecordKind::Meta if crate::sync::databases::is_id(&row.record.id) => {}
             RecordKind::Meta if row.record.id == crate::sync::record::ACCOUNT_META_ID => {}
             RecordKind::Meta if row.record.id == crate::sync::group_order::RECORD_ID => {}
             _ => return Err(invalid()),
@@ -134,7 +135,7 @@ fn is_group_order(row: &LocalRecord) -> bool {
 /// and none keeps a justification. Account rows the Catalog does not carry are skipped, those it does not know included:
 /// `public_rows` is what refuses an unknown row, so a caller of `catalog_of` alone (the room check of route and tunnel saves,
 /// `transports::ensure_room`, and the publish step's walk, `transports::local_routes`) learns the Catalog, not whether the state can be
-/// captured.
+/// captured. Its saved databases, search scopes and grant memory are the account's rows on the same terms (`databases::catalog_list`).
 pub(crate) fn catalog_of(state: &SyncStateV3, original: &Catalog) -> Result<Catalog, AppError> {
     let account = state.account.as_ref().ok_or_else(invalid)?;
     if !account.sealed.is_empty() || !account.chain_deletes.is_empty() {
@@ -255,6 +256,7 @@ pub(crate) fn catalog_of(state: &SyncStateV3, original: &Catalog) -> Result<Cata
         }
     }
     let (pam_scopes, pam_requests) = crate::sync::pam_records::catalog_lists(state, original).map_err(|_| invalid())?;
+    let databases = crate::sync::databases::catalog_list(state, original).ok_or_else(invalid)?;
     let mut catalog = Catalog {
         tunnels: next_tunnels,
         transports: vec![],
@@ -262,6 +264,7 @@ pub(crate) fn catalog_of(state: &SyncStateV3, original: &Catalog) -> Result<Cata
         group_orders: next_orders,
         pam_scopes,
         pam_requests,
+        databases,
     };
     for old in &original.transports {
         if let Some(route) = routes.remove(&old.host_id) {
@@ -277,6 +280,7 @@ pub(crate) fn catalog_of(state: &SyncStateV3, original: &Catalog) -> Result<Cata
 mod tests {
     use super::*;
     use crate::sync::{
+        databases::{self, tests::database, SavedDatabase},
         record::Record,
         state_v2::AccountState,
         transports::{HostTransport, PamCheck, TransportKind},
@@ -401,5 +405,80 @@ mod tests {
         library_route(&mut state, HOST, Some(&plain_route(OTHER))); // the row's id names another host
         assert!(catalog_of(&state, &empty()).is_err());
         assert!(public_rows(&state, &empty(), &BTreeMap::new()).is_err());
+    }
+
+    // ---- Saved databases ----
+
+    const D1: &str = "00000000000000d1";
+    const D2: &str = "00000000000000d2";
+    const D3: &str = "00000000000000d3";
+
+    /// The library's row for a saved database, as central sync keeps it in the account: the database, or `None` once removed.
+    fn library_database(state: &mut SyncStateV3, id: &str, saved: Option<&SavedDatabase>) {
+        let payload = saved.map_or(serde_json::Value::Null, |saved| json!({"schema":1,"database":saved}));
+        insert(&mut state.account.as_mut().unwrap().records, row(RecordKind::Meta, &databases::wire_id(id), payload));
+    }
+    fn database_ids(catalog: &Catalog) -> Vec<&str> {
+        catalog.databases.iter().map(|saved| saved.id.as_str()).collect()
+    }
+
+    #[test]
+    fn the_librarys_databases_enter_the_catalog_in_their_published_order_without_tombstones_or_justifications() {
+        for cutover in [false, true] {
+            let mut state = base_central_state(cutover);
+            // A row that carries the justification of a grant request, as no Lunport writes it: the Catalog leaves it out.
+            let mut remembered = database(D2);
+            remembered.pam = Some(PamCheck { entitlements: vec!["prod-operate".into()], location: "global".into(), duration_secs: 1800, justification: Some("restart orders".into()) });
+            library_database(&mut state, D2, Some(&remembered));
+            library_database(&mut state, D1, Some(&database(D1)));
+            library_database(&mut state, D3, None);
+            let original = Catalog { databases: vec![database(D2)], ..empty() };
+            let built = catalog_of(&state, &original).unwrap();
+            assert_eq!(database_ids(&built), [D2, D1], "published order, then new databases by id; a removed one is dropped");
+            assert_eq!(built.databases[0].pam.as_ref().unwrap().justification, None);
+            built.validate().unwrap();
+            assert_eq!(database_ids(&catalog_of(&state, &empty()).unwrap()), [D1, D2], "by id when nothing was published");
+        }
+    }
+
+    /// Like routes, the databases saved on this device alone never join the Catalog a capture builds: the publish step makes them the
+    /// library's rows first (`databases::publish_local`), and only those rows reach the Catalog.
+    #[test]
+    fn a_capture_never_takes_the_databases_saved_on_this_device() {
+        for cutover in [false, true] {
+            let mut state = databases::tests::saved_on_this_device(&base_central_state(cutover), &database(D1));
+            library_database(&mut state, D2, Some(&database(D2)));
+            assert_eq!(database_ids(&catalog_of(&state, &empty()).unwrap()), [D2]);
+            let published = public_rows(&state, &empty(), &BTreeMap::new())
+                .unwrap()
+                .into_iter()
+                .find_map(|(_, data)| match data {
+                    Data::Catalog(catalog) => Some(catalog.databases),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(published, [database(D2)], "the rows a capture publishes hold the library's database alone");
+        }
+    }
+
+    #[test]
+    fn the_librarys_database_rows_do_not_refuse_a_capture() {
+        let mut state = base_central_state(true);
+        library_database(&mut state, D1, Some(&database(D1)));
+        library_database(&mut state, D2, None);
+        assert!(public_rows(&state, &empty(), &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn a_library_database_row_that_does_not_decode_refuses_the_catalog() {
+        let mut state = base_central_state(true);
+        library_database(&mut state, D1, Some(&database(D2))); // the row's id names another database
+        assert!(catalog_of(&state, &empty()).is_err());
+        assert!(public_rows(&state, &empty(), &BTreeMap::new()).is_err());
+        let mut broken = base_central_state(true);
+        let mut unusable = database(D1);
+        unusable.instance = "Not An Instance".into();
+        library_database(&mut broken, D1, Some(&unusable));
+        assert!(catalog_of(&broken, &empty()).is_err());
     }
 }

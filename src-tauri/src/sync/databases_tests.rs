@@ -1,13 +1,15 @@
 use super::*;
-use crate::sync::records_v3::{decode_state, validate_state, DecodedState, RecordValidationError, CENTRAL_STATE_VERSION};
+use crate::sync::central::{catalog_of, payload::Catalog};
+use crate::sync::records_v3::{decode_state, validate_state, DecodedState, RecordValidationError, PAM_STATE_VERSION};
 use crate::sync::transports::{
-    tests::{filled_past_the_limit_with_tunnels, in_central_mode},
+    tests::{filled_past_the_limit_with_tunnels, filled_short_of, in_central_mode},
     NO_ROOM,
 };
 use serde_json::json;
 
 const ID: &str = "00000000000000d1";
 const OTHER: &str = "00000000000000d2";
+const THIRD: &str = "00000000000000d3";
 const KEY: &str = "meta:database:00000000000000d1";
 
 const NAME: &str = "Enter a database name (up to 128 characters).";
@@ -40,6 +42,25 @@ pub(crate) fn database(id: &str) -> SavedDatabase {
         pam: None,
         local_port: Some(6543),
     }
+}
+
+/// `state` with `database` saved on this device alone, as Lunport saved it before its library used central sync, whatever the library
+/// uses now.
+pub(crate) fn saved_on_this_device(state: &SyncStateV3, database: &SavedDatabase) -> SyncStateV3 {
+    let wire = wire_id(&database.id);
+    let mut next = state.clone();
+    next.local.databases.insert(record_key(RecordKind::Meta, &wire), row_of(state, &wire, Some(payload_of(database)), 1, None, false).unwrap());
+    next.version = next.version.max(STATE_VERSION);
+    next
+}
+
+/// `state` with `database` as a row of the library's account, written the way a projection writes it: not dirty, whatever the library
+/// uses now.
+fn library_row(state: &mut SyncStateV3, database: &SavedDatabase) {
+    let wire = wire_id(&database.id);
+    let row = row_of(state, &wire, Some(payload_of(database)), 1, None, false).unwrap();
+    state.account.as_mut().unwrap().records.insert(record_key(RecordKind::Meta, &wire), row);
+    state.version = state.version.max(STATE_VERSION);
 }
 
 /// `database(ID)` after `change`.
@@ -311,7 +332,7 @@ fn stored_databases_below_version_12_or_failing_their_rules_are_refused() {
     let library = set(&in_central_mode(state()), ID, None, Some(database(ID)), 1).unwrap();
     validate_state(&library).unwrap();
     let mut older = library.clone();
-    older.version = CENTRAL_STATE_VERSION.max(11);
+    older.version = PAM_STATE_VERSION;
     assert!(validate_state(&older).is_err());
     let mut broken = library.clone();
     broken.account.as_mut().unwrap().records.get_mut(KEY).unwrap().record.payload["database"]["region"] = json!("Asia");
@@ -393,4 +414,112 @@ fn a_database_names_its_connection_and_knows_when_it_is_prod() {
     }
     let dev = SavedDatabase { project: "acme-dev-654321".into(), instance: "orders-dev".into(), ..prod };
     assert_eq!(dev.connection_name(), "acme-dev-654321:asia-east1:orders-dev");
+}
+
+// ---- Central sync: the Catalog, the publish step and leaving ----
+
+/// A grant requirement that carries the justification of an earlier request.
+fn remembered() -> PamCheck {
+    PamCheck { justification: Some("restart orders".into()), ..pam(&["prod-operate"]) }
+}
+
+#[test]
+fn saving_a_database_with_a_justification_stores_it_without_one() {
+    let sent = changed(|d| d.pam = Some(remembered()));
+    let stored = changed(|d| d.pam = Some(pam(&["prod-operate"])));
+    assert_ne!(sent, stored);
+    for (whose, base) in [("this device's own", state()), ("the library's", in_central_mode(state()))] {
+        let saved = set(&base, ID, None, Some(sent.clone()), 1).unwrap();
+        assert_eq!(view(&saved)[0].database, stored, "{whose}: what is read back is what the Catalog may carry");
+        let row = saved.account.as_ref().and_then(|account| account.records.get(KEY)).or_else(|| saved.local.databases.get(KEY)).unwrap();
+        assert_eq!(row.record.payload["database"]["pam"]["justification"], serde_json::Value::Null, "{whose}");
+        assert_eq!(row.record.payload["database"]["pam"]["entitlements"], json!(["prod-operate"]), "the rest of the requirement stays");
+        let again = set(&saved, ID, Some(&stored), Some(sent.clone()), 2).unwrap();
+        assert_eq!(view(&again)[0].database, stored, "{whose}: the editor sends the database back as it displayed it");
+    }
+    let library = set(&in_central_mode(state()), ID, None, Some(sent), 1).unwrap();
+    let catalog = catalog_of(&library, &Catalog::default()).unwrap();
+    assert_eq!(catalog.databases, vec![stored], "the row can be published");
+    catalog.validate().unwrap();
+}
+
+#[test]
+fn the_publish_step_moves_this_devices_databases_into_the_library() {
+    let own = set(&set(&state(), ID, None, Some(database(ID)), 1).unwrap(), OTHER, None, Some(database(OTHER)), 2).unwrap();
+    assert_eq!(publish_local(&own, 3), Ok(None), "without central sync nothing moves");
+    let library = in_central_mode(own);
+    assert!(view(&library).is_empty(), "a central library reads its own rows");
+    let moved = publish_local(&library, 3).unwrap().expect("both move");
+    assert!(moved.local.databases.is_empty());
+    assert_eq!(ids(&moved), [ID, OTHER]);
+    assert!(view(&moved).iter().all(|row| row.synced && !row.blocked));
+    let rows: Vec<_> = moved.account.as_ref().unwrap().records.values().filter(|row| is_id(&row.record.id)).collect();
+    assert!(rows.len() == 2 && rows.iter().all(|row| row.dirty), "dirty, so the next capture publishes them");
+    assert_eq!(moved.version, STATE_VERSION);
+    validate_state(&moved).unwrap();
+    assert_eq!(catalog_of(&moved, &Catalog::default()).unwrap().databases, vec![database(ID), database(OTHER)]);
+    assert_eq!(publish_local(&moved, 4), Ok(None), "nothing more moves");
+    assert_eq!(publish_local(&blocked(library.clone()), 3), Ok(None), "a library whose writes are blocked takes none");
+    assert_eq!(publish_local(&in_central_mode(state()), 3), Ok(None), "nor does a library with nothing to move in");
+}
+
+#[test]
+fn the_publish_step_leaves_a_database_the_library_holds_a_row_for() {
+    // The library holds ID, and removed OTHER; this device saved both before, differently, and THIRD besides.
+    let mut library = set(&in_central_mode(state()), ID, None, Some(database(ID)), 1).unwrap();
+    library = set(&library, OTHER, None, Some(database(OTHER)), 2).unwrap();
+    library = set(&library, OTHER, Some(&database(OTHER)), None, 3).unwrap();
+    let mine = |id: &str| SavedDatabase { name: "Mine".into(), ..database(id) };
+    let held = [ID, OTHER, THIRD].iter().fold(library, |state, id| saved_on_this_device(&state, &mine(id)));
+    let moved = publish_local(&held, 4).unwrap().expect("one moves");
+    assert!(moved.local.databases.is_empty(), "the other two give way");
+    let names: Vec<_> = view(&moved).into_iter().map(|row| (row.database.id, row.database.name)).collect();
+    assert_eq!(names, [(ID.to_string(), "Orders".to_string()), (THIRD.to_string(), "Mine".to_string())], "the library's row wins, and a removed database stays removed");
+}
+
+#[test]
+fn the_publish_step_keeps_what_the_library_has_no_room_for() {
+    // In a Catalog that fits but would not with one more database, the database stays on this device.
+    let brink = filled_short_of(in_central_mode(state()), |catalog| catalog.databases.push(database(ID)));
+    let held = saved_on_this_device(&brink, &database(ID));
+    assert_eq!(publish_local(&held, 2), Ok(None));
+    assert!(held.local.databases.contains_key(KEY) && view(&held).is_empty());
+    // A library that holds the most databases takes no more, whatever their size.
+    let id_of = |n: usize| format!("{:016x}", 0x100 + n);
+    let mut full = in_central_mode(state());
+    for n in 0..MAX_DATABASES {
+        library_row(&mut full, &database(&id_of(n)));
+    }
+    assert_eq!(view(&full).len(), MAX_DATABASES);
+    let extra = saved_on_this_device(&full, &database(&id_of(MAX_DATABASES)));
+    assert_eq!(publish_local(&extra, 2), Ok(None));
+    assert_eq!(extra.local.databases.len(), 1);
+}
+
+#[test]
+fn a_database_that_would_push_the_catalog_past_one_record_is_refused_though_it_fits_before() {
+    let brink = filled_short_of(in_central_mode(state()), |catalog| catalog.databases.push(database(ID)));
+    assert_eq!(set(&brink, ID, None, Some(database(ID)), 2).unwrap_err().to_string(), NO_ROOM, "the Catalog measured after the save, not before");
+    let free = set(&in_central_mode(state()), ID, None, Some(database(ID)), 2).unwrap();
+    let crowded = filled_past_the_limit_with_tunnels(free);
+    assert!(set(&crowded, ID, Some(&database(ID)), None, 3).is_ok(), "a removal needs no room");
+}
+
+#[test]
+fn leaving_keeps_every_database_as_this_devices_own() {
+    let mut library = set(&in_central_mode(state()), ID, None, Some(database(ID)), 1).unwrap();
+    library = set(&library, OTHER, None, Some(database(OTHER)), 2).unwrap();
+    library = set(&library, OTHER, Some(&database(OTHER)), None, 3).unwrap();
+    // This device kept copies of the removed one and of a third database alone.
+    let before = [OTHER, THIRD].iter().fold(library, |state, id| saved_on_this_device(&state, &database(id)));
+    let mut left = before.clone();
+    (left.account, left.local.central, left.local.databases) = (None, None, Default::default());
+    preserve_on_leave(&before, &mut left, 4).unwrap();
+    assert_eq!(ids(&left), [ID, THIRD], "the library's databases and this device's own stay, a removed one does not come back");
+    assert!(left.local.databases.values().all(|row| !row.dirty && valid(&row.record)));
+    assert_eq!(left.version, STATE_VERSION);
+    validate_state(&left).unwrap();
+    let mut nothing = state();
+    preserve_on_leave(&state(), &mut nothing, 4).unwrap();
+    assert!(nothing.local.databases.is_empty() && nothing.version == 4, "no database, no version raised");
 }

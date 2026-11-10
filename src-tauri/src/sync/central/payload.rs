@@ -179,6 +179,10 @@ pub struct Catalog {
     pub pam_scopes: Vec<crate::sync::pam_records::PamScope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pam_requests: Vec<crate::sync::pam_records::GrantRequestMemory>,
+    /// The saved Cloud SQL databases, at most `databases::MAX_DATABASES`, none with a justification. Not written while empty, so a
+    /// library without any stays readable by every release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub databases: Vec<crate::sync::databases::SavedDatabase>,
 }
 /// The most collections, tunnel rules and group orders a Catalog holds, and the most groups its orders name together.
 pub const MAX_COLLECTIONS: usize = 256;
@@ -228,7 +232,7 @@ impl Catalog {
         {
             return Err(invalid());
         }
-        if !crate::sync::pam_records::valid_catalog(self) {
+        if !crate::sync::pam_records::valid_catalog(self) || !crate::sync::databases::valid_catalog(self) {
             return Err(invalid());
         }
         let mut groups = 0;
@@ -421,6 +425,7 @@ pub fn catalog_fits(catalog: &Catalog) -> bool {
 mod tests {
     use super::super::crypto::{self, DeviceKeys};
     use super::*;
+    use crate::sync::databases::{tests::database, MAX_DATABASES};
     use crate::sync::slot_rules::test_keys;
     use crate::sync::transports::PamCheck;
     use serde_json::json;
@@ -601,14 +606,14 @@ mod tests {
             id: "f".repeat(64),
             name: "Work".into(),
         };
-        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![],
+        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![c.clone(), c],
             group_orders: vec![],
         };
         assert!(catalog.validate().is_err());
-        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![],
+        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![],
@@ -717,7 +722,7 @@ mod tests {
     }
     #[test]
     fn a_catalog_without_routes_serializes_as_before() {
-        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![],
+        let catalog = Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             collections: vec![],
             group_orders: vec![],
             tunnels: vec![],
@@ -809,5 +814,95 @@ mod tests {
         assert!(most < transports::MAX_ROUTES, "{most} routes");
         assert!(catalog_fits(&with_routes(most)));
         assert!(!catalog_fits(&with_routes(most + 1)));
+    }
+
+    // ---- Saved databases ----
+
+    const DB: &str = "00000000000000d1";
+
+    /// The grant requirement a database may carry in the Catalog: no justification.
+    fn grant() -> PamCheck {
+        PamCheck {
+            entitlements: vec!["prod-operate".into()],
+            location: "global".into(),
+            duration_secs: 30 * 60,
+            justification: None,
+        }
+    }
+
+    #[test]
+    fn a_catalog_without_databases_still_decodes_and_omits_the_field() {
+        assert!(serde_json::to_value(Catalog::default())
+            .unwrap()
+            .get("databases")
+            .is_none());
+        let legacy = r#"{"collections":[],"group_orders":[]}"#;
+        let decoded: Catalog = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.databases.is_empty());
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
+        let with = Catalog {
+            databases: vec![database(DB)],
+            ..Catalog::default()
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["databases"][0]["instance"], "orders-pg");
+        assert_eq!(serde_json::from_value::<Catalog>(value).unwrap(), with);
+    }
+
+    #[test]
+    fn catalog_validation_refuses_duplicates_too_many_and_a_saved_justification() {
+        let at = |n: usize| database(&format!("{:016x}", 0x100 + n));
+        let mut catalog = empty_catalog();
+        catalog.databases = (0..MAX_DATABASES).map(at).collect();
+        assert!(catalog.validate().is_ok(), "256 databases");
+        catalog.databases = (0..=MAX_DATABASES).map(at).collect();
+        assert!(catalog.validate().is_err(), "257 databases");
+        catalog.databases = vec![database(DB)];
+        assert!(catalog.validate().is_ok(), "one database");
+        catalog.databases = vec![database(DB), database(DB)];
+        assert!(catalog.validate().is_err(), "one id twice");
+        let mut unusable = database(DB);
+        unusable.instance = "Not An Instance".into();
+        catalog.databases = vec![unusable];
+        assert!(
+            catalog.validate().is_err(),
+            "a database SavedDatabase::validate refuses"
+        );
+        let mut required = database(DB);
+        required.pam = Some(grant());
+        catalog.databases = vec![required.clone()];
+        assert!(catalog.validate().is_ok(), "a grant requirement alone");
+        required.pam.as_mut().unwrap().justification = Some("restart orders".into());
+        catalog.databases = vec![required];
+        assert!(
+            catalog.validate().is_err(),
+            "a justification inside the Catalog"
+        );
+    }
+
+    #[test]
+    fn catalog_databases_cross_the_wire_and_a_justification_is_refused_on_reading() {
+        let keys = VaultKeys::generate().unwrap();
+        let id = identity("meta");
+        let mut required = database("00000000000000d2");
+        required.pam = Some(grant());
+        let catalog = Catalog {
+            databases: vec![database(DB), required],
+            ..Catalog::default()
+        };
+        let bytes = encode(&id, &Data::Catalog(catalog.clone())).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            text.contains(r#""databases":[{"id":"00000000000000d1","name":"Orders","engine":"postgres","#),
+            "{text}"
+        );
+        let Data::Catalog(restored) = admit(&keys, &header(&id, &keys), &bytes).unwrap().data
+        else {
+            panic!("expected a catalog")
+        };
+        assert_eq!(restored, catalog);
+        let tampered = text.replace(r#""justification":null"#, r#""justification":"x""#);
+        assert_ne!(tampered, text);
+        assert!(admit(&keys, &header(&id, &keys), tampered.as_bytes()).is_err());
     }
 }

@@ -84,8 +84,9 @@ pub(super) fn holds_local(
             && (replica.pending.contains_key(opaque) || replica.conflicts.contains_key(opaque))
     })
 }
-/// Reads Catalog `value` into `state`'s rows: collections, tunnel rows, route rows and the Local group order. The delta projection
-/// reads the library's Catalog with it, and the Catalog merge the merged one (`catalog_conflict::apply`).
+/// Reads Catalog `value` into `state`'s rows: collections, tunnel rows, route rows, the rows of search scopes, grant memory and saved
+/// databases, and the Local group order. The delta projection reads the library's Catalog with it, and the Catalog merge the merged one
+/// (`catalog_conflict::apply`).
 pub(super) fn catalog(
     state: &mut SyncStateV3,
     value: &Catalog,
@@ -229,6 +230,23 @@ pub(super) fn catalog(
     }
     if !value.pam_scopes.is_empty() || !value.pam_requests.is_empty() {
         state.version = state.version.max(crate::sync::pam_records::STATE_VERSION);
+    }
+    // Saved databases take the same path. Only the ones the library now holds retire this device's own: one the Catalog holds no entry
+    // for stays here, for the publish step to move in.
+    let previous_databases: BTreeMap<_, _> = account
+        .records
+        .iter()
+        .filter(|(_, r)| r.record.kind == RecordKind::Meta && crate::sync::databases::is_id(&r.record.id))
+        .map(|(k, r)| (k.clone(), r.clone()))
+        .collect();
+    account.records.retain(|_, r| !(r.record.kind == RecordKind::Meta && crate::sync::databases::is_id(&r.record.id)));
+    for (id, payload) in crate::sync::databases::catalog_rows(value) {
+        let key = record_key(RecordKind::Meta, &id);
+        account.records.insert(key.clone(), fresh(previous_databases.get(&key), RecordKind::Meta, &id, payload, receipt, observed)?);
+        state.local.databases.remove(&key);
+    }
+    if !value.databases.is_empty() {
+        state.version = state.version.max(crate::sync::databases::STATE_VERSION);
     }
     state.local.group_order = value
         .group_orders
@@ -909,6 +927,7 @@ pub(super) mod tests {
         catalog.transports = routes.transports.clone();
         catalog.pam_scopes = routes.pam_scopes.clone();
         catalog.pam_requests = routes.pam_requests.clone();
+        catalog.databases = routes.databases.clone();
         let mut state = library.state.clone();
         append(
             &mut state,
@@ -996,6 +1015,53 @@ pub(super) mod tests {
         }
         let gone = project_delta(&project_delta(&cache_with_host(HOST), &catalog), &Catalog::default());
         assert!(pam_records::scopes(&gone).is_empty() && pam_records::memories(&gone).is_empty(), "a Catalog without them removes the rows");
+    }
+
+    /// Saved databases take the routes' path through both projections, need version 12, and the capture builds them back into the
+    /// Catalog it would publish; a library's removal is a tombstone the next Catalog leaves out.
+    #[test]
+    fn databases_round_trip_through_both_projections() {
+        use crate::sync::databases::{self, tests::database};
+        let (first, second) = (database("00000000000000d1"), database("00000000000000d2"));
+        let catalog = Catalog { databases: vec![second.clone(), first.clone()], ..Catalog::default() };
+        let saved = |state: &SyncStateV3| databases::view(state).into_iter().map(|row| row.database).collect::<Vec<_>>();
+        for next in [project_initial(&cache_with_host(HOST), &catalog), project_delta(&cache_with_host(HOST), &catalog)] {
+            assert_eq!(saved(&next), vec![first.clone(), second.clone()], "by id");
+            assert!(databases::view(&next).iter().all(|row| row.synced && !row.blocked));
+            assert!(!next.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &databases::wire_id(&first.id))].dirty);
+            assert_eq!(next.version, databases::STATE_VERSION);
+            let built = super::super::catalog_of(&next, &next.local.central_projection.as_ref().unwrap().catalog).unwrap();
+            assert_eq!(built.databases, vec![second.clone(), first.clone()], "in the order the library published");
+        }
+        let with = project_delta(&cache_with_host(HOST), &catalog);
+        let removed = databases::set(&with.state, &first.id, Some(&first), None, 400).unwrap();
+        assert!(removed.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, &databases::wire_id(&first.id))].record.deleted);
+        let built = super::super::catalog_of(&removed, &removed.local.central_projection.as_ref().unwrap().catalog).unwrap();
+        assert_eq!(built.databases, vec![second.clone()], "a tombstone removes it from the next Catalog");
+        let gone = project_delta(&with, &Catalog::default());
+        assert!(saved(&gone).is_empty());
+        assert!(
+            !gone.account.as_ref().unwrap().records.contains_key(&record_key(RecordKind::Meta, &databases::wire_id(&first.id))),
+            "a Catalog without them removes the rows, tombstones included"
+        );
+    }
+
+    /// Like routes, only the databases the library now holds retire this device's own: one the Catalog holds no entry for stays here,
+    /// for the publish step to move in.
+    #[test]
+    fn a_local_database_the_catalog_holds_no_entry_for_stays() {
+        use crate::sync::databases::{self, tests::{database, saved_on_this_device}};
+        let (held, mine) = (database("00000000000000d1"), database("00000000000000d2"));
+        let mut local = cache_with_host(HOST);
+        local.state = saved_on_this_device(&saved_on_this_device(&local.state, &held), &mine);
+        let next = project_delta(&local, &Catalog { databases: vec![held.clone()], ..Catalog::default() });
+        assert_eq!(databases::view(&next).into_iter().map(|row| row.database).collect::<Vec<_>>(), vec![held]);
+        assert_eq!(
+            next.local.databases.keys().collect::<Vec<_>>(),
+            [&record_key(RecordKind::Meta, &databases::wire_id(&mine.id))],
+            "this device's copy of the library's database goes; the one the library does not hold waits"
+        );
+        assert_eq!(next.version, databases::STATE_VERSION);
     }
 
     #[test]

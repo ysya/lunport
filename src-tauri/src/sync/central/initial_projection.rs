@@ -89,8 +89,11 @@ fn keep_routes(
     // Search scopes and grant memory name no host: they stay as they are, for the publish step to move in. The
     // library's own, from its Catalog, give way to none of them: a memory or scope of the same id the library holds wins.
     crate::sync::pam_records::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
+    // Saved databases name no host either: they stay the same way, and the library's own Catalog wins for a database it holds.
+    crate::sync::databases::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
     if let Some(account) = &candidate.account {
         candidate.local.pam_records.retain(|key, _| !account.records.contains_key(key));
+        candidate.local.databases.retain(|key, _| !account.records.contains_key(key));
     }
     // The account's route rows are the Catalog's routes, keyed as this device's own are.
     if let Some(account) = &candidate.account {
@@ -205,7 +208,9 @@ impl Candidate {
         // is below theirs. `finish` keeps them in the final candidate, under the host ids an adoption gives (`keep_routes`).
         shadow.local.transports.clear();
         shadow.local.transport_grants.clear();
+        // So do the search scopes, grant memory and saved databases it keeps: `keep_routes` puts them back the same way.
         shadow.local.pam_records.clear();
+        shadow.local.databases.clear();
         // All source pointers and files remain in source. A native stage supplies new verified mappings.
         shadow.local.keys.clear();
         shadow.local.credential_approvals.clear();
@@ -441,7 +446,7 @@ pub(in crate::sync) mod tests {
     }
     /// A Catalog of one collection, which the fixtures' source holds unselected.
     fn unselected_catalog() -> Catalog {
-        Catalog { pam_scopes: vec![], pam_requests: vec![],
+        Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             tunnels: vec![],
             transports: vec![],
             collections: vec![Collection {
@@ -700,20 +705,59 @@ pub(in crate::sync) mod tests {
         records_v3::validate_state(&projected).unwrap();
     }
 
-    /// A saved database stays through the first publication as this device's own record, and the candidate takes the version it needs:
-    /// the version the initial publication requires.
+    /// A saved database stays through the first publication as this device's own record, as grant memory does, for the publish step to
+    /// move in: the shadow, from which the delta is rebuilt, holds none, and the candidate takes the version it needs: the version the
+    /// initial publication requires.
     #[test]
     fn first_publication_keeps_the_devices_saved_databases_at_the_version_they_need() {
         use crate::sync::databases::{self, tests::database};
         let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
         let source = databases::set(&source, "00000000000000d1", None, Some(database("00000000000000d1")), 2).unwrap();
         let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
-        assert_eq!(initial.shadow().version, databases::STATE_VERSION);
+        assert!(initial.shadow().local.databases.is_empty() && !databases::has_data(initial.shadow()));
+        assert_eq!(initial.shadow().version, records_v3::CENTRAL_STATE_VERSION);
         let projected = finished(&initial, &keys);
-        assert_eq!(projected.local.databases, source.local.databases);
+        let kept: Vec<_> = projected.local.databases.values().map(|row| (databases::decode(&row.record), row.dirty)).collect();
+        assert_eq!(kept, [(Some(database("00000000000000d1")), false)], "it is this device's own until the publish step moves it in");
         assert_eq!(projected.version, databases::STATE_VERSION);
         assert_eq!(projected.version, candidate_version(&projected));
         records_v3::validate_state(&projected).unwrap();
+        let moved = databases::publish_local(&projected, 200).unwrap().expect("the library has room");
+        assert!(moved.local.databases.is_empty());
+        assert_eq!(databases::view(&moved).len(), 1);
+        let ledger = projected.local.central_projection.as_ref().unwrap();
+        assert!(
+            !ledger.public_changes(&projected, &keys).unwrap().iter().any(|change| matches!(change.data, Data::Catalog(_))),
+            "a capture alone leaves it out"
+        );
+    }
+
+    /// An adoption or a replacement keeps the databases of the library it leaves, and this device's own, as this device's own, as it
+    /// keeps search scopes and grant memory; a database the new library's Catalog already holds gives way to it.
+    #[test]
+    fn the_databases_of_a_library_that_is_left_stay_unless_the_new_catalog_holds_them() {
+        use crate::sync::{
+            databases::{self, tests::{database, saved_on_this_device}},
+            transports::tests::in_central_mode,
+        };
+        let (held, left, own) = (database("00000000000000d1"), database("00000000000000d2"), database("00000000000000d3"));
+        let mut source = in_central_mode(databases::tests::state());
+        for saved in [&held, &left] {
+            source = databases::set(&source, &saved.id, None, Some(saved.clone()), 1).unwrap();
+        }
+        source = saved_on_this_device(&source, &own);
+        // The new library's account holds its Catalog's rows, `held` among them; this device's shadow kept none of its own.
+        let mut candidate = source.clone();
+        candidate.local.databases.clear();
+        candidate.account.as_mut().unwrap().records.retain(|_, row| !databases::is_id(&row.record.id) || row.record.id == databases::wire_id(&held.id));
+        candidate.version = records_v3::CENTRAL_STATE_VERSION;
+        keep_routes(&source, &mut candidate, None, 50).unwrap();
+        let kept: Vec<_> = candidate.local.databases.values().filter_map(|row| databases::decode(&row.record)).map(|saved| saved.id).collect();
+        assert_eq!(kept, [left.id.clone(), own.id.clone()], "the library's other database and this device's own stay");
+        assert!(candidate.local.databases.values().all(|row| !row.dirty));
+        assert_eq!(databases::view(&candidate).into_iter().map(|row| row.database.id).collect::<Vec<_>>(), vec![held.id.clone()], "the new library's is the library's");
+        assert_eq!(candidate.version, databases::STATE_VERSION);
+        records_v3::validate_state(&candidate).unwrap();
     }
 
     /// A kept route gives way to the route the library's Catalog already holds for its host, as a delta projection decides (an

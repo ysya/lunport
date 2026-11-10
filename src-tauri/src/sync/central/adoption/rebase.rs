@@ -36,7 +36,7 @@ fn revision(read: &VerifiedLibrary, row: &RecordEnvelope) -> Result<u64, AppErro
 }
 /// The part of a Catalog this merge brings, which another device's edit must not have changed: its collections, their group orders and
 /// its tunnels. It brings no routes, so the library's routes are never part of it: another device may edit them meanwhile, and
-/// the rebased Catalog carries them as they are.
+/// the rebased Catalog carries them as they are. Search scopes, grant memory and saved databases are left out the same way.
 fn partition(
     mut c: Catalog,
     owned: &std::collections::BTreeSet<String>,
@@ -47,6 +47,8 @@ fn partition(
     // Search scopes and grant memory are not the adoption's either: they stay this device's until the publish step.
     c.pam_scopes.clear();
     c.pam_requests.clear();
+    // Nor are saved databases: this merge brings none, so another device's edit of them never pauses it.
+    c.databases.clear();
     c.collections.retain(|v| owned.contains(&v.id));
     c.group_orders
         .retain(|v| matches!(&v.scope,HostScope::Space{space_id} if owned.contains(space_id)));
@@ -268,5 +270,24 @@ impl merge::Plan {
             return Err(invalid());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::databases::tests::database;
+    use std::collections::BTreeSet;
+
+    /// The part of a Catalog an adoption merge brings holds no saved database: the ones a device keeps alone stay on it until the
+    /// publish step (as routes and search scopes do), and one that another device saves meanwhile must not pause the merge as an
+    /// imported name or tunnel that changed would.
+    #[test]
+    fn the_part_a_merge_brings_holds_no_saved_database() {
+        let (owned, owned_tunnels) = (BTreeSet::new(), BTreeSet::new());
+        let without = Catalog::default();
+        let with = Catalog { databases: vec![database("00000000000000d1")], ..Catalog::default() };
+        assert!(partition(with.clone(), &owned, &owned_tunnels).databases.is_empty());
+        assert_eq!(partition(with, &owned, &owned_tunnels), partition(without, &owned, &owned_tunnels));
     }
 }

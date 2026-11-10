@@ -33,6 +33,7 @@ export function collisionLabel(item: CatalogCollision, overview?: RecordOverview
       const scope = item.local ?? item.remote;
       return scope ? `Search scope ${revealHidden(`${parentLabel(scope.parent)} · ${scope.location}`)}` : "Search scope";
     }
+    case "database": return `Database ${quoted((item.local ?? item.remote)?.name ?? item.id)}`;
   }
 }
 
@@ -67,6 +68,19 @@ export function collisionValue(item: CatalogCollision, side: "local" | "remote",
     case "pam_scope": {
       const scope = item[side];
       return scope === null ? "Removed" : revealHidden(`${parentLabel(scope.parent)} · ${scope.location} · ${scope.account ?? "gcloud's active account"}`);
+    }
+    case "database": {
+      const database = item[side], other = item[side === "local" ? "remote" : "local"];
+      if (!database) return "Removed";
+      const name = other && other.name !== database.name ? `${quoted(database.name)} · ` : "";
+      return `${name}${[
+        `${revealHidden(`${database.project} / ${database.instance}`)} · ${revealHidden(database.region)}`,
+        database.environment,
+        `database ${revealHidden(database.default_database)}`,
+        database.account && `account ${revealHidden(database.account)}`,
+        database.pam && `PAM ${database.pam.entitlements.map(revealHidden).join(", ")}`,
+        database.local_port && `local port ${database.local_port}`,
+      ].filter(Boolean).join(", ")}`;
     }
   }
 }

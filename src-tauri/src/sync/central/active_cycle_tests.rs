@@ -103,7 +103,14 @@ fn install_push(
 fn fixture() -> Fixture {
     fixture_with_service(Service::new())
 }
-fn fixture_with_service(mut service: Service) -> Fixture {
+/// The fixture of a device whose saved state is at local state version `version`, as an older release left it.
+fn fixture_at(version: u32) -> Fixture {
+    fixture_with_service_at(Service::new(), version)
+}
+fn fixture_with_service(service: Service) -> Fixture {
+    fixture_with_service_at(service, CENTRAL_STATE_VERSION)
+}
+fn fixture_with_service_at(mut service: Service, version: u32) -> Fixture {
     let d = Arc::new(TestDevice::new(
         "active-cycle",
         &TestClock::new(),
@@ -139,7 +146,7 @@ fn fixture_with_service(mut service: Service) -> Fixture {
         id: "catalog".into(),
         scope: None,
     };
-    let catalog = Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
+    let catalog = Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
         tunnels: vec![],
         transports: vec![],
         collections: vec![],
@@ -207,7 +214,7 @@ fn fixture_with_service(mut service: Service) -> Fixture {
     service.state.lock().unwrap().history = vec![row];
     let plan = Plan::current(owner.clone(), &keys).unwrap();
     let cache = Cache::initial(&plan, 100, &BTreeMap::new()).unwrap();
-    records.version = CENTRAL_STATE_VERSION;
+    records.version = version;
     records.account = Some(cache.account);
     records.spaces = cache.spaces;
     records.local.hosts = cache.hosts;
@@ -886,6 +893,108 @@ fn a_scope_and_memory_another_device_published_reach_this_device_and_its_own_mem
     assert_eq!(catalog.pam_scopes, vec![scope]);
 }
 
+/// Saved databases (state version 12): a device saved at any older version receives the databases another device published; the round
+/// projects them as the library's rows and saves the state at version 12, the one they need.
+#[test]
+fn saved_databases_another_device_published_reach_a_device_saved_at_any_older_version() {
+    use crate::sync::databases::{self, tests::database};
+    for previous in CENTRAL_STATE_VERSION..databases::STATE_VERSION {
+        let f = fixture_at(previous);
+        round::sync_once(&f.d.env()).unwrap();
+        assert_eq!(state(&f.d).version, previous, "from version {previous}");
+        remote_catalog(&f, |catalog| catalog.databases.push(database("00000000000000d1")));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert_eq!(databases::view(&after).into_iter().map(|row| row.database).collect::<Vec<_>>(), vec![database("00000000000000d1")], "from version {previous}");
+        assert_eq!(after.version, databases::STATE_VERSION, "from version {previous}");
+    }
+}
+
+/// The databases' version is the newest, so it decides what a delta may raise the state to when the same Catalog also brings the library's
+/// first search scope and route rows, which need versions 11 and 10.
+#[test]
+fn the_databases_version_wins_when_a_delta_also_brings_scopes_and_routes() {
+    use crate::sync::{
+        databases::{self, tests::database},
+        pam_records::{self, PamScope},
+        transports,
+    };
+    let (host, scope) = ("0000000000000009", PamScope { id: "00000000000000a1".into(), parent: "projects/acme-dev-654321".into(), location: "global".into(), account: None });
+    for previous in CENTRAL_STATE_VERSION..databases::STATE_VERSION {
+        let f = fixture_at(previous);
+        round::sync_once(&f.d.env()).unwrap();
+        let published = scope.clone();
+        remote_catalog(&f, move |catalog| {
+            catalog.transports.push(iap_route(host));
+            catalog.pam_scopes.push(published);
+            catalog.databases.push(database("00000000000000d1"));
+        });
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert_eq!(after.version, databases::STATE_VERSION, "from version {previous}");
+        assert_eq!((databases::view(&after).len(), pam_records::scopes(&after).len(), transports::view(&after).len()), (1, 1, 1), "from version {previous}");
+    }
+}
+
+/// A saved database kept on this device alone (saved before its library used central sync) is published by a round once the publish step
+/// has made it the library's row, and the delta that reads it back leaves nothing to publish again.
+#[test]
+fn a_database_saved_on_this_device_moves_into_the_library_once() {
+    use crate::sync::databases::{self, tests::{database, saved_on_this_device}};
+    let f = fixture();
+    round::sync_once(&f.d.env()).unwrap();
+    let saved = database("00000000000000d1");
+    record_runtime::mutate_records(&f.d.env(), |state| Ok(saved_on_this_device(state, &saved))).unwrap();
+    let before = state(&f.d);
+    assert!(databases::view(&before).is_empty() && before.local.databases.len() == 1);
+    assert_eq!(before.version, databases::STATE_VERSION);
+    round::sync_once(&f.d.env()).unwrap();
+    let after = state(&f.d);
+    assert_eq!(after.local.central_projection.as_ref().unwrap().catalog.databases, vec![saved.clone()]);
+    assert!(after.local.databases.is_empty(), "the library holds it now");
+    assert_eq!(databases::view(&after).into_iter().map(|row| (row.database, row.synced, row.blocked)).collect::<Vec<_>>(), [(saved, true, false)]);
+    assert_eq!(after.version, databases::STATE_VERSION);
+    let pushed = f.batches.lock().unwrap().len();
+    round::sync_once(&f.d.env()).unwrap();
+    assert_eq!(f.batches.lock().unwrap().len(), pushed, "published once");
+}
+
+/// The library's databases are edited and removed through the same round: an edit is a dirty row and a removal a dirty tombstone, the
+/// capture publishes a Catalog with the edit and without the removed database, and the delta that reads it back leaves no tombstone.
+#[test]
+fn an_edited_and_a_removed_database_reach_the_catalog_in_one_round() {
+    use crate::sync::databases::{self, tests::database, SavedDatabase};
+    let f = fixture();
+    round::sync_once(&f.d.env()).unwrap();
+    let (kept, removed) = (database("00000000000000d1"), database("00000000000000d2"));
+    let save = |expected: Option<&SavedDatabase>, saved: &SavedDatabase| {
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            databases::set(state, &saved.id, expected, Some(saved.clone()), 900).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap()
+    };
+    save(None, &kept);
+    save(None, &removed);
+    round::sync_once(&f.d.env()).unwrap();
+    assert_eq!(state(&f.d).local.central_projection.as_ref().unwrap().catalog.databases, vec![kept.clone(), removed.clone()]);
+    let renamed = SavedDatabase { name: "Orders (eu)".into(), ..kept.clone() };
+    save(Some(&kept), &renamed);
+    record_runtime::mutate_records(&f.d.env(), |state| {
+        databases::set(state, &removed.id, Some(&removed), None, 950).map_err(|e| crate::error::AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let tombstone = format!("meta:{}", databases::wire_id(&removed.id));
+    assert!(state(&f.d).account.as_ref().unwrap().records[&tombstone].record.deleted, "the removal waits for the round as a tombstone");
+    round::sync_once(&f.d.env()).unwrap();
+    let after = state(&f.d);
+    assert_eq!(after.local.central_projection.as_ref().unwrap().catalog.databases, vec![renamed.clone()]);
+    assert_eq!(databases::view(&after).into_iter().map(|row| row.database).collect::<Vec<_>>(), vec![renamed]);
+    assert!(!after.account.as_ref().unwrap().records.contains_key(&tombstone), "read back, the removal is no row at all");
+    let pushed = f.batches.lock().unwrap().len();
+    round::sync_once(&f.d.env()).unwrap();
+    assert_eq!(f.batches.lock().unwrap().len(), pushed, "published once");
+}
+
 /// The version raise that a delta bringing route rows makes still needs the exact source it was staged from: a saved source whose format changed meanwhile is
 /// refused, as any other change is, and nothing is backed up.
 #[test]
@@ -1037,6 +1146,34 @@ mod catalog_merge_rounds {
         assert!(!in_conflict(&f, &after));
         assert!(!after.local.central.as_ref().unwrap().replica.as_ref().unwrap().pending.contains_key(&catalog_id(&f)));
         assert_eq!(library_tunnels(&after), [B, C], "the library holds both");
+        assert!(controller::status(&f.d.env()).unwrap().error.is_none());
+    }
+
+    /// Saved databases merge as tunnels do: one saved while another device published its own is merged with it in the round that reads it,
+    /// and both reach this device's rows and the library.
+    #[test]
+    fn a_database_saved_while_another_device_changed_the_catalog_merges_in_one_round() {
+        use crate::sync::databases::{self, tests::database};
+        let f = fixture();
+        round::sync_once(&f.d.env()).unwrap();
+        let (mine, theirs) = (database("00000000000000d1"), database("00000000000000d2"));
+        record_runtime::mutate_records(&f.d.env(), |state| {
+            databases::set(state, &mine.id, None, Some(mine.clone()), 900).map_err(|e| crate::error::AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        let published = theirs.clone();
+        remote_catalog(&f, move |catalog| catalog.databases.push(published));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert!(!in_conflict(&f, &after));
+        let sorted_ids = |databases: Vec<databases::SavedDatabase>| {
+            let mut ids: Vec<_> = databases.into_iter().map(|d| d.id).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(sorted_ids(databases::view(&after).into_iter().map(|row| row.database).collect()), [mine.id.clone(), theirs.id.clone()]);
+        assert_eq!(sorted_ids(after.local.central_projection.as_ref().unwrap().catalog.databases.clone()), [mine.id.clone(), theirs.id.clone()], "the library holds both");
+        assert_eq!(after.version, databases::STATE_VERSION);
         assert!(controller::status(&f.d.env()).unwrap().error.is_none());
     }
 

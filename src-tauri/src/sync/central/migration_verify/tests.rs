@@ -27,7 +27,7 @@ fn fixture(large: bool) -> (Plan, VaultKeys, DeviceKeys, Known) {
                     id: "catalog".into(),
                     scope: None,
                 },
-                Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![],
+                Data::Catalog(Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
                     tunnels: vec![],
                     transports: vec![],
                     collections: vec![],
