@@ -1,4 +1,4 @@
-//! Lunport's credentials behind Google's client library (design 2026-10-25, PAM grant requests): the library asks a `CredentialsProvider`
+//! Lunport's credentials behind Google's client library: the library asks a `CredentialsProvider`
 //! for its request headers, and this one answers with a bearer token from the same `TokenSource` the tunnel and the OS Login calls use,
 //! so the account rules (gcloud's sign-in files, the active account, a named account) and their sentences stay Lunport's.
 //!

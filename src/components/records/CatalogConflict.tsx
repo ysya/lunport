@@ -5,7 +5,7 @@ import { revealHidden } from "@/lib/reveal-hidden";
 import { iapTarget, parentLabel } from "@/lib/transports";
 import { tunnelRoute } from "@/lib/tunnels";
 
-/* The shared Catalog's row in Central conflicts (design 2026-10-27, Collisions: the review): the items both devices changed, in plain
+/* The shared Catalog's row in Central conflicts: the items both devices changed, in plain
    words. Every other change of both devices merges on its own; a choice settles only these. */
 
 export const CATALOG_TITLE = "Tunnels, routes and collections";

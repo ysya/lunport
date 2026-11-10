@@ -750,8 +750,8 @@ mod tests {
         assert_eq!(relay.reconnects(), 0);
     }
 
-    /// A relay that ends the session says why, and the tunnel keeps the reason for the engine's disconnect reason (design 2026-10-25,
-    /// "Error texts": the person reads why the session ended, not russh's end-of-file).
+    /// A relay that ends the session says why, and the tunnel keeps the reason for the engine's disconnect reason:
+    /// the person reads why the session ended, not russh's end-of-file.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_tunnel_records_why_it_ended() {
         let relay = FakeRelay::start(echo_server().await, TOKEN);

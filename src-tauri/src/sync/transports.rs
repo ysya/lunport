@@ -1,20 +1,20 @@
-//! Transports: how a device reaches a saved host when not over plain TCP (design 2026-10-25, Google Cloud IAP). One `Meta` record per
-//! host, `transport:<host-id>`, in the envelope tunnel rules use. In a library that uses central sync a route is the library's (design
-//! 2026-10-26, Inside Lunport, routes take tunnel rules' central path): `set` writes the account's row, as `tunnel_rules::set` does, under
+//! Transports: how a device reaches a saved host when not over plain TCP. One `Meta` record per
+//! host, `transport:<host-id>`, in the envelope tunnel rules use. In a library that uses central sync a route is the library's:
+//! `set` writes the account's row, as `tunnel_rules::set` does, under
 //! the same write gate, and capture publishes it in the Catalog. Without central sync (no account, or the older chain-mode account)
 //! routes live in `local.transports` only, so `set` consults neither the account nor opaque shadows, and an account join leaves them
 //! alone. Saving the first local one raises the local state version to `STATE_VERSION`, which an older Lunport refuses to open.
 //!
 //! The routes a device saved alone (before its library used central sync, or with an earlier release) move into a central library by
-//! one publish step (design 2026-10-26, Existing routes move in; R64a): `local_routes` walks them, and `publish_local` makes the ones the
+//! one publish step: `local_routes` walks them, and `publish_local` makes the ones the
 //! library takes its rows. A capture never takes them; the central dispatch runs the step before its capture, once this device's rows
 //! hold the library's latest Catalog.
 //!
-//! The host editor saves a route with its host, in one edit, and deleting a host removes its route in the same edit (design 2026-10-26,
-//! Commands): `RouteChange`, `apply_route_change` and `remove_route` are what the host commands apply after the host write.
+//! The host editor saves a route with its host, in one edit, and deleting a host removes its route in the same edit:
+//! `RouteChange`, `apply_route_change` and `remove_route` are what the host commands apply after the host write.
 //!
 //! What a grant request taught this device about a host (the justification and the length) is not part of the route: it stays in
-//! `local.transport_grants` as a `GrantMemory`, under `SYNC_STATE_VERSION` (design 2026-10-26), so that requesting a grant never edits
+//! `local.transport_grants` as a `GrantMemory`, under `SYNC_STATE_VERSION`, so that requesting a grant never edits
 //! the route.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,9 +36,9 @@ pub const STATE_VERSION: u32 = records_v3::TRANSPORT_STATE_VERSION;
 /// The local state version of grant memory and of the library's route rows.
 pub const SYNC_STATE_VERSION: u32 = records_v3::TRANSPORT_SYNC_STATE_VERSION;
 const MAX_ENTITLEMENTS: usize = 8;
-/// The most routes one library holds, as many as it holds tunnels (design 2026-10-26, Room in the Catalog). The central Catalog enforces it.
+/// The most routes one library holds, as many as it holds tunnels. The central Catalog enforces it.
 pub const MAX_ROUTES: usize = 256;
-/// The refusal of a save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog).
+/// The refusal of a save that would leave the library's Catalog too large for one sync record.
 pub const NO_ROOM: &str = "This library has no room for more routes or tunnels: together they would exceed what one sync record holds. Remove a route or a tunnel, then try again.";
 /// The refusal of a save whose displayed route is no longer the saved one: `set`'s compare-and-set (`RepositoryError::RouteChanged`).
 pub const ROUTE_CHANGED: &str = "The host's route changed while you were editing; reload and try again.";
@@ -89,8 +89,8 @@ pub struct PamCheck {
     pub entitlements: Vec<String>,
     #[serde(default = "default_location")]
     pub location: String,
-    /// How long a grant requested from Lunport asks for by default: seconds, whole minutes, 1–480 minutes; 30 minutes at first (design
-    /// 2026-10-25, PAM grant requests). The length last asked for stays on the device that asked (`GrantMemory`), not here.
+    /// How long a grant requested from Lunport asks for by default: seconds, whole minutes, 1–480 minutes; 30 minutes at first.
+    /// The length last asked for stays on the device that asked (`GrantMemory`), not here.
     #[serde(default = "default_duration")]
     pub duration_secs: u32,
     /// The justification last sent with a request, as earlier releases kept it here. It is remembered on the device now (`GrantMemory`);
@@ -99,7 +99,7 @@ pub struct PamCheck {
     pub justification: Option<String>,
 }
 
-/// What this device's last grant request for a host taught it (design 2026-10-26, Grant requests): the justification given and the
+/// What this device's last grant request for a host taught it: the justification given and the
 /// length asked for, offered again next time. It stays on this device, beside the route, so that requesting a grant never edits the
 /// route, which syncs with its host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,8 +285,7 @@ pub fn get(state: &SyncStateV3, host_id: &str) -> Option<HostTransport> {
         .or_else(|| state.local.transports.get(&record_key(RecordKind::Meta, &wire_id(host_id))).and_then(|row| decode(&row.record)))
 }
 
-/// Whether the route `get` reads for `host_id` is the library's, so it syncs wherever the host does (design 2026-10-26, Where routes
-/// sync).
+/// Whether the route `get` reads for `host_id` is the library's, so it syncs wherever the host does.
 pub fn synced(state: &SyncStateV3, host_id: &str) -> bool {
     library_route(state, host_id).is_some()
 }
@@ -297,13 +296,13 @@ fn library_route(state: &SyncStateV3, host_id: &str) -> Option<HostTransport> {
 }
 
 /// Whether routes and tunnels are the library's here: it uses central sync (this device's central owner has cut over) and this device
-/// keeps the library's rows in its account. Otherwise, with no account or the older chain-mode one, routes stay on this device (design
-/// 2026-10-26, Where routes sync) and nothing publishes a Catalog.
+/// keeps the library's rows in its account. Otherwise, with no account or the older chain-mode one, routes stay on this device
+/// and nothing publishes a Catalog.
 pub(crate) fn central_library(state: &SyncStateV3) -> bool {
     records_v3::central_cutover(state) && state.account.is_some()
 }
 
-/// The room check of a save in a library that uses central sync (design 2026-10-26, Room in the Catalog): the Catalog `next` would
+/// The room check of a save in a library that uses central sync: the Catalog `next` would
 /// publish must fit in one sync record, else `RepositoryError::NoRoom`. Only what the library must publish counts, not the routes saved
 /// on this device alone, which simply stay there while there is no room. A Catalog that cannot be built refuses the save with its own
 /// sentence, under `field` and `id`. Removing a route or a tunnel is never checked.
@@ -316,8 +315,8 @@ pub(crate) fn ensure_room(next: &SyncStateV3, field: &'static str, id: &str) -> 
     }
 }
 
-/// Where the routes saved on this device alone stand in a library that uses central sync (design 2026-10-26, Existing routes move in;
-/// Room in the Catalog; R64a, R65): what the publish step would move into the library, and which stay for want of room.
+/// Where the routes saved on this device alone stand in a library that uses central sync:
+/// what the publish step would move into the library, and which stay for want of room.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LocalRoutes {
     /// The routes the library takes, in host-id order.
@@ -359,7 +358,7 @@ pub(crate) fn local_routes(state: &SyncStateV3) -> Result<LocalRoutes, AppError>
     Ok(walk)
 }
 
-/// The publish step's move (design 2026-10-26, Existing routes move in; R64a): in a library that uses central sync whose writes are not
+/// The publish step's move: in a library that uses central sync whose writes are not
 /// blocked, each route `local_routes` lets in becomes the library's row (`write_library`: dirty, so the next capture publishes it, and
 /// without a justification) and leaves `local.transports`; nothing else changes. `None` when no route moves. When the step runs is its
 /// caller's to decide: the central dispatch runs it before its capture, once this device's rows hold the library's latest Catalog.
@@ -380,7 +379,7 @@ pub(crate) fn publish_local(state: &SyncStateV3, now: u64) -> Result<Option<Sync
 }
 
 /// Saves `route` on this device alone (`local.transports`), as a route is saved outside a central library: the Catalog merge leaves
-/// there a route this device added that the merged Catalog has no room for (design 2026-10-27, When it does not fit), and the publish
+/// there a route this device added that the merged Catalog has no room for, and the publish
 /// step moves it in once there is room.
 pub(crate) fn keep_on_this_device(state: &SyncStateV3, route: HostTransport, now: u64) -> Result<SyncStateV3, RepositoryError> {
     let host_id = route.host_id.clone();
@@ -423,7 +422,7 @@ pub fn set(state: &SyncStateV3, host_id: &str, expected: Option<&HostTransport>,
     Ok(next)
 }
 
-/// The route half of a combined host save (design 2026-10-26, Commands): the route as the editor displayed it (`expected`, none for a
+/// The route half of a combined host save: the route as the editor displayed it (`expected`, none for a
 /// host without one) and the route to save (`kind`, none to remove the route). It names no host: the command that carries it supplies
 /// the id, so a new host's route takes the new host's id.
 #[derive(Clone, Debug, Deserialize)]
@@ -447,7 +446,7 @@ pub fn apply_route_change(state: &SyncStateV3, host_id: &str, change: &RouteChan
     set(state, host_id, change.expected.as_ref(), route, now)
 }
 
-/// Removes the route of `host_id`, if it has one, as deleting the host does (design 2026-10-26, Deleting a host); a host with no route
+/// Removes the route of `host_id`, if it has one, as deleting the host does; a host with no route
 /// is left as it is.
 pub fn remove_route(state: &SyncStateV3, host_id: &str, now: u64) -> Result<SyncStateV3, RepositoryError> {
     apply_route_change(state, host_id, &RouteChange { expected: get(state, host_id), kind: None }, now)
@@ -463,7 +462,7 @@ pub fn refusal(error: RepositoryError) -> String {
     }
 }
 
-/// What this device remembers of its last grant request for `host_id`, if it made one (design 2026-10-26, Grant requests).
+/// What this device remembers of its last grant request for `host_id`, if it made one.
 pub fn grant_memory(state: &SyncStateV3, host_id: &str) -> Option<GrantMemory> {
     state.local.transport_grants.get(host_id).cloned()
 }
@@ -479,7 +478,7 @@ pub fn has_library_rows(state: &SyncStateV3) -> bool {
     state.account.as_ref().is_some_and(|account| account.records.values().any(|row| row.record.kind == RecordKind::Meta && is_id(&row.record.id)))
 }
 
-/// What a grant request taught this device about the host (design 2026-10-26, Grant requests): the duration asked for and the
+/// What a grant request taught this device about the host: the duration asked for and the
 /// justification given, offered again next time. They are kept on this device beside the route, not in it, so a request never edits the
 /// route. Written without a compare-and-set (the editor may be showing the route meanwhile); the route must exist and require a grant,
 /// and the request form's rules apply to what is remembered. The state version is raised to `SYNC_STATE_VERSION`.
@@ -548,7 +547,7 @@ fn write_library(state: &SyncStateV3, host_id: &str, transport: Option<HostTrans
 }
 
 /// A route as the library holds it: without the justification earlier releases kept in it. The device that asked remembers that
-/// (`GrantMemory`); it never syncs (design 2026-10-26, On the wire).
+/// (`GrantMemory`); it never syncs.
 pub(crate) fn without_justification(mut route: HostTransport) -> HostTransport {
     let TransportKind::GcpIap { pam, .. } = &mut route.kind;
     if let Some(pam) = pam {
@@ -558,7 +557,7 @@ pub(crate) fn without_justification(mut route: HostTransport) -> HostTransport {
 }
 
 /// Re-keys what this device keeps by host id to the ids `host_ids` gives the hosts (old → new), as an adoption gives the hosts it
-/// imports theirs (design 2026-10-26, Existing routes move in): each entry of `local.transports` whose host the map names, a route or a
+/// imports theirs: each entry of `local.transports` whose host the map names, a route or a
 /// removed one's tombstone, is written again under the host's new id, and what grant requests taught this device about that host
 /// (`local.transport_grants`) moves with it. Ids the map does not name keep theirs.
 pub fn rekey_local(state: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
@@ -584,7 +583,7 @@ pub fn rekey_local(state: &mut SyncStateV3, host_ids: &BTreeMap<String, String>,
     Ok(())
 }
 
-/// What an adoption or a replacement keeps of `source`'s routes (design 2026-10-26, Existing routes move in; R22): every route that
+/// What an adoption or a replacement keeps of `source`'s routes: every route that
 /// applies on `source`, the library's as well as this device's own (`view`), becomes a route saved on this device in `next`, under the
 /// id the merge gives its host (`host_ids`: old → new), and what grant requests taught this device about that host moves with it
 /// (`rekey_local`). A route or grant memory whose host the map does not name goes with that host. Both of `next`'s maps are rebuilt
@@ -602,7 +601,7 @@ pub fn follow_hosts(source: &SyncStateV3, next: &mut SyncStateV3, host_ids: &BTr
 
 /// Leaving an account keeps the transport of every host that stays on this device (a live record in `next.local.hosts`), the library's
 /// routes included, as one saved on this device, under the new local id the leave plan gave a space host (`host_ids`: old → new), and
-/// drops the transports of the hosts that go. What grant requests taught this device follows the same hosts, under the same ids (R8).
+/// drops the transports of the hosts that go. What grant requests taught this device follows the same hosts, under the same ids.
 /// Both of `next`'s maps are rebuilt from `before`'s.
 pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: &BTreeMap<String, String>, now: u64) -> Result<(), RepositoryError> {
     next.local.transports.clear();

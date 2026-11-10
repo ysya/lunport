@@ -7,8 +7,8 @@ import { errorMessage } from "@/lib/utils";
 import { revealHidden } from "@/lib/reveal-hidden";
 
 /**
- * The host key window of Lunport's own SSH client (own-ssh spec §10, §14): a host key is confirmed here, never in a terminal. The
- * Security semantics follow spec §14. The compact structured presentation was revised in beta 1.0.0-2. Names come from the user's
+ * The host key window of Lunport's own SSH client: a host key is confirmed here, never in a terminal. The
+ * compact structured presentation was revised in beta 1.0.0-2. Names come from the user's
  * hosts and the server, so they are shown through `revealHidden`.
  */
 
@@ -135,7 +135,7 @@ export function followPending(
  * The pending list reaches the window two ways: one fetch, started once the listener is registered (`followPending`), and an event for
  * every change. A fetch still in flight may have read an older list, so once an event has arrived the fetch's result is ignored.
  * (After a rejected answer the window fetches the list once more, outside this guard: an event that arrives while that fetch is in
- * flight can be overwritten by the older list until the next change. Plan 1d's rework of the window routes it through the guard.)
+ * flight can be overwritten by the older list until the next change.)
  */
 export function pendingFeed(set: (list: HostKeyRequest[]) => void): {
   fromFetch: (list: HostKeyRequest[]) => void;

@@ -1,4 +1,4 @@
-//! A Catalog conflict merged into this device's state (design 2026-10-27, Catalog conflicts keep both devices' changes). Pure
+//! A Catalog conflict merged into this device's state. Pure
 //! transitions; the central dispatch saves an automatic merge, and the review commits a chosen one.
 use super::{
     catalog_merge::{fit, merge, Collision, Over, Side},
@@ -121,7 +121,7 @@ pub(super) fn apply(
     Ok(Outcome::Merged(Box::new(next)))
 }
 
-/// What Central conflicts shows for the Catalog in conflict (design 2026-10-27, Collisions: the review): the items both devices
+/// What Central conflicts shows for the Catalog in conflict: the items both devices
 /// changed differently, and which choice fits. With no items the merge waits for the next round, or `over` says why it cannot.
 #[derive(Serialize)]
 pub struct CatalogReview {
@@ -153,7 +153,7 @@ pub(super) fn review(state: &SyncStateV3, keys: &VaultKeys) -> Result<Option<Cat
     Ok(Some(CatalogReview { items: open.collisions, over, can_local: local.is_ok(), can_remote: remote.is_ok() }))
 }
 
-/// The automatic merge (design 2026-10-27, The automatic merge): `state` captured, with its Catalog conflict merged, when the capture
+/// The automatic merge: `state` captured, with its Catalog conflict merged, when the capture
 /// leaves the Catalog in conflict (this round's pull read another device's Catalog, before or after this device's change was
 /// captured), the refused write can no longer commit (`conflicts::settled`), and no item collides and the result fits (`apply`).
 /// `None` otherwise, and in a library whose writes are blocked: the conflict waits for the review or a later round. A merge that

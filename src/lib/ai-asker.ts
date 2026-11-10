@@ -1,7 +1,7 @@
 import type { AiAsker } from "@/bindings/AiAsker";
 import { revealHidden } from "@/lib/reveal-hidden";
 
-/** Who asked, when an AI client's request opened the window (design 2026-11-09, native windows for AI requests). The client's name is
+/** Who asked, when an AI client's request opened the window. The client's name is
  *  what Lunport observed, shown through `revealHidden` like every other outside string. */
 export function askedBy(ai: AiAsker): string {
   return `Asked by ${revealHidden(ai.client)}, an AI client using Lunport AI access.`;

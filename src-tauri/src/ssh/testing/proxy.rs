@@ -1,6 +1,6 @@
 //! A TCP proxy in front of a scratch sshd that can go silent (bytes held, sockets open: a dead Wi-Fi link) or cut the connections.
 //! Keepalive, a connection dropped mid-command, a handshake that never answers and an abandoned login all need a link that misbehaves
-//! on demand. Ported from the spike's `proxy.rs`; the proxy owns a small tokio runtime, so tests stay synchronous.
+//! on demand. The proxy owns a small tokio runtime, so tests stay synchronous.
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};

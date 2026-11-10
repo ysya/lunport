@@ -408,7 +408,7 @@ fn a_central_history_page_cannot_overwrite_a_local_edit_saved_while_it_was_infli
     assert_eq!(replica.checkpoint.sequence,0);assert!(replica.pending.values().next().unwrap().sent.is_some());
 }
 
-/// Design 2026-10-25: a transport (device-local, `local.transports`) needs state version `TRANSPORT_STATE_VERSION`, which an older
+/// A transport (device-local, `local.transports`) needs state version `TRANSPORT_STATE_VERSION`, which an older
 /// Lunport refuses to open. Every save goes through the runtime, so the runtime raises the version, as it does for tunnel rules.
 #[test]
 fn a_transport_promotes_the_state_version_when_persisted() {
@@ -441,7 +441,7 @@ fn a_transport_promotes_the_state_version_when_persisted() {
     assert!(transports::has_data(&reopened));
 }
 
-/// Design 2026-10-26: the device-local grant memory needs state version 10, the same way (and so will a library's synced route rows). A
+/// The device-local grant memory needs state version 10, the same way (and so will a library's synced route rows). A
 /// candidate that reached the runtime by another road than `remember_grant_request` carries the version it had.
 #[test]
 fn grant_memory_promotes_the_state_version_when_persisted() {

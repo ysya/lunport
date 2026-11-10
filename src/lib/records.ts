@@ -139,7 +139,7 @@ export type RecordOverview = {
   transport_sync?: TransportSyncView[];
   /** What this computer's grant requests taught it, per host, as an earlier release remembered it; absent in older backend fixtures. */
   grant_memory?: GrantMemoryView[];
-  /** The Privileged Access Manager search scopes the person added (design 2026-10-27); absent in older backend fixtures. */
+  /** The Privileged Access Manager search scopes the person added; absent in older backend fixtures. */
   pam_scopes?: import("@/bindings/PamScope").PamScope[];
   /** The grant memory, one per entitlement, most recently written first; absent in older backend fixtures. */
   pam_requests?: import("@/bindings/GrantRequestMemory").GrantRequestMemory[];

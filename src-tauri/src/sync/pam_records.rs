@@ -1,4 +1,4 @@
-//! Privileged Access Manager in the library (design 2026-10-27, Search scopes and grant memory in the library): the search scopes the
+//! Privileged Access Manager in the library: the search scopes the
 //! person added (where Lunport asks Google which entitlements they may request), and the grant memory (the justification and length last
 //! used for an entitlement). One `Meta` record each, `pam_scope:<id>` and `pam_request:<id>`, in the envelope tunnel rules use.
 //!
@@ -28,7 +28,7 @@ pub const SCOPE_PREFIX: &str = "pam_scope:";
 pub const REQUEST_PREFIX: &str = "pam_request:";
 /// The local state version of these records, local or the library's.
 pub const STATE_VERSION: u32 = records_v3::PAM_STATE_VERSION;
-/// The most search scopes and grant memories one library holds (design 2026-10-27). The Catalog enforces both.
+/// The most search scopes and grant memories one library holds. The Catalog enforces both.
 pub const MAX_SCOPES: usize = 64;
 pub const MAX_REQUESTS: usize = 32;
 /// The refusal of a scope save that would leave the Catalog too large for one sync record.
@@ -285,7 +285,7 @@ pub fn remove_scope(state: &SyncStateV3, id: &str, now: u64) -> Result<SyncState
     write(state, &scope_wire_id(id), None, now)
 }
 
-/// Remembers a grant request on the entitlement `name` (design 2026-10-27): its memory is written, the memories beyond the
+/// Remembers a grant request on the entitlement `name`: its memory is written, the memories beyond the
 /// `MAX_REQUESTS` most recent are dropped, and in a library that uses central sync older memories are dropped while the Catalog would not
 /// fit. `legacy_host` names the host whose memory an earlier release kept by host (`local.transport_grants`): that one is forgotten,
 /// since this memory replaces it. `None` when nothing could be written (an invalid memory, a blocked library, no room even for this one);
@@ -320,7 +320,7 @@ pub fn remember(state: &SyncStateV3, name: &str, justification: &str, duration_s
     Some(next)
 }
 
-/// The publish step (design 2026-10-27, like routes': design 2026-10-26, Existing routes move in): in a library that uses central sync
+/// The publish step (like routes'): in a library that uses central sync
 /// whose writes are not blocked, the records this device kept alone become the library's rows, unless the library has a row of the same
 /// id: scopes while the Catalog has room (the others stay here), memories while it has room (the others are dropped: a memory is a
 /// convenience). `None` when nothing moves.

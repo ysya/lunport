@@ -138,7 +138,7 @@ export const centralAutomaticStep = () => tauriInvoke<AutomaticSyncProgress>("ce
 // Password stays in the form/call only; never put it in a Query or mutation cache.
 export const centralUnlockPassword = (password: string) => tauriInvoke<AutomaticSyncProgress>("central_unlock_password", { password });
 
-/** An item of the shared Catalog that this device and another changed differently (design 2026-10-27); `null` where that side removed it or never had it. */
+/** An item of the shared Catalog that this device and another changed differently; `null` where that side removed it or never had it. */
 export type CatalogCollision =
   | { kind: "tunnel"; id: string; local: TunnelRule | null; remote: TunnelRule | null }
   | { kind: "route"; host_id: string; local: HostTransport | null; remote: HostTransport | null }

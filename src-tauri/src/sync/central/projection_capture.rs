@@ -23,7 +23,7 @@ pub(super) fn basis_of<'a>(replica: &'a Replica, ledger: &'a Ledger, opaque: &st
         .or_else(|| ledger.bases.get(opaque).map(|basis| &basis.wire))
 }
 
-/// Whether this device can change the library's Catalog now without a conflict (R64a): none is held on it, and its basis
+/// Whether this device can change the library's Catalog now without a conflict: none is held on it, and its basis
 /// (`basis_of`) is the replica's current Catalog, so the latest Catalog the pull staged has been read into this device's rows (the
 /// delta projection reads it at the end of the round that staged it). Until then a Catalog captured from those rows would be held
 /// against an older basis and conflict with the library's.
@@ -45,7 +45,7 @@ pub(super) fn catalog_settled(state: &SyncStateV3, keys: &VaultKeys) -> Result<b
         && basis_of(replica, ledger, &opaque) == replica.current.get(&opaque))
 }
 
-/// The publish step (design 2026-10-26, Existing routes move in; R64a) as a pure transition: `state` with the routes saved on this
+/// The publish step as a pure transition: `state` with the routes saved on this
 /// device alone that the library takes made its rows (`transports::publish_local`), or `None` when none moves. It waits while the
 /// Catalog is not settled (`catalog_settled`): while the library's latest Catalog is not yet read into this device's rows, or is in
 /// conflict. The central dispatch saves what it returns before its capture.
@@ -57,7 +57,7 @@ pub(super) fn move_local_routes(
     if state.local.transports.is_empty() && state.local.pam_records.is_empty() || !catalog_settled(state, keys)? {
         return Ok(None);
     }
-    // Search scopes and grant memory this device kept alone move in by the same step (design 2026-10-27).
+    // Search scopes and grant memory this device kept alone move in by the same step.
     let routed = crate::sync::transports::publish_local(state, now)?;
     let pam = crate::sync::pam_records::publish_local(routed.as_ref().unwrap_or(state), now).map_err(AppError::Other)?;
     Ok(pam.or(routed))
@@ -628,7 +628,7 @@ pub(super) mod tests {
             scope: None,
         }
     }
-    /// R64a: the publish step waits while a Catalog captured now would conflict with the library's: while the latest Catalog a pull
+    /// The publish step waits while a Catalog captured now would conflict with the library's: while the latest Catalog a pull
     /// staged is not yet read into this device's rows, and while the Catalog is in conflict. Otherwise it moves the routes in.
     #[test]
     fn the_publish_step_waits_for_the_staged_catalog_to_be_read_and_while_it_is_in_conflict() {

@@ -1,4 +1,4 @@
-//! Opening a session (own-ssh spec §6.2, §7.2, §10): the broker's connect loop around the engine. The engine fails fast where a person
+//! Opening a session: the broker's connect loop around the engine. The engine fails fast where a person
 //! must decide (an unknown or changed host key, a password wanted after a refused key); the broker asks — the window for host keys, the
 //! session's owner for everything else — and connects again with what it learned. Every call here blocks: it runs on the session's own
 //! thread (`lunport-session`, which the broker starts for each client; the client's connection thread only reads what the client sends,
@@ -23,7 +23,7 @@ pub const PASSWORD_PROMPTS: usize = 3;
 
 /// What one host can ask of a connect, in connects, when the person answers everything it asks: the pin that another connection made
 /// meanwhile taken into the policy (once: the policy has a pin from then on), its host key confirmed (once, see
-/// `Done::asked_host_key`), the key type on record that the server no longer has (a pin's or a saved key's, once, plan 1b R17:
+/// `Done::asked_host_key`), the key type on record that the server no longer has (a pin's or a saved key's, once:
 /// `Done::unrestricted`) and its password typed `PASSWORD_PROMPTS` times. Each is followed by one more connect. The host key question and
 /// the passwords each need one answer of the person; the pin taken meanwhile and the handshake without the key type on record need none.
 const ROUNDS_PER_HOP: usize = 1 + 1 + 1 + PASSWORD_PROMPTS;
@@ -61,7 +61,7 @@ pub struct PinnedSummary {
     pub pinned_at_ms: u64,
 }
 
-/// A host key for the person to confirm in Lunport's window (spec §10, §14).
+/// A host key for the person to confirm in Lunport's window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKeyQuestion {
     /// The saved host the key is for.
@@ -78,7 +78,7 @@ pub struct HostKeyQuestion {
     /// For a key this device has not approved that is the very key saved for the host (`HostDirectory::saved_for`): when it was saved.
     /// The person still decides; `None` for any other key.
     pub saved: Option<PinnedSummary>,
-    /// The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` when a person's connection asks.
+    /// The AI client whose request asks; `None` when a person's connection asks.
     pub ai: Option<AiAsker>,
 }
 
@@ -88,7 +88,7 @@ pub struct HostKeyQuestion {
 pub trait HostKeyConfirmer: Send + Sync {
     fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String>;
 
-    /// `confirm`, telling a refusal from a question nobody answered (design 2026-11-09: an AI client's call says which). A confirmer that
+    /// `confirm`, telling a refusal from a question nobody answered (an AI client's call says which). A confirmer that
     /// cannot tell them apart calls every question it did not trust refused.
     fn decide(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> HostKeyDecision {
         match self.confirm(question, cancel) {
@@ -116,7 +116,7 @@ pub struct Connected {
     pub target: Target,
 }
 
-/// Why no session was opened: the sentence for the user (spec §11) and the `kind` word of the error event (`protocol::kinds`). The text
+/// Why no session was opened: the sentence for the user and the `kind` word of the error event (`protocol::kinds`). The text
 /// is printable (`printable`): it is shown outside the shell's own data stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectFailure {
@@ -145,11 +145,11 @@ pub struct Connector<'a> {
     pub keys: &'a dyn KeyStore,
     pub keychain: &'a dyn Keychain,
     pub confirmer: &'a dyn HostKeyConfirmer,
-    /// The app's gates on grant requests (design 2026-10-25, PAM grant requests): connections that need the same grant ask once.
+    /// The app's gates on grant requests: connections that need the same grant ask once.
     pub grants: &'a GrantGates,
 }
 
-/// How long the person has to answer the Request-a-grant question (design 2026-10-25): five minutes, the window's own limit.
+/// How long the person has to answer the Request-a-grant question: five minutes, the window's own limit.
 const GRANT_QUESTION_WAIT: Duration = Duration::from_secs(300);
 /// How long a connection waits for another connection's grant request to come out: the question, the request and the minute of
 /// polling for the grant to become active, with room.
@@ -157,7 +157,7 @@ const GATE_WAIT: Duration = Duration::from_secs(7 * 60);
 /// What the terminal reads while IAP is given time to see a grant.
 const IAP_WAITING: &str = "IAP has not seen the grant yet; retrying for up to two minutes.";
 
-/// IAP's grace (design 2026-10-25): for how long after a grant became active a tunnel refused with 4033 is tried again rather than
+/// IAP's grace: for how long after a grant became active a tunnel refused with 4033 is tried again rather than
 /// reported (IAP can take about 1½ minutes to see a grant), and how long between tries.
 #[derive(Clone, Copy, Debug)]
 struct Grace {
@@ -208,7 +208,7 @@ fn hop_of(error: &ConnectError) -> Option<&HopRef> {
 }
 
 /// The failure the user sees when the connect stops at `hop` (`None`: at the chain as a whole) for `reason`. A failure on a jump host
-/// is said through it (spec §11: `Could not connect through {jump alias}: {reason}`).
+/// is said through it (`Could not connect through {jump alias}: {reason}`).
 fn failure_at(hop: Option<&HopRef>, target: &Target, kind: &str, reason: impl fmt::Display) -> ConnectFailure {
     let destination = target.hops.last().map(|hop| &hop.id);
     match hop {
@@ -228,7 +228,7 @@ fn failure_of(error: &ConnectError, target: &Target) -> ConnectFailure {
 }
 
 /// The login of `hop` was abandoned because the person did not give the password (they cancelled the question, let it run out, or
-/// the client went away): spec §11's sentence, said through the jump host when `hop` is one. `BrokerAuth` remembers that a prompt of a
+/// the client went away): the failure is said through the jump host when `hop` is one. `BrokerAuth` remembers that a prompt of a
 /// hop ended unanswered but not how, so the reason is the same for all three.
 fn password_abandoned(hop: &HopRef, target: &Target) -> ConnectFailure {
     failure_of(&ConnectError::AuthAbandoned { hop: hop.clone(), reason: "the password was not given".to_string() }, target)
@@ -258,7 +258,7 @@ struct Done {
     /// Hosts whose key the person has been asked about. Once is all a connect needs: after the key was trusted (or the changed one
     /// accepted) the server presents that key. A server that then presents another one is not asked about again.
     asked_host_key: HashSet<HostId>,
-    /// Hosts connected once more without the key type on record, a pin's or a saved key's (plan 1b R17).
+    /// Hosts connected once more without the key type on record, a pin's or a saved key's.
     unrestricted: HashSet<HostId>,
     /// The passwords the person has been asked for, by host (`PASSWORD_PROMPTS` at the most).
     passwords_typed: HashMap<HostId, usize>,
@@ -308,7 +308,7 @@ impl Connector<'_> {
                 Err(error) => error,
             };
             // IAP refused the tunnel (4033) right after the PAM grant check passed on a grant given moments ago: IAP can take about
-            // 1½ minutes to see a grant (design 2026-10-25), so the tunnel is tried again every few seconds while the grace lasts, and
+            // 1½ minutes to see a grant, so the tunnel is tried again every few seconds while the grace lasts, and
             // the person is told once. Those tries are not rounds: nothing was asked or learned.
             if matches!(error, ConnectError::Tunnel { code: Some(4033), .. }) && prepared.recent_grant && within_grace(&prepared, grace, iap_retries) {
                 if !iap_told {
@@ -326,7 +326,7 @@ impl Connector<'_> {
                 // The person gave up the password of a hop (cancelled the question, let it run out, or their client went away). The engine
                 // asked it before it connected (a hop that starts with the password method) and went on without it, to a host key that was
                 // not known yet, or a pinned key type the server no longer has, or a login that ended for want of the password ("no login
-                // method could be tried" when the server offers nothing else). The attempt is over (spec §10, §11): the window is not opened
+                // method could be tried" when the server offers nothing else). The attempt is over: the window is not opened
                 // for it and nothing is pinned or connected again; the sentence is the abandonment, and the person connects again.
                 ConnectError::HostKeyUnknown { ref hop, .. }
                 | ConnectError::HostKeyMismatch { ref hop, .. }
@@ -338,7 +338,7 @@ impl Connector<'_> {
                 }
                 ConnectError::HostKeyUnknown { hop, key } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, None)?,
                 ConnectError::HostKeyMismatch { hop, key, pinned } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, Some(pinned))?,
-                // Plan 1b R17: the handshake offered only the type of the key on record (the pin, or the key saved for a hop this device has
+                // The handshake offered only the type of the key on record (the pin, or the key saved for a hop this device has
                 // not approved) and the server has none of it any more. Once more without the restriction: the policy still knows a pin, so a
                 // key of another type comes back as a changed key, with its warning; one of a saved key is asked about as changed as well.
                 ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. }
@@ -366,7 +366,7 @@ impl Connector<'_> {
                     match owner.ask_at(hop, QuestionKind::Password, &question, false, deadline) {
                         Reply::Answer(password) => {
                             auth.set_typed(&hop.id, password);
-                            // Amended R8: the hop is connected again as it is. A server that takes a key and then wants the password
+                            // The hop is connected again as it is. A server that takes a key and then wants the password
                             // (`AuthenticationMethods publickey,password`) still gets the key first, which a password-first reconnect
                             // would drop, and `BrokerAuth::password` answers the typed password from memory at once, so nobody waits while
                             // the connection is open. Only a hop with no password method in its sequence (it starts with
@@ -396,9 +396,9 @@ impl Connector<'_> {
 
     /// The handshake's choice of key type for each hop this device has no approved pin for: the type of the key the library saved for it
     /// (another device saved it, or this one before its approval lapsed), set as the hop's `pinned`, which the engine reads only to choose
-    /// the host key algorithms (design 2026-11-09, saved pins). The policy was made from the approved pins before this and trusts nothing
+    /// the host key algorithms. The policy was made from the approved pins before this and trusts nothing
     /// of it. A server that has the saved key presents it, and is asked about as that key even when it has a type the client prefers;
-    /// one that has none of its type is connected once more without the restriction (R17). A pin that cannot be read here chooses nothing:
+    /// one that has none of its type is connected once more without the restriction. A pin that cannot be read here chooses nothing:
     /// the question reads it again.
     fn ask_for_saved_key_types(&self, target: &mut Target) {
         for hop in target.hops.iter_mut().filter(|hop| hop.pinned.is_none()) {
@@ -408,7 +408,7 @@ impl Connector<'_> {
         }
     }
 
-    /// `HostDirectory::prepare`, with the grant it may need obtained first (design 2026-10-25, PAM grant requests): a connection a person
+    /// `HostDirectory::prepare`, with the grant it may need obtained first: a connection a person
     /// drives asks them through `owner`, requests the grant and checks again; the check then passes, or its refusal stands.
     fn prepare_granted(&self, target: &Target, owner: &dyn Owner, cancel: &CancelToken) -> Result<Prepared, ConnectFailure> {
         let public_key = |key_id: &str| self.keys.key(key_id).map(|key| key.public_key);
@@ -504,7 +504,7 @@ impl Connector<'_> {
         if pinned.is_none() {
             if let Some(record) = self.directory.pinned_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
                 policy.pin(&hop.id, record.key.clone());
-                // A hop already connected without the restriction (R17: its server has none of the type it was asked for, the saved key's)
+                // A hop already connected without the restriction (its server has none of the type it was asked for, the saved key's)
                 // keeps going without it: asking for that type again would only fail the same way.
                 if !done.unrestricted.contains(&hop.id) {
                     if let Some(refreshed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
@@ -527,8 +527,8 @@ impl Connector<'_> {
                 let summary = self.pinned_summary(target, hop, &pinned)?;
                 (Some(pinned), Some(summary), None)
             }
-            // No pin this device approved, but the library may have one: another device saved it, or this one before its approval lapsed
-            // (design 2026-11-09, saved pins). It is never trusted from here. A different key is asked about as the changed key it is,
+            // No pin this device approved, but the library may have one: another device saved it, or this one before its approval lapsed.
+            // It is never trusted from here. A different key is asked about as the changed key it is,
             // with that pin and its date, and accepting it replaces that pin; the very key that was saved is asked about as new, saying
             // when it was saved.
             None => match self.directory.saved_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
@@ -728,7 +728,7 @@ mod tests {
         assert!(locked(&world.owner.notices).is_empty());
     }
 
-    /// Spec §10: the first connect fails on the unknown key; the window asks; the trusted key is pinned and the broker connects again, so
+    /// The first connect fails on the unknown key; the window asks; the trusted key is pinned and the broker connects again, so
     /// the user sees "confirm, connected".
     #[test]
     fn an_unknown_host_key_is_confirmed_in_the_window_then_pinned_and_the_broker_connects_again() {
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(*locked(&accepting.owner.notices), [WAITING]);
     }
 
-    /// Design 2026-11-09 (saved pins): a key that differs from the one saved for the host, which this device has not approved (another
+    /// A key that differs from the one saved for the host, which this device has not approved (another
     /// device saved it), is a changed key. The window warns with the saved key and its date, and only accepting the new key replaces that
     /// pin; refused, the saved key stays as it was and this device has approved nothing.
     #[test]
@@ -816,7 +816,7 @@ mod tests {
     }
 
     /// The very key saved for the host, which this device has not approved yet, is confirmed here once, and the question says when it was
-    /// saved (design 2026-11-09, saved pins): local trust is never taken from a saved pin, and trusting the key approves that pin as it is.
+    /// saved: local trust is never taken from a saved pin, and trusting the key approves that pin as it is.
     #[test]
     fn the_very_key_saved_for_the_host_is_confirmed_here_once_and_the_question_says_when_it_was_saved() {
         let id = HostId::from("id-web");
@@ -833,7 +833,7 @@ mod tests {
     }
 
     /// The handshake asks for the type of the key saved for a host this device has not approved, as it does for a pin, without trusting
-    /// it (design 2026-11-09, saved pins): a server that has the saved key next to a type the client prefers presents the saved key, and
+    /// it: a server that has the saved key next to a type the client prefers presents the saved key, and
     /// the question says it was saved, instead of warning about the server's other key.
     #[test]
     fn a_server_that_still_has_the_saved_key_presents_it_and_is_not_asked_about_as_changed() {
@@ -855,7 +855,7 @@ mod tests {
     }
 
     /// A server that no longer has the saved key's type has nothing in common with that handshake: it is connected once more without the
-    /// restriction (plan 1b R17), and its key is asked about as a changed key, with the saved one.
+    /// restriction, and its key is asked about as a changed key, with the saved one.
     #[test]
     fn a_server_without_the_saved_keys_type_is_asked_about_as_changed_after_one_unrestricted_handshake() {
         let ecdsa = key(test_keys::ECDSA_PUBLIC);
@@ -1048,7 +1048,7 @@ mod tests {
         }
     }
 
-    /// Spec §11: a failure on a jump host is said through it, and so is every way a jump host's key can end the connect: the person does not
+    /// A failure on a jump host is said through it, and so is every way a jump host's key can end the connect: the person does not
     /// trust it, trusts it and the pin cannot be written, the directory's record of the pin moved on meanwhile, or the pins cannot be read.
     #[test]
     fn a_host_key_problem_of_a_jump_host_is_said_through_it() {
@@ -1091,7 +1091,7 @@ mod tests {
         }
     }
 
-    /// Plan 1b R17: a pinned host whose server no longer has a key of the pinned type would fail with "no common algorithm", because the
+    /// A pinned host whose server no longer has a key of the pinned type would fail with "no common algorithm", because the
     /// handshake offers only the pinned type. The broker connects once more without that restriction, so the person gets the normal
     /// changed-key warning instead.
     #[test]
@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(refusing.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web changed. Connection refused.")));
     }
 
-    /// Plan 1b R17 connects again without the pinned key type once for a host: when the server still has nothing in common with the
+    /// The broker connects again without the pinned key type once for a host: when the server still has nothing in common with the
     /// offer, the error stands. A host with no pin has no restriction to lift and is not tried again at all.
     #[test]
     fn the_connect_without_the_pinned_key_type_is_tried_once_for_a_host_and_only_for_a_pinned_one() {
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     /// The fallback password after a refused key is not typed while the connection waits (russh spins then): the engine reports that a
-    /// password is wanted, the broker asks, and connects again with the hop as it is (amended R8): the key stays first, as OpenSSH does
+    /// password is wanted, the broker asks, and connects again with the hop as it is: the key stays first, as OpenSSH does
     /// it, and the engine gets the typed password from memory. The fake engine does not model a server that takes the key and then wants
     /// the password, so it cannot tell this order from the password first in a login; the tests on the in-process server below can.
     #[test]
@@ -1226,7 +1226,7 @@ mod tests {
 
     /// The password a hop that starts with the password method is asked for before it connects was cancelled, let run out, or its client
     /// went away, and the server offers nothing else: the engine ends the login with "no login method could be tried". The person did not
-    /// fail to log in, they declined to, so it reads as the abandonment it is (spec §11), and they are not asked again.
+    /// fail to log in, they declined to, so it reads as the abandonment it is, and they are not asked again.
     #[test]
     fn a_password_prompt_that_ended_unanswered_reads_as_abandoned_and_not_as_a_failed_login() {
         for reply in [Reply::Cancelled, Reply::TimedOut, Reply::Gone] {
@@ -1242,7 +1242,7 @@ mod tests {
 
     /// The person cancels the password question of a first contact with a password-first host, lets it run out, or their client goes away.
     /// The engine asks it before it connects and goes on to the host key, which it has not seen yet, and the connect ends right there as
-    /// abandoned (spec §10, §11: a cancelled or overdue prompt ends the attempt, and the person connects again). The window is not opened
+    /// abandoned (a cancelled or overdue prompt ends the attempt, and the person connects again). The window is not opened
     /// for a connect the person gave up, nobody is told to wait for it, nothing is pinned or replaced, and nothing connects again.
     #[test]
     fn a_cancelled_password_question_ends_the_connect_before_any_host_key_is_asked_about() {
@@ -1273,7 +1273,7 @@ mod tests {
         }
     }
 
-    /// The same for a jump host that starts with the password method: the connect ends there, said through it (spec §11).
+    /// The same for a jump host that starts with the password method: the connect ends there, said through it.
     #[test]
     fn a_cancelled_password_question_of_a_jump_host_ends_the_connect_before_its_host_key_is_asked_about() {
         let directory = FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"]);
@@ -1297,7 +1297,7 @@ mod tests {
         assert_eq!(world.owner.asked().len(), 1, "the prompt was not shown after the password was given up");
     }
 
-    /// Spec §11: a failure on a jump host is said through it, an abandoned login too, whoever asked for the password: the engine, before
+    /// A failure on a jump host is said through it, an abandoned login too, whoever asked for the password: the engine, before
     /// it connected (a hop that starts with the password method), or the broker, between two connects (a hop that starts with a key).
     #[test]
     fn an_abandoned_password_on_a_jump_host_is_said_through_it() {
@@ -1424,7 +1424,7 @@ mod tests {
     }
 
     /// What a server wrote can end up in a failure: a protocol error, the algorithms it offers. A failure is printed on the person's
-    /// terminal, so (plan 1b: server text outside the shell's own data stream goes through `printable`) nothing a terminal would act on
+    /// terminal, so (server text outside the shell's own data stream goes through `printable`) nothing a terminal would act on
     /// gets through: not an escape sequence that clears the screen or redraws a prompt, not a carriage return that overwrites the line.
     #[test]
     fn a_failure_carries_no_control_character_of_the_text_a_server_wrote() {
@@ -1473,7 +1473,7 @@ mod tests {
     }
 
     /// The words the loop writes itself name the host and the user, and both come from the person's configuration (`ssh -G` copies the
-    /// user unchecked): they are `printable` and on one line (spec §7.1), as in the questions `BrokerAuth` writes for the same hop. This
+    /// user unchecked): they are `printable` and on one line, as in the questions `BrokerAuth` writes for the same hop. This
     /// is what reaches the terminal, in the password questions and in the notice that the window waits.
     #[test]
     fn the_names_in_the_loops_own_questions_and_notice_carry_no_control_character() {
@@ -1522,7 +1522,7 @@ mod tests {
         assert!(cancelled.engine.events().is_empty() && cancelled.confirmer.asked().is_empty(), "nothing was connected");
     }
 
-    /// Spec §11: a failure on a jump host is said through it.
+    /// A failure on a jump host is said through it.
     #[test]
     fn a_failure_on_a_jump_host_names_the_jump_host() {
         let directory = FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"]);
@@ -1591,7 +1591,7 @@ mod tests {
 
     /// The most that one host can ask of a connect, on every host of a chain of three, so that the bound is reached and not passed. The
     /// directory has a pin that it did not have when the host was resolved (another connection pinned it meanwhile), and it is of a type
-    /// that the server no longer has: the handshake is repeated without the restriction (plan 1b R17, the first handshake asked for the
+    /// that the server no longer has: the handshake is repeated without the restriction (the first handshake asked for the
     /// pin's type as a saved key's) and the pin is taken into the policy, the key the server has now is accepted as the changed key it is,
     /// and the password is typed wrong twice before it is right. Six rounds a host, and the one that gets in.
     #[test]
@@ -1821,7 +1821,7 @@ mod tests {
         assert_eq!(connected.target.hops[0].auth, AuthMethod::Password);
     }
 
-    /// A directory that answers like the fake and writes down every target it is asked to prepare (design 2026-10-25: OS Login and PAM
+    /// A directory that answers like the fake and writes down every target it is asked to prepare (OS Login and PAM
     /// run in `HostDirectory::prepare`, between the resolve and the connect).
     /// With `need`, it wants that grant until one was requested of it (then `answer`); `grants` are its answers to the requests, in
     /// order (none left: the grant is given, `receipt`), and `requested` what each request asked for.
@@ -1955,7 +1955,7 @@ mod tests {
     const GRANT_NOTICE: &str = "Requested a 30-minute prod-operate grant on acme-prod-123456; active until ";
     const IAP_WAITING: &str = "IAP has not seen the grant yet; retrying for up to two minutes.";
 
-    /// Design 2026-10-25 (PAM grant requests): a connection that needs a grant asks the person once, requests what they answered, tells
+    /// A connection that needs a grant asks the person once, requests what they answered, tells
     /// the terminal what it got, checks again and connects.
     #[test]
     fn a_needed_grant_is_asked_once_requested_noticed_and_then_connected() {
@@ -2102,7 +2102,7 @@ mod tests {
         assert!(world.owner.asked().is_empty(), "the waiter asked nothing");
     }
 
-    /// IAP can take about 1½ minutes to see a grant given moments ago (design 2026-10-25): a 4033 then is tried again every few seconds,
+    /// IAP can take about 1½ minutes to see a grant given moments ago: a 4033 then is tried again every few seconds,
     /// after one word to the terminal, until the tunnel opens.
     #[test]
     fn a_4033_within_the_grace_is_retried_until_the_tunnel_opens() {
@@ -2168,7 +2168,7 @@ mod tests {
         assert!(world.owner.asked().is_empty(), "nobody was asked for anything");
     }
 
-    /// Design 2026-10-25: a PAM grant given moments ago passes the check, but IAP can take about 1½ minutes to see it and refuses with
+    /// A PAM grant given moments ago passes the check, but IAP can take about 1½ minutes to see it and refuses with
     /// 4033 meanwhile. The refusal then says why, so the person waits instead of doubting their grant. Any other refusal, and a 4033
     /// after an older grant, stand as the engine said them.
     #[test]
@@ -2179,7 +2179,7 @@ mod tests {
             world.connect_through(&directory, &web(), &world.owner).err().expect("the connect fails")
         };
         let bare = "frank@example.com is not authorized to tunnel to jumpbox through IAP.";
-        // One sentence, as every failure text is (design 2026-10-25, "Error texts").
+        // One sentence, as every failure text is.
         assert_eq!(
             fails_with(refused(4033), Prepared { recent_grant: true, ..Default::default() }),
             failure(kinds::CONNECT, "frank@example.com is not authorized to tunnel to jumpbox through IAP; the grant became active moments ago, and IAP can take about 1½ minutes to see it.")

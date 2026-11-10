@@ -1,4 +1,4 @@
-//! 助記詞與加密。安全模型見 spec §2/§4: 助記詞是唯一祕密, 所有派生值可重算。
+//! 助記詞與加密。安全模型:助記詞是唯一祕密, 所有派生值可重算。
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -13,7 +13,7 @@ use crate::error::AppError;
 
 // frozen-identity: the salt every v1 sync chain was derived with; a different salt derives other keys than the ones already stored and on the relay.
 const HKDF_SALT: &[u8] = b"sshelter-sync-v1";
-/// v2 帳戶與 space0 的 HKDF salt(spec §5.1)。
+/// v2 帳戶與 space0 的 HKDF salt。
 // frozen-identity: the salt every account chain and space0 was derived with; a different salt derives other keys, chain ids and tokens.
 const HKDF_SALT_V2: &[u8] = b"sshelter-sync-v2";
 const NONCE_LEN: usize = 24;
@@ -64,7 +64,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 助記詞 → seed(BIP39 英文 24 詞、空 passphrase,64 bytes;v1 §4 與 v2 §5.1 相同)。
+/// 助記詞 → seed(BIP39 英文 24 詞、空 passphrase,64 bytes;v1 與 v2 相同)。
 fn seed_of(mnemonic: &str) -> Result<[u8; 64], AppError> {
     let normalized = normalize_mnemonic(mnemonic)?;
     let m = Mnemonic::parse_in(Language::English, &normalized)
@@ -88,7 +88,7 @@ pub fn derive_keys(mnemonic: &str) -> Result<ChainKeys, AppError> {
     Ok(chain_keys(&Hkdf::<Sha256>::new(Some(HKDF_SALT), &seed), "sshelter/v1"))
 }
 
-/// v2 帳戶 chain(spec §5.1):位置、權杖、金鑰都由同步碼推導。salt 與 v1 不同,所以同一組同步碼的 v1 chain
+/// v2 帳戶 chain:位置、權杖、金鑰都由同步碼推導。salt 與 v1 不同,所以同一組同步碼的 v1 chain
 /// 與帳戶 chain 互不相關。
 pub fn derive_account(mnemonic: &str) -> Result<ChainKeys, AppError> {
     let seed = seed_of(mnemonic)?;
@@ -96,7 +96,7 @@ pub fn derive_account(mnemonic: &str) -> Result<ChainKeys, AppError> {
     Ok(chain_keys(&Hkdf::<Sha256>::new(Some(HKDF_SALT_V2), &seed), "sshelter/v2/account"))
 }
 
-/// v1 升級建立的第一個 space(spec §5.1、§5.2):推導值讓兩台同時升級的電腦建出同一個 space(同一個 chain id、
+/// v1 升級建立的第一個 space:推導值讓兩台同時升級的電腦建出同一個 space(同一個 chain id、
 /// 同一把金鑰)。之後新建的 space 一律用 `ChainKeys::generate`。
 pub fn derive_space0(mnemonic: &str) -> Result<ChainKeys, AppError> {
     let seed = seed_of(mnemonic)?;
@@ -115,7 +115,7 @@ impl ChainKeys {
         zeroize::Zeroize::zeroize(&mut self.auth_token);
         zeroize::Zeroize::zeroize(&mut self.enc_key);
     }
-    /// 新建 space 的位置、權杖與金鑰(spec §5.1):各 32 bytes 的 OS CSPRNG 隨機值,不由同步碼推導。
+    /// 新建 space 的位置、權杖與金鑰:各 32 bytes 的 OS CSPRNG 隨機值,不由同步碼推導。
     pub fn generate() -> Result<Self, AppError> {
         let mut bytes = [0u8; 96];
         getrandom::fill(&mut bytes).map_err(|e| AppError::Other(format!("cannot draw random space keys: {e}")))?;
@@ -124,7 +124,7 @@ impl ChainKeys {
         Ok(Self { chain_id: hex(&bytes[..32]), auth_token: hex(&bytes[32..64]), enc_key })
     }
 
-    /// 由 `spacekey` 記錄的欄位重建(spec §4.1):chain id 與權杖必須是 64 字元小寫 hex,金鑰是 32 bytes 的標準
+    /// 由 `spacekey` 記錄的欄位重建:chain id 與權杖必須是 64 字元小寫 hex,金鑰是 32 bytes 的標準
     /// base64。記錄來自帳戶裡的其他裝置:格式不對就拒絕 —— chain id 之後會被組進 URL 與檔名。
     pub fn from_parts(chain_id: &str, auth_token: &str, enc_key_b64: &str) -> Result<Self, AppError> {
         if !is_chain_id(chain_id) || !is_chain_id(auth_token) {
@@ -136,7 +136,7 @@ impl ChainKeys {
         Ok(Self { chain_id: chain_id.to_string(), auth_token: auth_token.to_string(), enc_key })
     }
 
-    /// `enc_key` 的標準 base64。只寫進以帳戶金鑰加密的 `spacekey` 記錄(spec §4.1),絕不進 log 或狀態檔明文。
+    /// `enc_key` 的標準 base64。只寫進以帳戶金鑰加密的 `spacekey` 記錄,絕不進 log 或狀態檔明文。
     pub fn enc_key_b64(&self) -> String {
         B64.encode(self.enc_key)
     }
@@ -200,7 +200,7 @@ pub fn open(keys: &ChainKeys, kind: &str, id_hash: &str, sealed: &Sealed) -> Res
         .map_err(|_| AppError::Other("record cannot be decrypted with this chain".to_string()))
 }
 
-/// 用一把原始的 32 bytes 金鑰加密(保管庫,key roadmap 第 2 階段 spec §4.1):AAD 由呼叫端給。回傳(nonce, ciphertext),都是 base64。
+/// 用一把原始的 32 bytes 金鑰加密(保管庫):AAD 由呼叫端給。回傳(nonce, ciphertext),都是 base64。
 pub fn seal_raw(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<(String, String), AppError> {
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| AppError::Other(format!("cannot draw nonce: {e}")))?;
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn derivation_matches_pinned_vectors() {
-        // spec §4 的已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256 → hex)。
+        // 已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256 → hex)。
         // 改了 salt、info、分隔符或編碼,這裡就會炸 —— 這是互通性的護欄,不得更新數值遷就實作。
         let keys = derive_keys(WORDS).unwrap();
         assert_eq!(keys.chain_id, "4eb6631d45882eb3a0c2541383de4263fc056a1bc851718d66d2f664ae77bf4c");
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn v2_derivation_matches_pinned_vectors() {
-        // Sync v2 spec §5.4 的已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256,salt `HKDF_SALT_V2`)。
+        // v2 的已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256,salt `HKDF_SALT_V2`)。
         // 互通性的護欄:失敗時錯的是實作,不得更新數值遷就實作。
         let account = derive_account(WORDS).unwrap();
         assert_eq!(account.chain_id, "082945de8b6ccadf9733e9c3748fd20abf985b1d6383f5435e40d67de185a3b0");
@@ -335,7 +335,7 @@ mod tests {
             id_hash(&space0, "host", "web-1"),
             "fc773d220b5c6c97c19239671b3ee3521046fbbc27946694dd00e702db208b09"
         );
-        // space0 的 `spacekey` payload 由推導值決定(spec §5.2):兩台同時升級必須寫出相同的 enc_key。
+        // space0 的 `spacekey` payload 由推導值決定:兩台同時升級必須寫出相同的 enc_key。
         assert_eq!(space0.enc_key_b64(), "BeE35vhhIezzB5xj8JnzEC3AypnBSUfvLjZ72sp+4Nc=");
     }
 
@@ -374,7 +374,7 @@ mod tests {
         assert_ne!(key_hex, a.chain_id);
         assert_ne!(key_hex, a.auth_token);
         assert_ne!(a.auth_token, b.auth_token);
-        // 記錄加密與 v1 相同,只是 (chain_id, 金鑰) 換成這個 space 的值(spec §5.3)。
+        // 記錄加密與 v1 相同,只是 (chain_id, 金鑰) 換成這個 space 的值。
         let sealed = seal(&a, "host", "web-1", b"Host web-1\n").unwrap();
         assert_eq!(open(&a, "host", &sealed.id_hash, &sealed).unwrap(), b"Host web-1\n");
         assert!(open(&b, "host", &sealed.id_hash, &sealed).is_err());

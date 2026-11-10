@@ -78,7 +78,7 @@ pub enum RepositoryError {
     KeyNotFound(String),
     KeyInUse(String),
     OrderingOverflow(String),
-    /// A save that would leave the library's Catalog too large for one sync record (design 2026-10-26, Room in the Catalog). It reads
+    /// A save that would leave the library's Catalog too large for one sync record. It reads
     /// as `transports::NO_ROOM` wherever it is shown.
     NoRoom,
     /// A route save whose displayed route is no longer the saved one. It reads as `transports::ROUTE_CHANGED` wherever it is shown.

@@ -731,7 +731,7 @@ fn iap_route(host_id: &str) -> crate::sync::transports::HostTransport {
     serde_json::from_value(json!({"host_id":host_id,"kind":{"type":"gcp_iap","project":"acme-dev-654321","zone":"asia-east1-b","instance":"jumpbox"}})).unwrap()
 }
 
-/// Design 2026-10-26 (Existing routes move in, once, by one step): a route this device saved alone, for a host the library has, is
+/// A route this device saved alone, for a host the library has, is
 /// published by a round's capture and retired by the delta that reads it back, so the next round publishes nothing.
 #[test]
 fn a_route_saved_on_this_device_moves_into_the_library_once() {
@@ -839,7 +839,7 @@ fn next_version(f: &Fixture, history: &[rekey::Version], identity: &Identity, da
     }
 }
 
-/// R19: a device at central sync's own version receives a route another device published; the round projects it as the library's row
+/// A device at central sync's own version receives a route another device published; the round projects it as the library's row
 /// and saves the state at the version that row needs.
 #[test]
 fn a_route_another_device_published_reaches_a_device_at_the_central_version() {
@@ -856,7 +856,7 @@ fn a_route_another_device_published_reaches_a_device_at_the_central_version() {
     assert_eq!(after.version, transports::SYNC_STATE_VERSION);
 }
 
-/// Design 2026-10-27: a device at central sync's own version receives a search scope and a grant memory another device published; the
+/// A device at central sync's own version receives a search scope and a grant memory another device published; the
 /// round projects them as the library's rows and saves the state at the version they need. A memory this device then writes reaches the
 /// library by the next round's capture.
 #[test]
@@ -886,7 +886,7 @@ fn a_scope_and_memory_another_device_published_reach_this_device_and_its_own_mem
     assert_eq!(catalog.pam_scopes, vec![scope]);
 }
 
-/// The raise R19 lets a delta make still needs the exact source it was staged from: a saved source whose format changed meanwhile is
+/// The version raise that a delta bringing route rows makes still needs the exact source it was staged from: a saved source whose format changed meanwhile is
 /// refused, as any other change is, and nothing is backed up.
 #[test]
 fn a_delta_raising_the_version_for_routes_still_refuses_a_saved_source_that_changed() {
@@ -920,7 +920,7 @@ fn a_delta_raising_the_version_for_routes_still_refuses_a_saved_source_that_chan
         .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(&backup)));
 }
 
-/// R64a (final review I1): a device upgraded from 1.12 holds routes it saved alone, one for a host whose route another device has
+/// A device upgraded from 1.12 holds routes it saved alone, one for a host whose route another device has
 /// published meanwhile (X), with settings of its own, and one for a host the library holds no route for (Y), and the Catalog it last read
 /// is older than that publication. Its first round reads the library's Catalog and raises no conflict over it: the library keeps the
 /// other device's route for X, whose projection retires this device's copy, and nothing is published. Y waits on this device until the
@@ -981,7 +981,7 @@ fn a_device_upgraded_with_routes_of_its_own_keeps_the_librarys_and_publishes_the
     assert_eq!(second.version, transports::SYNC_STATE_VERSION);
 }
 
-/// Design 2026-10-27 (Catalog conflicts keep both devices' changes): helpers for the Catalog merge rounds.
+/// Helpers for the Catalog merge rounds.
 mod catalog_merge_rounds {
     use super::*;
     use crate::sync::{
@@ -1040,7 +1040,7 @@ mod catalog_merge_rounds {
         assert!(controller::status(&f.d.env()).unwrap().error.is_none());
     }
 
-    /// Review Focus 1: the first route reaching a device through a merge raises its state to the version route rows need.
+    /// The first route reaching a device through a merge raises its state to the version route rows need.
     #[test]
     fn the_first_route_a_merge_brings_raises_the_state_version() {
         let f = fixture();
@@ -1057,7 +1057,7 @@ mod catalog_merge_rounds {
         assert_eq!(after.version, transports::SYNC_STATE_VERSION);
     }
 
-    /// Review Focus 4: a library that takes no edit takes no merge either; the conflict waits and the rows stay as they are.
+    /// A library that takes no edit takes no merge either; the conflict waits and the rows stay as they are.
     #[test]
     fn a_library_whose_writes_are_blocked_keeps_its_catalog_conflict() {
         let f = fixture();
@@ -1124,7 +1124,7 @@ mod catalog_merge_rounds {
         assert!(core.central_poll.retry_at.is_none());
     }
 
-    /// The done criterion (design 2026-10-27): two devices push Catalog changes inside one pull-to-push window, each a tunnel and a
+    /// The done criterion: two devices push Catalog changes inside one pull-to-push window, each a tunnel and a
     /// route. The relay takes the other device's push and refuses this one (409); the same round pulls again, merges and pushes, so
     /// neither device's routes or tunnels are lost, and the library the other device reads next holds all four.
     #[test]
@@ -1161,7 +1161,7 @@ mod catalog_merge_rounds {
         clean_round(&f);
     }
 
-    /// Design 2026-10-27 (A refused push), call 13: a host race reaches its review in the round that met the refusal, without an
+    /// A host race reaches its review in the round that met the refusal, without an
     /// error first.
     #[test]
     fn a_host_race_reaches_review_in_the_refused_round() {
@@ -1207,7 +1207,7 @@ mod catalog_merge_rounds {
         assert_eq!(tunnel_ids(&after), [B]);
     }
 
-    /// Review Focus 5: a third device's push lands while this device pushes its merge; the round pulls and merges again.
+    /// A third device's push lands while this device pushes its merge; the round pulls and merges again.
     #[test]
     fn a_third_device_pushing_during_the_merge_round_is_merged_too() {
         let f = fixture();

@@ -63,7 +63,7 @@ impl crate::ssh::AuthSource for LinkTrouble {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// Host keys (spec §6.2 step 3). The engine never waits for a person: an unpinned key fails the connect with the key that was seen.
+// Host keys. The engine never waits for a person: an unpinned key fails the connect with the key that was seen.
 
 #[test]
 fn an_unknown_host_key_fails_fast_with_the_key_the_server_presented_and_leaves_no_connection_behind() {
@@ -165,7 +165,7 @@ fn a_server_that_only_has_an_ssh_rsa_host_key_has_nothing_in_common_and_the_mess
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// Login with vault keys (spec §6.3 b: the engine refuses to sign RSA with SHA-1).
+// Login with vault keys (the engine refuses to sign RSA with SHA-1).
 
 fn log_in_with_a_key_of(kind: KeyKind) -> Option<Vec<SignCall>> {
     let tools = tools()?;

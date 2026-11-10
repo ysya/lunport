@@ -119,7 +119,7 @@ pub struct Entitlement<'a> {
 }
 
 /// An entitlement's full name, in parts: its parent (`projects/<id>`, `folders/<number>` or `organizations/<number>`), its location and
-/// its id. Entitlements live on any of the three (design 2026-10-27, The Access tab); a route's always on its project.
+/// its id. Entitlements live on any of the three; a route's always on its project.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntitlementName {
     pub parent: String,
@@ -183,7 +183,7 @@ impl EntitlementName {
     }
 }
 
-/// What an entitlement search learns of one entitlement the caller may request (design 2026-10-27, The Access tab).
+/// What an entitlement search learns of one entitlement the caller may request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntitlementInfo {
     /// The full name (`EntitlementName::full`).
@@ -238,7 +238,7 @@ pub enum RequestError {
 }
 
 impl RequestError {
-    /// The sentence for the person, naming the entitlement (design 2026-10-25, PAM grant requests).
+    /// The sentence for the person, naming the entitlement.
     pub fn sentence(&self, entitlement: &str) -> String {
         match self {
             RequestError::Cancelled => "The connection was cancelled.".to_string(),
@@ -254,9 +254,9 @@ impl RequestError {
 
 /// Requests a grant on `place` for `duration_secs` with `justification` (or takes the one already in flight there, the most recent),
 /// tells `remember` once a request was made, and reads the grant back every `poll_every` until it is `ACTIVE`, for at most `wait`.
-/// `cancelled` is looked at between steps. The connect and the Google Cloud panel both request through here (design 2026-10-25).
+/// `cancelled` is looked at between steps. The connect and the Google Cloud panel both request through here.
 ///
-/// With `approver` set (the Access tab, design 2026-10-27), a grant that waits for an approver is the answer, not a failure: a request
+/// With `approver` set (the Access tab), a grant that waits for an approver is the answer, not a failure: a request
 /// that lands in `APPROVAL_AWAITED`, or one already waiting there, is returned at once, since nothing more happens without the
 /// approver. The connect never sets it: it does not wait for an approver.
 #[allow(clippy::too_many_arguments)]

@@ -49,7 +49,7 @@ describe("host key presentation", () => {
     });
   });
 
-  // Design 2026-11-09 (saved pins): the library already has this very key (another device saved it), and this device still confirms it.
+  // The library already has this very key (another device saved it), and this device still confirms it.
   it("says when the library saved a key this device has not confirmed", () => {
     const saved = request({
       saved: {

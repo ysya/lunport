@@ -1,4 +1,4 @@
-//! The client's side of one session (own-ssh spec §7.3), with no I/O of its own: it is told what happened (`Input`) and answers with
+//! The client's side of one session, with no I/O of its own: it is told what happened (`Input`) and answers with
 //! what to do (`Action`); `run.rs` does the reading and writing. Until the shell is open the terminal stays as it was, so Ctrl-C still
 //! stops the program; questions are asked with the terminal in its prompt mode; once the shell is open the terminal is raw and every
 //! key goes to the shell; at the end the terminal is put back before anything is printed. Every text the broker wrote (a notice, a
@@ -121,13 +121,13 @@ fn cancel(question_id: String) -> Action {
     Action::Send(ClientMessage::Answer { question_id, value: None, cancel: true })
 }
 
-/// What `lunport connect` was asked for (spec §7.3): the host, and whether a failure before the shell opens waits for Enter.
+/// What `lunport connect` was asked for: the host, and whether a failure before the shell opens waits for Enter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub host: HostQuery,
     /// `--pause-on-error`: when the connection fails before the shell opens, the reason stays on the terminal under `PAUSE_PROMPT` and the
     /// program exits once Enter is pressed. Lunport's Connect gives it to a terminal that runs the command as its window's program, which
-    /// would close the window, and the reason with it, as the program ends (spec §7.4).
+    /// would close the window, and the reason with it, as the program ends.
     pub pause_on_error: bool,
 }
 
@@ -137,7 +137,7 @@ impl From<HostQuery> for Request {
     }
 }
 
-/// What `--pause-on-error` puts under the reason of a failure before the shell opened (spec §7.3, §11). It says what Enter does to the
+/// What `--pause-on-error` puts under the reason of a failure before the shell opened. It says what Enter does to the
 /// program, not to the window: Windows Terminal, among others, may keep a window whose program ended with an error.
 pub const PAUSE_PROMPT: &str = "Press Enter to exit.";
 
@@ -181,7 +181,7 @@ enum Phase {
     Ended,
 }
 
-/// The exit status of `lunport connect` for a shell that ended with `code` or was killed by `signal` (spec §7.3): the shell's own
+/// The exit status of `lunport connect` for a shell that ended with `code` or was killed by `signal`: the shell's own
 /// status; for a signal 128 + its number, as a shell reports it; 255 when it ended without either (a lost connection), as ssh does.
 pub fn exit_code(code: Option<u32>, signal: Option<&str>) -> i32 {
     match (code, signal) {
@@ -557,7 +557,7 @@ mod tests {
         assert!(kept == expected, "the first 64 KiB are kept, as they were typed");
     }
 
-    /// Spec §7.3: a question leaves raw mode (or the terminal as it was), asks without echo for a password, sends the answer and goes
+    /// A question leaves raw mode (or the terminal as it was), asks without echo for a password, sends the answer and goes
     /// back; typeahead is thrown away, so it cannot become the password.
     #[test]
     fn a_password_question_is_asked_without_echo_and_the_answer_is_sent() {
@@ -617,7 +617,7 @@ mod tests {
         assert!(matches!(client.phase, Phase::Connecting), "no prompt mode is opened for it");
     }
 
-    /// Spec §7.3: the terminal is put back before anything else, then the program exits with the shell's status.
+    /// The terminal is put back before anything else, then the program exits with the shell's status.
     #[test]
     fn the_shells_exit_status_becomes_the_programs_after_the_terminal_is_put_back() {
         let mut client = opened();
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(client.handle(Input::Interrupt), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(130)], "Ctrl-C while connecting stops it");
     }
 
-    /// Spec §7.3: the end of input outside a question is the terminal going away, like SIGHUP. The terminal is put back before the broker
+    /// The end of input outside a question is the terminal going away, like SIGHUP. The terminal is put back before the broker
     /// is told: a broker that stopped reading would block the write, and the terminal would stay raw under a program that is stuck.
     #[test]
     fn the_end_of_input_outside_a_question_is_the_terminal_going_away_and_the_terminal_is_put_back_before_the_broker_is_told() {
@@ -731,7 +731,7 @@ mod tests {
         actions
     }
 
-    /// Spec §7.3, `--pause-on-error`: a connection that fails before the shell opens leaves its reason on the terminal, the broker is told
+    /// `--pause-on-error`: a connection that fails before the shell opens leaves its reason on the terminal, the broker is told
     /// `close` at once (nothing more is said to it), and the prompt asks for Enter in the mode of a question that hides what is typed (the
     /// Windows console reads nothing while it is cooked; a password typed again by habit is not shown), what was typed before thrown
     /// away; the program exits with the failure's status only once Enter is pressed. What comes meanwhile (the broker's end, a resize, a
@@ -1314,7 +1314,7 @@ mod tests {
         assert!(client.handle(Input::Continue).is_empty(), "nothing after the end");
     }
 
-    /// Spec §7.3 / plan 1b R10: the shell's status, 128 + the signal's number for a signal (as a shell reports it), 255 for neither.
+    /// The shell's status, 128 + the signal's number for a signal (as a shell reports it), 255 for neither.
     #[test]
     fn exit_codes_follow_the_shell_and_a_signal_is_128_plus_its_number() {
         assert_eq!(exit_code(Some(0), None), 0);

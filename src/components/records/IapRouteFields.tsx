@@ -25,7 +25,7 @@ import { RecordField, selectClass } from "./form";
 import { routeChange, type RouteDraft, type RouteState, type Via } from "./route";
 
 /*
- * The host editor's Connect via (design 2026-10-26, "Host editor: Connect via"): how the host is reached, at its address or through a
+ * The host editor's Connect via: how the host is reached, at its address or through a
  * Google Cloud IAP route saved with it. The editor owns the draft; these draw it and hand every change back up.
  */
 
@@ -268,7 +268,7 @@ function EntitlementsInput({ id, value, onChange, disabled }: { id?: string; val
 }
 
 /**
- * The entitlements the route's account may request in its project's PAM location (design 2026-10-27), offered under the field: one
+ * The entitlements the route's account may request in its project's PAM location, offered under the field: one
  * press adds one. Read once the project reads as one; nothing is shown while Google has none to offer or cannot say.
  */
 function EntitlementSuggestions({ kind, disabled, onAdd }: { kind: TransportKind; disabled: boolean; onAdd: (id: string) => void }) {

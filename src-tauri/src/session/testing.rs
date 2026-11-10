@@ -348,7 +348,7 @@ impl HostDirectory for FakeDirectory {
     }
 }
 
-/// The grant `host` needs in the tests (design 2026-10-25, PAM grant requests): `prod-operate` on `project`, 30 minutes, with the
+/// The grant `host` needs in the tests: `prod-operate` on `project`, 30 minutes, with the
 /// justification given last time. Each test gives a project of its own: `GrantGates::for_tests` is shared by every test, and connections
 /// that need the same grant ask once.
 pub fn grant_need(host: &str, project: &str) -> super::directory::GrantNeed {

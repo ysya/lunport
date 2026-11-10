@@ -338,7 +338,7 @@ fn closes_after_a_failure(terminal_id: &str) -> bool {
     !matches!(terminal_id, "terminal" | "cmd" | "wt")
 }
 
-/// The file name of the console helper installed next to `lunport.exe` on Windows (own-ssh spec §7.3; src-tauri/cli-helper). Release
+/// The file name of the console helper installed next to `lunport.exe` on Windows (src-tauri/cli-helper). Release
 /// `lunport.exe` is a GUI program, which a shell does not wait for and a Windows Terminal tab gives no console; the helper is a console
 /// program that runs it with the same arguments and waits for it.
 #[cfg(any(windows, test))]
@@ -346,9 +346,9 @@ fn console_helper() -> String {
     format!("{}.exe", crate::identity::current().console_helper)
 }
 
-/// What a Windows terminal runs to connect (own-ssh spec §7.4): the console helper next to Lunport's executable `exe` (an installed
+/// What a Windows terminal runs to connect: the console helper next to Lunport's executable `exe` (an installed
 /// Lunport). Without it a debug build (`debug_build`; a console program) runs `exe` itself, and a release build fails with a sentence
-/// that names the missing helper: its `exe` is a GUI program, which a terminal neither waits for nor gives a console (§7.3).
+/// that names the missing helper: its `exe` is a GUI program, which a terminal neither waits for nor gives a console.
 #[cfg(any(windows, test))]
 fn connect_program(exe: &std::path::Path, debug_build: bool) -> Result<std::path::PathBuf, AppError> {
     let name = console_helper();
@@ -462,7 +462,7 @@ mod tests {
         }
     }
 
-    /// Spec §7.4: Connect gives `--pause-on-error` to the terminals that close the window when the command ends with an error (the reason
+    /// Connect gives `--pause-on-error` to the terminals that close the window when the command ends with an error (the reason
     /// of a connect that fails before the shell opens would go with it), and not to Terminal (`do script` runs it in a shell that stays),
     /// cmd (`cmd /k`) or Windows Terminal (its default keeps a pane whose program failed). An unknown terminal (`$TERMINAL`) is taken to
     /// close.
@@ -521,7 +521,7 @@ mod tests {
     }
 
     /// A release build without the console helper does not hand its lunport.exe, a GUI program, to a terminal, which would neither wait for
-    /// it nor give it a console (spec §7.3): Connect fails with a sentence that names the missing file and where it should be.
+    /// it nor give it a console: Connect fails with a sentence that names the missing file and where it should be.
     #[test]
     fn without_the_console_helper_a_release_build_says_it_is_missing() {
         let dir = tempfile::tempdir().unwrap();

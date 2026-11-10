@@ -1,4 +1,4 @@
-//! What the engine tells the broker besides a session or an error (plan 1b): whether a password typed now could still get in
+//! What the engine tells the broker besides a session or an error: whether a password typed now could still get in
 //! (`ConnectError::AuthFailed::password_wanted`), the server's banner (`AuthSource::banner`), and why a shell was refused
 //! (`Exit::Refused`).
 

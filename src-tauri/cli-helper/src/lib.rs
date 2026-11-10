@@ -1,4 +1,4 @@
-//! `lunport-cli.exe`: the console program Windows terminals run to reach Lunport (own-ssh spec §7.3, §7.4).
+//! `lunport-cli.exe`: the console program Windows terminals run to reach Lunport.
 //!
 //! Release `lunport.exe` is a GUI program (`windows_subsystem = "windows"`): a shell does not wait for it, and a Windows Terminal tab
 //! gives it no console. The helper is a console program, so the terminal gives it a console and waits for it. It runs the
@@ -61,8 +61,8 @@ pub fn ignores(event: u32) -> bool {
     event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT
 }
 
-/// One of the four settings of the console that `lunport.exe connect` changes while it runs, and puts back on every way out it has
-/// (own-ssh spec §7.3). A `lunport.exe` ended from outside has no way out: the NSIS installer ends every `lunport.exe` of the user, a
+/// One of the four settings of the console that `lunport.exe connect` changes while it runs, and puts back on every way out it has.
+/// A `lunport.exe` ended from outside has no way out: the NSIS installer ends every `lunport.exe` of the user, a
 /// session's too, at each install, in-app update and uninstall. So the helper keeps the four as well (`keeping_the_console`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {

@@ -49,7 +49,7 @@ pub struct RecordDirectory {
     grant_memory: Option<Box<GrantMemory>>,
 }
 /// When a grant was given, as the broker counts it: its grant time, never ahead of `now` (Google's clock may run ahead); `now` for a
-/// grant still activating; nothing for a grant with no time that is not activating (design 2026-10-25, PAM grant requests).
+/// grant still activating; nothing for a grant with no time that is not activating.
 fn repository_error(error: RepositoryError) -> DirectoryError {
     match error {
         RepositoryError::Validation(RecordValidationError::HostNotFound(id)) => {
@@ -86,8 +86,7 @@ pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryErro
         pinned_at_ms: pin.pinned_at_ms,
     })
 }
-/// Writes what a grant request taught this computer about a host: `(host, justification, duration_secs)` (design 2026-10-26, Grant
-/// requests).
+/// Writes what a grant request taught this computer about a host: `(host, justification, duration_secs)`.
 /// Remembers a grant request a connection made: the host it was for, the entitlement's full name, the justification and the length.
 pub type GrantMemory = dyn Fn(&HostId, &str, &str, u32) -> Result<(), DirectoryError> + Send + Sync;
 
@@ -106,7 +105,7 @@ impl RecordDirectory {
         self
     }
 
-    /// `HostDirectory::request_grant` with the pacing given (the trait method uses the design's 2 s and 60 s; tests hurry). A grant that
+    /// `HostDirectory::request_grant` with the pacing given (the trait method uses 2 s and 60 s; tests hurry). A grant that
     /// appeared since `prepare` looked (another connection, the panel) is used instead of requested: PAM refuses a second request with
     /// the same scope. What the person gave is remembered on this computer for next time (the device-local grant memory), and a memory
     /// that cannot be written does not fail the request.
@@ -286,7 +285,7 @@ impl RecordDirectory {
             }
             hops.push(hop);
         }
-        // A device-local transport (design 2026-10-25) replaces the first hop's TCP connection. It cannot carry a later hop, which is
+        // A device-local transport replaces the first hop's TCP connection. It cannot carry a later hop, which is
         // reached through the hop before it.
         for (index, hop) in hops.iter_mut().enumerate() {
             let Some(HostTransport { kind: TransportKind::GcpIap { project, zone, instance, interface, account, .. }, .. }) = transports::get(&state, hop.id.as_str()) else {
@@ -310,7 +309,7 @@ impl HostDirectory for RecordDirectory {
     fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
         self.resolve_material(query, false, true)
     }
-    /// For a first hop through Google Cloud IAP (design 2026-10-25): the PAM grant check, then OS Login. The key is registered when the
+    /// For a first hop through Google Cloud IAP: the PAM grant check, then OS Login. The key is registered when the
     /// profile lacks it or has no POSIX account yet (`gcloud compute ssh` does the same; the import creates the account), and the
     /// profile's username must be the one the host is saved with: nothing here changes the target, so the identity checks that compare
     /// the hop's user keep their meaning.
@@ -354,7 +353,7 @@ impl HostDirectory for RecordDirectory {
             }
             if !in_flight {
                 // The question starts from what was last asked for on the entitlement it requests (the justification and the length,
-                // the library's grant memory, design 2026-10-27), else from what this computer last asked for on the host, as an earlier
+                // the library's grant memory), else from what this computer last asked for on the host, as an earlier
                 // release remembered it; an entitlement never asked for gets the route's own default length and nothing to prefill.
                 let first = crate::gcp::pam::EntitlementName::in_project(&project, &pam.location, &pam.entitlements[0]).full();
                 let memory = crate::sync::pam_records::memory(&state, &first)

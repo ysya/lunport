@@ -16,6 +16,6 @@ changed: PinnedHostKey | null,
  */
 saved: PinnedHostKey | null,
 /**
- * The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` for a person's connection.
+ * The AI client whose request asks; `None` for a person's connection.
  */
 ai: AiAsker | null, };

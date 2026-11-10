@@ -1,4 +1,4 @@
-//! How long a connection lives and how it ends: keepalive, a cut link, closing and dropping (spec §6.2 steps 2, 3 and 5).
+//! How long a connection lives and how it ends: keepalive, a cut link, closing and dropping.
 
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ fn session_through_a_proxy(server: &Server, keepalive_every: Duration, max_misse
 }
 
 /// russh's keepalive is "nothing received for this long", and a link that goes quiet is noticed after (max_missed + 1) × every; the
-/// spike measured 3044 ms for 1 s and 2 on macOS. The bounds are wide, the point is the order of magnitude and the reason.
+/// measured time was 3044 ms for 1 s and 2 on macOS. The bounds are wide, the point is the order of magnitude and the reason.
 #[test]
 fn keepalive_closes_a_silent_link_and_the_reason_says_so() {
     let Some(tools) = tools() else { return };

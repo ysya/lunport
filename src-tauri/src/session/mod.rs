@@ -1,18 +1,18 @@
-//! The session broker (own-ssh spec §4, §7): it opens SSH sessions for its clients over the local IPC endpoint (a socket on macOS and
+//! The session broker: it opens SSH sessions for its clients over the local IPC endpoint (a socket on macOS and
 //! Linux, a named pipe on Windows) — protocol-1 `lunport connect` and the protocol-2 MCP adapter — asks the client (or the app's
 //! window, for host keys) what a login needs, and relays the terminal. Every SSH call it makes blocks, so it runs on plain threads, never
 //! in async code and never on the UI thread.
 
 use std::path::{Path, PathBuf};
 
-/// The broker's socket in the app's data directory (spec §4): `<app data>/ipc/sock`. The CLI finds it the same way, without the app.
+/// The broker's socket in the app's data directory: `<app data>/ipc/sock`. The CLI finds it the same way, without the app.
 /// Windows has the named pipe instead (`pipe_name`).
 #[cfg(unix)]
 pub fn socket_path(app_data: &Path) -> PathBuf {
     ipc_dir(app_data).join("sock")
 }
 
-/// The broker's named pipe on Windows (spec §4): `\\.\pipe\lunport-session-<…>`, named after the user as the agent's pipe is. The CLI
+/// The broker's named pipe on Windows: `\\.\pipe\lunport-session-<…>`, named after the user as the agent's pipe is. The CLI
 /// finds it the same way, without the app.
 #[cfg(windows)]
 pub fn pipe_name() -> std::io::Result<String> {

@@ -1,4 +1,4 @@
-//! Jump hosts: a chain of connections, each carried inside the one before it (spec §6.2 step 2).
+//! Jump hosts: a chain of connections, each carried inside the one before it.
 
 use std::time::{Duration, Instant};
 
@@ -151,7 +151,7 @@ fn closing_the_session_disconnects_every_hop() {
     eventually("the jump host to log a disconnect message", 5, || pair.a.sshd.log().contains("Received disconnect"));
 }
 
-/// More than one jump (spec decision 4, ProxyJump with several levels): the third hop is opened with a `direct-tcpip` request on a session
+/// More than one jump (ProxyJump with several levels): the third hop is opened with a `direct-tcpip` request on a session
 /// whose own transport is a channel of the first one, and closing has three hops to disconnect, the innermost first.
 #[test]
 fn a_three_hop_chain_runs_a_command_on_the_last_host_and_closing_disconnects_every_hop() {
@@ -189,7 +189,7 @@ fn a_three_hop_chain_runs_a_command_on_the_last_host_and_closing_disconnects_eve
     eventually("the first host to log a disconnect message", 5, || a.sshd.log().contains("Received disconnect"));
 }
 
-/// The outer link dies: the reason is the outer hop's own record. The inner hop only learns that its carrier is gone (spec §6.2 step 2).
+/// The outer link dies: the reason is the outer hop's own record. The inner hop only learns that its carrier is gone.
 #[test]
 fn when_the_outer_link_is_cut_the_reason_is_the_outer_hops() {
     let Some(tools) = tools() else { return };
@@ -205,7 +205,7 @@ fn when_the_outer_link_is_cut_the_reason_is_the_outer_hops() {
     assert_eq!((reason.hop.alias.as_str(), reason.kind), ("a", DisconnectKind::ConnectionLost), "{reason:?}");
 }
 
-/// Not measured in the spike (spec §16): the inner hop ends first while the outer one is fine. A proxy between `a` and `b` is cut. The
+/// The inner hop ends first while the outer one is fine. A proxy between `a` and `b` is cut. The
 /// whole chain must come down, and the reason must be the inner hop's, not the "closed by us" that the teardown makes the outer hop record.
 #[test]
 fn when_the_inner_hop_ends_first_the_chain_comes_down_and_the_reason_is_the_inner_hops() {
@@ -277,8 +277,8 @@ fn a_shell_on_the_second_host_works_through_the_jump() {
 /// Review focus: the tunnel branch of `connect_hop` has no `SocketGuard`, and needs none. A destination behind a jump host that sends
 /// its version line and then nothing is given up on after `stall_limit` (1.5 s here: a 2 s keepalive interval, a 6 s connect timeout),
 /// and the handshake task that russh started on the tunnel is detached by that. It ends because `connect_chain` disconnects the jump
-/// host next, which closes the channel the task was reading and writing. A task left behind would spin once the interval had passed
-/// (spec §6.2 step 2, and Task 9's test of the same wait on a socket), so the CPU time of the call and of the 2 s after it is measured;
+/// host next, which closes the channel the task was reading and writing. A task left behind would spin once the interval had passed,
+/// so the CPU time of the call and of the 2 s after it is measured;
 /// the process-wide CPU time is only meaningful when nothing else runs, so a child process of the test binary does the measuring. The
 /// jump host's connection must be closed afterwards, and so must the destination's end of the tunnel.
 #[cfg(unix)]

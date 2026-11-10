@@ -1,4 +1,4 @@
-//! The Google Cloud page's Access tab (design 2026-10-27, The Access tab; The PAM commands): Privileged Access Manager on its own, not
+//! The Google Cloud page's Access tab: Privileged Access Manager on its own, not
 //! through a host. `overview` lists every entitlement the person may request, searched in the scopes the routes use (their projects, as
 //! their accounts) and in the scopes the person added, with the entitlements the routes name even when the search does not return
 //! them; each with the state of the grants on it, the hosts that need it and the memory of its last request. `gcp_pam_request` requests
@@ -139,7 +139,7 @@ fn route_places(routes: &[HostTransport], active: Option<&str>) -> Vec<(Place, V
     places
 }
 
-/// The Access tab's overview (design 2026-10-27, The PAM commands): the places to look (`routes`' and `added`), and every entitlement
+/// The Access tab's overview: the places to look (`routes`' and `added`), and every entitlement
 /// found there or named by a route, with its state. Blocks; at most `PARALLEL` calls at once, none started after `deadline`.
 pub fn overview(gcp: &dyn GcpClient, active: Option<&str>, routes: &[HostTransport], added: &[PamScope], memories: &[GrantRequestMemory], deadline: Instant) -> PamOverview {
     let from_routes = route_places(routes, active);
@@ -282,7 +282,7 @@ fn active_account() -> Option<String> {
     crate::gcp::auth::active_account(&commands::gcloud_config_dir())
 }
 
-/// The Access tab's overview, read now (design 2026-10-27, The PAM commands).
+/// The Access tab's overview, read now.
 #[tauri::command]
 pub async fn gcp_pam_overview(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<PamOverview, String> {
     commands::main_only(&window)?;
@@ -324,7 +324,7 @@ pub async fn gcp_pam_request(app: tauri::AppHandle, window: tauri::WebviewWindow
     .map_err(|error| error.to_string())?
 }
 
-/// Adds a search scope (design 2026-10-27, The Access tab): a parent, a location and an account (none: gcloud's active account).
+/// Adds a search scope: a parent, a location and an account (none: gcloud's active account).
 #[tauri::command]
 pub async fn gcp_pam_scope_save(app: tauri::AppHandle, window: tauri::WebviewWindow, parent: String, location: String, account: Option<String>) -> Result<RecordOverview, String> {
     commands::main_only(&window)?;

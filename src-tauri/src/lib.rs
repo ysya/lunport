@@ -267,7 +267,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::engine::initialize(app.handle())?;
             diagnostics::stage(diagnostics::Stage::Mcp);
             mcp::initialize(app.handle(), host)?;
-            // The session broker that `lunport connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
+            // The session broker that `lunport connect` talks to: a failure is recorded, it does not stop the app.
             diagnostics::stage(diagnostics::Stage::Broker);
             session::app::start(app.handle());
             quick_connect::initialize(app.handle());
@@ -296,7 +296,7 @@ fn run_app(host: bool, start_hidden: bool) {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window.app_handle().state::<state::AppState>().session.embedded.close_all();
             }
-            // The host key window (own-ssh spec §10): closing it refuses every key it was asking about.
+            // The host key window: closing it refuses every key it was asking about.
             if window.label() == session::auth_window::AUTH_WINDOW {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {window.app_handle().state::<state::AppState>().session.auth_questions.deny_all();}
                 return;
@@ -307,13 +307,13 @@ fn run_app(host: bool, start_hidden: bool) {
                 }
                 return;
             }
-            // 視窗在前景時以一般間隔輪詢、回到前景立刻同步一輪(同步退避期間要等退避結束,spec §6.4);不在前景時省 relay 的配額(Sync v2)。
+            // 視窗在前景時以一般間隔輪詢、回到前景立刻同步一輪(同步退避期間要等退避結束);不在前景時省 relay 的配額。
             if let tauri::WindowEvent::Focused(focused) = event {
                 sync::engine::window_focused(window.app_handle(), *focused);
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<state::AppState>();
-                // Open sessions keep the app running too: quitting would end them (own-ssh spec §4).
+                // Open sessions keep the app running too: quitting would end them.
                 if session::app::hides_on_close(
                     state.close_to_tray.load(std::sync::atomic::Ordering::Relaxed),
                     state.mcp.keep_alive.load(std::sync::atomic::Ordering::Relaxed),
@@ -469,7 +469,7 @@ fn run_app(host: bool, start_hidden: bool) {
             tauri::RunEvent::Reopen { .. } => show_main_window_by_user(app),
             tauri::RunEvent::Exit => {
                 diagnostics::stage(diagnostics::Stage::Exit);
-                // Quitting ends every session; each terminal is told why (own-ssh spec §4).
+                // Quitting ends every session; each terminal is told why.
                 session::app::quit(app);
             }
             _ => {}

@@ -28,10 +28,10 @@ pub struct AuthRequest {
     pub echo: bool,
     #[cfg_attr(test, ts(type = "number"))]
     pub remaining_ms: u64,
-    /// The form of a `grant` question (design 2026-10-25, PAM grant requests); `None` for every other kind.
+    /// The form of a `grant` question; `None` for every other kind.
     #[serde(default)]
     pub grant: Option<GrantPrompt>,
-    /// The AI client whose request asks (design 2026-11-09, native windows for AI requests); `None` for a person's connection.
+    /// The AI client whose request asks; `None` for a person's connection.
     #[serde(default)]
     pub ai: Option<crate::session::protocol::AiAsker>,
 }
@@ -120,7 +120,7 @@ pub struct NativeOwner {
     pub surface: Arc<dyn AuthSurface>,
     pub request_id: String,
     pub cancel: CancelToken,
-    /// The AI client whose request this owner answers for (design 2026-11-09, native windows for AI requests): every question it asks
+    /// The AI client whose request this owner answers for: every question it asks
     /// names it. `None` for a person's connection.
     pub ai: Option<crate::session::protocol::AiAsker>,
 }
@@ -275,7 +275,7 @@ impl AuthSurface for TauriAuthSurface {
 
 /// Read the current hub after the health check; never replay an expired snapshot.
 /// The window's logical size for what is pending: a server's one-line question fits the small window; the Request-a-grant form (two
-/// fields and a hint; design 2026-10-25, PAM grant requests) gets a taller one when a grant question is anywhere in the queue.
+/// fields and a hint) gets a taller one when a grant question is anywhere in the queue.
 pub(crate) fn window_size(requests: &[AuthRequest]) -> (f64, f64) {
     if requests.iter().any(|request| request.kind == "grant") {
         (520.0, 500.0)
@@ -358,7 +358,7 @@ mod tests {
         }
     }
     /// The window was sized for a server's one-line question; the Request-a-grant form (two fields and a hint) needs more room, so a
-    /// grant anywhere in the queue gets the taller window (design 2026-10-25, PAM grant requests).
+    /// grant anywhere in the queue gets the taller window.
     #[test]
     fn the_window_is_taller_for_a_grant_form_than_for_a_servers_question() {
         let password = AuthRequest { ai: None, id: "a".into(), request_id: "r".into(), hop: None, kind: "password".into(), text: "pw".into(), echo: false, remaining_ms: 1, grant: None };
@@ -391,8 +391,8 @@ mod tests {
         }
     }
 
-    /// Every question an AI client's request asks names the client and what then goes ahead without review (design 2026-11-09, native
-    /// windows for AI requests): a grant and a password alike. A person's questions name nobody.
+    /// Every question an AI client's request asks names the client and what then goes ahead without review:
+    /// a grant and a password alike. A person's questions name nobody.
     #[test]
     fn an_ai_clients_questions_name_the_client() {
         use crate::session::protocol::{AiAsker, Unreviewed};

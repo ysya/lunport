@@ -112,7 +112,7 @@ impl ApprovedTarget {
         Ok(())
     }
 }
-/// What ended a server key question of an AI client's call without trust (design 2026-11-09), for the client's answer. Each names the host
+/// What ended a server key question of an AI client's call without trust, for the client's answer. Each names the host
 /// by its alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum KeyOutcome {
@@ -144,7 +144,7 @@ impl KeyOutcome {
 const COMMAND_STOPPED: &str = "the command did not run";
 
 /// The AI client as Lunport observed it (the requester chain), never what the client says of itself: who started a tunnel in the Tunnels
-/// panel, and who asks in Lunport's windows (design 2026-11-09, native windows for AI requests).
+/// panel, and who asks in Lunport's windows.
 pub(crate) fn client_label(context: &RequestContext) -> String {
     let observed: Vec<&str> = context.requested_by.iter().map(String::as_str).filter(|name| *name != "Unknown").collect();
     if observed.is_empty() {
@@ -160,8 +160,8 @@ pub(crate) fn asker(context: &RequestContext, mode: ApprovalMode, then: Unreview
     AiAsker { client: client_label(context), unreviewed: (mode == ApprovalMode::AutoLog).then_some(then) }
 }
 
-/// Lunport's host key window as an AI client's call asks it (design 2026-11-09): every question goes to the window, a changed key in
-/// Auto-log too (native windows for AI requests), and names the client (`asker`). The connect path asks a key that differs from the one
+/// Lunport's host key window as an AI client's call asks it: every question goes to the window, a changed key in
+/// Auto-log too, and names the client (`asker`). The connect path asks a key that differs from the one
 /// another device saved for the host (a pin this device has not approved yet) as a changed key. It remembers the first question that ended
 /// without trust, for the client's answer.
 pub(crate) struct ClientConfirmer<'a> {
@@ -205,8 +205,8 @@ impl HostKeyConfirmer for ClientConfirmer<'_> {
 }
 
 /// `verify_host_key`'s handshake for the host `query` names, along `route` (the route the request was approved for): Lunport's host key
-/// window for each hop whose key needs the person, the pin written on trust, and no login to the destination (jump hosts log in). Design
-/// 2026-11-09: `ssh_exec` and `start_tunnel` run it before they use a server key this device has not verified. `guard` is the request's
+/// window for each hop whose key needs the person, the pin written on trust, and no login to the destination (jump hosts log in).
+/// `ssh_exec` and `start_tunnel` run it before they use a server key this device has not verified. `guard` is the request's
 /// own check (its policy and permission); every route the handshake resolves must be `route`, its destination only met.
 pub(crate) fn verify_route(
     connector: &Connector<'_>,
@@ -262,7 +262,7 @@ pub(crate) fn trust_entry(context: &RequestContext, host_id: &str, alias: &str, 
     }
 }
 
-/// Before an AI client's call connects through a hop whose server key this device has not verified (design 2026-11-09), the person
+/// Before an AI client's call connects through a hop whose server key this device has not verified, the person
 /// decides on it in Lunport's host key window, as `verify_host_key` asks: no credential for the destination is asked before that. The
 /// hops are those of `target`, the route the request was approved for, and their keys are looked at as they are now (the person may
 /// have verified one while an approval was open). The decision is audited.
@@ -296,7 +296,7 @@ pub(crate) fn verify_unverified(
     runtime.record(trust_entry(context, destination.id.as_str(), &destination.alias, mode, verified.is_ok()));
     verified.map_err(|error| confirmer.answer(Some(stopped)).unwrap_or(error))?;
     // A key that is not verified by the time the call connects (another device changed the pin in between) is the connection's to ask
-    // about, in its own window, in both modes (design 2026-11-09, native windows for AI requests).
+    // about, in its own window, in both modes.
     Ok(())
 }
 pub(crate) struct CheckedEngine<'a> {
@@ -316,8 +316,7 @@ impl SshEngine for CheckedEngine<'_> {
 }
 
 /// Uses public resolution; private material is verified by KeyStore immediately before authentication. A Privileged Access Manager grant
-/// the target needs is passed on, so that the connection asks for it in Lunport's window, for an AI client's request too (design
-/// 2026-11-09, native windows for AI requests).
+/// the target needs is passed on, so that the connection asks for it in Lunport's window, for an AI client's request too.
 pub(crate) struct PublicDirectory<'a>(
     pub(crate) &'a dyn crate::session::directory::HostDirectory,
     pub(crate) &'a (dyn Fn() -> Result<(), String> + Sync),
@@ -712,8 +711,8 @@ mod tests {
     };
     use crate::sync::testkit::MemKeychain;
 
-    /// An AI request that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window, in both modes (design
-    /// 2026-11-09, native windows for AI requests): the grant is requested with the person's justification and length, and the command
+    /// An AI request that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window, in both modes:
+    /// the grant is requested with the person's justification and length, and the command
     /// runs once it is active.
     #[test]
     fn an_ai_request_asks_for_a_grant_in_lunports_window_and_runs_once_it_is_active() {
@@ -949,7 +948,7 @@ pub(crate) fn dispatch(
         .map_err(|e| e.to_string())?,
         "start_tunnel" => crate::sync::engine::with_env(app, |env| {
             // Lunport's native windows for what verifying the route's server keys may ask (a jump host's login, a grant), naming the AI
-            // client (design 2026-11-09).
+            // client.
             let owner = crate::session::auth_window::NativeOwner {
                 ai: Some(asker(&context, policy.approval_mode, Unreviewed::Tunnel)),
                 hub: state.session.auth_questions.clone(),
@@ -1091,7 +1090,7 @@ pub(super) fn metadata(
         p.user.clone()
     };
     let safe = |s: &str| crate::session::auth::printable(s).replace(['\n', '\t'], "?");
-    // The host's Google Cloud IAP transport, when it has one (design 2026-10-26, AI edits): what the client would change.
+    // The host's Google Cloud IAP transport, when it has one: what the client would change.
     let transport = crate::sync::transports::get(state, &view.host.id).map(|transport| transport_view(&transport));
     Ok(
         json!({"id":view.host.id,"alias":safe(&p.alias),"hostname":safe(&p.hostname),"user":safe(&user),"port":p.port,"auth":p.auth,"key_id":p.key_id,"jump_ids":p.jump,"tags":p.tags.iter().map(|t|safe(t)).collect::<Vec<_>>(),"scope":view.host.scope,"group_path":path.iter().rev().map(|g|json!({"id":g.id,"name":safe(&g.payload.name)})).collect::<Vec<_>>(),"inherited_from":view.inherited_from,"transport":transport}),
@@ -1117,7 +1116,7 @@ pub(super) fn transport_view(transport: &crate::sync::transports::HostTransport)
 mod behavior_tests {
     use super::*;
 
-    /// Design 2026-10-26 (AI edits): the host view the AI reads carries the host's transport, so the client can see what it would
+    /// The host view the AI reads carries the host's transport, so the client can see what it would
     /// change; the justification the person last sent stays theirs.
     #[test]
     fn the_host_view_carries_the_transport_without_its_justification() {
@@ -1644,7 +1643,7 @@ mod behavior_tests {
         assert!(r.status().audit_error.is_some());
     }
 
-    // ---- A server key the AI meets for the first time (design 2026-11-09) ----
+    // ---- A server key the AI meets for the first time ----
 
     use crate::session::connect::{HostKeyConfirmer, HostKeyQuestion};
     use crate::session::testing::{Decision, TEST_PASSPHRASE};
@@ -1775,7 +1774,7 @@ mod behavior_tests {
         }
     }
 
-    /// A changed server key opens the warning window in both modes (design 2026-11-09, native windows for AI requests): after Accept new
+    /// A changed server key opens the warning window in both modes: after Accept new
     /// key the same call replaces the saved key and runs the command; a refusal or no answer says the key had changed, keeps the saved key
     /// and runs nothing.
     #[test]
@@ -1812,8 +1811,8 @@ mod behavior_tests {
         }
     }
 
-    /// A key the verification step trusted is not refused afterwards by a check of Auto-log's own (design 2026-11-09, native windows for
-    /// AI requests): the connection decides with its own window, as in Ask mode. Here this device's approval never shows (`pinned_for`
+    /// A key the verification step trusted is not refused afterwards by a check of Auto-log's own:
+    /// the connection decides with its own window, as in Ask mode. Here this device's approval never shows (`pinned_for`
     /// says nothing, as when another device keeps changing the pin), and the connection, which meets the pinned key, runs the command.
     #[test]
     fn auto_log_leaves_a_key_still_unverified_after_the_verification_to_the_connection() {
@@ -1853,7 +1852,7 @@ mod behavior_tests {
     }
 
     /// Every host key window an AI request opens names the AI client as Lunport observed it, and in Auto-log says that the command runs
-    /// without per-command review once the key is trusted (design 2026-11-09, native windows for AI requests).
+    /// without per-command review once the key is trusted.
     #[test]
     fn the_host_key_window_names_the_ai_client_and_says_what_runs_unreviewed() {
         use crate::session::protocol::{AiAsker, Unreviewed};
@@ -1888,7 +1887,7 @@ mod behavior_tests {
     }
 
     /// A key that differs from the one another device saved for the host (a pin this device has not approved) is a changed key, as the
-    /// connect path asks it (design 2026-11-09, saved pins): both modes warn about it in the window, with the saved key, and the call goes
+    /// connect path asks it: both modes warn about it in the window, with the saved key, and the call goes
     /// on after Accept new key. The very key another device saved is asked about as new, says when it was saved, and is trusted here in
     /// both modes.
     #[test]

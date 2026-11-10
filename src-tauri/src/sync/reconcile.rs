@@ -1,4 +1,4 @@
-//! 記錄的加解密編碼(spec §5.3)與遠端 host 記錄要套到檔案的效果。一輪同步的合併規則在 `merge`。
+//! 記錄的加解密編碼與遠端 host 記錄要套到檔案的效果。一輪同步的合併規則在 `merge`。
 
 use crate::error::AppError;
 use crate::sync::crypto::{self, ChainKeys, Sealed};

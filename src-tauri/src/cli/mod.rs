@@ -1,5 +1,5 @@
-//! `lunport connect` (own-ssh spec §7.3): the terminal's end of a session in the app, on macOS and Linux (a terminal, termios and
-//! signals) and on Windows (a console, its modes and its control events; plan 1b-3).
+//! `lunport connect`: the terminal's end of a session in the app, on macOS and Linux (a terminal, termios and
+//! signals) and on Windows (a console, its modes and its control events).
 
 pub mod client;
 // The Windows console without the Windows calls (`terminal_windows.rs` adds them): built on Windows, and in every platform's tests.
@@ -33,14 +33,14 @@ use std::sync::Arc;
 use crate::session::protocol::HostQuery;
 use client::{Request, PAUSE_PROMPT};
 
-/// What `lunport connect` prints when the app does not answer after it was started (spec §7.3, §11).
+/// What `lunport connect` prints when the app does not answer after it was started.
 pub const NOT_STARTED: &str = "Lunport did not start within 12 seconds.";
 
 /// The flag of `Request::pause_on_error`, before the host: Lunport's Connect gives it to a terminal that closes its window with the
-/// program (spec §7.4). It is not in the usage, which is for people.
+/// program. It is not in the usage, which is for people.
 pub const PAUSE_ON_ERROR: &str = "--pause-on-error";
 
-/// What `lunport connect` prints when standard input is not a terminal (spec §7.3).
+/// What `lunport connect` prints when standard input is not a terminal.
 pub const NEEDS_TERMINAL: &str = "lunport connect needs a terminal.";
 
 /// How `lunport connect` is used.
@@ -95,7 +95,7 @@ fn texts(args: &[OsString]) -> Result<Vec<String>, String> {
     args.iter().map(|arg| arg.clone().into_string().map_err(|_| USAGE.to_string())).collect()
 }
 
-/// The terminal type the shell is opened for: `$TERM`, or `xterm-256color` without one (spec §7.3).
+/// The terminal type the shell is opened for: `$TERM`, or `xterm-256color` without one.
 pub fn term_from(value: Option<std::ffi::OsString>) -> String {
     value.and_then(|value| value.into_string().ok()).filter(|term| !term.is_empty()).unwrap_or_else(|| "xterm-256color".to_string())
 }
@@ -253,7 +253,7 @@ pub fn run_connect(args: &[OsString]) -> i32 {
 #[cfg(windows)]
 const PIPE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The connection to the broker, on its named pipe (found without the app, spec §4): if nobody serves it Lunport is started, hidden,
+/// The connection to the broker, on its named pipe (found without the app): if nobody serves it Lunport is started, hidden,
 /// under the same locks as the MCP adapter's start, and waited for, as on Unix. A pipe of that name that is not the user's own is not
 /// Lunport's (another program made it): it is said so, and Lunport is not started for it, nor is anything said to it.
 #[cfg(windows)]
@@ -381,7 +381,7 @@ mod tests {
         }
     }
 
-    /// Lunport's Connect puts `--pause-on-error` before the host (spec §7.4); the usage, which is for people, does not show it.
+    /// Lunport's Connect puts `--pause-on-error` before the host; the usage, which is for people, does not show it.
     #[test]
     fn pause_on_error_comes_before_the_host() {
         assert_eq!(parse_args(&args(&["--pause-on-error", "web"])), Ok(Request { host: HostQuery::Alias("web".into()), pause_on_error: true }));
@@ -529,7 +529,7 @@ mod tests {
             assert!(!matches!(read, Ok(count) if count > 0), "nothing was asked of Lunport: {read:?}");
         }
 
-        /// Without a terminal on standard input the CLI says so and ends with 1 (spec §7.3), and it does so before it reaches Lunport, let
+        /// Without a terminal on standard input the CLI says so and ends with 1, and it does so before it reaches Lunport, let
         /// alone starts it: a program that cannot talk to a terminal must not launch the app just to say that.
         #[test]
         fn without_a_terminal_the_cli_says_so_before_it_reaches_or_starts_lunport() {
@@ -537,7 +537,7 @@ mod tests {
             assert_eq!(session_on(Arc::new(NotATerminal), reach), (1, "lunport connect needs a terminal.\n".to_string()));
         }
 
-        /// Spec §11: when nothing answers after Lunport was started, the sentence and 1; the terminal was never changed.
+        /// When nothing answers after Lunport was started, the sentence and 1; the terminal was never changed.
         #[test]
         fn when_nothing_answers_the_cli_says_lunport_did_not_start_and_leaves_the_terminal_alone() {
             let terminal = FakeTermios::new();
@@ -545,7 +545,7 @@ mod tests {
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
         }
 
-        /// Spec §7.3, `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
+        /// `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
         /// (once) before it ends with 1; the terminal is left as it was, with its own line editing for that Enter. Without a terminal there
         /// is nothing to wait on: the sentence, and 1.
         #[test]
@@ -624,7 +624,7 @@ mod tests {
             (code, String::from_utf8(said).unwrap())
         }
 
-        /// Spec §7.3: input that is not a console is said, with 1, before Lunport is reached, let alone started.
+        /// Input that is not a console is said, with 1, before Lunport is reached, let alone started.
         #[test]
         fn without_a_console_the_cli_says_so_before_it_reaches_or_starts_lunport() {
             let console = FakeConsole::new();
@@ -634,7 +634,7 @@ mod tests {
             assert_eq!(session_with(console, reach, events), (1, "lunport connect needs a terminal.\n".to_string()));
         }
 
-        /// Spec §11: when nothing answers after Lunport was started, the sentence and 1; the console was never changed.
+        /// When nothing answers after Lunport was started, the sentence and 1; the console was never changed.
         #[test]
         fn when_nothing_answers_the_cli_says_lunport_did_not_start_and_leaves_the_console_alone() {
             let console = FakeConsole::new();
@@ -643,7 +643,7 @@ mod tests {
             assert!(console.changes().is_empty(), "the console was not changed");
         }
 
-        /// Spec §7.3, `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
+        /// `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
         /// (once), the console as it was (its own line editing), before it ends with 1.
         #[test]
         fn with_pause_on_error_lunport_that_cannot_be_reached_is_said_and_waits_for_enter() {
@@ -722,7 +722,7 @@ mod tests {
         assert!(refused(&denied).starts_with("lunport: cannot connect to Lunport ("), "{}", refused(&denied));
     }
 
-    /// Spec §11: the sentence, exactly, when the app does not answer.
+    /// The sentence, exactly, when the app does not answer.
     #[test]
     fn when_nothing_answers_after_the_start_the_cli_says_lunport_did_not_start() {
         use crate::host_start::{ensure_started, SpawnLocks};

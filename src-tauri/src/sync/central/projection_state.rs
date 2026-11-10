@@ -82,7 +82,7 @@ impl Ledger {
             .collect();
         let mut local = BTreeMap::new();
         // The ledger records the library as published, though its owner has cut over: the routes saved on this device are not in it,
-        // and no capture takes them; the publish step moves them into the library (R64a).
+        // and no capture takes them; the publish step moves them into the library.
         for (identity, data) in
             super::projection_local::public_rows(state, &catalog, &storage)?
         {
@@ -972,7 +972,7 @@ pub(super) mod tests {
             .iter()
             .any(|(_, data)| matches!(data,Data::Catalog(c) if c==&ledger.catalog)));
     }
-    /// R64a: the initial ledger records the library as published, though its owner has cut over, and no capture takes the routes this
+    /// The initial ledger records the library as published, though its owner has cut over, and no capture takes the routes this
     /// device saved alone: the publish step makes them the library's rows first, and the capture publishes those.
     #[test]
     fn the_initial_ledger_records_the_library_as_published_and_a_capture_leaves_this_devices_routes_to_the_publish_step() {

@@ -13,9 +13,9 @@ pub struct AppState {
     pub mcp: crate::mcp::McpRuntime,
     /// 同步執行期狀態:generation/狀態/帳戶金鑰同一把鎖(`SyncCore`)、lifecycle 互斥鎖、同步中旗標。
     pub sync: crate::sync::runtime::SyncRuntime,
-    /// The session broker: its host key window, its sessions (own-ssh spec §4, §7).
+    /// The session broker: its host key window, its sessions.
     pub session: crate::session::SessionRuntime,
-    /// The one client for Google's APIs (design 2026-10-25): its token cache and its library clients serve the connections and the
+    /// The one client for Google's APIs: its token cache and its library clients serve the connections and the
     /// Google Cloud panel alike, so a grant check costs one search, not a sign-in.
     pub gcp: Arc<crate::gcp::rest::RestClient>,
 }

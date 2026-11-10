@@ -51,32 +51,32 @@ pub struct SyncStateV2 {
     pub version: u32,
     pub device_id: String,
     pub device_name: String,
-    /// 只能在未加入時更改(cursor 與 seq 屬於某一個 relay,spec §7.3)。
+    /// 只能在未加入時更改(cursor 與 seq 屬於某一個 relay)。
     pub relay_url: String,
     /// None = 未加入帳戶。
     #[serde(default)]
     pub account: Option<AccountState>,
-    /// 這台勾選的 space,key = space id。未勾選的 space 只存在帳戶的 `space`/`spacekey` 記錄中(spec §4.4)。
+    /// 這台勾選的 space,key = space id。未勾選的 space 只存在帳戶的 `space`/`spacekey` 記錄中。
     #[serde(default)]
     pub spaces: BTreeMap<String, SpaceState>,
-    /// 更換同步碼進行中(spec §7.5):下次啟動依它接續。
+    /// 更換同步碼進行中:下次啟動依它接續。
     #[serde(default)]
     pub rotation: Option<RotationProgress>,
-    /// v1 狀態檔的備份檔名(v1 升級之後,spec §7.6)。
+    /// v1 狀態檔的備份檔名(v1 升級之後)。
     #[serde(default)]
     pub legacy_v1_backup: Option<String>,
-    /// 最近一次 `GET /legacy/v1/info` 的結果(spec §6.4)。
+    /// 最近一次 `GET /legacy/v1/info` 的結果。
     #[serde(default)]
     pub relay_features: Option<RelayFeatures>,
-    /// 離開帳戶時 keychain 裡的同步碼刪不掉:持久化這個待辦,重啟後仍顯示重試(同 v1,spec §7.3)。
+    /// 離開帳戶時 keychain 裡的同步碼刪不掉:持久化這個待辦,重啟後仍顯示重試(同 v1)。
     #[serde(default)]
     pub phrase_cleanup_pending: bool,
     pub last_sync_ms: Option<u64>,
     pub last_error: Option<String>,
-    /// 這台的金鑰插槽(SP3 spec §4.3),key = 插槽 id。只含公開資訊與本機路徑。離開帳戶時保留(插槽檔留在原地)。
+    /// 這台的金鑰插槽,key = 插槽 id。只含公開資訊與本機路徑。離開帳戶時保留(插槽檔留在原地)。
     #[serde(default)]
     pub key_slots: BTreeMap<String, LocalSlot>,
-    /// 等使用者看過才清掉的提示(v1 升級說明、別台刪了 space、改名被擋下、新同步碼……;spec §7.2、§7.5、§8)。讀檔時略過
+    /// 等使用者看過才清掉的提示(v1 升級說明、別台刪了 space、改名被擋下、新同步碼……)。讀檔時略過
     /// 這版不認得的種類(`known_notices`),降版之後狀態檔照樣讀得回來。
     #[serde(default, deserialize_with = "known_notices")]
     pub notices: Vec<SyncNotice>,
@@ -116,13 +116,13 @@ impl SyncStateV2 {
             .is_some_and(|v| v > ACCOUNT_SCHEMA_VERSION)
     }
 
-    /// 這台偵測到帳戶已被更換同步碼(spec §7.5):非 None 時不做任何網路寫入。
+    /// 這台偵測到帳戶已被更換同步碼:非 None 時不做任何網路寫入。
     pub fn frozen(&self) -> Option<&FreezeInfo> {
         self.account.as_ref().and_then(|a| a.frozen.as_ref())
     }
 }
 
-/// 帳戶 chain 的區段(spec §4.4)。
+/// 帳戶 chain 的區段。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountState {
     pub chain_id: String,
@@ -134,16 +134,16 @@ pub struct AccountState {
     /// 帳戶 `meta` 的 `schema_version`;比 `ACCOUNT_SCHEMA_VERSION` 新 → 唯讀。
     #[serde(default)]
     pub remote_schema_version: Option<u32>,
-    /// 偵測到帳戶已被更換同步碼(spec §7.5)。
+    /// 偵測到帳戶已被更換同步碼。
     #[serde(default)]
     pub frozen: Option<FreezeInfo>,
     /// device / space / meta / keyslot 的明文記錄,key = `record_key(kind, id)`。
     #[serde(default)]
     pub records: BTreeMap<String, LocalRecord>,
-    /// `spacekey`、`key`(SP3)與未知種類的密文,key = `sealed_key(kind, id_hash)`。
+    /// `spacekey`、`key` 與未知種類的密文,key = `sealed_key(kind, id_hash)`。
     #[serde(default)]
     pub sealed: BTreeMap<String, SealedRecord>,
-    /// 這台刪除的 space 還沒 `DELETE` 的 chain(spec §7.2):tombstone 之前那份 `spacekey` 的密文(帳戶金鑰加密,
+    /// 這台刪除的 space 還沒 `DELETE` 的 chain:tombstone 之前那份 `spacekey` 的密文(帳戶金鑰加密,
     /// 權杖只在記憶體解開)。tombstone 上傳之後才刪 chain —— 別台先收到 tombstone,不會看到「chain 不見了」。
     #[serde(default)]
     pub chain_deletes: Vec<SealedRecord>,
@@ -205,7 +205,7 @@ impl VerifiedPublicIdentity {
     }
 }
 
-/// 不能以明文保存的記錄(spec §3、§4.4):relay 的密文 envelope 原樣保存(`envelope.seq` = relay 序號)。這台寫出、
+/// 不能以明文保存的記錄:relay 的密文 envelope 原樣保存(`envelope.seq` = relay 序號)。這台寫出、
 /// 還沒上傳的(例如新 space 的 `spacekey`)`dirty` = true:上傳的就是這份密文,`envelope.seq` 當 base_seq。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SealedRecord {
@@ -258,7 +258,7 @@ impl SealedRecord {
     }
 }
 
-/// 一個插槽在這台電腦上的狀況(SP3 spec §4.3)。
+/// 一個插槽在這台電腦上的狀況。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LocalSlot {
     /// 插槽檔名(`<name>-<插槽 id 前 8>`)。
@@ -272,11 +272,11 @@ pub struct LocalSlot {
     /// 已經為「這台需要金鑰」發過 `SyncNotice::KeysNeeded`(每個插槽只發一次)。
     #[serde(default)]
     pub asked: bool,
-    /// 最後看到的 `keyslot` payload:帳戶裡找不到這個插槽時(例如在沒有 SP3 的電腦上更換了同步碼)據此補寫(spec §6.6)。
+    /// 最後看到的 `keyslot` payload:帳戶裡找不到這個插槽時(例如在還沒有金鑰插槽的舊版電腦上更換了同步碼)據此補寫。
     #[serde(default)]
     pub payload: Option<KeySlotPayload>,
     /// 這台電腦自己把哪一把金鑰(指紋)上傳成這個插槽的同步金鑰:只有這台的使用者在這台選了同步它(建立插槽時選「Sync key」、
-    /// 或之後的「Sync this key」「Sync the new key」)才會設定,帳戶裡別人的變更不會動它。補寫 `key`(spec §6.6)時,連到本機金鑰的
+    /// 或之後的「Sync this key」「Sync the new key」)才會設定,帳戶裡別人的變更不會動它。補寫 `key`時,連到本機金鑰的
     /// 插槽、以及保管庫裡不是從這個帳戶同步來的金鑰(`SlotSource::Vault`)只認它:`payload` 是帳戶裡最新的 `keyslot`,帳戶裡的任何成員
     /// 都改得動(改成 `synced`、填上公開的指紋),證明不了使用者同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。建立或加入
     /// 另一個帳戶時清掉(`account::install_account`:記錄學到的帳戶
@@ -294,7 +294,7 @@ pub struct LocalSlot {
     /// 這筆記錄是在哪一個帳戶學到的(帳戶 chain id,`AccountState::chain_id`):這台在那個帳戶裡第一次看到這個插槽(`slots::reconcile` 建立記錄)、
     /// 在那裡建立它(`slot_setup::create_slot`)、落地或改用了那裡的同步金鑰(`slots::reconcile`、`slots::use_synced`)、在那裡選了同步它
     /// (`slots::set_mode`),或在那裡第一次為它挑了金鑰、沿用了它(`slots::pick`、`slot_setup::reuse_slot`)。補寫帳戶裡不見的插槽
-    /// (`slots::republish`,spec §6.6)只做在現在這個帳戶學到的記錄:離開之後建立或加入的另一個帳戶,收不到在之前的帳戶學到的 `keyslot`,
+    /// (`slots::republish`)只做在現在這個帳戶學到的記錄:離開之後建立或加入的另一個帳戶,收不到在之前的帳戶學到的 `keyslot`,
     /// 也收不到那裡同步來的私鑰。
     ///
     /// 帳戶裡之後出現同 id 的 `keyslot`,不會把記錄改記成那個帳戶:這台在新帳戶的 `device.slots` 列著留下來的插槽 id,新帳戶的成員可以發佈一個
@@ -303,7 +303,7 @@ pub struct LocalSlot {
     #[serde(default)]
     pub learned_in: Option<String>,
     /// 插槽裡的同步副本(`SlotSource::SyncedCopy`)不是從這筆記錄學到的帳戶(`learned_in`)收到的:之前的帳戶留下、就地放進這個帳戶的副本
-    /// (`slot_setup::adopt_slot`,「Sync key」與「Keep on this computer」都算)。補寫 `key`(`slots::republish`,spec §6.6)時,這樣的副本
+    /// (`slot_setup::adopt_slot`,「Sync key」與「Keep on this computer」都算)。補寫 `key`(`slots::republish`)時,這樣的副本
     /// 要這台的使用者在這裡選過同步它(`uploaded_fingerprint` 是它的指紋)才算握有 —— 它的位元組來自之前的帳戶,不是這個帳戶。只對同步來的副本有意義:
     /// 每個把 `SyncedCopy` 放進記錄的地方都重新設定它 —— 從帳戶落地同步的金鑰時清掉(`slots::land_into`、`slots::use_synced`、
     /// `slot_setup::reuse_slot`);從保管庫改回檔案(`slots::set_delivery`)時,保管庫那一筆不是從這個帳戶同步來的(來源不是 `Synced`)
@@ -311,13 +311,13 @@ pub struct LocalSlot {
     /// `Synced`、而且這個旗標是 false 的才不必這台的同意。false = 不是。
     #[serde(default)]
     pub copy_from_another_account: bool,
-    /// 這台自己加進 Lunport、不在任何帳戶裡的金鑰(金鑰保管庫 spec §4.3「This computer only」:New key 匯入或 Generate key 產生的)。
+    /// 這台自己加進 Lunport、不在任何帳戶裡的金鑰(「This computer only」:New key 匯入或 Generate key 產生的)。
     /// 收編進帳戶時清掉(`slot_setup::adopt_slot`)。帳戶的 `device.slots` 不列它:只在這台的金鑰不告訴帳戶。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_only: bool,
 }
 
-/// 插槽裡放的東西(SP3 spec §4.2)。
+/// 插槽裡放的東西。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SlotSource {
@@ -325,44 +325,44 @@ pub enum SlotSource {
     Linked { path: String, link: LinkKind, fingerprint: Option<String>, origin: bool },
     /// 同步來的私鑰(檔案就在插槽裡)。
     SyncedCopy { fingerprint: String },
-    /// 只在 Lunport(金鑰保管庫 spec §4.3):私鑰在保管庫(`vault.json`),插槽目錄只放 `.pub`,插槽路徑本身沒有檔案;`ssh` 經 Lunport 的
+    /// 只在 Lunport:私鑰在保管庫(`vault.json`),插槽目錄只放 `.pub`,插槽路徑本身沒有檔案;`ssh` 經 Lunport 的
     /// agent 取用。`public_key` 用來在每一輪重寫 `.pub`(不必開保管庫),`has_passphrase` 給畫面說明。
     Vault { fingerprint: String, public_key: String, has_passphrase: bool },
 }
 
-/// 一個這台勾選的 space(spec §4.4)。
+/// 一個這台勾選的 space。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpaceState {
     /// `spaces` 只保存勾選的 space,所以平常是 true;取消勾選做到一半(已移出 Include、檔案還沒刪掉)時是 false,
-    /// 下一輪據此做完(spec §4.3 的順序)。
+    /// 下一輪據此做完。
     pub selected: bool,
     /// `space_files::space_file_name` 產生的檔名;使用前以 `space_files::space_file_path` 驗證。
     pub file_name: String,
     pub cursor_seq: u64,
-    /// 剛勾選後 false:第一輪以 space chain 為準(spec §7.2,同 v1 基線輪)。
+    /// 剛勾選後 false:第一輪以 space chain 為準(同 v1 基線輪)。
     #[serde(default)]
     pub baseline_established: bool,
     /// host 的明文記錄,key = `record_key(Host, alias)`。
     #[serde(default)]
     pub records: BTreeMap<String, LocalRecord>,
-    /// 等待本機核准的遠端記錄,key = alias(spec §7.4);同一 alias 的較新版本取代舊的。
+    /// 等待本機核准的遠端記錄,key = alias;同一 alias 的較新版本取代舊的。
     #[serde(default)]
     pub pending_approvals: BTreeMap<String, PendingApproval>,
-    /// 只屬於這個 space 的錯誤(違反不變式、寫入失敗;spec §9):這個 space 暫停,其他照常。
+    /// 只屬於這個 space 的錯誤(違反不變式、寫入失敗):這個 space 暫停,其他照常。
     #[serde(default)]
     pub last_error: Option<String>,
-    /// 使用者拒絕套用的遠端版本,key = alias(spec §7.4「拒絕」):不進快取、不寫檔,只記版本資訊。之後本機修改這台
+    /// 使用者拒絕套用的遠端版本,key = alias:不進快取、不寫檔,只記版本資訊。之後本機修改這台
     /// 主機時,新版本以它為基準(版本號、時間戳、base_seq)照 LWW 蓋過它;收到這個 alias 的較新遠端記錄就清掉。
     #[serde(default)]
     pub declined: BTreeMap<String, DeclinedVersion>,
-    /// 只為了重新上傳才標成 dirty 的記錄 key(v1 升級帶進 space0 的已同步記錄,spec §7.6;relay 歷史倒退、整份重傳時原本
+    /// 只為了重新上傳才標成 dirty 的記錄 key(v1 升級帶進 space0 的已同步記錄;relay 歷史倒退、整份重傳時原本
     /// 乾淨的記錄):它們輸給較新的遠端版本不是「本機修改被覆蓋」,不發 `sync://conflict`。上傳成功或被遠端取代就移出。
     #[serde(default)]
     pub republish: BTreeSet<String>,
-    /// relay 回報這個 space 的 chain 不存在、帳戶卻仍有這個 space(spec §9):暫停,等使用者選「重建」或「刪除」。
+    /// relay 回報這個 space 的 chain 不存在、帳戶卻仍有這個 space:暫停,等使用者選「重建」或「刪除」。
     #[serde(default)]
     pub missing: bool,
-    /// 改名被擋下時的目標檔名(spec §4.3、§9):每一輪都會重試改名,同一個目標仍被擋時不再重複提示(使用者可能已經
+    /// 改名被擋下時的目標檔名:每一輪都會重試改名,同一個目標仍被擋時不再重複提示(使用者可能已經
     /// 看過、關掉了);改名成功或不再需要改名就清掉。
     #[serde(default)]
     pub rename_blocked: Option<String>,
@@ -399,7 +399,7 @@ pub struct DeclinedVersion {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SyncNotice {
-    /// v1 升級完成(spec §7.6、§8):space「Synced」可改名、其他電腦也要更新;含 `Include` 的區塊留在 `kept_file`;使用者自己放在
+    /// v1 升級完成:space「Synced」可改名、其他電腦也要更新;含 `Include` 的區塊留在 `kept_file`;使用者自己放在
     // frozen-identity: a folder name already on users' disks
     /// `~/.ssh/sshelter/` 的檔案(v1 只有 `hosts.config` 那個 token 是我們的)改成本機檔案,新的完整路徑在 `moved_files`(通常是空的;
     /// 升級中斷後重跑時只列得出這一輪搬的)。`moved_files` 是後來加的欄位:讀舊版寫的狀態檔時缺欄位 = 空。
@@ -409,20 +409,20 @@ pub enum SyncNotice {
         #[serde(default)]
         moved_files: Vec<String>,
     },
-    /// 別台刪除了這台勾選的 space:檔案已備份並移除(spec §7.2)。
+    /// 別台刪除了這台勾選的 space:檔案已備份並移除。
     SpaceDeleted { name: String, by_device: String },
-    /// 改名時新檔名已有檔案:保留舊檔名、不覆蓋(spec §4.3、§9)。同一個目標只提示一次(`SpaceState::rename_blocked`)。
+    /// 改名時新檔名已有檔案:保留舊檔名、不覆蓋。同一個目標只提示一次(`SpaceState::rename_blocked`)。
     RenameBlocked { space_id: String, name: String, file_name: String },
-    /// 這台的 space 檔改成本機檔案(spec §7.3 離開帳戶;更換同步碼時新帳戶沒有接續的勾選 space 也一樣,§7.5):它們已搬到
+    /// 這台的 space 檔改成本機檔案(離開帳戶;更換同步碼時新帳戶沒有接續的勾選 space 也一樣):它們已搬到
     // frozen-identity: a folder name already on users' disks
     /// `~/.ssh/sshelter-local/`、主 config 以一般的 Include 引入,ssh 照常讀得到,不再同步;`kept_files` 是新的完整路徑。之後建立或
     /// 加入帳戶都不會再動它們,可以用搬移精靈搬進新帳戶的 space。
     LeftAccount { kept_files: Vec<String> },
-    /// 這台完成了更換同步碼:請顯示並保存新同步碼(spec §7.5 第 7 步)。
+    /// 這台完成了更換同步碼:請顯示並保存新同步碼(第 7 步)。
     NewSyncCode,
-    /// 另一台電腦也更換了同步碼(spec §7.5「兩台同時更換」)。
+    /// 另一台電腦也更換了同步碼(兩台同時更換)。
     OtherRotation { devices: Vec<String> },
-    /// 這台同步的主機用到留在別台電腦的金鑰:請在這台挑一把(SP3 spec §6.7;每個插槽只提示一次)。
+    /// 這台同步的主機用到留在別台電腦的金鑰:請在這台挑一把(每個插槽只提示一次)。
     KeysNeeded { names: Vec<String> },
 }
 
@@ -433,7 +433,7 @@ fn known_notices<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Ve
     Ok(raw.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
 }
 
-/// 一筆保留未套用、等待核准的遠端記錄(spec §7.4)。不進 `SpaceState::records`,所以下一輪的本機 diff 不會把它
+/// 一筆保留未套用、等待核准的遠端記錄。不進 `SpaceState::records`,所以下一輪的本機 diff 不會把它
 /// 當成本機修改推回去;核准時連同 `seq` 一起進 `records` 並寫檔,拒絕時丟棄。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingApproval {
@@ -449,7 +449,7 @@ pub struct PendingApproval {
     pub from_device: String,
 }
 
-/// 這台偵測到的更換同步碼(spec §7.5)。
+/// 這台偵測到的更換同步碼。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FreezeInfo {
     pub detected_at_ms: u64,
@@ -459,7 +459,7 @@ pub struct FreezeInfo {
     pub markers: Vec<RotationMarkerPayload>,
 }
 
-/// 最近一次 `GET /legacy/v1/info` 的結果(spec §6.4)。
+/// 最近一次 `GET /legacy/v1/info` 的結果。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RelayFeatures {
     /// 查的是哪個 relay URL:URL 改了就要重查。
@@ -482,7 +482,7 @@ impl RelayFeatures {
     }
 }
 
-/// 更換同步碼走到哪一步(spec §7.5 的編號)。
+/// 更換同步碼走到哪一步(編號是更換同步碼的第幾步)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RotationStep {
@@ -505,11 +505,11 @@ pub enum RotationStep {
 pub struct RotatedSpace {
     /// 新 space 的 chain id(明文,用來寫 `previous_id` 與對照勾選)。
     pub new_space_id: String,
-    /// 新 space 的 `spacekey` 記錄(id = 新 space id),以**新帳戶金鑰**加密(spec §7.5 第 1 步);第 5 步原樣上傳。
+    /// 新 space 的 `spacekey` 記錄(id = 新 space id),以**新帳戶金鑰**加密(第 1 步);第 5 步原樣上傳。
     pub sealed_key: SealedRecord,
 }
 
-/// 更換同步碼的進度(spec §7.5):可中斷、可接續。
+/// 更換同步碼的進度:可中斷、可接續。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RotationProgress {
     pub step: RotationStep,
@@ -528,7 +528,7 @@ pub struct RotationProgress {
     /// 第 6 步已 `DELETE` 的舊 space id。
     #[serde(default)]
     pub deleted: BTreeSet<String>,
-    /// 建立 chain 遇到 `429`(每 IP 每小時 20 次建立):暫停到這個時間再自動接續(spec §6.6、§7.5)。
+    /// 建立 chain 遇到 `429`(每 IP 每小時 20 次建立):暫停到這個時間再自動接續。
     #[serde(default)]
     pub paused_until_ms: Option<u64>,
 }
@@ -547,7 +547,7 @@ impl RotationProgress {
         }
     }
 
-    /// 只能在第 3 步之前取消:還沒寫標記、沒凍結任何東西(spec §7.5)。
+    /// 只能在第 3 步之前取消:還沒寫標記、沒凍結任何東西。
     pub fn cancellable(&self) -> bool {
         matches!(self.step, RotationStep::Prepared | RotationStep::LocalChangesSent)
     }
@@ -777,7 +777,7 @@ mod tests {
         }
     }
 
-    /// SP3 之前寫的狀態檔沒有 `key_slots`,讀進來是空的;有 `key_slots` 的狀態檔照樣讀得回來。
+    /// 有金鑰插槽之前寫的狀態檔沒有 `key_slots`,讀進來是空的;有 `key_slots` 的狀態檔照樣讀得回來。
     #[test]
     fn key_slots_default_to_empty_and_round_trip() {
         let mut state = SyncStateV2::fresh("MacBook").unwrap();

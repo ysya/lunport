@@ -324,7 +324,7 @@ fn execute(
         inner: &observed_engine,
         check: &check_connected,
     };
-    // A person drives a deployment: a needed grant is asked of them (design 2026-10-25, PAM grant requests).
+    // A person drives a deployment: a needed grant is asked of them.
     let directory = PublicDirectory(connector.directory, &check, &check_resolved);
     let guarded = Connector {
         engine: &engine,

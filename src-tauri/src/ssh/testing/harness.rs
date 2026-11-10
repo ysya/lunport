@@ -2,7 +2,7 @@
 //! authorized_keys, and `sshd -D -e -f <config>` run as the current user (no root, no PAM). Nothing here reads or writes the real
 //! `~/.ssh`: the system `ssh` client used by `system_ssh` gets `-F /dev/null`.
 //!
-//! Ported from the phase-0 spike's harness (the `spike/` crate that plan 1a deleted), checked on macOS with OpenSSH 10.3p1: `Port 0` is
+//! Checked on macOS with OpenSSH 10.3p1: `Port 0` is
 //! rejected ("Badly formatted port number"), so the port is picked first; sshd prints one harmless line `BSM audit: ... setaudit_addr
 //! failed: Operation not permitted`; password and keyboard-interactive login cannot work without PAM, so this sshd offers public keys
 //! only.
@@ -93,7 +93,7 @@ impl PipeReader {
 /// of the deadline leaves no "panicked at" line in the output of `--nocapture` runs.
 ///
 /// The readers are bounded too: when a grandchild keeps the pipes open after the tool is gone, waiting for end-of-file would last as
-/// long as the grandchild lives, so each reader gets `PIPE_GRACE` and then the output so far is used (the spike's deferred Minor 2). The
+/// long as the grandchild lives, so each reader gets `PIPE_GRACE` and then the output so far is used. The
 /// readers are waited for one after the other: up to `2 * PIPE_GRACE` after a tool that ended by itself, `PIPE_GRACE` after a kill (only
 /// stderr is waited for then).
 pub(super) fn run_within(command: &mut Command, timeout: Duration) -> Result<Output, String> {
@@ -639,7 +639,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(4), "killed at the deadline, not waited for: {:?}", started.elapsed());
     }
 
-    /// The spike's deferred Minor 2. The tool is killed at its deadline, but a background `sleep` it started still holds the output
+    /// The tool is killed at its deadline, but a background `sleep` it started still holds the output
     /// pipes. Waiting for end-of-file would take as long as that `sleep` lives; the runner must give up after `PIPE_GRACE` instead.
     #[cfg(unix)]
     #[test]

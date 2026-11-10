@@ -39,7 +39,7 @@ import {
 import { cn } from "@/lib/utils";
 
 /*
- * The Google Cloud page's Accounts tab (design 2026-10-27, The Accounts tab): gcloud on this computer and its Google accounts, with
+ * The Google Cloud page's Accounts tab: gcloud on this computer and its Google accounts, with
  * the actions that change them. Each action runs gcloud and changes gcloud for every tool on this computer, so every one but signing in
  * again to an account whose sign-in failed is confirmed first, in words that say so.
  */
@@ -102,7 +102,7 @@ export function signInRows(gcloud: GcloudAccountsView, routes: HostTransport[]):
 /** An action the person asked for and has yet to confirm, with what the confirmation says of it. */
 export type Confirming = { action: AccountAction; routes: number; active: boolean };
 
-/** The words of a confirmation (design 2026-10-27, The Accounts tab). */
+/** The words of a confirmation. */
 export function confirmation({ action, routes, active }: Confirming): { title: string; body: string[]; button: string; destructive: boolean } | null {
   switch (action.kind) {
     case "activate":

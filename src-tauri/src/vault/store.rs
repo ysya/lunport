@@ -1,6 +1,6 @@
-//! 金鑰保管庫檔(key roadmap 第 2 階段 spec §4.1):這台電腦持有的私鑰,存在 `sync-state.json` 旁邊的 `vault.json`。每一筆以
+//! 金鑰保管庫檔:這台電腦持有的私鑰,存在 `sync-state.json` 旁邊的 `vault.json`。每一筆以
 //! XChaCha20-Poly1305 個別加密(AAD = `AAD_PREFIX` + 換行 + 插槽 id),金鑰是 32 bytes 的隨機值,base64 存在系統 keychain:新的保管庫用
-//! 自己的帳戶 `vault:key:<16 個 hex>`(記在檔頭的 `key_account`),計畫 1 的保管庫用 `vault:key`。私鑰原文原樣保存:有 passphrase 的仍是加密狀態(spec §5.5)。
+//! 自己的帳戶 `vault:key:<16 個 hex>`(記在檔頭的 `key_account`),第 1 版的保管庫用 `vault:key`。私鑰原文原樣保存:有 passphrase 的仍是加密狀態。
 //! 檔頭只有格式版本、金鑰所在的 keychain 帳戶名稱與這台的 agent 設定(不含祕密)。
 //! 寫入一律原子(`slot_files::write_private`:暫存檔 → rename)、只有擁有者能讀寫:Unix 的暫存檔先設 0600 再寫;Windows 的暫存檔繼承資料夾的權限,
 //! rename 之後才設成只給擁有者的 DACL(檔案裡只有密文與不含祕密的檔頭,這段空檔可以接受)。
@@ -20,19 +20,19 @@ use crate::sync::env::Keychain;
 use crate::sync::runtime::SyncRuntime;
 
 pub const VAULT_FILE: &str = "vault.json";
-/// 計畫 1 的保管庫(檔頭沒有 `key_account`)把金鑰放在這個 keychain 帳戶。
+/// 第 1 版的保管庫(檔頭沒有 `key_account`)把金鑰放在這個 keychain 帳戶。
 pub const VAULT_KEY_ACCOUNT: &str = "vault:key";
-/// 新的保管庫各用自己的帳戶 `vault:key:<16 個 hex>`,名稱記在檔頭的 `key_account`(計畫 1 的後續事項):keychain 誤報「沒有這筆」時,
+/// 新的保管庫各用自己的帳戶 `vault:key:<16 個 hex>`,名稱記在檔頭的 `key_account`:keychain 誤報「沒有這筆」時,
 /// 新的金鑰不會蓋掉舊的,搬到旁邊的保管庫檔仍解得開。
 pub const VAULT_KEY_ACCOUNT_PREFIX: &str = "vault:key:";
-/// 記住核准的預設時間(分鐘;spec §5.3)。
+/// 記住核准的預設時間(分鐘)。
 pub const DEFAULT_REMEMBER_MINUTES: u32 = 240;
-/// 換掉的金鑰改存的 id 前綴(金鑰保管庫 spec §4.3):`retired:<插槽 id>:<毫秒>`,撞名再加 `-1`、`-2`……。它不是插槽 id:agent 不提供它、
-/// 同步的每一輪也不把它當成插槽的金鑰;計畫 2b 的 Keychain 列出它們,可匯出或刪除。
+/// 換掉的金鑰改存的 id 前綴:`retired:<插槽 id>:<毫秒>`,撞名再加 `-1`、`-2`……。它不是插槽 id:agent 不提供它、
+/// 同步的每一輪也不把它當成插槽的金鑰;之後的 Keychain 畫面要列出它們,可匯出或刪除。
 pub const RETIRED_PREFIX: &str = "retired:";
 /// 這一版讀寫的最新格式:檔頭有 `key_account` 的檔案。
 const VAULT_VERSION: u32 = 2;
-/// 檔頭沒有 `key_account` 的檔案(計畫 1 寫的,或之後沿用 `vault:key` 的)維持第 1 版,舊版照常開啟。有 `key_account` 的是第 2 版:舊版看到「更新版的格式」
+/// 檔頭沒有 `key_account` 的檔案(第 1 版寫的,或之後沿用 `vault:key` 的)維持第 1 版,舊版照常開啟。有 `key_account` 的是第 2 版:舊版看到「更新版的格式」
 /// 就原地不動,不會因為在 `vault:key` 找不到金鑰而把它當成缺金鑰搬到旁邊。
 const LEGACY_VERSION: u32 = 1;
 // frozen-identity: the AAD every key already in vault.json was sealed with; a different prefix opens none of them.
@@ -43,13 +43,13 @@ pub fn vault_path(state_path: &Path) -> PathBuf {
     state_path.with_file_name(VAULT_FILE)
 }
 
-/// `id` 是換掉的金鑰(`RETIRED_PREFIX`),不是插槽的。目前只有測試用到,所以只在測試編譯;計畫 2b 的 Keychain 列出 retired 項目的時候,把 `#[cfg(test)]` 拿掉。
+/// `id` 是換掉的金鑰(`RETIRED_PREFIX`),不是插槽的。目前只有測試用到,所以只在測試編譯;之後的 Keychain 畫面列出 retired 項目的時候,把 `#[cfg(test)]` 拿掉。
 #[cfg(test)]
 pub fn is_retired_id(id: &str) -> bool {
     id.starts_with(RETIRED_PREFIX)
 }
 
-/// 這筆私鑰從哪裡來(spec §4.1):在這台產生、從檔案匯入、或從帳戶同步來。補寫帳戶裡的 `key`(SP3 §6.6)時,只有同步來的才不必這台的同意。
+/// 這筆私鑰從哪裡來:在這台產生、從檔案匯入、或從帳戶同步來。補寫帳戶裡的 `key`時,只有同步來的才不必這台的同意。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryOrigin {
@@ -88,7 +88,7 @@ fn default_remember_minutes() -> u32 {
     DEFAULT_REMEMBER_MINUTES
 }
 
-/// 這台電腦的 agent 設定(spec §4.3,只能比每把金鑰的設定更嚴):記住核准多久、這台一律每次都問。
+/// 這台電腦的 agent 設定(只能比每把金鑰的設定更嚴):記住核准多久、這台一律每次都問。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSettings {
     #[serde(default = "default_remember_minutes")]
@@ -112,7 +112,7 @@ struct SealedEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct VaultFile {
     version: u32,
-    /// 這個檔案的金鑰所在的 keychain 帳戶;沒有 = `VAULT_KEY_ACCOUNT`(計畫 1 的檔案)。
+    /// 這個檔案的金鑰所在的 keychain 帳戶;沒有 = `VAULT_KEY_ACCOUNT`(第 1 版的檔案)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_account: Option<String>,
     #[serde(default)]
@@ -137,7 +137,7 @@ impl VaultFile {
 pub enum VaultError {
     /// 防禦用:已開啟的保管庫有項目卻沒有金鑰(`get`、`put`)。`open` 之後不會發生:有項目卻缺金鑰的檔案在 `open` 就搬到旁邊了,回的是 `Unreadable`。
     KeyMissing,
-    /// 讀不懂、或有項目卻缺它的 keychain 帳戶裡的金鑰的保管庫檔:已搬到同一個資料夾的 `kept_as`(搬不動是 None),之後從空的保管庫開始(spec §4.1、§11)。
+    /// 讀不懂、或有項目卻缺它的 keychain 帳戶裡的金鑰的保管庫檔:已搬到同一個資料夾的 `kept_as`(搬不動是 None),之後從空的保管庫開始。
     Unreadable { kept_as: Option<String>, reason: String },
     /// 更新版 Lunport 寫的格式:原地不動,保管庫停用。
     Newer { version: u32 },
@@ -218,7 +218,7 @@ fn file_version(bytes: &[u8]) -> Result<u32, serde_json::Error> {
     serde_json::from_slice::<Probe>(bytes).map(|probe| probe.version)
 }
 
-/// 不能用的檔案搬到同一個資料夾的 `vault.<kind>-<ms>.json`(`kind`:`unreadable` 是讀不懂、`keyless` 是金鑰不見;同 Sync v2 對讀不懂的狀態檔的處理):
+/// 不能用的檔案搬到同一個資料夾的 `vault.<kind>-<ms>.json`(`kind`:`unreadable` 是讀不懂、`keyless` 是金鑰不見;與讀不懂的同步狀態檔的處理相同):
 /// 之後的存檔寫到原路徑,不搬就會蓋掉它。`rename` 會取代已經存在的目標,所以先找第一個沒人用的名字(`-1`、`-2`……),先前保留的那一份不會被蓋掉。
 fn set_aside(path: &Path, kind: &str, now_ms: u64, reason: String) -> VaultError {
     let mut name = format!("vault.{kind}-{now_ms}.json");
@@ -254,7 +254,7 @@ impl std::fmt::Debug for Vault {
 
 impl Vault {
     /// 開啟 `path` 的保管庫。檔案不存在 → 空的(什麼都不寫,金鑰也還不產生)。先只看 `version`:比本 app 新的格式原地不動,回 `Newer`。
-    /// 讀不懂的檔案、或有項目卻缺它的 keychain 帳戶裡的金鑰的檔案(spec §11)不覆寫,搬到旁邊(`vault.unreadable-<ms>.json`、`vault.keyless-<ms>.json`)並回
+    /// 讀不懂的檔案、或有項目卻缺它的 keychain 帳戶裡的金鑰的檔案不覆寫,搬到旁邊(`vault.unreadable-<ms>.json`、`vault.keyless-<ms>.json`)並回
     /// `Unreadable`;下一次開啟從空的保管庫開始,第一次 `put` 才產生新的金鑰。keychain 讀取出錯(可能只是暫時鎖著)或存的值不是 32 bytes 的 base64
     /// 時回 `Other`,什麼都不搬。A key that is missing but may still move from the credential service of the version before the rename
     /// (`identity_migration::missing_vault_key`) leaves the file as it is, entries or none: `CredentialsPending`. One that stays there
@@ -360,7 +360,7 @@ impl Vault {
         Ok(())
     }
 
-    /// 放進這個插槽的金鑰;原本是另一把(指紋不同)就把它改存成 retired 項目(`RETIRED_PREFIX`),不丟掉(spec §4.3:私鑰不自動刪除)。
+    /// 放進這個插槽的金鑰;原本是另一把(指紋不同)就把它改存成 retired 項目(`RETIRED_PREFIX`),不丟掉(私鑰不自動刪除)。
     /// 兩件事一起存檔,回傳 retired 項目的 id。原本那一筆解不開就什麼都不改、回錯誤:不能換掉一把讀不出來的金鑰。
     pub fn replace(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry, now_ms: u64) -> Result<Option<String>, VaultError> {
         fsutil::check_write(&self.path)?;
@@ -415,7 +415,7 @@ impl Vault {
         &self.file.settings
     }
 
-    /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;plan 2 的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
+    /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;之後的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
     #[cfg(test)]
     pub fn set_settings(&mut self, settings: AgentSettings) -> Result<(), VaultError> {
         fsutil::check_write(&self.path)?;
@@ -723,7 +723,7 @@ pub fn with_vault<T>(
     f(&mut vault)
 }
 
-/// 保管庫檔裡每一筆的 id(插槽 id,與 retired 項目)。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 Lunport」的插槽還在保管庫裡(金鑰保管庫 spec §11)。
+/// 保管庫檔裡每一筆的 id(插槽 id,與 retired 項目)。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 Lunport」的插槽還在保管庫裡。
 /// 檔案不存在 → 空的;讀不懂 → `Unreadable { kept_as: None, .. }`;更新版的格式 → `Newer`。
 pub fn stored_ids(path: &Path) -> Result<BTreeSet<String>, VaultError> {
     let bytes = match std::fs::read(path) {
@@ -1105,7 +1105,7 @@ mod tests {
         }
     }
 
-    /// 這個保管庫檔的金鑰所在的 keychain 帳戶:檔頭的 `key_account`,沒有就是計畫 1 的 `vault:key`。
+    /// 這個保管庫檔的金鑰所在的 keychain 帳戶:檔頭的 `key_account`,沒有就是第 1 版的 `vault:key`。
     fn account_of(path: &Path) -> String {
         let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         file["key_account"].as_str().unwrap_or(VAULT_KEY_ACCOUNT).to_string()
@@ -1167,8 +1167,8 @@ mod tests {
         assert_eq!(got.private_key, test_keys::plain());
     }
 
-    /// keychain 一時找不到計畫 1 的 `vault:key`:檔案搬到旁邊,之後新的金鑰放到新的帳戶,`vault:key` 不會被蓋掉;
-    /// 等 keychain 又找得到它,搬到旁邊的檔案照樣解得開(計畫 1 的後續事項)。
+    /// keychain 一時找不到第 1 版的 `vault:key`:檔案搬到旁邊,之後新的金鑰放到新的帳戶,`vault:key` 不會被蓋掉;
+    /// 等 keychain 又找得到它,搬到旁邊的檔案照樣解得開。
     #[test]
     fn a_key_the_keychain_cannot_find_is_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
@@ -1194,9 +1194,9 @@ mod tests {
         assert_eq!(current.get(&"b".repeat(32)).unwrap().unwrap().private_key, test_keys::plain());
     }
 
-    /// 計畫 1 寫的保管庫檔(沒有 `key_account`,第 1 版)照舊開得了,再存東西也不改帳戶與版本:舊版 Lunport 還讀得懂它。
+    /// 第 1 版的保管庫檔(沒有 `key_account`)照舊開得了,再存東西也不改帳戶與版本:舊版 Lunport 還讀得懂它。
     #[test]
-    fn a_plan_1_vault_keeps_its_format() {
+    fn a_version_1_vault_keeps_its_format() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(VAULT_FILE);
         let keychain = MemKeychain::default();
@@ -1260,7 +1260,7 @@ mod tests {
         let original = std::fs::read(&path).unwrap();
         let account = account_of(&path);
 
-        // 鑰匙圈裡這個保管庫的金鑰不見了:舊檔搬到旁邊保留(spec §11),不蓋掉、也不留在原處讓之後的存檔蓋掉。
+        // 鑰匙圈裡這個保管庫的金鑰不見了:舊檔搬到旁邊保留,不蓋掉、也不留在原處讓之後的存檔蓋掉。
         let empty = MemKeychain::default();
         match Vault::open(&path, &empty, 2) {
             Err(VaultError::Unreadable { kept_as: Some(name), reason }) => {

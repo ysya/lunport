@@ -1,4 +1,4 @@
-//! agent 的端點(金鑰保管庫 spec §4.4、§5.1):Unix socket,或 Windows 的 named pipe(`pipe_windows`)。一個使用者只有一個 agent:先拿到
+//! agent 的端點:Unix socket,或 Windows 的 named pipe(`pipe_windows`)。一個使用者只有一個 agent:先拿到
 //! `<agent 目錄>/lock` 的 Lunport 提供,持有到行程結束(當掉也由系統釋放),另一個 Lunport 不開、什麼都不碰。每條連線一條執行緒(同 MCP bridge)。
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -63,7 +63,7 @@ pub(crate) fn dispatch(stream: Stream, pid: Option<u32>, active: &Arc<AtomicUsiz
     });
 }
 
-/// Unix socket 路徑的上限(含結尾的 NUL):macOS 104、Linux 108(spec §4.4、§15)。
+/// Unix socket 路徑的上限(含結尾的 NUL):macOS 104、Linux 108。
 #[cfg(unix)]
 const SUN_PATH_MAX: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
 

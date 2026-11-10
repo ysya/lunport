@@ -100,7 +100,7 @@ pub struct PendingAccountView {
     kind: crate::sync::record_account::PendingAccountKind,
     phase: crate::sync::record_account::PendingAccountPhase,
 }
-/// Why a route of a library that uses central sync stays on this computer, when the Google Cloud page can say it (R65): the library has
+/// Why a route of a library that uses central sync stays on this computer, when the Google Cloud page can say it: the library has
 /// no room for it, as the publish step's walk finds (`transports::local_routes`). A route held back for any other reason has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,7 +160,7 @@ pub struct RecordOverview {
     transport_sync: Vec<TransportSyncView>,
     /// What grant requests taught this device, per host, as an earlier release remembered it.
     grant_memory: Vec<GrantMemoryView>,
-    /// The Privileged Access Manager search scopes the person added, and the grant memory per entitlement (design 2026-10-27).
+    /// The Privileged Access Manager search scopes the person added, and the grant memory per entitlement.
     pam_scopes: Vec<crate::sync::pam_records::PamScope>,
     pam_requests: Vec<crate::sync::pam_records::GrantRequestMemory>,
 }
@@ -585,7 +585,7 @@ pub async fn records_group_delete(
     })
     .await
 }
-/// A new host and its route, saved as one edit (design 2026-10-26, Commands): the route takes the new host's id, and a route that is
+/// A new host and its route, saved as one edit: the route takes the new host's id, and a route that is
 /// refused refuses the host with it.
 pub(crate) fn create_host_with_route(
     state: &SyncStateV3,
@@ -648,7 +648,7 @@ fn with_route(state: SyncStateV3, host_id: &str, route: Option<&RouteChange>, no
         None => Ok(state),
     }
 }
-/// A refused route write, as the person reads it (R16, R18).
+/// A refused route write, as the person reads it.
 fn route_error(e: repo::RepositoryError) -> AppError {
     AppError::Other(crate::sync::transports::refusal(e))
 }
@@ -1275,7 +1275,7 @@ mod tests {
         }
     }
 
-    // ---- A host and its route are saved as one edit (design 2026-10-26, Commands) ----
+    // ---- A host and its route are saved as one edit ----
 
     const HOST: &str = "0000000000000001";
     const OTHER: &str = "0000000000000002";
@@ -1351,7 +1351,7 @@ mod tests {
         validate_state(&removed).unwrap();
     }
 
-    /// R16: a route that is not the one the editor displayed refuses the whole save, and the person reads the route's own sentence.
+    /// A route that is not the one the editor displayed refuses the whole save, and the person reads the route's own sentence.
     #[test]
     fn a_route_that_changed_meanwhile_refuses_the_whole_save_in_its_own_sentence() {
         let d = device("stale-route", &TestClock::new());
@@ -1367,7 +1367,7 @@ mod tests {
         assert_eq!((after.hosts[0].payload.alias.as_str(), after.transports), ("web", vec![fixtures::iap(&id)]), "the host was not renamed either");
     }
 
-    /// R18 and the room check: a library that refuses the route refuses the whole save, in a sentence.
+    /// A library that refuses the route, or has no room for it, refuses the whole save, in a sentence.
     #[test]
     fn a_library_that_refuses_the_route_refuses_the_whole_save_in_a_sentence() {
         let mut paused = fixtures::in_central_mode(bare_state());
@@ -1460,7 +1460,7 @@ mod tests {
         assert_eq!(transports::get(&both, HOST), Some(fixtures::iap(HOST)));
     }
 
-    /// R65: the overview says why a route of a central library stays on this computer only when the library has no room for it, as the
+    /// The overview says why a route of a central library stays on this computer only when the library has no room for it, as the
     /// publish step's walk finds. A route that waits for anything else, the step itself or paused writes, gives no reason.
     #[test]
     fn the_overview_gives_a_reason_only_for_a_route_the_library_has_no_room_for() {

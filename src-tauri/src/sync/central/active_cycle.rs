@@ -12,8 +12,7 @@ use crate::{
     error::AppError,
     sync::{env::SyncEnv, record_runtime},
 };
-/// How many pushes the relay may refuse for a stale revision before a round fails as it does for any refusal (design 2026-10-27, A
-/// refused push).
+/// How many pushes the relay may refuse for a stale revision before a round fails as it does for any refusal.
 const MAX_REFUSED_PUSHES: usize = 3;
 fn rekey_required() -> AppError {
     AppError::Other("Verified library reconciliation is required before this device can resume synchronization. Local edits and protected keys are retained.".into())

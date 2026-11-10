@@ -118,7 +118,7 @@ describe("transports", () => {
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "Global", duration_secs: 1800, justification: null } }))).toBe("Enter the PAM location, such as global.");
     expect(transportProblem(withKind({ pam: { entitlements: ["a", "b", "c", "d", "e", "f", "g", "h", "i"], location: "global", duration_secs: 1800, justification: null } }))).toBe("Enter at most 8 PAM entitlements.");
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null } }))).toBeNull();
-    // The grant request's defaults (design 2026-10-25, PAM grant requests), with the backend's sentences.
+    // The grant request's defaults, with the backend's sentences.
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "global", duration_secs: 30, justification: null } }))).toBe("Enter a grant duration between 1 and 480 minutes.");
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "global", duration_secs: 28_860, justification: null } }))).toBe("Enter a grant duration between 1 and 480 minutes.");
     expect(transportProblem(withKind({ pam: { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: "x".repeat(513) } }))).toBe("Keep the justification under 512 characters on one line.");

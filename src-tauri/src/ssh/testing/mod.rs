@@ -1,4 +1,4 @@
-//! Test support for the SSH engine (own-ssh spec §12): a scratch OpenSSH server, a link that misbehaves on demand, and stand-ins for
+//! Test support for the SSH engine: a scratch OpenSSH server, a link that misbehaves on demand, and stand-ins for
 //! the broker's policy and auth source. Test code only (`#[cfg(test)]` in `ssh/mod.rs`).
 
 pub mod doubles;

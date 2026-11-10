@@ -169,11 +169,11 @@ pub struct Catalog {
     pub group_orders: Vec<GroupOrder>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tunnels: Vec<crate::sync::tunnel_rules::TunnelRule>,
-    /// Host routes, at most one per host (design 2026-10-26, Connect via). The field is not written
+    /// Host routes, at most one per host. The field is not written
     /// without routes, so a library without any stays readable by every release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transports: Vec<HostTransport>,
-    /// The search scopes the person added for Privileged Access Manager, and the grant memory, one per entitlement (design 2026-10-27).
+    /// The search scopes the person added for Privileged Access Manager, and the grant memory, one per entitlement.
     /// Neither field is written while empty, so a library without them stays readable by every release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pam_scopes: Vec<crate::sync::pam_records::PamScope>,

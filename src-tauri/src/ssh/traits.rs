@@ -1,7 +1,7 @@
-//! The engine interface, as spec §6.1 writes it. Everything here is synchronous: the broker, the CLI and the MCP adapter run on plain
+//! The engine interface. Everything here is synchronous: the broker, the CLI and the MCP adapter run on plain
 //! threads, and the engine hides its own runtime. Nothing in this file names russh.
 //!
-//! Two members of the spec's block are there since russh needs them: `ShellChannel` is `Send + Sync` (a shell is read on one thread
+//! Two members of the interface are there since russh needs them: `ShellChannel` is `Send + Sync` (a shell is read on one thread
 //! while another writes, which needs a shared reference), and `AuthSource::public_key` exists (russh's public-key login announces the
 //! public key before it asks for a signature, and neither `Hop` nor `sign` carries it).
 
@@ -19,7 +19,7 @@ pub trait SshEngine: Send + Sync {
     /// `connect` that the policy or the auth source takes.
     ///
     /// A host key that is not pinned never waits for the user: the call fails with `ConnectError::HostKeyUnknown` (or `HostKeyMismatch`)
-    /// carrying the key the server presented, and the caller connects again once the user has decided (spec §6.2 step 3).
+    /// carrying the key the server presented, and the caller connects again once the user has decided.
     fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError>;
 }
 
@@ -93,7 +93,7 @@ pub trait ShellChannel: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, SessionError>;
 
     /// The terminal was resized. Sent to the server right away; the server ignores a resize that arrives before the PTY exists, so a
-    /// caller that has a size to apply sends it after `Session::shell` returns (the broker remembers the last one, spec §7.2). A
+    /// caller that has a size to apply sends it after `Session::shell` returns (the broker remembers the last one). A
     /// connection whose peer has stopped reading does not take it: after a few seconds the call fails with `SessionError::Timeout`.
     fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError>;
 
@@ -111,7 +111,7 @@ pub trait HostKeyPolicy: Send + Sync {
     fn check(&self, hop: &HopRef, key: &HostKey) -> HostKeyVerdict;
 }
 
-/// Where the engine gets signatures and secrets. Implemented by the broker, which decides who is asked (spec §6.1, decision 7). Every
+/// Where the engine gets signatures and secrets. Implemented by the broker, which decides who is asked. Every
 /// method is called on the thread that called `SshEngine::connect`.
 pub trait AuthSource: Send + Sync {
     /// The public half of the vault key `key_id` as an OpenSSH line (`<algorithm> <base64> [comment]`); `None` when there is no such key,

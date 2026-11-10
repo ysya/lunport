@@ -1,4 +1,4 @@
-//! The plumbing between an engine's channel reader and the thread that reads a shell (own-ssh spec §6.3): a bounded byte queue that
+//! The plumbing between an engine's channel reader and the thread that reads a shell: a bounded byte queue that
 //! never holds the connection back, the cell that carries the shell's exit, and `QueuedShell`, the `ShellChannel` built from them.
 //! Engine-neutral: the russh engine and the fake engine both fill the same pieces.
 

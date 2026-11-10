@@ -1,4 +1,4 @@
-//! The console `lunport connect` runs in on Windows (own-ssh spec §7.3, the Windows bullet), apart from the Windows calls: the modes
+//! The console `lunport connect` runs in on Windows, apart from the Windows calls: the modes
 //! the console is set to, and the `Tty` and `Restorer` that set them and put the console back. On Windows `terminal_windows.rs` adds
 //! the real console and serves this as `cli::terminal`, with the surface the Unix `terminal.rs` has, so that the loop (`run.rs`) uses
 //! either. Compiled on Windows and in the tests of every platform: the logic is tested against a fake console on macOS and Linux too.
@@ -43,7 +43,7 @@ pub const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 pub const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
 /// Output: virtual terminal sequences are acted on (colours, cursor moves, the alternate screen).
 pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-/// Output: line endings as xterm has them (spec §7.3): a line feed does not return the carriage, as the flag's name says, and a
+/// Output: line endings as xterm has them: a line feed does not return the carriage, as the flag's name says, and a
 /// character in a line's last column waits there for the next one, as its documentation says. Raw mode only, on a console that has it.
 pub const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
 /// The UTF-8 code page.
@@ -901,7 +901,7 @@ mod tests {
         (console, tty)
     }
 
-    /// Spec §7.3: raw input takes the keys as they are typed (no line input), unshown (no echo), with Ctrl-C a key like any other (no
+    /// Raw input takes the keys as they are typed (no line input), unshown (no echo), with Ctrl-C a key like any other (no
     /// processed input), as virtual terminal sequences. Every other flag stays as the console had it at the start: mouse, insert mode,
     /// quick edit and the extended flags that carry those two, window input, and flags this layer does not know of. Whole modes are
     /// compared, from several modes of the start.
@@ -950,7 +950,7 @@ mod tests {
         }
     }
 
-    /// Spec §7.3, the way OpenSSH's raw mode turns `OPOST` off and the other modes keep the start's `ONLCR`: the output takes virtual
+    /// Like OpenSSH, whose raw mode turns `OPOST` off while the other modes keep the start's `ONLCR`: the output takes virtual
     /// terminal sequences (with the processing they need) in every mode, and xterm's line endings in raw mode only (a line feed that
     /// does not return the carriage, for the shell's output). At a question and in cooked mode a line feed returns the carriage as it did
     /// at the start, so the CLI's own lines start at the left margin. Every other flag as at the start; whole modes are compared.
@@ -975,7 +975,7 @@ mod tests {
         }
     }
 
-    /// Spec §7.3: at the start the four settings are only read, the input first (input that is not a console is refused before anything
+    /// At the start the four settings are only read, the input first (input that is not a console is refused before anything
     /// else is asked). Nothing is changed before the take-over, so nothing is put back before it either, whichever way out: a Ctrl-C that
     /// ends the program the default way while Lunport starts leaves the console as it was. The watchdog still gets its hold.
     #[test]
@@ -992,7 +992,7 @@ mod tests {
         assert!(tty.restorer().hold_restored(Duration::from_secs(1)).is_some(), "the watchdog holds the console all the same");
     }
 
-    /// Spec §7.3: the take-over (once every way out can put the console back) sets the output for a terminal, the way cooked mode has
+    /// The take-over (once every way out can put the console back) sets the output for a terminal, the way cooked mode has
     /// it (virtual terminal sequences, a line feed returning the carriage), then UTF-8; the input stays as it was. A second take-over
     /// changes nothing. From then on a mode sets the input's mode and the output's, and the code page stays.
     #[test]
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(console.now(), console.start);
     }
 
-    /// Spec §7.3: input that is not a console (a pipe, a file) is refused at the start, and nothing about the console is changed.
+    /// Input that is not a console (a pipe, a file) is refused at the start, and nothing about the console is changed.
     #[test]
     fn input_that_is_not_a_console_is_refused_and_nothing_is_changed() {
         let console = FakeConsole::new();
@@ -1156,7 +1156,7 @@ mod tests {
         console.fail(|call| matches!(call, Call::Set(Setting::OutputMode, _)));
         assert_eq!(tty.take_over().unwrap_err().kind(), io::ErrorKind::Other);
 
-        // Final wave (F5): a put-back of the output's mode that fails too (a console that stopped answering) leaves the console changed, so
+        // A put-back of the output's mode that fails too (a console that stopped answering) leaves the console changed, so
         // a later way out tries again: here the dropped `Tty` puts all four settings back.
         let console = FakeConsole::new();
         let mut tty = Tty::new(console.clone()).unwrap();
@@ -1206,7 +1206,7 @@ mod tests {
         assert_eq!(console.changes().last(), Some(&Call::Set(Setting::OutputMode, RAW_OUTPUT)), "not tried again");
     }
 
-    /// Spec §7.3: a dropped `Tty` and `Tty::restore` put all four settings back, the input's mode first. Once they are back there is
+    /// A dropped `Tty` and `Tty::restore` put all four settings back, the input's mode first. Once they are back there is
     /// nothing more to put back.
     #[test]
     fn dropping_or_restoring_the_tty_puts_all_four_settings_back() {
@@ -1325,7 +1325,7 @@ mod tests {
         drop(held);
     }
 
-    /// Spec §7.3: a panic puts the console back before its message is printed. The hook's first step runs here directly, on a restorer
+    /// A panic puts the console back before its message is printed. The hook's first step runs here directly, on a restorer
     /// registered as `restore_on_panic` registers it; tests do not install the hook: a Unix test build has the termios layer's hook too,
     /// installed under its own `Once`, and two installers at once can lose one hook (taking the previous hook and setting the new one is
     /// not one step). With nothing else holding the console it puts back exactly the four settings, the input's mode first, and throws
@@ -1484,7 +1484,7 @@ mod tests {
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
     }
 
-    /// Final wave (F11): a question's line read is ended by a change to cooked mode that keeps what was typed, too, while the console still
+    /// A question's line read is ended by a change to cooked mode that keeps what was typed, too, while the console still
     /// hides what is typed: another program's Ctrl-C (`GenerateConsoleCtrlEvent`) cancels a question without ending its read (measured),
     /// and left in progress into the echoing mode of the start, the hidden read would show what is typed next and take it.
     #[test]
@@ -1505,7 +1505,7 @@ mod tests {
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None), "what the question's read held is thrown away");
     }
 
-    /// Fix round 1: the end of a session under a question (`Mode::Cooked` throwing what was typed away) ends the question's line read first,
+    /// The end of a session under a question (`Mode::Cooked` throwing what was typed away) ends the question's line read first,
     /// while the console still hides what is typed: the line read keeps what was typed into it (a part of a password, which no flush
     /// reaches: the module's doc), and left in progress into the echoing console of the start it would show what is typed next and take
     /// it. What it read is thrown away.
@@ -1527,7 +1527,7 @@ mod tests {
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None), "what the question's read held is thrown away");
     }
 
-    /// Final wave (F11): a change that leaves a question says whether the console has ended the question's line. It has when a line read of
+    /// A change that leaves a question says whether the console has ended the question's line. It has when a line read of
     /// the question ended: on the Enter typed for it (the answer was read), or on the one with which the change ended the read. It has not
     /// when no line read of it ended (none was in progress: the keys thread is gone; or the console refused the Enter), and a change that
     /// leaves no question says no.
@@ -1567,7 +1567,7 @@ mod tests {
         assert!(!tty.question_line_ended(), "no question was left");
     }
 
-    /// Fix round 1: an Enter of the program's own that the read in progress did not take (it ended on a key typed at that moment) must not
+    /// An Enter of the program's own that the read in progress did not take (it ended on a key typed at that moment) must not
     /// reach the first read of the next mode: every change that ends a read throws away what the console holds after it, also one that
     /// keeps what was typed otherwise.
     #[test]
@@ -1627,7 +1627,7 @@ mod tests {
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Closed, None));
     }
 
-    /// Spec §7.3: the size is the window's (the part of the screen buffer shown), both ends included.
+    /// The size is the window's (the part of the screen buffer shown), both ends included.
     #[test]
     fn the_size_is_the_window_s_both_ends_included() {
         assert_eq!(window_size(0, 0, 79, 23), Some((80, 24)));

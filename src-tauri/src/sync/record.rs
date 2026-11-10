@@ -1,5 +1,5 @@
-//! 記錄模型與合併規則(spec §3.2、§6)。純資料,不碰 I/O。
-//! Sync v2(spaces spec §4.1、§4.2)加上帳戶 chain 的 `space` / `spacekey` 種類與它們的 payload。
+//! 記錄模型與合併規則。純資料,不碰 I/O。
+//! Sync v2 加上帳戶 chain 的 `space` / `spacekey` 種類與它們的 payload。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,11 +10,11 @@ use crate::sync::crypto::ChainKeys;
 /// payload 的 `schema`(host/device/space/spacekey 皆為 1);test fixtures build space keys with it.
 #[cfg(test)]
 pub const SCHEMA_VERSION: u32 = 1;
-/// 帳戶 chain 的格式版本:`meta` `"account"` 的 `schema_version`(spec §4.1)。chain 上的值比它新 → 這台只讀。
+/// 帳戶 chain 的格式版本:`meta` `"account"` 的 `schema_version`。chain 上的值比它新 → 這台只讀。
 pub const ACCOUNT_SCHEMA_VERSION: u32 = 2;
 /// 帳戶 chain 上帳戶 `meta` 記錄的 id。
 pub const ACCOUNT_META_ID: &str = "account";
-/// 更換同步碼標記的 `meta` id 前綴,後接發起裝置的 device_id(spec §4.1、§7.5)。
+/// 更換同步碼標記的 `meta` id 前綴,後接發起裝置的 device_id。
 pub const ROTATION_META_PREFIX: &str = "rotation:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub const ROTATION_META_PREFIX: &str = "rotation:";
 pub enum RecordKind {
     Host,
     Group,
-    /// 帳戶 chain:同步的私鑰(id = 插槽 id;祕密,SP3 spec §4.1)。
+    /// 帳戶 chain:同步的私鑰(id = 插槽 id;祕密)。
     Key,
     Password,
     Device,
@@ -31,7 +31,7 @@ pub enum RecordKind {
     Space,
     /// 帳戶 chain:一個 space 的權杖與金鑰(id = space id;wire 名稱 `spacekey`)。
     SpaceKey,
-    /// 帳戶 chain:一個金鑰插槽(id = 插槽 id;wire 名稱 `keyslot`;SP3 spec §4.1)。
+    /// 帳戶 chain:一個金鑰插槽(id = 插槽 id;wire 名稱 `keyslot`)。
     KeySlot,
 }
 
@@ -66,7 +66,7 @@ impl RecordKind {
     }
 
     /// 明文含祕密的種類(`spacekey` 的權杖與金鑰;v1 預留的 key/password):狀態檔只能保存它們的密文 envelope,
-    /// 解密只在記憶體(spec §3、§4.4)。
+    /// 解密只在記憶體。
     pub fn is_secret(self) -> bool {
         matches!(self, RecordKind::Key | RecordKind::Password | RecordKind::SpaceKey)
     }
@@ -149,7 +149,7 @@ pub fn merge(local: Option<&LocalRecord>, remote: &Record) -> MergeOutcome {
     }
 }
 
-/// 中繼往返的密文信封(wire 格式 camelCase,對應 relay Worker 與 Task 5 的 client)。
+/// 中繼往返的密文信封(wire 格式 camelCase,對應 relay Worker 與 client)。
 /// 也是 `SyncState.sealed` 保留「本版不處理的種類」時的原樣儲存格式。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,11 +172,11 @@ pub struct DevicePayload {
     /// 這台裝置持有的同步金鑰 id(Phase B 才會填)。
     #[serde(default)]
     pub keys: Vec<String>,
-    /// 這台勾選的 space id(spec §4.1)。v1 的裝置記錄沒有這個欄位 → 空;空的時候不寫出,v1 payload 的內容不變。
+    /// 這台勾選的 space id。v1 的裝置記錄沒有這個欄位 → 空;空的時候不寫出,v1 payload 的內容不變。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spaces: Vec<String>,
-    /// 這台的插槽裡是哪把金鑰(SP3 spec §4.1)。空的時候不寫出,SP1 的 payload 內容不變;SP1 讀到會略過這個欄位。
-    /// 不能用 `keys`:SP1 把它當 `Vec<String>` 解析。
+    /// 這台的插槽裡是哪把金鑰。空的時候不寫出,舊版的 payload 內容不變;舊版讀到會略過這個欄位。
+    /// 不能用 `keys`:舊版把它當 `Vec<String>` 解析。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<crate::sync::slot_rules::DeviceSlot>,
 }
@@ -188,28 +188,28 @@ pub struct MetaPayload {
 }
 
 impl MetaPayload {
-    /// 帳戶 chain 的 `meta` `"account"`(spec §4.1):`{ schema_version: 2, created_by_app_version }`。
+    /// 帳戶 chain 的 `meta` `"account"`:`{ schema_version: 2, created_by_app_version }`。
     pub fn account(app_version: &str) -> Self {
         Self { schema_version: ACCOUNT_SCHEMA_VERSION, created_by_app_version: app_version.to_string() }
     }
 }
 
-/// `space` 記錄的 payload(帳戶 chain;id = space id = 該 space 的 chain id,spec §4.1)。刪除 = tombstone。
+/// `space` 記錄的 payload(帳戶 chain;id = space id = 該 space 的 chain id)。刪除 = tombstone。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpacePayload {
     pub schema: u32,
     /// 顯示名稱;UI 盡量避免重名,但不作為一致性保證。
     pub name: String,
-    /// 只用來組檔名(spec §4.3),不要求唯一。
+    /// 只用來組檔名,不要求唯一。
     pub slug: String,
     pub created_at_ms: u64,
-    /// 更換同步碼後指向舊的 space id(spec §7.5)。
+    /// 更換同步碼後指向舊的 space id。
     #[serde(default)]
     pub previous_id: Option<String>,
 }
 
-/// `spacekey` 記錄的 payload(帳戶 chain;id = space id):該 space 的權杖與金鑰,`enc_key` 為標準 base64
-/// (spec §4.1)。明文是祕密:只在記憶體解開,狀態檔只存帳戶金鑰加密的 envelope;`Debug` 不印出權杖與金鑰。
+/// `spacekey` 記錄的 payload(帳戶 chain;id = space id):該 space 的權杖與金鑰,`enc_key` 為標準 base64。
+/// 明文是祕密:只在記憶體解開,狀態檔只存帳戶金鑰加密的 envelope;`Debug` 不印出權杖與金鑰。
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpaceKeyPayload {
     pub schema: u32,
@@ -230,7 +230,7 @@ impl SpaceKeyPayload {
     }
 }
 
-/// 更換同步碼的標記(`meta`,id = `rotation:<device_id>`):只出現在被淘汰的舊帳戶 chain(spec §4.1、§7.5)。
+/// 更換同步碼的標記(`meta`,id = `rotation:<device_id>`):只出現在被淘汰的舊帳戶 chain。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RotationMarkerPayload {
     pub rotated_at_ms: u64,
@@ -371,11 +371,11 @@ mod tests {
         assert!(RecordKind::Key.is_secret());
     }
 
-    /// SP1 的 `DevicePayload` 沒有 `slots`:SP3 寫出的裝置記錄,SP1 照樣讀得懂(未知欄位略過);`slots` 空的時候不寫出。
+    /// 舊版的 `DevicePayload` 沒有 `slots`:有金鑰插槽的版本寫出的裝置記錄,舊版照樣讀得懂(未知欄位略過);`slots` 空的時候不寫出。
     #[test]
-    fn device_slots_are_invisible_to_sp1_and_omitted_when_empty() {
+    fn device_slots_are_invisible_to_older_versions_and_omitted_when_empty() {
         #[derive(serde::Deserialize)]
-        struct Sp1DevicePayload {
+        struct OlderDevicePayload {
             #[allow(dead_code)]
             name: String,
             #[serde(default)]
@@ -393,7 +393,7 @@ mod tests {
             slots: vec![crate::sync::slot_rules::DeviceSlot { slot_id: "0".repeat(32), fingerprint: None, synced_copy: true, in_vault: false }],
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert!(serde_json::from_value::<Sp1DevicePayload>(json.clone()).is_ok());
+        assert!(serde_json::from_value::<OlderDevicePayload>(json.clone()).is_ok());
         assert_eq!(serde_json::from_value::<DevicePayload>(json).unwrap(), payload);
         let empty = serde_json::to_value(DevicePayload { slots: Vec::new(), ..payload }).unwrap();
         assert!(empty.get("slots").is_none());
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn space_records_go_through_the_v1_record_codec() {
-        // 記錄加密與 v1 相同(spec §5.3):`reconcile::encode`/`decode` 直接處理新種類。
+        // 記錄加密與 v1 相同:`reconcile::encode`/`decode` 直接處理新種類。
         use crate::sync::reconcile::{decode, encode};
         let account = ChainKeys::generate().unwrap();
         let space = ChainKeys::generate().unwrap();

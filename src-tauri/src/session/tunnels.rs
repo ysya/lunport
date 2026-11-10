@@ -1,4 +1,4 @@
-//! Port forwards started in Lunport, or by an AI client through MCP (design 2026-11-08). Definitions sync; running state is device-local.
+//! Port forwards started in Lunport, or by an AI client through MCP. Definitions sync; running state is device-local.
 use super::{
     auth::Owner,
     connect::{CancelToken, Connector},
@@ -49,7 +49,7 @@ impl TunnelPhase {
 pub struct TunnelLive {
     pub phase: TunnelPhase,
     pub forwarding: ForwardStatus,
-    /// Who started the tunnel when an AI client started it through MCP (design 2026-11-08): the requester Lunport observed. `None`
+    /// Who started the tunnel when an AI client started it through MCP: the requester Lunport observed. `None`
     /// for a tunnel started in Lunport.
     #[cfg_attr(test, ts(optional = nullable))]
     pub started_by: Option<String>,
@@ -73,7 +73,7 @@ pub(crate) struct Entry {
     live: Mutex<TunnelLive>,
     /// Why Lunport itself stopped the tunnel, when it did for a reason of its own (an AI client's access ended): its error then.
     ended_for: Mutex<Option<String>>,
-    /// How many of Lunport's windows its connection has open for the person (design 2026-11-09, native windows for AI requests):
+    /// How many of Lunport's windows its connection has open for the person:
     /// `start_tunnel` keeps waiting while one is.
     asking: std::sync::atomic::AtomicUsize,
 }
@@ -267,17 +267,16 @@ impl Tunnels {
 /// What a tunnel whose SSH connection ended says when nothing more specific is known.
 const CONNECTION_ENDED: &str = "The SSH connection ended. Start the tunnel again to reconnect.";
 
-/// What a tunnel says when IAP stopped it because the grant its first hop needs ended (design
-/// 2026-10-26, Tunnels through a host that needs a grant).
+/// What a tunnel says when IAP stopped it because the grant its first hop needs ended.
 pub(crate) const GRANT_ENDED: &str =
     "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one.";
 
 /// Why a tunnel that was not stopped in Lunport ended. IAP refusing the first hop's account on a
 /// route with a PAM check means its grant ended; every other ending keeps `fallback`. An IAP
-/// refusal for another reason on such a route (access removed in Google Cloud) reads the same
-/// (design 2026-10-26, call 14). The spec names two refusals, the relay's 4033 "not authorized"
+/// refusal for another reason on such a route (access removed in Google Cloud) reads the same.
+/// Two refusals matter: the relay's 4033 "not authorized"
 /// close and a 403 handshake refusal; only the 4033 close reaches a running tunnel today, because
-/// `iap::reconnect` retries a 403 until its budget runs out (R61). The 403 arm stays for the spec.
+/// `iap::reconnect` retries a 403 until its budget runs out. The 403 arm stays so that both read the same.
 pub(crate) fn stop_reason(end: Option<&IapError>, needs_grant: bool, fallback: String) -> String {
     let refused = matches!(
         end,
@@ -296,7 +295,7 @@ fn route_needs_grant(state: &SyncStateV3, host_id: &str) -> bool {
         .is_some_and(|route| matches!(route.kind, TransportKind::GcpIap { pam: Some(_), .. }))
 }
 
-/// What may end a running tunnel besides its Stop and its connection. An AI client's start (design 2026-11-08) adds the last two.
+/// What may end a running tunnel besides its Stop and its connection. An AI client's start adds the last two.
 pub(crate) struct Watch<'a> {
     /// The sync account's id now: a change stops the tunnel.
     pub account: &'a dyn Fn() -> Option<String>,
@@ -315,7 +314,7 @@ impl Watch<'_> {
     }
 }
 
-/// What a tunnel an AI client started says when Lunport stopped it because the client's access to its host ended (design 2026-11-08).
+/// What a tunnel an AI client started says when Lunport stopped it because the client's access to its host ended.
 pub(crate) const AI_ACCESS_ENDED: &str =
     "AI access to this tunnel's host ended, so Lunport stopped the tunnel the AI client started.";
 
@@ -389,11 +388,11 @@ fn run(
     }
 }
 
-/// What an AI client's start was approved for (design 2026-11-08), for `run_for_ai`.
+/// What an AI client's start was approved for, for `run_for_ai`.
 pub(crate) struct AiApproval<'a> {
     /// The destination, route and keys the start was approved for, captured as `ssh_exec` captures them.
     pub approved: &'a crate::mcp::records::ApprovedTarget,
-    /// Who asks in the windows the tunnel's connection opens (design 2026-11-09, native windows for AI requests).
+    /// Who asks in the windows the tunnel's connection opens.
     pub asker: crate::session::protocol::AiAsker,
     /// The policy as it is now still allows the start: AI access on, the mode it was approved in, the host permitted.
     pub allowed: &'a (dyn Fn() -> Result<(), String> + Sync),
@@ -404,9 +403,9 @@ pub(crate) struct AiApproval<'a> {
 /// How often an AI client's tunnel asks whether the client's access ended.
 const REVOCATION_POLL: Duration = Duration::from_millis(250);
 
-/// Runs `rule` for an AI client (design 2026-11-08) over `base` guarded as `ssh_exec` guards its connection: it connects only to the
+/// Runs `rule` for an AI client over `base` guarded as `ssh_exec` guards its connection: it connects only to the
 /// approved route with the approved keys while the policy still allows it, and asks what `ssh_exec` asks in Lunport's windows, naming
-/// the client (design 2026-11-09, native windows for AI requests): a new or changed server key, credentials, a Privileged Access Manager
+/// the client: a new or changed server key, credentials, a Privileged Access Manager
 /// grant. The windows count on the entry while they wait for the person. When `ai.revoked` says the client's access ended, the tunnel
 /// stops with that reason, while it still connects too, which withdraws the windows its connection opened.
 pub(crate) fn run_for_ai(
@@ -434,7 +433,7 @@ pub(crate) fn run_for_ai(
     };
     let engine = CheckedEngine { inner: base.engine, check: &check_connected };
     let directory = PublicDirectory(base.directory, &check, &check_resolved);
-    // The windows the connection opens count on the entry while they wait for the person (design 2026-11-09): `start_tunnel` waits for
+    // The windows the connection opens count on the entry while they wait for the person: `start_tunnel` waits for
     // the person instead of answering that the tunnel is still connecting.
     let window = CountedWindow { inner: base.confirmer, entry };
     let owner = CountedOwner { inner: owner, entry };
@@ -475,7 +474,7 @@ pub(crate) fn run_for_ai(
     // `start_tunnel` passes a "needs interaction:" answer on as it is and prefixes the others with "The tunnel could not start".
     result.map_err(|error| confirmer.answer(None).unwrap_or(error))
 }
-/// The owner of an AI client's tunnel, counted on its entry while it asks the person (design 2026-11-09, native windows for AI requests).
+/// The owner of an AI client's tunnel, counted on its entry while it asks the person.
 struct CountedOwner<'a> {
     inner: &'a dyn Owner,
     entry: &'a Entry,
@@ -630,8 +629,8 @@ pub(crate) type Work = Box<
 >;
 
 /// Starts the saved tunnel `expected` on a worker thread of its own, registered with the broker so that quitting stops it, and answers
-/// its entry: the panel's Start, and an AI client's (design 2026-11-08), which names the client in `ai` (who started it, and who asks in
-/// the windows its connection opens, design 2026-11-09) and guards the connection in `work`.
+/// its entry: the panel's Start, and an AI client's, which names the client in `ai` (who started it, and who asks in
+/// the windows its connection opens) and guards the connection in `work`.
 pub(crate) fn launch(app: &tauri::AppHandle, expected: &TunnelRule, ai: Option<crate::session::protocol::AiAsker>, work: Work) -> Result<Arc<Entry>, String> {
     // The credential window names the request: an AI client's tunnel says so.
     let request = if ai.is_some() { "mcp-tunnel" } else { "tunnel" };
@@ -837,11 +836,11 @@ mod tests {
             "fallback"
         );
         assert_eq!(stop_reason(None, true, "fallback".into()), "fallback");
-        // The spec's sentence, word for word.
+        // The sentence, word for word.
         assert_eq!(GRANT_ENDED, "The Privileged Access Manager grant this tunnel needs has ended. Start the tunnel again to request a new one.");
     }
 
-    /// Design 2026-10-26 (R27): only IAP refusing the first hop's account names the grant; every
+    /// Only IAP refusing the first hop's account names the grant; every
     /// other way its tunnel ends keeps today's text, on a route with a PAM check too.
     #[test]
     fn every_other_end_of_the_iap_tunnel_keeps_todays_text() {
@@ -944,7 +943,7 @@ mod tests {
         })
     }
 
-    /// Design 2026-10-26, Tunnels through a host that needs a grant: a running tunnel that IAP
+    /// A running tunnel that IAP
     /// stops with its 4033 "not authorized" close says that its grant ended when the first hop's
     /// route has a PAM check, which is asked of that hop (the tunnel's host here). Without a PAM
     /// check, for another close, and for a connection lost another way, it keeps today's text; a
@@ -1056,7 +1055,7 @@ mod tests {
         assert_eq!(run_until(&directory, "db", &|_| true, &stopped), Ok(()));
     }
 
-    // ---- An AI client's tunnel (design 2026-11-08) ----
+    // ---- An AI client's tunnel ----
 
     /// What a run of an AI client's tunnel came to: what `run_for_ai` returned, the tunnel as the worker left it (`finish`), whether it
     /// ran, and the engine, for its events.
@@ -1184,7 +1183,7 @@ mod tests {
         assert!(run.result.as_ref().is_err_and(|error| error.contains("MCP policy changed")), "{:?}", run.result);
     }
 
-    /// Design 2026-11-09: a server key that is not verified when the tunnel connects (the start verified it, so it went in between) is
+    /// A server key that is not verified when the tunnel connects (the start verified it, so it went in between) is
     /// asked about in the host key window, in either mode; a refusal says so, and nothing runs.
     #[test]
     fn an_ai_clients_tunnel_asks_the_window_about_a_new_server_key_in_either_mode() {
@@ -1204,8 +1203,8 @@ mod tests {
         }
     }
 
-    /// A changed server key in an AI client's tunnel opens the warning window in both modes (design 2026-11-09, native windows for AI
-    /// requests); the window names the client and, in Auto-log, says the tunnel starts without review. After Accept new key the tunnel
+    /// A changed server key in an AI client's tunnel opens the warning window in both modes;
+    /// the window names the client and, in Auto-log, says the tunnel starts without review. After Accept new key the tunnel
     /// runs; a refusal says the key had changed and nothing runs.
     #[test]
     fn an_ai_clients_tunnel_warns_about_a_changed_server_key_in_both_modes() {
@@ -1231,7 +1230,7 @@ mod tests {
     }
 
     /// While a window the tunnel's connection opened waits for the person (its server key, its password), its entry says so, so that
-    /// `start_tunnel` keeps waiting for the person (design 2026-11-09, native windows for AI requests); once answered, it does not.
+    /// `start_tunnel` keeps waiting for the person; once answered, it does not.
     #[test]
     fn an_ai_clients_tunnel_counts_the_windows_its_connection_has_open() {
         use crate::session::{
@@ -1302,8 +1301,8 @@ mod tests {
         assert!(!entry.asking(), "nothing open once answered");
     }
 
-    /// An AI client's tunnel through a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window
-    /// (design 2026-11-09, native windows for AI requests), and runs once the grant is active.
+    /// An AI client's tunnel through a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window,
+    /// and runs once the grant is active.
     #[test]
     fn an_ai_clients_tunnel_asks_for_the_grant_its_host_needs() {
         use crate::session::{

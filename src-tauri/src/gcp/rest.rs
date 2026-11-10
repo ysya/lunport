@@ -71,8 +71,8 @@ pub trait GcpClient: Send + Sync {
     /// Requests a grant on the entitlement `entitlement` (its full name) for `duration_secs` with `justification`, and answers the grant
     /// as PAM created it (usually still `ACTIVATING`).
     fn create_grant(&self, account: Option<&str>, entitlement: &str, duration_secs: u32, justification: &str) -> Result<Grant, GcpError>;
-    /// The entitlements in `scope` (`<parent>/locations/<location>`) the caller may request a grant on (design 2026-10-27, The Access
-    /// tab). The fakes of the tests that never search answer none.
+    /// The entitlements in `scope` (`<parent>/locations/<location>`) the caller may request a grant on.
+    /// The fakes of the tests that never search answer none.
     fn search_entitlements(&self, _account: Option<&str>, _scope: &str) -> Result<Vec<EntitlementInfo>, GcpError> {
         Ok(Vec::new())
     }
@@ -303,7 +303,7 @@ mod tests {
         RestClient::with_bases(Arc::new(StaticToken("t0k".into())), &server.url(), &server.url())
     }
 
-    /// Design 2026-10-25: every call to Google is bounded by the 20-second timeout, the library's calls included, and the library does
+    /// Every call to Google is bounded by the 20-second timeout, the library's calls included, and the library does
     /// not retry on its own (the broker's loops do that, watching `cancel`): a PAM server that does not answer in time is a network
     /// failure, reported as soon as the timeout passes.
     #[test]
@@ -433,7 +433,7 @@ mod tests {
         second.assert();
     }
 
-    /// Requesting a grant (design 2026-10-25, PAM grant requests): the entitlement as the parent, the duration and the justification
+    /// Requesting a grant: the entitlement as the parent, the duration and the justification
     /// as PAM writes them, and the grant PAM answers, still activating.
     #[test]
     fn create_grant_sends_the_parent_duration_and_justification_and_answers_the_grant() {
@@ -463,7 +463,7 @@ mod tests {
         mock.assert();
     }
 
-    /// Grants on a folder's entitlement go to the folder's path (design 2026-10-27): the name is the parent, whatever it is.
+    /// Grants on a folder's entitlement go to the folder's path: the name is the parent, whatever it is.
     #[test]
     fn a_folder_entitlement_is_addressed_by_its_own_name() {
         let mut server = mockito::Server::new();
@@ -478,7 +478,7 @@ mod tests {
         mock.assert();
     }
 
-    /// The entitlements the caller may request in a scope (design 2026-10-27, The Access tab): asked as a grant requester, every page,
+    /// The entitlements the caller may request in a scope: asked as a grant requester, every page,
     /// with what each gives, its longest grant and whether an approver must approve.
     #[test]
     fn entitlements_are_searched_as_a_grant_requester_across_pages() {

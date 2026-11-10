@@ -1,4 +1,4 @@
-//! The same scenarios against the fake engine and the real one (plan 1b): wherever the broker relies on how an engine behaves, the fake
+//! The same scenarios against the fake engine and the real one: wherever the broker relies on how an engine behaves, the fake
 //! must behave like the real engine, or the broker's tests would pass against behaviour the app never sees. Each scenario is written once,
 //! as a function of an engine, a target and an auth source, and runs twice: against `FakeEngine`, and against `RusshEngine` with the
 //! in-process server (logins) or a scratch OpenSSH behind a proxy (shells and a cut link).
@@ -216,7 +216,7 @@ fn an_unreachable_password_first_hop_was_asked_for_its_password_first() {
 }
 
 /// A hop pinned to a key of another type: the handshake offers only that type, and the server has none (the broker then reconnects
-/// without the restriction to show the changed-key warning, plan 1b R17). `offered` is the offer, as the engine names its algorithms.
+/// without the restriction to show the changed-key warning). `offered` is the offer, as the engine names its algorithms.
 fn pinned_type_missing(world: &ShellWorld, pin: &HostKey, offered: &[&str]) {
     let mut target = world.target.clone();
     target.hops[0].pinned = Some(pin.clone());

@@ -209,7 +209,7 @@ pub fn set(
         },
     );
     next.version = next.version.max(STATE_VERSION);
-    // Tunnels share the Catalog's room with routes (design 2026-10-26, Room in the Catalog).
+    // Tunnels share the Catalog's room with routes.
     if rule.is_some() && crate::sync::transports::central_library(state) {
         crate::sync::transports::ensure_room(&next, "tunnel", id)?;
     }

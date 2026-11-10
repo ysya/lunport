@@ -209,7 +209,7 @@ pub(super) fn catalog(
         );
         state.local.transports.remove(&key);
     }
-    // R19: the library's route rows need their version, which nothing else on a central publication's path raises (its save admits
+    // The library's route rows need their version, which nothing else on a central publication's path raises (its save admits
     // this raise, `record_runtime::save_active_with_authority`).
     if !value.transports.is_empty() {
         state.version = state.version.max(transports::SYNC_STATE_VERSION);
@@ -857,7 +857,7 @@ pub(super) mod tests {
             .contains("private_key"));
     }
 
-    // ---- Routes from the Catalog (design 2026-10-26, Inside Lunport, routes take tunnel rules' central path) ----
+    // ---- Routes from the Catalog ----
 
     use crate::sync::transports::{
         self,
@@ -866,7 +866,7 @@ pub(super) mod tests {
     };
 
     /// The host `initial`'s library holds, in this device's own scope and in a collection: no capture can tell which of the two a
-    /// route saved on this device names, so such a route stays on the device (R14).
+    /// route saved on this device names, so such a route stays on the device.
     const HOST: &str = "0000000000000001";
     /// A host the library does not hold.
     const OTHER: &str = "0000000000000002";
@@ -974,12 +974,12 @@ pub(super) mod tests {
             assert_eq!(
                 next.version,
                 transports::SYNC_STATE_VERSION,
-                "the library's route rows need version 10 (R19)"
+                "the library's route rows need version 10"
             );
         }
     }
 
-    /// Design 2026-10-27: search scopes and grant memory take the routes' path through both projections, need version 11, and the
+    /// Search scopes and grant memory take the routes' path through both projections, need version 11, and the
     /// capture builds them back into the Catalog it would publish.
     #[test]
     fn scopes_and_memories_round_trip_through_both_projections() {

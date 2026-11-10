@@ -1,4 +1,4 @@
-//! Lunport's own SSH engine (own-ssh spec §4, §6): the interface the broker, the CLI and the MCP adapter use (`SshEngine`, `Session`,
+//! Lunport's own SSH engine: the interface the broker, the CLI and the MCP adapter use (`SshEngine`, `Session`,
 //! `ShellChannel`, `HostKeyPolicy`, `AuthSource`), a fake for their tests, and the russh-backed engine behind the interface.
 //!
 //! russh is imported by exactly one file, `russh_engine.rs`; a test below keeps it that way. Swapping the engine later means replacing
@@ -18,7 +18,7 @@ pub(crate) mod testing;
 mod traits;
 mod types;
 
-// What the rest of the app uses (plan 1b R21: the module is private to the crate; the broker is its user).
+// What the rest of the app uses (the module is private to the crate; the broker is its user).
 pub(crate) use error::{AuthError, ConnectError, SessionError};
 pub(crate) use traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
 pub(crate) use types::{
@@ -49,7 +49,7 @@ mod tests {
         found
     }
 
-    /// The engine can be replaced one day (spec §1, goal 5), so the library that speaks SSH is named in one file only. The text searched
+    /// The engine can be replaced one day, so the library that speaks SSH is named in one file only. The text searched
     /// for is put together at run time, so that this file does not contain it.
     #[test]
     fn russh_is_named_by_russh_engine_rs_and_by_no_other_file() {

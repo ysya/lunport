@@ -39,7 +39,7 @@ pub trait TokenSource: Send + Sync {
     fn access_token(&self, account: Option<&str>) -> Result<Token, AuthError>;
 
     /// Drops every token kept for later: gcloud's credentials changed (an account signed in, removed or made active from the Google
-    /// Cloud page, design 2026-10-27), so a token kept from before may belong to a sign-in that is gone.
+    /// Cloud page), so a token kept from before may belong to a sign-in that is gone.
     fn forget(&self) {}
 }
 
@@ -461,11 +461,11 @@ mod tests {
         write(dir.path(), "legacy_credentials/ops@example.com/adc.json", &authorized_user("ops@example.com", "r2"));
         write(dir.path(), "legacy_credentials/robot/adc.json", r#"{"type":"service_account"}"#);
         // gcloud's view, not a route's: `default` (the folder gcloud uses for an empty account) is listed though it is no email address; the
-        // Google Cloud command, which knows what a route can name, keeps only the emails (R32).
+        // Google Cloud command, which knows what a route can name, keeps only the emails.
         write(dir.path(), "legacy_credentials/default/adc.json", &authorized_user("default", "r3"));
         assert_eq!(credentialed_accounts(dir.path()), ["default", "frank@example.com", "ops@example.com"]);
         let missing = dir.path().join("missing");
-        assert!(credentialed_accounts(&missing).is_empty()); // Review Focus 4: no gcloud directory is no accounts, not an error
+        assert!(credentialed_accounts(&missing).is_empty()); // No gcloud directory is no accounts, not an error
         assert!(!missing.exists(), "listing reads gcloud's directory and creates nothing");
     }
 

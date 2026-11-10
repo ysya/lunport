@@ -12,7 +12,7 @@ import { GoogleAccountsTab } from "./GoogleAccountsTab";
 import { PamAccessTab } from "./PamAccessTab";
 
 /*
- * The Google Cloud page (design 2026-10-27, The Cloud section and the Google Cloud page): the Cloud section's first provider, in three
+ * The Google Cloud page: the Cloud section's first provider, in three
  * tabs. Accounts is gcloud on this computer and its Google accounts, with the actions that change them; Access is Privileged Access
  * Manager on its own; IAP hosts lists the hosts that connect through IAP. Nothing here edits a route: that is the host editor's
  * Connect via.
@@ -46,7 +46,7 @@ export const GOOGLE_CLOUD_TABS: Array<{ value: GoogleCloudTab; label: string }> 
 export function IapHostsTab({ overview, editHost }: { overview: RecordOverview; editHost: (id: string) => void }) {
   const listed = listedRoutes(overview);
   // In a central library a route that stays on this computer is said to, after the others, with the reason when it is that the library
-  // has no room for it (R65); elsewhere every route stays on its computer, by design.
+  // has no room for it; elsewhere every route stays on its computer, by design.
   const central = overview.central_mode === true && Boolean(overview.account);
   const apart = ({ route }: ListedRoute) => central && !routeSynced(overview, route.host_id);
   const apartLine = ({ route }: ListedRoute) =>

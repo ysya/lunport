@@ -242,7 +242,7 @@ fn a_closed_session_refuses_commands() {
     assert_eq!(session.exec("echo no", ENOUGH, MIB), Err(SessionError::Closed));
 }
 
-/// Spec §16: long connections and rekeying were not measured in the spike. sshd is told to start a new key exchange after every 512 KiB,
+/// A long connection that rekeys: sshd is told to start a new key exchange after every 512 KiB,
 /// so 4 MiB of output makes it ask a dozen times. russh asks the host key question once, in the first exchange; if an upgrade of russh
 /// ever asked again, the answer could only be "no" (the thread that answers is gone after `connect`) and this connection would die in
 /// the middle of the output.

@@ -522,7 +522,7 @@ fn synchronized_identity_changes_never_release_a_locally_saved_password() {
     }
 }
 
-/// Design 2026-11-09 (saved pins): `saved_for` shows the library's pin of the endpoint that connected even when this device has not
+/// `saved_for` shows the library's pin of the endpoint that connected even when this device has not
 /// approved it, which resolution and `pinned_for` leave out, and refuses an endpoint that changed since the connect resolved it.
 #[test]
 fn saved_for_shows_a_pin_this_device_has_not_approved_and_checks_the_endpoint() {
@@ -576,7 +576,7 @@ fn a_later_pin_approval_cannot_authorize_a_password_for_an_in_flight_old_server_
     assert!(directory.password_authorized(&hop, Some(&replacement)).unwrap());
 }
 
-/// Google Cloud IAP transports (design 2026-10-25): the first hop's transport, and what `prepare` does with OS Login and PAM.
+/// Google Cloud IAP transports: the first hop's transport, and what `prepare` does with OS Login and PAM.
 mod gcp_transport {
     use super::*;
     use crate::gcp::oslogin::{LoginProfile, PosixAccount};
@@ -840,7 +840,7 @@ mod gcp_transport {
         *gcp.grants.lock().unwrap() = vec![grant("ENDED"), grant("DENIED")];
         let d = directory(gate_state("deploy", Some(transport("acme-prod-123456", GATE, false, prod_pam()))), &gcp);
         let target = d.resolve(&gate()).unwrap();
-        // A missing grant is a `GrantNeeded` now (design 2026-10-25, PAM grant requests); its sentence is the refusal of old.
+        // A missing grant is a `GrantNeeded` now; its sentence is the refusal of old.
         let error = d.prepare(&target, &public_key, &CancelToken::default()).unwrap_err();
         assert!(matches!(error, DirectoryError::GrantNeeded(_)), "{error:?}");
         let text = error.to_string();
@@ -854,7 +854,7 @@ mod gcp_transport {
         assert!(!d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
     }
 
-    /// Design 2026-10-25: IAP can take about 1½ minutes to see a grant, so the broker is told when the grant it found is that fresh and
+    /// IAP can take about 1½ minutes to see a grant, so the broker is told when the grant it found is that fresh and
     /// adds the note to a 4033 refusal. A grant given earlier than two minutes ago, or one without a time, is not fresh.
     #[test]
     fn prepare_reports_a_grant_that_became_active_moments_ago() {
@@ -875,7 +875,7 @@ mod gcp_transport {
         assert!(d.prepare(&target, &public_key, &CancelToken::default()).unwrap().recent_grant);
     }
 
-    /// Design 2026-10-25 (PAM grant requests): a missing grant is reported with everything the broker needs to ask and request, and
+    /// A missing grant is reported with everything the broker needs to ask and request, and
     /// the refusal sentence stays the one that quotes the gcloud command.
     #[test]
     fn prepare_asks_for_a_grant_with_the_transports_defaults_when_none_is_in_flight() {
@@ -919,7 +919,7 @@ mod gcp_transport {
         *need
     }
 
-    /// Design 2026-10-26 (Grant requests): the question a connection asks offers what this computer last asked for on the host, as the
+    /// The question a connection asks offers what this computer last asked for on the host, as the
     /// request dialog does, not what the route holds: that justification and that length, whatever the route's default length is.
     #[test]
     fn the_grant_question_offers_what_this_computer_last_asked_for_on_the_host() {
@@ -934,7 +934,7 @@ mod gcp_transport {
         assert_eq!(pam.map(|pam| pam.duration_secs), Some(1800));
     }
 
-    /// Design 2026-10-27: the library's memory of the entitlement the question requests comes before what this computer remembered for
+    /// The library's memory of the entitlement the question requests comes before what this computer remembered for
     /// the host, whichever host asked for it, on whichever computer.
     #[test]
     fn the_grant_question_offers_the_entitlements_memory_first() {
@@ -1041,7 +1041,7 @@ mod gcp_transport {
         let cancel = CancelToken::default();
         cancel.cancel();
         assert_eq!(d.request_grant_with(&need, "x", 1800, &cancel, std::time::Duration::ZERO, std::time::Duration::from_secs(5)).unwrap_err(), DirectoryError::Failed("The connection was cancelled.".into()));
-        // The trait method is the inner one with the design's pacing: a cancelled token returns at once there too.
+        // The trait method is the inner one with the real pacing: a cancelled token returns at once there too.
         assert_eq!(d.request_grant(&need, "x", 1800, &cancel).unwrap_err(), DirectoryError::Failed("The connection was cancelled.".into()));
         let _: Option<GrantReceipt> = None;
     }

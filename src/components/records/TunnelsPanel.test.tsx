@@ -32,7 +32,7 @@ describe("Tunnels", () => {
     expect(render([{ ...active, removed: false, changed: true }])).toContain("Restart to apply changes");
     expect(render([active])).toContain(">Stop</button>");
   });
-  it("names a running tunnel an AI client started, and only while it runs (design 2026-11-08)", () => {
+  it("names a running tunnel an AI client started, and only while it runs", () => {
     const started = row({ live: { phase: "running", forwarding: { running: true, port: 15432, connections: 0, error: null }, started_by: "Terminal → claude" } });
     const html = render([started]);
     expect(html).toContain("Started by an AI client");
@@ -60,7 +60,7 @@ describe("Tunnels", () => {
 });
 
 /*
- * Design 2026-10-26, Tunnels through a host that needs a grant. The rows read the grant through the backend, which a server render
+ * Tunnels through a host that needs a grant. The rows read the grant through the backend, which a server render
  * never does: `renderTunnels` draws the panel once, which makes the grant queries its rows hold, runs those queries through the real
  * fetcher against the mocked command, and draws the panel again with what they found.
  */
@@ -187,7 +187,7 @@ describe("the grant a tunnel's first hop needs", () => {
     expect(tunnelGrantLine(active, pam)).toBe("prod-operate · Active until 10:00");
     expect(tunnelGrantLine({ ...active, active_until_ms: null }, pam)).toBe("prod-operate · Active");
     expect(tunnelGrantLine(activating, pam)).toBe("prod-admin · Activating…");
-    // A grant waiting for its approver is said as such, not as a missing one (design 2026-10-27).
+    // A grant waiting for its approver is said as such, not as a missing one.
     expect(tunnelGrantLine({ ...activating, state: "approval_awaited" }, pam)).toBe("prod-admin · Awaiting approval");
     expect(tunnelGrantLine(none, pam)).toBe("Needs a grant: prod-operate, prod-admin");
     expect(tunnelGrantLine(none, { ...pam, entitlements: ["prod-deploy"] })).toBe("Needs a grant: prod-deploy");

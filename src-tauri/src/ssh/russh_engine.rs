@@ -1,11 +1,11 @@
-//! The russh-backed engine (own-ssh spec §6): the only file in the app that imports russh (`ssh/mod.rs` has a test that keeps it so).
+//! The russh-backed engine: the only file in the app that imports russh (`ssh/mod.rs` has a test that keeps it so).
 //!
 //! The engine owns a dedicated tokio runtime and drives it with `block_on`, so everything on the `SshEngine` side is synchronous. The
 //! caller's references (`&dyn HostKeyPolicy`, `&dyn AuthSource`) never leave the connect call: the connection tasks russh spawns see only
 //! `'static` data, and the one question they must ask the caller (is this host key trusted?) travels over a channel to the thread that
 //! is blocked in `connect`, which answers it.
 //!
-//! What the phase-0 spike taught, as rules (spec §6.2, §6.3): a handshake or a login call that waits for the application stalls the
+//! What early experiments with russh taught, as rules: a handshake or a login call that waits for the application stalls the
 //! whole connection, so nothing here waits for a person inside a callback; every wait is bounded, and the wait for the server's answer
 //! during the handshake and the login ends before the keepalive interval does (`stall_limit`); a failed or abandoned login drops the
 //! connection instead of switching method on it; liveness is read from the connection's own state, never from an error variant.
@@ -60,8 +60,7 @@ pub struct EngineOptions {
     /// Bytes of shell output kept between the channel reader and the thread that reads the shell (see `ByteQueue`).
     pub shell_queue_bytes: usize,
     /// How long the person may take to answer one keyboard-interactive round and, separately, how long the server may then take over its
-    /// verdict on the answers (one round can take up to twice this). `None` = 4 × the hop's connect timeout, at least 60 s (spec §6.2
-    /// step 4).
+    /// verdict on the answers (one round can take up to twice this). `None` = 4 × the hop's connect timeout, at least 60 s.
     pub prompt_wait: Option<Duration>,
     /// Worker threads of the engine's runtime.
     pub worker_threads: usize,
@@ -284,7 +283,7 @@ impl Handler for EngineHandler {
         Ok(())
     }
 
-    /// Never waits for a person (spec §6.2 step 3): the policy answers from its table through the connect thread, and `Unknown` or
+    /// Never waits for a person: the policy answers from its table through the connect thread, and `Unknown` or
     /// `Mismatch` makes the handshake fail with `UnknownKey`, which `connect` turns into `HostKeyUnknown` or `HostKeyMismatch`.
     ///
     /// russh asks once, in the first key exchange; a later one (the server's `RekeyLimit`, the client's 1 GiB or one hour) reuses that key
@@ -351,7 +350,7 @@ fn describe_io(error: &std::io::Error) -> String {
 }
 
 /// The host key algorithms offered to a server: russh's defaults without `ssh-rsa` (SHA-1), or, for a host with a pinned key, only that
-/// key's family (spec §6.2 step 3, §6.3 a). An algorithm that is not in the default list (or that cannot be parsed) restricts nothing.
+/// key's family. An algorithm that is not in the default list (or that cannot be parsed) restricts nothing.
 fn host_key_algorithms(pinned: Option<&HostKey>) -> Vec<Algorithm> {
     let defaults: Vec<Algorithm> = Preferred::DEFAULT.key.iter().filter(|algorithm| !matches!(algorithm, Algorithm::Rsa { hash: None })).cloned().collect();
     let Some(pinned) = pinned else { return defaults };
@@ -447,7 +446,7 @@ impl Connection {
         ended.clone()
     }
 
-    /// The record of the outermost hop that has one (a hop that dies after its carrier is gone records nothing useful, spec §6.2 step 2),
+    /// The record of the outermost hop that has one (a hop that dies after its carrier is gone records nothing useful),
     /// else ours when we closed it. A hop whose `Handle` is closed but has not recorded anything yet is about to (russh closes the handle
     /// first and calls the handler a moment later), so it is given a short while before the fallback is used.
     fn find_reason(&self) -> Option<DisconnectReason> {
@@ -628,7 +627,7 @@ where
     connected.map_err(|error| handshake_error(&reference, shared, error))
 }
 
-/// The sentence for a Google Cloud IAP tunnel that could not be opened (design 2026-10-25, "Error texts"), as a `ConnectError::Tunnel`.
+/// The sentence for a Google Cloud IAP tunnel that could not be opened, as a `ConnectError::Tunnel`.
 /// The account named is the target's; without one, gcloud's active account was used.
 fn iap_failure(hop: &HopRef, target: &IapTarget, port: u16, error: IapError) -> ConnectError {
     let instance = target.instance.as_str();
@@ -737,7 +736,7 @@ struct EngineSigner<'a> {
 enum SignerFailure {
     /// russh's session is gone.
     SessionEnded,
-    /// An RSA signature with SHA-1 was asked for: refused, `sign` was not called (spec §6.3 b).
+    /// An RSA signature with SHA-1 was asked for: refused, `sign` was not called.
     Sha1Refused,
     Auth(AuthError),
 }
@@ -788,7 +787,7 @@ enum Step {
 }
 
 /// How long `authenticate` waits for the handler's record of how a connection ended: russh closes the `Handle` first and calls the handler a
-/// moment later (spec §6.2 step 2).
+/// moment later.
 const LOGIN_END_WAIT: Duration = Duration::from_secs(1);
 
 /// What an answer to a login request that names no method to go on with came to.
@@ -849,7 +848,7 @@ async fn after_empty_refusal(
 /// Logs in to a freshly connected hop. The methods of `hop.auth_sequence()` are tried in order, each only if the server still offers
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
-/// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection (spec §6.2 step 4). Each
+/// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection. Each
 /// request is given `stall_limit` to be answered, except the reply to a keyboard-interactive round, which gets `prompt_wait`. That wait
 /// and a call to `AuthSource::password` as a fallback (the connection is open while a person types) cost CPU when they outlast the
 /// keepalive interval; the module rules say how much and why.
@@ -1020,7 +1019,7 @@ impl SshEngine for RusshEngine {
 const WATCH_EVERY: Duration = Duration::from_millis(100);
 
 /// Watches a connection for as long as it lives. When one hop ends (the server dropped it, its keepalive ran out, the hop in front of it
-/// went away) every other hop is disconnected too, so that a chain never lingers half open (spec §6.2 step 2). It stops when the
+/// went away) every other hop is disconnected too, so that a chain never lingers half open. It stops when the
 /// session is closed or dropped.
 fn watch_connection(runtime: &RuntimeOwner, connection: Arc<Connection>) {
     runtime.handle().spawn(async move {
@@ -1291,7 +1290,7 @@ impl Drop for RusshShellInput {
     }
 }
 
-/// The one task that reads a shell's channel (spec §6.3: every channel has a reader, or russh stalls the whole connection). It moves the
+/// The one task that reads a shell's channel (every channel has a reader, or russh stalls the whole connection). It moves the
 /// output into the queue without ever waiting for the consumer, and when the channel ends it records how, then closes the queue, in
 /// that order, so a consumer that sees the end of the output finds the exit.
 async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWriteHalf<Msg>>, queue: Arc<ByteQueue>, exit: Arc<ExitCell>, mut closed_by_us: watch::Receiver<bool>) {
@@ -1775,7 +1774,7 @@ mod tests {
         (decided.expect("the handler does not fail"), observed)
     }
 
-    /// Spec §6.2 step 3: the host key question fails closed. Only a key the policy pinned is trusted; an unknown or a changed key is written
+    /// The host key question fails closed. Only a key the policy pinned is trusted; an unknown or a changed key is written
     /// down, so that `connect` can report it, and refused; a question nobody can answer is refused and writes nothing down.
     #[test]
     fn the_host_key_check_trusts_a_pinned_key_only_and_refuses_when_nobody_can_answer() {
@@ -1974,7 +1973,7 @@ mod tests {
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("a runtime")
     }
 
-    /// Spec §6.2 step 4, read from russh's source and measured here for the first time. When the signer fails, russh's session is left
+    /// Read from russh's source and measured here for the first time. When the signer fails, russh's session is left
     /// waiting for a signature that never comes: later calls get no answer, `disconnect()` is accepted and does nothing, and only
     /// dropping the `Handle` ends it. That is why a failed login drops the connection and never tries another method on it.
     #[test]
@@ -2052,7 +2051,7 @@ mod tests {
             }
         });
         let (with_keepalive, without) = (used[0], used[1]);
-        // the design expected: an idle connection costs nothing, whatever its state
+        // an idle connection costs nothing, whatever its state
         assert!(without < Duration::from_millis(100), "without keepalive an idle connection kept the runtime busy for {without:?} in 3 s");
         assert!(
             with_keepalive > Duration::from_millis(1000),
@@ -2060,7 +2059,7 @@ mod tests {
         );
     }
 
-    /// The last line of defence for spec §6.3 b: even if the caller of the signer asked for SHA-1, an RSA key is never signed with it and
+    /// The last line of defence: even if the caller of the signer asked for SHA-1, an RSA key is never signed with it and
     /// `sign` is not called. For the other key types the hash means nothing and is not passed on.
     #[test]
     fn the_signer_never_asks_for_an_rsa_signature_with_sha1_and_appends_the_signature_to_what_russh_gave_it() {

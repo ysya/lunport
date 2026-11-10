@@ -71,7 +71,7 @@ fn directory(device: &Arc<TestDevice>) -> FormatDirectory {
     }
 }
 
-/// Design 2026-11-09 (saved pins), through the library: a server key that differs from the pin saved for the host, which this device has
+/// Through the library: a server key that differs from the pin saved for the host, which this device has
 /// not approved (another device saved it), is asked about as a changed key with that pin's date, and only accepting it replaces the pin.
 /// The very key that was saved is asked about as new, says when it was saved, and keeps its pin. Either way the key is approved here once
 /// and the next connect asks nothing; refused, nothing is written.
@@ -254,7 +254,7 @@ fn trusting_an_unknown_or_changed_host_key_connects_to_openssh() {
     }
 }
 
-/// Design 2026-11-09 (saved pins), against OpenSSH with an Ed25519 and an RSA host key: another device saved the RSA key, which this device
+/// Against OpenSSH with an Ed25519 and an RSA host key: another device saved the RSA key, which this device
 /// has not approved. The handshake asks for the saved key's type, so the server presents that very key and the question says it was saved,
 /// instead of warning about the Ed25519 key the client would prefer. Trusting it approves the saved pin as it is, and the next connect
 /// asks nothing.
