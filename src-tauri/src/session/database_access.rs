@@ -112,9 +112,10 @@ struct Attempts<'a> {
 }
 
 impl Attempts<'_> {
-    /// Runs `call` until it works. A denial right after a grant is tried again every `grace.step` until `grace.span` has passed since
-    /// the first refusal: Google may not have applied the grant yet. Any other failure, a denial long after the grant and a denial that
-    /// outlasts the grace end it with their sentence; a cancelled connection ends it with `grants::CANCELLED`.
+    /// Runs `call` until it works. A 403 right after a grant is tried again every `grace.step` until `grace.span` has passed since the
+    /// first refusal: Google may not have applied the grant yet. Any other failure (a 401 says the token is no good, which no grant
+    /// explains), a 403 long after the grant and a 403 that outlasts the grace end it with their sentence; a cancelled connection ends it
+    /// with `grants::CANCELLED`.
     fn run<T>(&mut self, mut call: impl FnMut() -> Result<T, GcpError>) -> Result<T, String> {
         loop {
             if self.cancel.is_cancelled() {
@@ -124,7 +125,7 @@ impl Attempts<'_> {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             };
-            let too_soon = self.recent_grant && matches!(error, GcpError::Denied { .. });
+            let too_soon = self.recent_grant && matches!(error, GcpError::Denied { status: 403, .. });
             if too_soon && self.refused_since.get_or_insert_with(Instant::now).elapsed() < self.grace.span {
                 if !pause(self.cancel, self.grace.step) {
                     return Err(grants::CANCELLED.to_string());
@@ -138,7 +139,7 @@ impl Attempts<'_> {
 }
 
 /// The material for a connection to `db`: its connect settings, a new key and a certificate Cloud SQL signs for that key. `recent_grant`
-/// (`GrantState::Held`) says the grant it relies on was given moments ago, and a denial is then tried again as `grace` allows. An instance
+/// (`GrantState::Held`) says the grant it relies on was given moments ago, and a 403 is then tried again as `grace` allows. An instance
 /// without a public address is refused: Lunport connects over the public one. Blocks on the Cloud SQL Admin API, on making the key and
 /// while it waits to try again, so it runs on a blocking thread.
 pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_grant: bool, grace: Grace, cancel: &CancelToken) -> Result<Material, String> {
@@ -682,8 +683,22 @@ mod tests {
         assert!(admin.certificates_asked() > 1, "and tried again meanwhile");
     }
 
+    /// A 401 says the token is no good, which a grant that has not propagated cannot explain: it is reported at once, and its sentence
+    /// does not blame the grant.
     #[test]
-    fn only_a_denial_is_retried_even_right_after_a_grant() {
+    fn a_401_right_after_a_grant_is_reported_at_once() {
+        let unauthorized = || GcpError::Denied { api: "Cloud SQL Admin", status: 401, account: ACCOUNT.into() };
+        let sentence_of_it = "frank@example.com may not call the Cloud SQL Admin API (HTTP 401).";
+        let admin = Admin::answering(vec![Ok(settings())], vec![Err(unauthorized()), Ok(certificate(ACCOUNT))]);
+        assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), sentence_of_it);
+        assert_eq!(admin.certificates_asked(), 1, "the certificate is not asked for again");
+        let admin = Admin::answering(vec![Err(unauthorized()), Ok(settings())], vec![Ok(certificate(ACCOUNT))]);
+        assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), sentence_of_it);
+        assert_eq!(admin.calls().len(), 1, "the settings are not asked for again, and nothing else is asked");
+    }
+
+    #[test]
+    fn only_a_403_is_retried_even_right_after_a_grant() {
         for error in [GcpError::Network("timed out".into()), GcpError::Http { api: "Cloud SQL Admin", status: 500 }, GcpError::Refused { api: "Cloud SQL Admin", message: "Cloud SQL has no instance acme-prod-123456:asia-east1:orders-pg.".into() }] {
             let admin = Admin::answering(vec![Ok(settings())], vec![Err(error.clone())]);
             assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), error.to_string());
