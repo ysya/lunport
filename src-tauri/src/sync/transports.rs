@@ -176,31 +176,38 @@ impl HostTransport {
             return Err("Enter the Google account as an email address.".into());
         }
         if let Some(pam) = pam {
-            if pam.entitlements.is_empty() {
-                return Err("Enter at least one PAM entitlement.".into());
-            }
-            if pam.entitlements.len() > MAX_ENTITLEMENTS {
-                return Err(format!("Enter at most {MAX_ENTITLEMENTS} PAM entitlements."));
-            }
-            if !pam.entitlements.iter().all(|entitlement| is_resource_name(entitlement)) {
-                return Err("Enter PAM entitlement ids such as prod-operate.".into());
-            }
-            if !is_resource_name(&pam.location) {
-                return Err("Enter the PAM location, such as global.".into());
-            }
-            if !is_grant_duration(pam.duration_secs) {
-                return Err("Enter a grant duration between 1 and 480 minutes.".into());
-            }
-            if pam.justification.as_deref().is_some_and(|text| !is_justification_line(text)) {
-                return Err("Keep the justification under 512 characters on one line.".into());
-            }
+            validate_pam(pam)?;
         }
         Ok(())
     }
 }
 
+/// One sentence about the first field of a grant requirement that is not acceptable, else `Ok`: the rules a host's route and a saved
+/// database share.
+pub(crate) fn validate_pam(pam: &PamCheck) -> Result<(), String> {
+    if pam.entitlements.is_empty() {
+        return Err("Enter at least one PAM entitlement.".into());
+    }
+    if pam.entitlements.len() > MAX_ENTITLEMENTS {
+        return Err(format!("Enter at most {MAX_ENTITLEMENTS} PAM entitlements."));
+    }
+    if !pam.entitlements.iter().all(|entitlement| is_resource_name(entitlement)) {
+        return Err("Enter PAM entitlement ids such as prod-operate.".into());
+    }
+    if !is_resource_name(&pam.location) {
+        return Err("Enter the PAM location, such as global.".into());
+    }
+    if !is_grant_duration(pam.duration_secs) {
+        return Err("Enter a grant duration between 1 and 480 minutes.".into());
+    }
+    if pam.justification.as_deref().is_some_and(|text| !is_justification_line(text)) {
+        return Err("Keep the justification under 512 characters on one line.".into());
+    }
+    Ok(())
+}
+
 /// A project id (`acme-dev-654321`: 6–30 characters, lowercase letters, digits and dashes, starting with a letter) or a project number.
-fn is_project(text: &str) -> bool {
+pub(crate) fn is_project(text: &str) -> bool {
     let number = (6..=20).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit());
     let id = (6..=30).contains(&text.len())
         && text.starts_with(|c: char| c.is_ascii_lowercase())

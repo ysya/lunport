@@ -47,9 +47,12 @@ impl Prepared {
 }
 /// The state version of an initial projection's candidate: central sync's, unless it holds what routes need, then the version of the
 /// library's route rows: the account's rows themselves, the routes this device keeps for the publish step to turn into such rows,
-/// or what its grant requests taught it. The initial publication requires exactly this version.
+/// or what its grant requests taught it. Saved databases, the library's or this device's own, need the newest version. The initial
+/// publication requires exactly this version.
 pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
-    if crate::sync::pam_records::has_data(candidate) {
+    if crate::sync::databases::has_data(candidate) {
+        crate::sync::databases::STATE_VERSION
+    } else if crate::sync::pam_records::has_data(candidate) {
         crate::sync::pam_records::STATE_VERSION
     } else if transports::needs_sync_version(candidate) || transports::has_data(candidate) {
         transports::SYNC_STATE_VERSION
@@ -693,6 +696,22 @@ pub(in crate::sync) mod tests {
             })
         );
         assert_eq!(projected.version, transports::SYNC_STATE_VERSION);
+        assert_eq!(projected.version, candidate_version(&projected));
+        records_v3::validate_state(&projected).unwrap();
+    }
+
+    /// A saved database stays through the first publication as this device's own record, and the candidate takes the version it needs:
+    /// the version the initial publication requires.
+    #[test]
+    fn first_publication_keeps_the_devices_saved_databases_at_the_version_they_need() {
+        use crate::sync::databases::{self, tests::database};
+        let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
+        let source = databases::set(&source, "00000000000000d1", None, Some(database("00000000000000d1")), 2).unwrap();
+        let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
+        assert_eq!(initial.shadow().version, databases::STATE_VERSION);
+        let projected = finished(&initial, &keys);
+        assert_eq!(projected.local.databases, source.local.databases);
+        assert_eq!(projected.version, databases::STATE_VERSION);
         assert_eq!(projected.version, candidate_version(&projected));
         records_v3::validate_state(&projected).unwrap();
     }

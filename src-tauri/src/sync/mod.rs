@@ -44,6 +44,7 @@ pub mod state;
 pub mod state_v2;
 #[cfg(test)]
 pub mod testkit;
+pub mod databases;
 pub mod pam_records;
 pub mod transports;
 pub mod tunnel_rules;

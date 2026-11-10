@@ -20,6 +20,9 @@ pub const TRANSPORT_SYNC_STATE_VERSION: u32 = 10;
 /// Search scopes and grant memory exist (`pam_scope:` and `pam_request:` records), in `local.pam_records` or as the
 /// library's rows in `account.records`: an older Lunport refuses the state instead of meeting rows it cannot publish.
 pub const PAM_STATE_VERSION: u32 = 11;
+/// Saved databases exist (`database:` records), in `local.databases` or as the library's rows in `account.records`: an older Lunport
+/// refuses the state instead of meeting rows it cannot publish.
+pub const DATABASE_STATE_VERSION: u32 = 12;
 pub const MAX_JUMPS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
