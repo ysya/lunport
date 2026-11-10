@@ -5,7 +5,7 @@ import { cargoLockVersion, selectChecks, validateVersions, withoutVersion } from
 import { cratePackageName } from "./identity.mjs";
 import { setCargoPackageVersion } from "./set-app-version.mjs";
 
-const unchanged = { frontend: false, native: false, packages: false, credentials: false, windows: false };
+const unchanged = { frontend: false, native: false, profiles: false, packages: false, credentials: false, windows: false };
 // The application crate's package name, which ci-changes.mjs finds in Cargo.lock.
 const PACKAGE = cratePackageName(readFileSync("src-tauri/Cargo.toml", "utf8"));
 const noRead = () => { throw new Error("not a version-only change"); };
@@ -27,17 +27,17 @@ test("version-only release edits skip compilation, dependency and config edits d
   };
   assert.deepEqual(selectChecks(files, read), unchanged);
   assert.equal(selectChecks(["package.json"], (revision) => JSON.stringify({ version: "1.5.0", dependencies: { react: revision === "head" ? "20" : "19" } })).frontend, true);
-  assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], revision => JSON.stringify({ version: "1.5.0", bundle: { active: revision === "head" } })), { ...unchanged, native: true, packages: true, credentials: true });
+  assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], revision => JSON.stringify({ version: "1.5.0", bundle: { active: revision === "head" } })), { ...unchanged, native: true, profiles: true, packages: true, credentials: true });
   assert.notEqual(withoutVersion("src-tauri/Cargo.toml", '[package]\nversion = "1"\n[dependencies]\nx = "1"'), withoutVersion("src-tauri/Cargo.toml", '[package]\nversion = "2"\n[dependencies]\nx = "2"'));
   const lock = version => `[[package]]\nname = "${PACKAGE}"\nversion = "${version}"\n[[package]]\nname = "other"\nversion = "${version}"`;
   assert.notEqual(withoutVersion("src-tauri/Cargo.lock", lock("1")), withoutVersion("src-tauri/Cargo.lock", lock("2")));
 });
 
 test("missing version files run checks, docs skip builds, manual runs force all routes", () => {
-  assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], noRead), { ...unchanged, native: true, packages: true, credentials: true });
+  assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], noRead), { ...unchanged, native: true, profiles: true, packages: true, credentials: true });
   assert.deepEqual(selectChecks(["README.md", "src-tauri/signing/README.md"], noRead), unchanged);
-  assert.deepEqual(selectChecks([], noRead, true), { frontend: true, native: true, packages: true, credentials: true, windows: true });
-  assert.deepEqual(selectChecks(["scripts/ci-changes.mjs"], noRead), { ...unchanged, frontend: true, native: true, credentials: true });
+  assert.deepEqual(selectChecks([], noRead, true), { frontend: true, native: true, profiles: true, packages: true, credentials: true, windows: true });
+  assert.deepEqual(selectChecks(["scripts/ci-changes.mjs"], noRead), { ...unchanged, frontend: true, native: true, profiles: true, credentials: true });
   assert.equal(selectChecks(["scripts/validate-windows-startup.ps1"], noRead).native, true);
   assert.equal(selectChecks(["src-tauri/Cargo.lock"], noRead).credentials, true);
   assert.equal(selectChecks(["scripts/build-macos-release.sh"], noRead).credentials, true);
@@ -77,11 +77,34 @@ test("the frozen helpers, their pins and the app identifier run the macOS creden
   ]) {
     assert.equal(selectChecks([path], noRead).credentials, true, path);
   }
-  assert.deepEqual(selectChecks(["src-tauri/src/identity.rs"], noRead), { ...unchanged, native: true, credentials: true });
+  assert.deepEqual(selectChecks(["src-tauri/src/identity.rs"], noRead), { ...unchanged, native: true, profiles: true, credentials: true });
   // Look-alikes and other Rust code stay with the native suites.
   for (const path of ["src-tauri/src/identity_migration/mod.rs", "src-tauri/src/identity_migration/credentials_macos.rs", "src-tauri/src/identity.rs.orig", "src-tauri/tauri.dev.conf.json"]) {
     assert.equal(selectChecks([path], noRead).credentials, false, path);
   }
+});
+
+test("release profile boundaries run only when their build inputs or assertions change", () => {
+  for (const path of [
+    "src-tauri/src/app_profile.rs",
+    "src-tauri/src/identity.rs",
+    "src-tauri/src/legacy_identity.rs",
+    "src-tauri/src/write_policy.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/tests/app_profile_build.rs",
+    "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
+    "src-tauri/build.rs",
+    "src-tauri/tauri.conf.json",
+    "src-tauri/tauri.dev.conf.json",
+    "vendor/tauri-runtime-wry/src/lib.rs",
+  ]) {
+    assert.equal(selectChecks([path], noRead).profiles, true, path);
+  }
+  for (const path of ["src-tauri/src/mcp/transfers.rs", "src-tauri/src/ssh/russh_engine.rs", "src-tauri/src/identity_migration/mod.rs"]) {
+    assert.equal(selectChecks([path], noRead).profiles, false, path);
+  }
+  assert.equal(selectChecks(["vendor/tauri-runtime-wry/src/lib.rs"], noRead).native, true);
 });
 
 // A job whose condition reads a selection output that does not exist reads an empty string and is skipped, and a skipped required job

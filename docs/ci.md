@@ -27,6 +27,10 @@ so dispatch scripts and Rust caches continue to work.
 - UI changes run frontend tests/build without three native suites.
 - Rust changes run native suites without rebuilding the UI. Changes spanning both
   areas run both. Rust dependency changes also run credential checks.
+- Release-profile boundary builds run on all three desktop platforms when their
+  profile, identity, write policy, library entry point, build configuration or test
+  changes. Other Rust changes keep the full platform debug suites and skip the
+  extra production and development release builds.
 - Docs changes run the inexpensive policy/version/workflow check.
 - The Linux upgrade check runs for changes to its script and to the identity data it reads
   (`scripts/identity.mjs`, `scripts/legacy-identity.json`). The Rust tests compare

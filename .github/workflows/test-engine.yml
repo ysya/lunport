@@ -28,6 +28,7 @@ jobs:
     outputs:
       frontend: ${{ steps.select.outputs.frontend }}
       native: ${{ steps.select.outputs.native }}
+      profiles: ${{ steps.select.outputs.profiles }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -212,7 +213,7 @@ jobs:
   profiles:
     name: Production and Development boundaries (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.native == 'true'
+    if: needs.changes.outputs.profiles == 'true'
     strategy:
       fail-fast: false
       matrix:
