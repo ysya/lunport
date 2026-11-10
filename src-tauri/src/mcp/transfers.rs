@@ -456,11 +456,13 @@ mod tests {
 
     #[test]
     fn transfer_paths_require_safe_absolute_local_and_remote_names() {
-        assert!(validate_paths("/tmp/report.txt", "/srv/report.txt").is_ok());
+        let directory = tempfile::tempdir().unwrap();
+        let local = directory.path().join("report.txt");
+        assert!(validate_paths(local.to_str().unwrap(), "/srv/report.txt").is_ok());
         assert!(validate_paths("report.txt", "/srv/report.txt").is_err());
-        assert!(validate_paths("/tmp/report.txt", "").is_err());
-        assert!(validate_paths("/tmp/report.txt", "/srv/report\nother.txt").is_err());
-        assert!(validate_paths("/tmp/report.txt", "/srv/\u{202e}txt").is_err());
+        assert!(validate_paths(local.to_str().unwrap(), "").is_err());
+        assert!(validate_paths(local.to_str().unwrap(), "/srv/report\nother.txt").is_err());
+        assert!(validate_paths(local.to_str().unwrap(), "/srv/\u{202e}txt").is_err());
     }
 
     #[test]
