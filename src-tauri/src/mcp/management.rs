@@ -255,9 +255,12 @@ pub(super) fn create(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let mut decision = None;
     let result = (|| {
         // Saving connection data is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err("Host creation approval timed out.".into()),
             ApprovalDecision::Cancel => return Err("Host creation was canceled.".into()),
@@ -295,6 +298,8 @@ pub(super) fn create(
             "host_creation_not_completed"
         }
         .into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result
@@ -521,9 +526,12 @@ pub(super) fn update(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let mut decision = None;
     let result = (|| {
         // Saving connection data is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err("Host update approval timed out.".into()),
             ApprovalDecision::Cancel => return Err("Host update was canceled.".into()),
@@ -556,12 +564,14 @@ pub(super) fn update(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(id),
-        alias: changes.alias,
+        alias: before.host.payload.alias.clone(),
         mode: policy.approval_mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
         outcome: if result.is_ok() { "host_updated" } else { "host_update_not_completed" }.into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result
@@ -748,7 +758,6 @@ fn transport_change(
     mut context: RequestContext,
     cancel: &CancelToken,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
-    alias: String,
     state: &SyncStateV3,
     host: &repo::HostView,
     before: Option<crate::sync::transports::HostTransport>,
@@ -781,9 +790,12 @@ fn transport_change(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let mut decision = None;
     let result = (|| {
         // Saving connection data is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err(words.timed_out.into()),
             ApprovalDecision::Cancel => return Err(words.canceled.into()),
@@ -810,12 +822,14 @@ fn transport_change(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(id),
-        alias,
+        alias: host.host.payload.alias.clone(),
         mode: policy.approval_mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
         outcome: if result.is_ok() { words.saved } else { words.not_saved }.into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result
@@ -843,7 +857,7 @@ pub(super) fn set_transport(
     }
     let before = crate::sync::transports::get(&state, &host.host.id);
     let after = changes.merged(&host.host.id, before.as_ref())?;
-    transport_change(env, runtime, policy, context, cancel, approve, changes.alias, &state, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
+    transport_change(env, runtime, policy, context, cancel, approve, &state, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
 }
 
 #[derive(Deserialize)]
@@ -876,7 +890,7 @@ pub(super) fn remove_transport(
     if before.is_none() {
         return Err("This host has no transport.".into());
     }
-    transport_change(env, runtime, policy, context, cancel, approve, alias, &state, &host, before, None, proposal_kinds::REMOVE_TRANSPORT, &REMOVE_WORDS)
+    transport_change(env, runtime, policy, context, cancel, approve, &state, &host, before, None, proposal_kinds::REMOVE_TRANSPORT, &REMOVE_WORDS)
 }
 
 pub(super) fn verify(
@@ -897,13 +911,10 @@ pub(super) fn verify(
                 .resolve_host_key(&HostQuery::Alias(alias.into()))
         })
         .map_err(|e| e.to_string())?;
-    let host = target
-        .hops
-        .last()
-        .ok_or("No destination.")?
-        .id
-        .as_str()
-        .to_owned();
+    let destination = target.hops.last().ok_or("No destination.")?;
+    let host = destination.id.as_str().to_owned();
+    // The entry names the host by its alias, however the client named it.
+    let host_alias = destination.alias.clone();
     let query = HostQuery::Id(host.clone());
     let policy = runtime.policy.lock().unwrap().clone();
     authorize(&policy, &host)?;
@@ -924,9 +935,17 @@ pub(super) fn verify(
     // nothing goes ahead without review.
     let asker = crate::session::protocol::AiAsker { client: records::client_label(&context), unreviewed: None };
     let confirmer = records::ClientConfirmer::new(connector.confirmer, asker);
-    let result = records::verify_route(connector, &query, &target, owner, cancel, &guard, &confirmer)
+    // A jump host's credential or grant question the person declined or left unanswered is what stopped the verification.
+    let declines = activity::Declines::default();
+    let owner = activity::NotingOwner { inner: owner, declines: &declines };
+    let started = unix_ms();
+    let result = records::verify_route(connector, &query, &target, &owner, cancel, &guard, &confirmer)
         .and_then(|value| serde_json::to_value(value).map_err(|_| "Could not encode verified identity.".into()));
-    runtime.record(records::trust_entry(&context, &host, alias, policy.approval_mode, result.is_ok()));
+    let stop = result.as_ref().err().map(|error| {
+        let declined = declines.first().or_else(|| confirmer.declined());
+        activity::stop_for(error, None, declined, runtime.withdrawn(policy.approval_mode, cancel))
+    });
+    runtime.record(records::trust_entry(&context, &host, &host_alias, policy.approval_mode, started, stop));
     result
 }
 

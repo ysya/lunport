@@ -77,7 +77,8 @@ import { searchSettings, settingsDestinations } from "@/lib/settings-navigation"
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { chooseMcpMode } from "@/lib/mcp-flow";
-import { McpActivity } from "@/components/McpActivity";
+import { McpActivitySummary } from "@/components/McpActivitySummary";
+import { useNow } from "@/lib/use-now";
 import { groupPath, groupAncestors } from "@/components/records/group-tree";
 import { groupComparator } from "@/components/records/group-order";
 import type { RecordOverview } from "@/lib/records";
@@ -92,12 +93,14 @@ export function SettingsCategoryPane({
   onOpenImport,
   onOpenDataTools,
   onOpenSync,
+  onOpenActivity,
 }: {
   category: SettingsCategory;
   recordOverview: RecordOverview;
   onOpenImport?: () => void;
   onOpenDataTools?: () => void;
   onOpenSync?: () => void;
+  onOpenActivity?: () => void;
 }) {
   if (category === "general") return <GeneralPane />;
   if (category === "updates") return <UpdatesPane />;
@@ -118,6 +121,7 @@ export function SettingsCategoryPane({
     return (
       <McpPane
         records
+        openActivity={onOpenActivity}
         generation={recordOverview.generation}
         groups={[...recordOverview.groups].sort(groupComparator(recordOverview.group_order?.ids ?? [])).map((group) => {
           const chain = groupAncestors(recordOverview, group.id, group.scope);
@@ -175,11 +179,12 @@ const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: Te
  * `useSyncBackendSettings`. Open state lives in the UI store so the toolbar
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
-export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync }: {
+export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, onOpenSync, onOpenActivity }: {
   recordOverview: RecordOverview;
   onOpenImport?: () => void;
   onOpenDataTools?: () => void;
   onOpenSync?: () => void;
+  onOpenActivity?: () => void;
 }) {
   const contentRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -299,7 +304,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
                   <span><small>{result.categoryLabel}</small><strong>{result.title}</strong><span>{result.detail}</span></span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
                 </button>) : <div className="app-empty-state"><h2>No matching settings</h2><p>Try a preference name such as “theme”, “terminal” or “logs”.</p><Button variant="outline" size="sm" onClick={() => { setSearch(""); searchRef.current?.focus(); }}>Clear search</Button></div>}
               </div> : <>
-                {active.id !== "files" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} /></div>}
+                {active.id !== "files" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} onOpenActivity={onOpenActivity} /></div>}
               </>}
             </div>
           </div>
@@ -689,13 +694,16 @@ function ConnectionPane({ recordOverview }: { recordOverview: RecordOverview }) 
   );
 }
 
-export function McpPane({ hosts, groups = [], generation, records = false }: {
+export function McpPane({ hosts, groups = [], generation, records = false, openActivity }: {
   hosts: McpAccessHost[];
   generation?: string;
   groups?: McpAccessGroup[];
   records?: boolean;
+  /** Opens the AI activity page, where every AI request and its result is. */
+  openActivity?: () => void;
 }) {
   const status = useMcpStatus(2_000);
+  const now = useNow();
   const setEnabled = useSetMcpEnabled();
   const setMode = useSetMcpApprovalMode();
   const [riskOpen, setRiskOpen] = useState(false);
@@ -806,14 +814,11 @@ export function McpPane({ hosts, groups = [], generation, records = false }: {
 
       <McpHostAccess hosts={hosts} groups={groups} generation={generation} records={records} status={status.data} unavailable={status.isError} />
 
-      <Section
-        title="Recent activity"
-        description="Latest 10 public audit entries, retained across restarts. Authorization does not mean command success. Output and authentication answers are never logged."
-      >
+      <Section title="Activity" description="What AI clients did, with each result, is on its own page.">
         {status.data?.audit_error && <p role="alert" className="mb-2 break-words text-xs text-destructive">Audit persistence error: {status.data.audit_error}. Completed commands are not retried.</p>}
         {status.isError && <p role="alert" className="mb-2 text-xs text-destructive">AI access status is unavailable. Retry after the app reconnects.</p>}
         <SettingsGroup>
-          <McpActivity entries={status.data?.recent ?? []} />
+          <McpActivitySummary latest={status.data?.recent[0]} now={now} open={openActivity} />
         </SettingsGroup>
       </Section>
 

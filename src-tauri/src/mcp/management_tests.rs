@@ -282,6 +282,64 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         assert!(r.records_active.lock().unwrap().is_empty());
     }
 }
+/// What the AI activity page reads of verify_host_key: a refusal in the trust window is the person's, a host whose AI access ended meanwhile
+/// is an error, and a request withdrawn meanwhile is canceled.
+#[test]
+fn verify_host_key_records_refusals_apart_from_errors() {
+    use crate::mcp::{McpReview, McpStopKind, McpWindow};
+    use crate::session::connect::{HostKeyConfirmer, HostKeyQuestion};
+    let stop_of = |r: &McpRuntime| {
+        let entry = r.recent.lock().unwrap()[0].clone();
+        assert_eq!(entry.review, Some(McpReview::NotAsked));
+        assert_eq!(entry.outcome, "host_key_not_verified");
+        assert!(entry.at_ms > 0 && entry.at_ms <= entry.completed_at_ms);
+        entry.stop.map(|stop| (stop.kind, stop.window))
+    };
+    let r = runtime(ApprovalMode::Ask);
+    r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+    let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+    let refuse = FakeConfirmer::deciding(vec![Decision::Refuse]);
+    let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
+        directory: &directory,
+        engine: &FakeEngine::new(),
+        confirmer: &refuse,
+        keys: &FakeKeys::new(),
+        keychain: &MemKeychain::default(),
+    };
+    assert!(verify(&r, &connector, "web", RequestContext::default(), &CancelToken::default(), &FakeOwner::default(), &ensure_allowed).is_err());
+    assert_eq!(stop_of(&r), Some((McpStopKind::Refused, Some(McpWindow::ServerKey))));
+
+    // Trusted in the window, but the host's AI access ended (or the request was withdrawn) before the key was saved.
+    struct Meanwhile<'a>(&'a McpRuntime, bool);
+    impl HostKeyConfirmer for Meanwhile<'_> {
+        fn confirm(&self, q: &HostKeyQuestion, c: &CancelToken) -> Option<String> {
+            if self.1 {
+                c.cancel();
+            } else {
+                self.0.policy.lock().unwrap().allowed_hosts.clear();
+            }
+            Some(q.fingerprint.clone())
+        }
+    }
+    for (cancel_it, kind) in [(false, McpStopKind::Error), (true, McpStopKind::Canceled)] {
+        let r = runtime(ApprovalMode::Ask);
+        r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+        let window = Meanwhile(&r, cancel_it);
+        let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
+            directory: &directory,
+            engine: &FakeEngine::new(),
+            confirmer: &window,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+        };
+        assert!(verify(&r, &connector, "web", RequestContext::default(), &CancelToken::default(), &FakeOwner::default(), &ensure_allowed).is_err());
+        assert_eq!(stop_of(&r), Some((kind, None)), "cancel: {cancel_it}");
+    }
+}
+
 /// verify_host_key on a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window,
 /// in both modes, and then shows the server key.
 #[test]
@@ -869,4 +927,116 @@ fn a_denied_timed_out_or_cancelled_transport_change_changes_nothing_and_is_audit
         assert_eq!(last_outcome(&r), "transport_not_set");
         assert!(r.records_active.lock().unwrap().is_empty());
     }
+}
+
+/// What the AI activity page reads of a proposal: how the person reviewed it in the approval window, and what stopped it when it was
+/// not saved, apart from an error.
+/// A client that names a host by its ID gets entries that name the host by its alias, as the AI activity page shows them.
+#[test]
+fn entries_name_the_host_by_its_alias_when_the_client_names_it_by_its_id() {
+    let named = |r: &McpRuntime| {
+        let entry = r.recent.lock().unwrap().front().unwrap().clone();
+        (entry.outcome, entry.alias)
+    };
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    update(&d.env(), &r, &json!({"alias": id, "port": 22}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    assert_eq!(named(&r), ("host_updated".to_string(), "fixture-web".to_string()));
+    let mut transport = pam_transport();
+    transport["alias"] = json!(id);
+    set_transport(&d.env(), &r, &transport, RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    assert_eq!(named(&r), ("transport_set".to_string(), "fixture-web".to_string()));
+    remove_transport(&d.env(), &r, &json!({"alias": id}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err();
+    assert_eq!(named(&r), ("transport_not_removed".to_string(), "fixture-web".to_string()));
+
+    let r = runtime(ApprovalMode::Ask);
+    r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+    let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+    let trust = FakeConfirmer::deciding(vec![Decision::Trust]);
+    let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
+        directory: &directory,
+        engine: &FakeEngine::new(),
+        confirmer: &trust,
+        keys: &FakeKeys::new(),
+        keychain: &MemKeychain::default(),
+    };
+    verify(&r, &connector, "id-web", RequestContext::default(), &CancelToken::default(), &FakeOwner::default(), &ensure_allowed).unwrap();
+    assert_eq!(named(&r), ("host_key_verified".to_string(), "web".to_string()));
+}
+
+#[test]
+fn proposals_record_their_review_and_stop_apart_from_errors() {
+    use crate::mcp::{McpReview, McpStopKind, McpWindow};
+    let last = |r: &McpRuntime| r.recent.lock().unwrap().front().unwrap().clone();
+    let stop_of = |entry: &McpAuditEntry| entry.stop.as_ref().map(|stop| (stop.kind, stop.window));
+    for (decision, review, stop) in [
+        (ApprovalDecision::Deny, Some(McpReview::Refused), Some((McpStopKind::Refused, Some(McpWindow::Approval)))),
+        (ApprovalDecision::TimedOut, Some(McpReview::NoAnswer), Some((McpStopKind::NoAnswer, Some(McpWindow::Approval)))),
+        (ApprovalDecision::Cancel, None, Some((McpStopKind::Canceled, Some(McpWindow::Approval)))),
+        (ApprovalDecision::Allow, Some(McpReview::Approved), None),
+    ] {
+        let d = device();
+        let r = runtime(ApprovalMode::Ask);
+        let _ = create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|_| decision);
+        let entry = last(&r);
+        assert_eq!(entry.review, review, "{decision:?}");
+        assert_eq!(stop_of(&entry), stop, "{decision:?}");
+    }
+
+    // Allowed, then a conflicting host is saved while the window was open: an error, with its reason.
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let error = create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|_| {
+        crate::sync::record_commands::edit_records(&d.env(), |s, now| {
+            repo::create_host(s, "0000000000000001", HostScope::Local, payload(&input()).unwrap(), now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    let entry = last(&r);
+    assert_eq!(entry.review, Some(McpReview::Approved));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Error, None)));
+    assert_eq!(entry.stop.and_then(|stop| stop.reason), Some(crate::mcp::activity::reason_text(&error)));
+
+    // Allowed, then AI access is turned off before the save, while no token is cancelled yet: withdrawn, not an error.
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    create(&d.env(), &r, &input(), RequestContext::default(), &CancelToken::default(), &|_| {
+        r.policy.lock().unwrap().enabled = false;
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    let entry = last(&r);
+    assert_eq!(entry.review, Some(McpReview::Approved));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Canceled, None)));
+
+    // update_host and set_transport: a refusal is the person's, in the approval window.
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"192.0.2.8"}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err();
+    assert_eq!(last(&r).review, Some(McpReview::Refused));
+    assert_eq!(stop_of(&last(&r)), Some((McpStopKind::Refused, Some(McpWindow::Approval))));
+    set_transport(&d.env(), &r, &pam_transport(), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err();
+    assert_eq!(stop_of(&last(&r)), Some((McpStopKind::Refused, Some(McpWindow::Approval))));
+
+    // An update over a host changed while the window was open: an error, with its reason.
+    update(&d.env(), &r, &json!({"alias":"fixture-web","hostname":"192.0.2.8"}), RequestContext::default(), &CancelToken::default(), &|_| {
+        crate::sync::record_commands::edit_records(&d.env(), |state, now| {
+            let host = repo::get_host(state, &id).map_err(|e| AppError::Other(e.to_string()))?;
+            let mut payload = host.host.payload.clone();
+            payload.hostname = "other.invalid".into();
+            repo::update_host(state, &id, &host.revision, payload, now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+        ApprovalDecision::Allow
+    })
+    .unwrap_err();
+    let entry = last(&r);
+    assert_eq!(entry.review, Some(McpReview::Approved));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Error, None)));
+    assert_eq!(entry.stop.and_then(|stop| stop.reason).as_deref(), Some("The host changed while the request was open; read it again and retry."));
 }

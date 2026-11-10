@@ -20,11 +20,13 @@ use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
 
+pub(crate) mod activity;
 pub(crate) mod records;
 mod adapter;
 mod management;
 mod permissions;
 mod tunnels;
+pub use activity::{McpActivityLog, McpReview, McpStop, McpStopKind, McpWindow};
 pub use records::RequestContext;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -106,6 +108,13 @@ pub struct McpAuditEntry {
     pub detail: Option<String>,
     #[cfg_attr(test, ts(type = "number"))]
     pub completed_at_ms: u64,
+    /// How the review of the command or proposal went; `None` in entries written before it was recorded, and when the request stopped
+    /// before its review.
+    #[serde(default)] pub review: Option<McpReview>,
+    /// What stopped an AI request that did not succeed; `None` when nothing did, and in entries written before it was recorded.
+    #[serde(default)] pub stop: Option<McpStop>,
+    /// The tunnel's name, for a tunnel request (`alias` is its host's).
+    #[serde(default)] pub tunnel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +185,8 @@ pub struct McpRuntime {
     records_active:Mutex<HashMap<String,(String,crate::session::connect::CancelToken)>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
+    /// Changes whenever `recent` does, while it is locked (`activity`).
+    revision: AtomicU64,
     pub keep_alive: AtomicBool,
     next_request_id: AtomicU64,
     last_client_at_ms: AtomicU64,
@@ -189,6 +200,7 @@ impl Default for McpRuntime {
             records_active:Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
+            revision: AtomicU64::new(0),
             keep_alive: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
             last_client_at_ms: AtomicU64::new(0),
@@ -215,7 +227,7 @@ impl McpRuntime {
             .map(|p| p.request.clone())
             .collect();
         pending.sort_by_key(|p| p.requested_at_ms);
-        let recent = self.recent.lock().unwrap().iter().take(10).cloned().collect();
+        let recent = self.recent.lock().unwrap().iter().filter(|entry| entry.is_ai()).take(10).cloned().collect();
         let last = self.last_client_at_ms.load(Ordering::Relaxed);
         McpStatus {
             noninteractive_credentials_supported: cfg!(windows),
@@ -245,7 +257,8 @@ impl McpRuntime {
         let mut audit = self.audit.lock().unwrap();
         let mut recent = self.recent.lock().unwrap();
         recent.push_front(entry);
-        recent.truncate(1000);
+        activity::retain_per_kind(&mut recent);
+        self.revision.fetch_add(1, Ordering::SeqCst);
         let result = audit.path.as_ref().map(|path| {
             let mut bytes = Vec::new();
             for item in recent.iter().rev() {
@@ -269,8 +282,11 @@ impl McpRuntime {
         match std::fs::File::open(&path).and_then(read_audit_bytes) {
             Ok(bytes) if bytes.len() as u64 <= AUDIT_READ_LIMIT=>{
                 let mut entries=VecDeque::new();let lines=bytes.split(|b|*b==b'\n').collect::<Vec<_>>();
-                for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);entries.truncate(1000);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
-                *self.recent.lock().unwrap()=entries;
+                for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
+                activity::retain_per_kind(&mut entries);
+                let mut recent=self.recent.lock().unwrap();
+                *recent=entries;
+                self.revision.fetch_add(1, Ordering::SeqCst);
             }
             Ok(_)=>audit.error=Some("Session log exceeds the 32 MiB read limit.".into()),
             Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
@@ -453,6 +469,12 @@ fn display_safe_command(command: &str) -> bool {
 #[tauri::command]
 pub fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
     status_for(&state)
+}
+
+/// The AI activity page's read: the AI entries, newest first, unless the log is still at `since`.
+#[tauri::command]
+pub fn mcp_activity(state: tauri::State<AppState>, since: Option<u64>) -> McpActivityLog {
+    state.mcp.activity(since)
 }
 fn status_for(state:&AppState)->McpStatus{
     let mut status=state.mcp.status();

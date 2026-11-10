@@ -28,6 +28,15 @@ function navigation() {
 }
 
 describe("Records navigation controls", () => {
+  it("the sidebar lists AI activity last in the Library section", () => {
+    const html = navigation();
+    const tunnels = html.indexOf('aria-label="Tunnels"');
+    const activity = html.indexOf('aria-label="AI activity"');
+    expect(tunnels).toBeGreaterThan(-1);
+    expect(activity).toBeGreaterThan(tunnels);
+    expect(activity).toBeLessThan(html.indexOf(">Cloud</div>"));
+  });
+
   it("names Google Cloud without a count, whatever routes the library holds", () => {
     const html = renderToStaticMarkup(<LibraryNavigation
       overview={recordOverview({ transports: [hostTransport()] })}
