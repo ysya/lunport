@@ -931,6 +931,41 @@ fn a_denied_timed_out_or_cancelled_transport_change_changes_nothing_and_is_audit
 
 /// What the AI activity page reads of a proposal: how the person reviewed it in the approval window, and what stopped it when it was
 /// not saved, apart from an error.
+/// A client that names a host by its ID gets entries that name the host by its alias, as the AI activity page shows them.
+#[test]
+fn entries_name_the_host_by_its_alias_when_the_client_names_it_by_its_id() {
+    let named = |r: &McpRuntime| {
+        let entry = r.recent.lock().unwrap().front().unwrap().clone();
+        (entry.outcome, entry.alias)
+    };
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let id = created(&d, &r);
+    update(&d.env(), &r, &json!({"alias": id, "port": 22}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    assert_eq!(named(&r), ("host_updated".to_string(), "fixture-web".to_string()));
+    let mut transport = pam_transport();
+    transport["alias"] = json!(id);
+    set_transport(&d.env(), &r, &transport, RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Allow).unwrap();
+    assert_eq!(named(&r), ("transport_set".to_string(), "fixture-web".to_string()));
+    remove_transport(&d.env(), &r, &json!({"alias": id}), RequestContext::default(), &CancelToken::default(), &|_| ApprovalDecision::Deny).unwrap_err();
+    assert_eq!(named(&r), ("transport_not_removed".to_string(), "fixture-web".to_string()));
+
+    let r = runtime(ApprovalMode::Ask);
+    r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+    let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+    let trust = FakeConfirmer::deciding(vec![Decision::Trust]);
+    let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
+        directory: &directory,
+        engine: &FakeEngine::new(),
+        confirmer: &trust,
+        keys: &FakeKeys::new(),
+        keychain: &MemKeychain::default(),
+    };
+    verify(&r, &connector, "id-web", RequestContext::default(), &CancelToken::default(), &FakeOwner::default(), &ensure_allowed).unwrap();
+    assert_eq!(named(&r), ("host_key_verified".to_string(), "web".to_string()));
+}
+
 #[test]
 fn proposals_record_their_review_and_stop_apart_from_errors() {
     use crate::mcp::{McpReview, McpStopKind, McpWindow};

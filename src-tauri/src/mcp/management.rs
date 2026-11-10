@@ -564,7 +564,7 @@ pub(super) fn update(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(id),
-        alias: changes.alias,
+        alias: before.host.payload.alias.clone(),
         mode: policy.approval_mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
@@ -758,7 +758,6 @@ fn transport_change(
     mut context: RequestContext,
     cancel: &CancelToken,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
-    alias: String,
     state: &SyncStateV3,
     host: &repo::HostView,
     before: Option<crate::sync::transports::HostTransport>,
@@ -823,7 +822,7 @@ fn transport_change(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(id),
-        alias,
+        alias: host.host.payload.alias.clone(),
         mode: policy.approval_mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
@@ -858,7 +857,7 @@ pub(super) fn set_transport(
     }
     let before = crate::sync::transports::get(&state, &host.host.id);
     let after = changes.merged(&host.host.id, before.as_ref())?;
-    transport_change(env, runtime, policy, context, cancel, approve, changes.alias, &state, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
+    transport_change(env, runtime, policy, context, cancel, approve, &state, &host, before, Some(after), proposal_kinds::SET_TRANSPORT, &SET_WORDS)
 }
 
 #[derive(Deserialize)]
@@ -891,7 +890,7 @@ pub(super) fn remove_transport(
     if before.is_none() {
         return Err("This host has no transport.".into());
     }
-    transport_change(env, runtime, policy, context, cancel, approve, alias, &state, &host, before, None, proposal_kinds::REMOVE_TRANSPORT, &REMOVE_WORDS)
+    transport_change(env, runtime, policy, context, cancel, approve, &state, &host, before, None, proposal_kinds::REMOVE_TRANSPORT, &REMOVE_WORDS)
 }
 
 pub(super) fn verify(
@@ -912,13 +911,10 @@ pub(super) fn verify(
                 .resolve_host_key(&HostQuery::Alias(alias.into()))
         })
         .map_err(|e| e.to_string())?;
-    let host = target
-        .hops
-        .last()
-        .ok_or("No destination.")?
-        .id
-        .as_str()
-        .to_owned();
+    let destination = target.hops.last().ok_or("No destination.")?;
+    let host = destination.id.as_str().to_owned();
+    // The entry names the host by its alias, however the client named it.
+    let host_alias = destination.alias.clone();
     let query = HostQuery::Id(host.clone());
     let policy = runtime.policy.lock().unwrap().clone();
     authorize(&policy, &host)?;
@@ -949,7 +945,7 @@ pub(super) fn verify(
         let declined = declines.first().or_else(|| confirmer.declined());
         activity::stop_for(error, None, declined, runtime.withdrawn(policy.approval_mode, cancel))
     });
-    runtime.record(records::trust_entry(&context, &host, alias, policy.approval_mode, started, stop));
+    runtime.record(records::trust_entry(&context, &host, &host_alias, policy.approval_mode, started, stop));
     result
 }
 
