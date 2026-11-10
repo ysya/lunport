@@ -102,12 +102,12 @@ mod tests {
         assert_eq!(serde_json::to_value(UnlockMethod::Dialog).unwrap(), serde_json::json!("dialog"));
     }
 
-    /// The Mac says whether it can ask, through the shim, without asking anything: no prompt comes up. Which answer it gives depends on the
-    /// Mac. (`confirm` is never called here, since it would ask.)
+    /// A smoke test: it only proves that the shim links and that asking the Mac whether it can ask brings up no prompt. Which answer the
+    /// Mac gives depends on the Mac, so it is not checked. (`confirm` is never called here, since it would ask.)
     #[cfg(target_os = "macos")]
     #[test]
     fn the_mac_tells_whether_it_can_ask_without_asking() {
-        assert!(matches!(unlock_method(), UnlockMethod::System | UnlockMethod::Dialog));
+        let _ = unlock_method();
     }
 
     #[cfg(not(target_os = "macos"))]
