@@ -85,6 +85,12 @@ pub trait Owner: Send + Sync {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
     /// Trusted hop attribution is supplied separately from server-controlled prompt text.
     fn ask_at(&self, hop:&HopRef, kind:QuestionKind,text:&str,echo:bool,deadline:Option<Instant>)->Reply{let _=hop;self.ask(kind,text,echo,deadline)}
+    /// How the person ended a question another connection asked for this one too (connections that need the same grant share one
+    /// Request-a-grant window): `Cancelled` or `TimedOut`. Nothing is shown; an owner that records the person's decisions records it as
+    /// its own.
+    fn answered_elsewhere(&self, kind: QuestionKind, reply: &Reply) {
+        let _ = (kind, reply);
+    }
     /// Shows that the host key waits for the person in Lunport's window; no answer.
     fn host_key_notice(&self, text: &str);
     /// Shows the server's banner (already through `printable`).

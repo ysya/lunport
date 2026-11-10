@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::auth::Reply;
 use super::connect::CancelToken;
 use super::directory::{GrantNeed, GrantReceipt};
 
@@ -27,8 +28,48 @@ impl GateKey {
     }
 }
 
-/// How a request came out, for the connections that waited on it: the grant, or the sentence the connection that asked failed with.
-pub type Outcome = Result<GrantReceipt, String>;
+/// How a request came out, for the connections that waited on it: the grant, or why there is none.
+pub type Outcome = Result<GrantReceipt, NoGrant>;
+
+/// Why a request gave no grant: the sentence the connection that asked failed with, and how the person ended its question when they
+/// said no or let it time out. The connections that waited on it share that question, so the person's answer is theirs too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoGrant {
+    pub sentence: String,
+    pub declined: Option<Declined>,
+}
+
+impl NoGrant {
+    /// A request that gave no grant for a reason of its own, not the person's.
+    pub fn said(sentence: impl Into<String>) -> NoGrant {
+        NoGrant { sentence: sentence.into(), declined: None }
+    }
+}
+
+/// A grant question the person said no to (`Cancelled`) or left until its deadline (`TimedOut`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Declined {
+    Cancelled,
+    TimedOut,
+}
+
+impl Declined {
+    /// How `reply` ended a question, when the person said no or did not answer.
+    pub fn of(reply: &Reply) -> Option<Declined> {
+        match reply {
+            Reply::Cancelled => Some(Declined::Cancelled),
+            Reply::TimedOut => Some(Declined::TimedOut),
+            Reply::Answer(_) | Reply::Gone => None,
+        }
+    }
+
+    pub fn reply(self) -> Reply {
+        match self {
+            Declined::Cancelled => Reply::Cancelled,
+            Declined::TimedOut => Reply::TimedOut,
+        }
+    }
+}
 
 #[derive(Default)]
 struct Gate {
@@ -88,11 +129,11 @@ impl GrantGates {
                 break outcome.clone();
             }
             if cancel.is_cancelled() {
-                break Err(CANCELLED.to_string());
+                break Err(NoGrant::said(CANCELLED));
             }
             let now = Instant::now();
             if now >= deadline {
-                break Err(TOO_LONG.to_string());
+                break Err(NoGrant::said(TOO_LONG));
             }
             // Woken by the lead, or every so often to look at `cancel`.
             let (guard, _) = gate.settled.wait_timeout(outcome, (deadline - now).min(Duration::from_millis(250))).unwrap_or_else(PoisonError::into_inner);
@@ -142,7 +183,7 @@ impl Lease<'_> {
 
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        self.finish(Err(UNSETTLED.to_string()));
+        self.finish(Err(NoGrant::said(UNSETTLED)));
     }
 }
 
@@ -194,10 +235,10 @@ mod tests {
         drop(lease);
         assert!(matches!(gates.enter(key("dropped"), &cancel, Duration::from_secs(5)), Entry::Lead(_)), "a dropped lease takes its gate down");
         let Entry::Lead(_lead) = gates.enter(key("slow"), &cancel, Duration::from_secs(5)) else { panic!() };
-        assert!(matches!(gates.enter(key("slow"), &cancel, Duration::from_millis(20)), Entry::Outcome(Err(text)) if text == TOO_LONG));
+        assert!(matches!(gates.enter(key("slow"), &cancel, Duration::from_millis(20)), Entry::Outcome(Err(no)) if no == NoGrant::said(TOO_LONG)));
         let cancelled = CancelToken::default();
         cancelled.cancel();
-        assert!(matches!(gates.enter(key("slow"), &cancelled, Duration::from_secs(5)), Entry::Outcome(Err(text)) if text == CANCELLED));
+        assert!(matches!(gates.enter(key("slow"), &cancelled, Duration::from_secs(5)), Entry::Outcome(Err(no)) if no == NoGrant::said(CANCELLED)));
         assert_eq!(gates.waiting(), 0);
         let _ = HostId::from("unused");
     }

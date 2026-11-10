@@ -170,17 +170,20 @@ pub(crate) struct NotingOwner<'a> {
     pub(crate) declines: &'a Declines,
 }
 impl NotingOwner<'_> {
-    fn noted(&self, kind: QuestionKind, reply: Reply) -> Reply {
+    fn note(&self, kind: QuestionKind, reply: &Reply) {
         let window = match kind {
             QuestionKind::Passphrase | QuestionKind::Password | QuestionKind::Interactive => Some(McpWindow::Credentials),
             QuestionKind::Grant => Some(McpWindow::Grant),
             QuestionKind::HostKeyNotice => None,
         };
-        match (&reply, window) {
+        match (reply, window) {
             (Reply::Cancelled, Some(window)) => self.declines.note(McpStopKind::Refused, window),
             (Reply::TimedOut, Some(window)) => self.declines.note(McpStopKind::NoAnswer, window),
             _ => {}
         }
+    }
+    fn noted(&self, kind: QuestionKind, reply: Reply) -> Reply {
+        self.note(kind, &reply);
         reply
     }
 }
@@ -190,6 +193,11 @@ impl Owner for NotingOwner<'_> {
     }
     fn ask_at(&self, hop: &crate::ssh::HopRef, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
         self.noted(kind, self.inner.ask_at(hop, kind, text, echo, deadline))
+    }
+    /// A grant question another request asked for this one too: the person's no, or no answer, stopped this request as well.
+    fn answered_elsewhere(&self, kind: QuestionKind, reply: &Reply) {
+        self.note(kind, reply);
+        self.inner.answered_elsewhere(kind, reply)
     }
     fn host_key_notice(&self, text: &str) {
         self.inner.host_key_notice(text)
@@ -436,5 +444,25 @@ mod tests {
         assert!(matches!(owner.ask(QuestionKind::Password, "Password:", false, None), Reply::Cancelled), "the reply is passed on");
         let _ = owner.ask(QuestionKind::Grant, "Grant:", true, None);
         assert_eq!(declines.first(), Some((McpStopKind::Refused, McpWindow::Credentials)), "the first decline stays");
+    }
+
+    /// A grant question another request asked and the person declined is noted as this request's own (they share the question), and
+    /// passed on.
+    #[test]
+    fn noting_owner_notes_a_grant_question_declined_elsewhere() {
+        let cases: [(fn() -> Reply, &str, Option<(McpStopKind, McpWindow)>); 3] = [
+            (|| Reply::Cancelled, "Cancelled", Some((McpStopKind::Refused, McpWindow::Grant))),
+            (|| Reply::TimedOut, "TimedOut", Some((McpStopKind::NoAnswer, McpWindow::Grant))),
+            (|| Reply::Gone, "Gone", None),
+        ];
+        for (reply, name, noted) in cases {
+            let person = FakeOwner::default();
+            let declines = Declines::default();
+            let owner = NotingOwner { inner: &person, declines: &declines };
+            owner.answered_elsewhere(QuestionKind::Grant, &reply());
+            assert_eq!(declines.first(), noted, "{name}");
+            assert!(person.asked().is_empty(), "nothing is asked");
+            assert_eq!(person.told.lock().unwrap().clone(), vec![(QuestionKind::Grant, name)]);
+        }
     }
 }
