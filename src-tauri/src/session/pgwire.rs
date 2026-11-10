@@ -29,6 +29,8 @@ pub const READ_ONLY_OPTION: &str = "-c cloudsql_session_read_only=locked";
 
 /// The setting `READ_ONLY_OPTION` sets.
 const READ_ONLY_SETTING: &str = "cloudsql_session_read_only";
+/// What the name of a protocol option begins with: PostgreSQL takes a start-up parameter for one only by this prefix, as written here.
+const PROTOCOL_OPTION_PREFIX: &str = "_pq_.";
 /// A CancelRequest is its length, its code, the process id of the session and a secret key of 4 to 256 bytes.
 const MIN_CANCEL_BYTES: usize = 16;
 const MAX_CANCEL_BYTES: usize = 12 + 256;
@@ -163,6 +165,31 @@ impl Startup {
         self.params.iter().rev().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
     }
 
+    /// The message as Lunport takes it from the app: Lunport answers an app as a server of protocol 3.0 and no newer. It returns the message
+    /// to send on to the real server, at protocol 3.0 and without the protocol options (the parameters whose names begin with `_pq_.`),
+    /// and the NegotiateProtocolVersion message for the app, if the app asked for a minor version above 0 or sent protocol options; a
+    /// server sends one then, before its first request for authentication. The app gets it ahead of Lunport's own request for a password,
+    /// and the real server, asked for 3.0 and no options, has nothing to negotiate. The message names the options in the order the app
+    /// sent them. It holds the whole number of the protocol version (3.0), as PostgreSQL servers write it, and not the minor version
+    /// alone: libpq refuses a 0 there as a step back to a version before 3.0.
+    pub fn negotiated(self) -> (Startup, Option<Vec<u8>>) {
+        let newer_minor = (self.version & 0xFFFF) != 0;
+        let (options, params): (Vec<_>, Vec<_>) = self.params.into_iter().partition(|(name, _)| name.starts_with(PROTOCOL_OPTION_PREFIX));
+        let negotiation = (newer_minor || !options.is_empty()).then(|| {
+            let mut message = vec![NEGOTIATE_PROTOCOL_VERSION, 0, 0, 0, 0];
+            message.extend_from_slice(&PROTOCOL_3.to_be_bytes());
+            message.extend_from_slice(&int32(options.len()));
+            for (name, _) in &options {
+                push_text(&mut message, name);
+            }
+            // The length counts itself and not the type byte.
+            let length = int32(message.len() - 1);
+            message[1..5].copy_from_slice(&length);
+            message
+        });
+        (Startup { version: PROTOCOL_3, params }, negotiation)
+    }
+
     /// The message with `user` as its only `user` parameter, in the place of the first one the app sent, else at the end.
     pub fn with_user(mut self, user: &str) -> Startup {
         let first = self.params.iter().position(|(name, _)| name == "user");
@@ -209,7 +236,7 @@ impl Startup {
             push_text(&mut message, value);
         }
         message.push(0);
-        let length = length_bytes(message.len());
+        let length = int32(message.len());
         message[..4].copy_from_slice(&length);
         message
     }
@@ -228,9 +255,11 @@ fn push_text(message: &mut Vec<u8>, text: &str) {
     message.push(0);
 }
 
-/// The four bytes of a message's length. A message of more bytes than they count is not made.
-fn length_bytes(len: usize) -> [u8; 4] {
-    u32::try_from(len).unwrap_or(u32::MAX).to_be_bytes()
+/// `value` as the four big-endian bytes of a length or a count in a message. A value too large for four bytes saturates at the largest one,
+/// which is no message's length, rather than wrapping around or panicking; the size of what is built here is the caller's to bound before
+/// it is sent (a rewritten start-up message against `MAX_STARTUP_BYTES`).
+fn int32(value: usize) -> [u8; 4] {
+    u32::try_from(value).unwrap_or(u32::MAX).to_be_bytes()
 }
 
 /// The request for a clear-text password, with which the local port asks the app for the password Lunport made for the database: the
@@ -275,7 +304,7 @@ pub fn error_response(sqlstate: &str, message: &str) -> Vec<u8> {
     }
     response.push(0);
     // The length counts itself and not the type byte.
-    let length = length_bytes(response.len() - 1);
+    let length = int32(response.len() - 1);
     response[1..5].copy_from_slice(&length);
     response
 }
@@ -293,8 +322,8 @@ pub enum ServerAuth {
 
 /// Reads the server's first answer to a start-up message and returns what it is with all the bytes that were read, to be passed on to
 /// the app as they are. A NegotiateProtocolVersion message may come first, which says the server has a lower minor version than the app
-/// asked for or does not know some of its protocol options; it is part of the bytes and the answer is the message after it. Nothing is
-/// read past the answer.
+/// asked for or does not know some of its protocol options (`Startup::negotiated` leaves a server nothing to negotiate, so this is a
+/// fallback); it is part of the bytes and the answer is the message after it. Nothing is read past the answer.
 ///
 /// An answer of any other kind, a sign-in method that is neither accepted nor a password, and a message of a length no such message has
 /// are `InvalidData`.
@@ -735,6 +764,67 @@ mod tests {
         let options: Vec<&str> = read.params.iter().filter(|(name, _)| name == "options").map(|(_, value)| value.as_str()).collect();
         assert_eq!(options, [READ_ONLY_OPTION]);
         assert_eq!(read.params.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_libpq_3_2_startup_is_negotiated_down_to_protocol_3_0() {
+        let (startup, negotiation) = read_startup(&hex(LIBPQ_STARTUP_3_2)).await.negotiated();
+        assert_eq!(startup.version(), PROTOCOL_3);
+        assert_eq!(params_of(&startup), [("user", "frank"), ("database", "orders"), ("application_name", "psql")]);
+        // The message, written out: the type, a length of 12, the number of protocol 3.0 and no option that is not known.
+        let negotiation = negotiation.expect("an app that asked for 3.2 is told 3.0");
+        assert_eq!(negotiation, [b'v', 0, 0, 0, 12, 0, 3, 0, 0, 0, 0, 0, 0]);
+        // It is followed by the request for a password, as a server sends them, and is read as a server's first answer is.
+        let wire = [negotiation, auth_cleartext().to_vec()].concat();
+        assert_eq!(server_auth(&wire).await.unwrap(), (ServerAuth::NeedsPassword, wire));
+        // Whatever else is done to the message, the real server is asked for protocol 3.0.
+        let sent = startup.with_user("frank@example.com").with_read_only_lock().encode();
+        assert_eq!(sent[4..8], PROTOCOL_3.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn protocol_options_are_dropped_and_named_in_the_negotiation() {
+        let wire = startup_wire(PROTOCOL_3, &[("user", "frank"), ("_pq_.foo", "1"), ("database", "orders")]);
+        let (startup, negotiation) = read_startup(&wire).await.negotiated();
+        assert_eq!(startup.version(), PROTOCOL_3);
+        assert_eq!(params_of(&startup), [("user", "frank"), ("database", "orders")]);
+        // The type, a length of 21, protocol 3.0, one option that is not known, and its name.
+        let mut expected = vec![b'v', 0, 0, 0, 21, 0, 3, 0, 0, 0, 0, 0, 1];
+        expected.extend_from_slice(b"_pq_.foo\0");
+        assert_eq!(negotiation, Some(expected));
+
+        // Several, in the order the app sent them, with a newer minor version too; names that only look like protocol options stay.
+        let wire = startup_wire(
+            PROTOCOL_3_2,
+            &[("_pq_.foo", "1"), ("user", "frank"), ("_PQ_.foo", "kept"), ("_pq_.bar", "x"), ("pq_.foo", "kept"), ("_pq_foo", "kept")],
+        );
+        let (startup, negotiation) = read_startup(&wire).await.negotiated();
+        assert_eq!(startup.version(), PROTOCOL_3);
+        assert_eq!(params_of(&startup), [("user", "frank"), ("_PQ_.foo", "kept"), ("pq_.foo", "kept"), ("_pq_foo", "kept")]);
+        let mut expected = vec![b'v', 0, 0, 0, 30, 0, 3, 0, 0, 0, 0, 0, 2];
+        expected.extend_from_slice(b"_pq_.foo\0_pq_.bar\0");
+        assert_eq!(negotiation, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn a_newer_minor_version_is_negotiated_even_with_no_option() {
+        for minor in [1u32, 2, 3, 65535] {
+            let wire = startup_wire((3 << 16) | minor, &[("user", "frank")]);
+            let (startup, negotiation) = read_startup(&wire).await.negotiated();
+            assert_eq!(startup.version(), PROTOCOL_3, "3.{minor}");
+            assert_eq!(params_of(&startup), [("user", "frank")], "3.{minor}");
+            assert_eq!(negotiation, Some(vec![b'v', 0, 0, 0, 12, 0, 3, 0, 0, 0, 0, 0, 0]), "3.{minor}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plain_protocol_3_0_startup_is_not_negotiated() {
+        let wire = hex(LIBPQ_STARTUP);
+        let before = read_startup(&wire).await;
+        let (after, negotiation) = before.clone().negotiated();
+        assert_eq!(negotiation, None);
+        assert_eq!(after, before);
+        assert_eq!(after.encode(), wire);
     }
 
     #[tokio::test]
