@@ -185,7 +185,13 @@ impl Broker {
     /// Human deployment reuses the same directory, key store and host-key policy without MCP grants.
     /// Clone the broker out of AppState before calling; the returned connector borrows only this broker.
     pub fn connector(&self) -> Connector<'_> {
-        Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref(),grants:&self.grants}
+        Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref(),grants:self.grants()}
+    }
+
+    /// The gates on grant requests that `connector()` lends to hosts. A saved database that needs a grant goes through the same ones, so
+    /// that it asks once together with the connections that need that very grant.
+    pub(crate) fn grants(&self) -> &GrantGates {
+        &self.grants
     }
 
     /// Human deployments participate in the same quit barrier, without consulting MCP policy.

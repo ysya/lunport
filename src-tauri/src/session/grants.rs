@@ -84,7 +84,8 @@ pub struct Lease<'a> {
 /// The sentence a connection gets when the lead's request took longer than `wait`.
 pub const TOO_LONG: &str = "Another connection's grant request did not finish in time; connect again.";
 const UNSETTLED: &str = "The grant request did not finish; connect again.";
-const CANCELLED: &str = "The connection was cancelled.";
+/// What a connection that was cancelled while it waited is told.
+pub(crate) const CANCELLED: &str = "The connection was cancelled.";
 
 impl GrantGates {
     /// Takes the gate of `key`: the first connection to come gets `Lead`; every later one waits until the lead settles the gate, `cancel`
@@ -193,6 +194,16 @@ pub(crate) trait GrantFailure: Clone {
     fn waited_on(sentence: String) -> Self;
 }
 
+impl GrantFailure for String {
+    fn sentence(&self) -> String {
+        self.clone()
+    }
+
+    fn waited_on(sentence: String) -> String {
+        sentence
+    }
+}
+
 /// A grace for a service that is slow to see a new grant: for how long after a grant became active a refusal that the grant's absence
 /// may explain is tried again rather than reported (IAP can take about 1½ minutes to see a grant), and how long between tries.
 #[derive(Clone, Copy, Debug)]
@@ -275,6 +286,8 @@ pub(crate) struct CurrentGrant {
     pub granted_at: Option<SystemTime>,
     /// Whether it was given within `RECENT_GRANT` of `now`.
     pub recent: bool,
+    /// When its access ends (`pam::active_span`); `None` for a grant PAM did not date.
+    pub until: Option<SystemTime>,
 }
 
 /// The first of the route's entitlements (`pam`, in `project`) that `account` holds a grant in flight on, and what the freshest of that
@@ -288,9 +301,11 @@ pub(crate) fn current_grant(gcp: &dyn GcpClient, account: Option<&str>, project:
         if current.is_empty() {
             continue;
         }
-        let granted_at = current.iter().filter_map(|grant| pam::granted_at(grant, now)).max();
+        let freshest = current.iter().filter_map(|grant| pam::granted_at(grant, now).map(|at| (at, *grant))).max_by_key(|(at, _)| *at);
+        let granted_at = freshest.map(|(at, _)| at);
         let recent = granted_at.is_some_and(|granted| now.duration_since(granted).map_or(true, |age| age <= RECENT_GRANT));
-        return Ok(Some(CurrentGrant { granted_at, recent }));
+        let until = freshest.map(|(_, grant)| pam::active_span(grant, now, pam.duration_secs).1);
+        return Ok(Some(CurrentGrant { granted_at, recent, until }));
     }
     Ok(None)
 }
@@ -349,5 +364,23 @@ mod tests {
         assert!(matches!(gates.enter(key("slow"), &cancelled, Duration::from_secs(5)), Entry::Outcome(Err(text)) if text == CANCELLED));
         assert_eq!(gates.waiting(), 0);
         let _ = HostId::from("unused");
+    }
+
+    #[test]
+    fn the_default_grace_is_two_minutes_in_steps_of_ten_seconds() {
+        let grace = Grace::default();
+        assert_eq!((grace.span, grace.step), (Duration::from_secs(120), Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn a_pause_lasts_its_span_and_a_cancelled_connection_does_not_wait_it_out() {
+        let cancel = CancelToken::default();
+        let started = Instant::now();
+        assert!(pause(&cancel, Duration::from_millis(30)));
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        cancel.cancel();
+        let started = Instant::now();
+        assert!(!pause(&cancel, Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

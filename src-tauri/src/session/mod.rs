@@ -44,6 +44,7 @@ pub mod pam;
 pub mod transports;
 pub mod tunnels;
 pub mod databases;
+pub(crate) mod database_access;
 pub mod embedded;
 pub mod auth;
 pub(crate) mod credential_approval;

@@ -38,15 +38,17 @@ pub struct GrantNeed {
 impl GrantNeed {
     /// The refusal the person reads when nothing is requested: how to request a grant by hand.
     pub fn refusal_sentence(&self) -> String {
-        format!(
-            "No active Privileged Access Manager grant for {} on {}. Request one (for example gcloud pam grants create --entitlement={} --requested-duration=30m --justification=\"…\" --location={} --project={}) and connect again.",
-            self.entitlements.join(" or "),
-            self.project,
-            self.entitlement,
-            self.location,
-            self.project
-        )
+        refusal_sentence(&self.entitlements, &self.entitlement, &self.location, &self.project)
     }
+}
+
+/// The refusal the person reads when nothing is requested for a grant on `entitlement` (the one requested, the first of `entitlements`,
+/// any of which would do) in `location` of `project`: how to request a grant by hand.
+pub fn refusal_sentence(entitlements: &[String], entitlement: &str, location: &str, project: &str) -> String {
+    format!(
+        "No active Privileged Access Manager grant for {} on {project}. Request one (for example gcloud pam grants create --entitlement={entitlement} --requested-duration=30m --justification=\"…\" --location={location} --project={project}) and connect again.",
+        entitlements.join(" or ")
+    )
 }
 
 /// A grant that was requested (or found) and is active: when it was given and when it ends.
