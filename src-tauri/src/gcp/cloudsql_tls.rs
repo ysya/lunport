@@ -229,6 +229,7 @@ mod tests {
     use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::server::WebPkiClientVerifier;
+    use rustls::sign::SingleCertAndKey;
     use rustls::{ProtocolVersion, SupportedProtocolVersion};
     use std::net::Ipv4Addr;
     use std::sync::OnceLock;
@@ -309,10 +310,21 @@ mod tests {
         alpn: Option<Vec<u8>>,
     }
 
-    /// A TLS server on 127.0.0.1 that speaks `versions`, presents `cert`, and requires a client certificate from `client_ca`, as Cloud SQL
-    /// does. It takes one connection, answers its first four bytes with `pong` and reports what it saw, or why the connection failed.
+    /// A TLS server on 127.0.0.1 that speaks `versions`, presents `cert` and signs with its `key`, and requires a client certificate from
+    /// `client_ca`, as Cloud SQL does. It takes one connection, answers its first four bytes with `pong` and reports what it saw, or why the
+    /// connection failed.
     async fn serve(
         (cert, key): (CertificateDer<'static>, PrivateKeyDer<'static>),
+        client_ca: &Authority,
+        versions: &[&'static SupportedProtocolVersion],
+    ) -> (SocketAddr, oneshot::Receiver<io::Result<Seen>>) {
+        let certified = CertifiedKey::from_der(vec![cert], key, &rustls::crypto::aws_lc_rs::default_provider()).expect("the key is the certificate's");
+        serve_as(certified, client_ca, versions).await
+    }
+
+    /// `serve` with the certificate and the key it signs with given as they are, whether or not the key is the certificate's.
+    async fn serve_as(
+        certified: CertifiedKey,
         client_ca: &Authority,
         versions: &[&'static SupportedProtocolVersion],
     ) -> (SocketAddr, oneshot::Receiver<io::Result<Seen>>) {
@@ -324,8 +336,7 @@ mod tests {
             .with_protocol_versions(versions)
             .unwrap()
             .with_client_cert_verifier(client_verifier)
-            .with_single_cert(vec![cert], key)
-            .unwrap();
+            .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified)));
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -403,12 +414,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_common_name_that_only_begins_with_the_instance_is_rejected() {
+        let (server_ca, client_ca) = (authority("Server CA"), authority("Client CA"));
+        // `orders-pg2` begins with `orders-pg`, the instance's name: only the exact common name may pass.
+        let (address, _seen) = serve(server_cert(&server_ca, None, "acme-prod-123456:orders-pg2"), &client_ca, &[&rustls::version::TLS13]).await;
+        let error = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(None)).await.err().expect("another instance's certificate is refused");
+        assert!(
+            matches!(tls_error(&error), Some(rustls::Error::InvalidCertificate(CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. }))),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_certificate_from_another_ca_is_rejected_without_the_name_fallback() {
         let (server_ca, client_ca, stranger) = (authority("Server CA"), authority("Client CA"), authority("Another CA"));
         // Everything about this certificate is right but its issuer, the common name included.
         let (address, _seen) = serve(server_cert(&stranger, Some(DNS_NAME), INSTANCE_CN), &client_ca, &[&rustls::version::TLS13]).await;
         let error = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(None)).await.err().expect("a certificate from another CA is refused");
         assert!(matches!(tls_error(&error), Some(rustls::Error::InvalidCertificate(CertificateError::UnknownIssuer))), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_does_not_hold_the_certificate_key_is_rejected() {
+        let (server_ca, client_ca) = (authority("Server CA"), authority("Client CA"));
+        // The instance's own certificate, right in every way, but the handshake is signed with another key: whoever copied the certificate
+        // cannot sign for it.
+        let (cert, _key) = server_cert(&server_ca, Some(DNS_NAME), INSTANCE_CN);
+        let other = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KeyPair::generate().unwrap().serialize_der()));
+        let other = rustls::crypto::aws_lc_rs::sign::any_supported_type(&other).unwrap();
+        let (address, _seen) = serve_as(CertifiedKey::new(vec![cert], other), &client_ca, &[&rustls::version::TLS13]).await;
+        let error = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(Some(DNS_NAME))).await.err().expect("a signature by another key is refused");
+        assert!(matches!(tls_error(&error), Some(rustls::Error::InvalidCertificate(CertificateError::BadSignature))), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -467,6 +503,7 @@ mod tests {
         .await;
         let error = dialled.expect("the dial ends at its own limit").err().expect("a silent listener is no TLS server");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert_eq!(error.to_string(), format!("The TLS handshake with Cloud SQL at {address} did not finish within 300ms."));
     }
 
     #[test]
