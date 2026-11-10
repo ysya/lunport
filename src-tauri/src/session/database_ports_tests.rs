@@ -296,6 +296,15 @@ impl App {
         }
     }
 
+    /// Whether the port ended the connection, with an ErrorResponse before or without one: what comes is read to its end.
+    fn ended(&mut self) -> bool {
+        let mut rest = Vec::new();
+        match self.0.read_to_end(&mut rest) {
+            Ok(_) => rest.first().is_none_or(|kind| *kind == b'E'),
+            Err(error) => matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe),
+        }
+    }
+
     /// Sends `bytes` through the port and expects them back: the fake Cloud SQL sends back what it gets.
     fn round_trip(&mut self, bytes: &[u8]) {
         self.send(bytes);
@@ -601,6 +610,20 @@ fn the_65th_connection_is_refused_with_53300() {
 }
 
 #[test]
+fn a_cancel_request_on_a_full_port_is_closed_without_dialling() {
+    let upstream = fake();
+    let ports = DatabasePorts::new(upstream.clone());
+    let port = running(&ports, &orders());
+    let _apps: Vec<App> = (0..MAX_PORT_CONNECTIONS).map(|_| App::connect(port)).collect();
+    wait_until("64 connections are open", || ports.live(ID).connections == 64);
+    let mut cancel = App::connect(port);
+    cancel.send(&cancel_request());
+    assert!(cancel.closed());
+    assert_eq!(upstream.dialled.load(Ordering::SeqCst), 0, "Cloud SQL was not dialled");
+    assert!(upstream.received().is_empty());
+}
+
+#[test]
 fn open_connections_survive_a_failed_refresh() {
     let upstream = fake();
     let ports = DatabasePorts::new(upstream.clone());
@@ -639,7 +662,8 @@ fn stopping_closes_every_connection_and_frees_the_port() {
     wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
     assert!(relaying.closed(), "a session in progress");
     assert!(silent.closed(), "an app that had not signed in");
-    assert!(asking.closed(), "an app waiting for its connection to be prepared");
+    // Its preparing gives up when the port stops, and it may be refused for that before its connection is closed.
+    assert!(asking.ended(), "an app waiting for its connection to be prepared");
     wait_until("the preparing was cancelled with the port", || upstream.cancelled.load(Ordering::SeqCst) == 1);
     assert_eq!(ports.live(ID), DatabaseLive::default());
     assert!(!ports.running(ID));

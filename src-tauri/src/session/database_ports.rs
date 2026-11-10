@@ -727,9 +727,13 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
     let deadline = tokio::time::Instant::now() + sign_in_within;
     let startup = match tokio::time::timeout_at(deadline, opening(&mut app)).await {
         Ok(Ok(Opening::Startup(startup))) => startup,
-        // A cancel request is passed on however many connections are open, as PostgreSQL takes one: it is over at once, and it may be the
-        // way out of a query that holds a slot.
-        Ok(Ok(Opening::Cancel(request))) => return pass_on_cancel(upstream.as_ref(), &port.db.id, &request).await,
+        // A cancel request takes a slot as any connection does: it needs no password, and it dials Cloud SQL. Without one it is closed.
+        Ok(Ok(Opening::Cancel(request))) => {
+            if slot.is_some() {
+                pass_on_cancel(upstream.as_ref(), &port.db.id, &request).await;
+            }
+            return;
+        }
         Ok(Err(error)) => return refuse_unreadable(&mut app, &error).await,
         Err(_) => return,
     };
