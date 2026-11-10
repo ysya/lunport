@@ -38,6 +38,9 @@ so dispatch scripts and Rust caches continue to work.
 - The Linux upgrade check runs for changes to its script and to the identity data it reads
   (`scripts/identity.mjs`, `scripts/legacy-identity.json`). The Rust tests compare
   `scripts/legacy-identity.json` with `legacy_identity`, so it runs the native suites too.
+- The archived 1.2.0 group-order compatibility build runs when group-order writing
+  or its compatibility harness changes. Other native changes use the current Rust
+  suites without compiling the archived application again.
 - `scripts/windows-console-helper.mjs` and `scripts/identity.mjs` run the Windows suite,
   whose console helper step builds the helper the way the Windows builds do.
 - The macOS credential checks run for changes to the frozen helpers and their scripts, to

@@ -52,12 +52,12 @@ function withoutTauriCommandRegistration(text) {
 }
 
 export function selectChecks(files, readRevision, force = false) {
-  const checks = { frontend: force, native: force, profiles: force, packages: force, credentials: force, windows: force };
+  const checks = { frontend: force, native: force, profiles: force, packages: force, credentials: force, windows: force, group_compat: force };
   for (const path of files) {
     // CI policy edits exercise all routes once. Other workflow edits belong to
     // their own checks, rather than recompiling the app for a release label.
     if (/^scripts\/ci-changes(?:\.test-node)?\.mjs$/.test(path) || /^\.github\/workflows\/test-(engine|windows)\.yml$/.test(path)) {
-      checks.frontend = checks.native = checks.profiles = checks.credentials = true;
+      checks.frontend = checks.native = checks.profiles = checks.credentials = checks.group_compat = true;
     }
     if (/\.md$/.test(path)) continue;
     let versionOnly = false;
@@ -93,6 +93,10 @@ export function selectChecks(files, readRevision, force = false) {
     if (/^src-tauri\/(?:build\.rs|tauri(?:\.dev)?\.conf\.json|tests\/app_profile_build\.rs|src\/(?:app_profile|identity|legacy_identity|write_policy)\.rs)$/.test(path) || path.startsWith("src-tauri/src/sync/central/") || path.startsWith("vendor/tauri-runtime-wry/")) checks.profiles = true;
     // The Rust tests compare legacy_identity with scripts/legacy-identity.json; the Linux upgrade check reads it and scripts/identity.mjs.
     if (path.startsWith("src-tauri/") || path.startsWith("vendor/tauri-runtime-wry/") || /^scripts\/(validate-group-order-compat\.sh|compat\/|validate-windows-startup\.ps1|legacy-identity\.json$)/.test(path)) checks.native = true;
+    // The archived 1.2.0 fixture is a separate Cargo build. Run it only when the
+    // group-order writer or its compatibility harness changes.
+    if (/^scripts\/(?:validate-group-order-compat\.sh|compat\/group-order-v1\.2\.rs)$/.test(path)
+      || /^src-tauri\/src\/sync\/(?:group_order|record_(?:groups|merge|library|runtime|commands))(?:\.rs$|\/)/.test(path)) checks.group_compat = true;
     if (/^src-tauri\/(tauri.*\.json$|icons\/|installers\/)/.test(path) || /^scripts\/(validate-linux-rebrand\.py|identity\.mjs|legacy-identity\.json)$/.test(path) || path === ".github/workflows/rebrand-package-check.yml") checks.packages = true;
     // The macOS credential checks also read the values the app pins the frozen helpers to (identity.rs, legacy_identity.rs), the app
     // identifier their production-signed test clients are signed with (tauri.conf.json), and the identity values their scripts read

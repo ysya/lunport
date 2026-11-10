@@ -5,7 +5,7 @@ import { cargoLockVersion, selectChecks, validateVersions, withoutVersion } from
 import { cratePackageName } from "./identity.mjs";
 import { setCargoPackageVersion } from "./set-app-version.mjs";
 
-const unchanged = { frontend: false, native: false, profiles: false, packages: false, credentials: false, windows: false };
+const unchanged = { frontend: false, native: false, profiles: false, packages: false, credentials: false, windows: false, group_compat: false };
 // The application crate's package name, which ci-changes.mjs finds in Cargo.lock.
 const PACKAGE = cratePackageName(readFileSync("src-tauri/Cargo.toml", "utf8"));
 const noRead = () => { throw new Error("not a version-only change"); };
@@ -56,11 +56,24 @@ test("Tauri command registration changes do not repeat release-profile builds", 
 test("missing version files run checks, docs skip builds, manual runs force all routes", () => {
   assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], noRead), { ...unchanged, native: true, profiles: true, packages: true, credentials: true });
   assert.deepEqual(selectChecks(["README.md", "src-tauri/signing/README.md"], noRead), unchanged);
-  assert.deepEqual(selectChecks([], noRead, true), { frontend: true, native: true, profiles: true, packages: true, credentials: true, windows: true });
-  assert.deepEqual(selectChecks(["scripts/ci-changes.mjs"], noRead), { ...unchanged, frontend: true, native: true, profiles: true, credentials: true });
+  assert.deepEqual(selectChecks([], noRead, true), { frontend: true, native: true, profiles: true, packages: true, credentials: true, windows: true, group_compat: true });
+  assert.deepEqual(selectChecks(["scripts/ci-changes.mjs"], noRead), { ...unchanged, frontend: true, native: true, profiles: true, credentials: true, group_compat: true });
   assert.equal(selectChecks(["scripts/validate-windows-startup.ps1"], noRead).native, true);
   assert.equal(selectChecks(["src-tauri/Cargo.lock"], noRead).credentials, true);
   assert.equal(selectChecks(["scripts/build-macos-release.sh"], noRead).credentials, true);
+});
+
+test("the archived group-order compatibility build runs only for its inputs", () => {
+  assert.equal(selectChecks(["src-tauri/src/ssh/russh_engine.rs"], noRead).group_compat, false);
+  for (const path of [
+    "scripts/compat/group-order-v1.2.rs",
+    "scripts/validate-group-order-compat.sh",
+    "src-tauri/src/sync/record_groups.rs",
+    "src-tauri/src/sync/record_groups/mod.rs",
+    "src-tauri/src/sync/record_merge.rs",
+  ]) {
+    assert.equal(selectChecks([path], noRead).group_compat, true, path);
+  }
 });
 
 // The Linux upgrade check, the Windows suite and the macOS credential scripts read scripts/identity.mjs; the Linux and macOS checks and
