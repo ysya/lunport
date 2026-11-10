@@ -130,7 +130,7 @@ export async function checkPasskeyBrowser({
     };
     const first = await begin();
     await page.getByRole("button", { name: "Create an account", exact: true }).click();
-    await page.getByLabel("Email (account name)").fill("owner@homelab.test");
+    await page.getByLabel("Email (account name)").fill("owner@example.com");
     await page
       .getByRole("button", {
         name: "Create an account with a passkey",

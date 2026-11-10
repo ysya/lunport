@@ -22,7 +22,7 @@ on:
           - macos-latest
           - windows-latest
       args:
-        description: "Extra tauri build args (e.g. --target aarch64-apple-darwin)"
+        description: "Extra tauri build args (e.g. --target aarch64-apple-darwin). On Windows, --target breaks the MSI build: src-tauri/installers/main.wxs includes legacy.wxi by a path relative to target/release/wix/<arch>"
         required: false
         default: ""
 
@@ -32,12 +32,6 @@ permissions:
 jobs:
   build:
     runs-on: ${{ inputs.platform }}
-    env:
-      # Added to the args of a Windows build that has the console helper, as the Windows leg of release.yml has it: bundles sshelter-cli.exe
-      # (step "Build the console helper") next to sshelter.exe. The JSON reaches tauri whole only because it has no backslash and no cmd
-      # metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so it must never get a Windows path or
-      # any of % & ^ | < > ( ).
-      WINDOWS_HELPER_ARGS: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}'
     steps:
       # Betas have a dash in their tag (vX.Y.Z-N). This workflow builds the tag's commit without
       # the beta version stamp (scripts/set-app-version.mjs, applied by beta.yml only), so its
@@ -56,6 +50,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
+
+      # This workflow's own build scripts beside the tag's tree: the tag may be older than they are. They read the names they need from
+      # the tree they build. The list is the helper script and the modules it imports (scripts/windows-console-helper.test-node.mjs).
+      - name: Check out this workflow's build scripts
+        if: inputs.platform == 'windows-latest'
+        uses: actions/checkout@v7
+        with:
+          path: .workflow-scripts
+          sparse-checkout: |
+            scripts/identity.mjs
+            scripts/windows-console-helper.mjs
+          sparse-checkout-cone-mode: false
 
       - name: Install Linux dependencies
         if: startsWith(inputs.platform, 'ubuntu')
@@ -85,18 +91,13 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      # The console helper sshelter-cli.exe, as in release.yml (its comment says why it is built this way). A tag from before the helper
-      # has no src-tauri/cli-helper: its Windows installers are built as they were then.
+      # The console helper, as in release.yml, by this workflow's script for the tag's tree, under the name the helper has there. A tag
+      # from before the helper has no src-tauri/cli-helper: its Windows installers are built as they were then.
       - name: Build the console helper (Windows)
         id: helper
         if: inputs.platform == 'windows-latest' && hashFiles('src-tauri/cli-helper/Cargo.toml') != ''
         shell: bash
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          cargo build --release --locked --manifest-path src-tauri/cli-helper/Cargo.toml
-          mkdir -p src-tauri/binaries
-          cp src-tauri/cli-helper/target/release/sshelter-cli.exe src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe
+        run: node .workflow-scripts/scripts/windows-console-helper.mjs --root .
 
       - name: Install frontend dependencies
         run: pnpm install
@@ -123,4 +124,4 @@ jobs:
         with:
           releaseId: ${{ steps.target-release.outputs.id }}
           tagName: ${{ inputs.tag }}
-          args: ${{ inputs.args }} ${{ steps.helper.outcome == 'success' && env.WINDOWS_HELPER_ARGS || '' }}
+          args: ${{ inputs.args }} ${{ steps.helper.outputs.args }}

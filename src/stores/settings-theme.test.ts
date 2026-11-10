@@ -5,7 +5,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 function storage(state: Record<string, unknown>) {
   let saved = JSON.stringify({ state, version: 0 });
   vi.stubGlobal("window", { localStorage: {
-    getItem: (key: string) => key === "sshelter-settings" ? saved : null,
+    getItem: (key: string) => key === "lunport-settings" ? saved : null,
     setItem: (_key: string, value: string) => { saved = value; },
     removeItem: () => {},
   } });

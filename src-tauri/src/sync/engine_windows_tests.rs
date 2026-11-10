@@ -83,7 +83,7 @@ fn synced_library_startup_and_concurrent_tray_updates() {
     let state_before = std::fs::read(&device.env().state_path).unwrap();
     // The CI-only GUI smoke script starts the real Development executable from this public,
     // encrypted fixture. Never export the in-memory credential store alongside it.
-    if let Some(path) = std::env::var_os("SSHELTER_TEST_SYNCED_STATE_OUT") {
+    if let Some(path) = std::env::var_os("LUNPORT_TEST_SYNCED_STATE_OUT") {
         std::fs::write(path, &state_before).unwrap();
     }
 

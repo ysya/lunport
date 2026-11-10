@@ -19,7 +19,7 @@ const status: McpStatus = {
     requested_by: ["observed-process"], requester_id: "42", client_info: { name: "claimed-client", title: null, version: "1" },
     at_ms: 1, completed_at_ms: 2, outcome: "allowed", ended: "disconnected", exit_code: null, signal: null, detail: null,
   }],
-  executable: "/fixture/sshelter", last_client_at_ms: null,
+  executable: "/fixture/lunport", last_client_at_ms: null,
 };
 function render(overview = recordOverview(), data: McpStatus = status) {
   const client = new QueryClient();

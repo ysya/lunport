@@ -4,10 +4,15 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { cratePackageName } from "./identity.mjs";
 import { setCargoPackageVersion } from "./set-app-version.mjs";
 
+// The application crate's package name: the root package of its Cargo.lock.
+const APPLICATION_PACKAGE = cratePackageName(readFileSync(new URL("../src-tauri/Cargo.toml", import.meta.url), "utf8"));
+const escaped = text => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 export function cargoLockVersion(text, replacement) {
-  const match = /\[\[package\]\]\r?\nname = "sshelter"\r?\nversion = "([^"]+)"/.exec(text);
+  const match = new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "${escaped(APPLICATION_PACKAGE)}"\\r?\\nversion = "([^"]+)"`).exec(text);
   assert.ok(match, "Cargo.lock must contain the application package");
   return replacement === undefined ? match[1] : text.replace(match[0], match[0].replace(`version = "${match[1]}"`, `version = "${replacement}"`));
 }
@@ -25,7 +30,7 @@ export function withoutVersion(path, text) {
 }
 
 export function selectChecks(files, readRevision, force = false) {
-  const checks = { frontend: force, native: force, packages: force, credentials: force };
+  const checks = { frontend: force, native: force, packages: force, credentials: force, windows: force };
   for (const path of files) {
     // CI policy edits exercise all routes once. Other workflow edits belong to
     // their own checks, rather than recompiling the app for a release label.
@@ -43,9 +48,15 @@ export function selectChecks(files, readRevision, force = false) {
     }
     if (versionOnly) continue;
     if (/^(src\/|public\/|tests\/browser\/|patches\/|index\.html$|package\.json$|pnpm-(lock|workspace)\.yaml$|vite\.config\.|tsconfig)/.test(path)) checks.frontend = true;
-    if (path.startsWith("src-tauri/") || /^scripts\/(validate-group-order-compat\.sh|compat\/|validate-windows-startup\.ps1)/.test(path)) checks.native = true;
-    if (/^src-tauri\/(tauri.*\.json$|icons\/|installers\/)/.test(path) || path === "scripts/validate-linux-rebrand.py" || path === ".github/workflows/rebrand-package-check.yml") checks.packages = true;
-    if (/^src-tauri\/(Cargo\.(toml|lock)$|build\.rs$|signing\/|src\/(macos_credential|secrets\.rs))/.test(path) || /^scripts\/.*macos/.test(path) || /^\.github\/workflows\/(macos-keychain-check|release|beta)\.yml$/.test(path)) checks.credentials = true;
+    // The Rust tests compare legacy_identity with scripts/legacy-identity.json; the Linux upgrade check reads it and scripts/identity.mjs.
+    if (path.startsWith("src-tauri/") || /^scripts\/(validate-group-order-compat\.sh|compat\/|validate-windows-startup\.ps1|legacy-identity\.json$)/.test(path)) checks.native = true;
+    if (/^src-tauri\/(tauri.*\.json$|icons\/|installers\/)/.test(path) || /^scripts\/(validate-linux-rebrand\.py|identity\.mjs|legacy-identity\.json)$/.test(path) || path === ".github/workflows/rebrand-package-check.yml") checks.packages = true;
+    // The macOS credential checks also read the values the app pins the frozen helpers to (identity.rs, legacy_identity.rs), the app
+    // identifier their production-signed test clients are signed with (tauri.conf.json), and the identity values their scripts read
+    // (scripts/identity.mjs, which reads those files, and scripts/legacy-identity.json).
+    if (/^src-tauri\/(Cargo\.(toml|lock)$|build\.rs$|tauri\.conf\.json$|signing\/|src\/(macos_credential|secrets\.rs|(legacy_)?identity\.rs$))/.test(path) || /^scripts\/(.*macos|identity\.mjs$|legacy-identity\.json$)/.test(path) || /^\.github\/workflows\/(macos-keychain-check|release|beta)\.yml$/.test(path)) checks.credentials = true;
+    // The Windows suite, which native changes run anyway, builds the console helper with the Windows builds' script.
+    if (/^scripts\/(windows-console-helper|identity)\.mjs$/.test(path)) checks.windows = true;
   }
   return checks;
 }

@@ -1,5 +1,5 @@
-//! The local IPC endpoint on Windows: a named pipe per role, `\\.\pipe\sshelter-<role>-<the first 16 hex digits of the SHA-256 of the
-//! user's SID string>` (the key vault's `sshelter-agent-…`, its spec §4.4 and §5.1; the session broker's `sshelter-session-…`, own-ssh
+//! The local IPC endpoint on Windows: a named pipe per role, `\\.\pipe\lunport-<role>-<the first 16 hex digits of the SHA-256 of the
+//! user's SID string>` (the key vault's `lunport-agent-…`, its spec §4.4 and §5.1; the session broker's `lunport-session-…`, own-ssh
 //! spec §4). Every instance's DACL grants the current user alone and remote clients are refused; the first instance carries
 //! `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name another program holds is not served (spec §11; another Lunport is stopped before that, by
 //! `server::take_lock`). Only std and windows-sys.
@@ -133,11 +133,13 @@ fn user_sid() -> io::Result<String> {
     }
 }
 
-/// The pipe name of a role (`agent`, `session`): `sshelter-<role>-<the first 16 hex digits of the SHA-256 of the user's SID string>`
-/// (key vault spec §4.4, own-ssh spec §4). The same every time for a user, and another user's is another name.
+/// The pipe name of a role (`agent`, `session`): `lunport-<role>-<the first 16 hex digits of the SHA-256 of the user's SID string>`, where
+/// `lunport` is the pipe prefix of the build's identity (key vault spec §4.4, own-ssh spec §4). The same every time for a user, and
+/// another user's is another name.
 pub fn pipe_name_for(role: &str) -> io::Result<String> {
     let digest = Sha256::digest(user_sid()?.as_bytes());
-    Ok(format!("sshelter-{role}-{}", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()))
+    let prefix = crate::identity::current().pipe_prefix;
+    Ok(format!("{prefix}-{role}-{}", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()))
 }
 
 /// The bytes of a SID; `None` for a null or malformed one. Two SIDs are equal exactly when their bytes are (the fields `EqualSid`
@@ -194,15 +196,20 @@ fn served_by_user(owner: Option<&[u8]>, user: &[u8]) -> bool {
     owner == Some(user)
 }
 
-/// The role a pipe or listener name stands for, which names the pipe in messages: `agent` in `sshelter-agent` and
-/// `sshelter-agent-<hex>`, `session` in `sshelter-session-<hex>`.
+/// The role a pipe or listener name stands for, which names the pipe in messages: `agent` in `lunport-agent` and
+/// `lunport-agent-<hex>`, `session` in `lunport-session-<hex>`. The names begin with the prefix of the build's identity: a pipe's with
+/// `pipe_prefix`, a listener thread's with `thread_prefix`.
 fn role_in(name: &str) -> &str {
-    let rest = name.strip_prefix("sshelter-").unwrap_or(name);
+    let identity = crate::identity::current();
+    let rest = [identity.pipe_prefix, identity.thread_prefix]
+        .into_iter()
+        .find_map(|prefix| name.strip_prefix(prefix)?.strip_prefix('-'))
+        .unwrap_or(name);
     rest.split('-').next().unwrap_or(rest)
 }
 
 /// Why `connect` refused the pipe `name`: another program made it.
-fn not_sshelters(name: &str) -> io::Error {
+fn not_lunports(name: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, format!(r"Another program is using Lunport's {} pipe (\\.\pipe\{name})", role_in(name)))
 }
 
@@ -483,7 +490,7 @@ pub fn connect(name: &str, busy_wait: Duration) -> io::Result<PipeStream> {
             // The name comes from the user's SID, which is no secret: any local program can make a pipe of that name while Lunport does
             // not serve it (unlike the socket, which lives in a directory only the user can enter). Refused, it is closed unused.
             if !served_by_user(pipe_owner(&pipe).as_deref(), &user_sid_bytes()?) {
-                return Err(not_sshelters(name));
+                return Err(not_lunports(name));
             }
             return PipeStream::new(pipe);
         }
@@ -565,7 +572,7 @@ pub(crate) fn accept(pipe: &OwnedHandle) -> io::Result<Option<u32>> {
 }
 
 /// Takes the lock in `dir`, opens `\\.\pipe\<name>` and hands every connection, as a `PipeStream`, to `handle` on a thread of its own
-/// (`dispatch`). The listener's own thread is named `thread` (`sshelter-agent`, `sshelter-session`). Another Lunport holds the lock →
+/// (`dispatch`). The listener's own thread is named `thread` (`lunport-agent`, `lunport-session`). Another Lunport holds the lock →
 /// `OtherInstance`; the name is held by another program (or the pipe cannot be made) → an error.
 pub fn listen(dir: &Path, name: &str, thread: &str, handle: Handler) -> Result<Started, AppError> {
     // What the messages call this pipe: `agent`, `session`.
@@ -655,7 +662,7 @@ mod tests {
     fn the_pipe_name_is_stable_hex_from_the_user() {
         let name = pipe_name_for("agent").unwrap();
         assert_eq!(name, pipe_name_for("agent").unwrap());
-        let hex = name.strip_prefix("sshelter-agent-").unwrap();
+        let hex = name.strip_prefix("lunport-agent-").unwrap();
         assert_eq!(hex.len(), 16);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -664,21 +671,21 @@ mod tests {
     #[test]
     fn each_role_has_its_own_pipe_named_after_the_user() {
         let agent = pipe_name_for("agent").unwrap();
-        let hex = agent.strip_prefix("sshelter-agent-").unwrap();
-        assert_eq!(pipe_name_for("session").unwrap(), format!("sshelter-session-{hex}"));
+        let hex = agent.strip_prefix("lunport-agent-").unwrap();
+        assert_eq!(pipe_name_for("session").unwrap(), format!("lunport-session-{hex}"));
     }
 
     #[test]
     fn serves_a_client_and_a_second_agent_does_not_start() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");
-        let name = format!("sshelter-test-{}", std::process::id());
+        let name = format!("lunport-test-{}", std::process::id());
         let (tx, rx) = mpsc::channel();
-        assert_eq!(listen(&agent, &name, "sshelter-agent", echoing(tx.clone())).unwrap(), Started::Running);
+        assert_eq!(listen(&agent, &name, "lunport-agent", echoing(tx.clone())).unwrap(), Started::Running);
         let mut client = std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\{name}")).unwrap();
         assert_eq!(ping(&mut client), PONG);
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(std::process::id()));
-        assert_eq!(listen(&agent, &name, "sshelter-agent", echoing(tx)).unwrap(), Started::OtherInstance);
+        assert_eq!(listen(&agent, &name, "lunport-agent", echoing(tx)).unwrap(), Started::OtherInstance);
     }
 
     /// 只有 `ERROR_ACCESS_DENIED`(`FILE_FLAG_FIRST_PIPE_INSTANCE` 遇到已經存在的名稱時回的錯誤)才說名稱被別的程式佔用;其他錯誤不是。
@@ -696,18 +703,18 @@ mod tests {
     #[test]
     fn a_pipe_name_someone_else_holds_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let name = format!("sshelter-squat-{}", std::process::id());
+        let name = format!("lunport-squat-{}", std::process::id());
         let security = OwnerOnly::new().unwrap();
         let _squatter = create_instance(&wide_pipe_path(&name), &security, true, PIPE_UNLIMITED_INSTANCES).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let err = listen(&dir.path().join("agent"), &name, "sshelter-agent", echoing(tx)).unwrap_err().to_string();
+        let err = listen(&dir.path().join("agent"), &name, "lunport-agent", echoing(tx)).unwrap_err().to_string();
         assert!(err.contains("Another program"), "{err}");
     }
 
     /// A pipe name no other test uses (the tests of a run share one process).
     fn fresh_name(what: &str) -> String {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        format!("sshelter-{what}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst))
+        format!("lunport-{what}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst))
     }
 
     /// A client connected through a listener, and the server's end of that connection, which the handler hands over. The directory holds
@@ -720,7 +727,7 @@ mod tests {
         let handler: Handler = Arc::new(move |stream, _pid| {
             let _ = tx.lock().unwrap().send(stream);
         });
-        assert_eq!(listen(&dir.path().join("ipc"), &name, "sshelter-pipetest", handler).unwrap(), Started::Running);
+        assert_eq!(listen(&dir.path().join("ipc"), &name, "lunport-pipetest", handler).unwrap(), Started::Running);
         let client = connect(&name, Duration::from_secs(5)).expect("the listener serves the pipe");
         let server = rx.recv_timeout(Duration::from_secs(5)).expect("the handler was given the connection");
         (client, server, dir)
@@ -850,7 +857,7 @@ mod tests {
     /// Fix round 1 (security): only a pipe the user owns is Lunport's; one of another owner, or one whose owner cannot be read, is not,
     /// and the refusal says which pipe another program is using.
     #[test]
-    fn only_a_pipe_the_user_owns_is_sshelters() {
+    fn only_a_pipe_the_user_owns_is_lunports() {
         let user = user_sid_bytes().unwrap();
         assert!(served_by_user(Some(user.as_slice()), &user), "the user's own pipe");
         let mut other = user.clone();
@@ -858,10 +865,28 @@ mod tests {
         assert!(!served_by_user(Some(other.as_slice()), &user), "another owner (another last sub-authority)");
         assert!(!served_by_user(Some(&user[..user.len() - 4]), &user), "another owner (a shorter SID)");
         assert!(!served_by_user(None, &user), "an owner that could not be read");
-        let refused = not_sshelters("sshelter-session-0123456789abcdef");
+        let refused = not_lunports("lunport-session-0123456789abcdef");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(refused.to_string(), r"Another program is using Lunport's session pipe (\\.\pipe\sshelter-session-0123456789abcdef)");
-        assert_eq!((role_in("sshelter-agent"), role_in("sshelter-agent-0123456789abcdef")), ("agent", "agent"));
+        assert_eq!(refused.to_string(), r"Another program is using Lunport's session pipe (\\.\pipe\lunport-session-0123456789abcdef)");
+        assert_eq!((role_in("lunport-agent"), role_in("lunport-agent-0123456789abcdef")), ("agent", "agent"));
+    }
+
+    /// The role of a pipe or listener name is what follows the prefix of the build's identity: a pipe's name begins with `pipe_prefix`, a
+    /// listener thread's with `thread_prefix`. A name from before the rename, or one that begins with neither, is not stripped.
+    #[test]
+    fn role_in_strips_the_current_prefix() {
+        let identity = crate::identity::current();
+        for prefix in [identity.pipe_prefix, identity.thread_prefix] {
+            assert_eq!(role_in(&format!("{prefix}-agent")), "agent");
+            assert_eq!(role_in(&format!("{prefix}-agent-0123456789abcdef")), "agent");
+            assert_eq!(role_in(&format!("{prefix}-session-0123456789abcdef")), "session");
+        }
+        assert_eq!(role_in(&crate::identity::thread_name("session")), "session");
+        assert_eq!(role_in(&pipe_name_for("session").unwrap()), "session");
+        // A name without the prefix is read from its start.
+        assert_eq!(role_in("agent"), "agent");
+        let old = crate::legacy_identity::current().pipe_prefix;
+        assert_eq!(role_in(&format!("{old}-session-0123456789abcdef")), old);
     }
 
     /// Fix round 1 (security): the pipe's name comes from the user's SID, which is no secret, and any local program can make a pipe of

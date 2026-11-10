@@ -1,6 +1,6 @@
 # Using Lunport
 
-Lunport is your SSH workspace for hosts, keys and Groups, formerly named SSHelter. Download the current Stable from [Releases](https://github.com/ysya/lunport/releases/latest). Existing SSHelter installations retain their data, credentials and command-line integrations through the rename.
+Lunport is your SSH workspace for hosts, keys and Groups. Download the current Stable from [Releases](https://github.com/ysya/lunport/releases/latest).
 
 ## Your host library
 
@@ -92,7 +92,7 @@ Devices running Lunport 1.13.0-1 or earlier stop syncing a library once it holds
 
 A dropped network connection is reconnected inside the tunnel for up to 15 minutes; the SSH session survives it as long as its keepalive allows (with the host's defaults, 30 s × 3 missed, about a minute and a half), and when the tunnel ends the connection says why.
 
-The command-line entry point remains `sshelter connect <host>` through the rename. Windows terminals use `sshelter-cli.exe`, installed beside `sshelter.exe`. Saved MCP commands keep working with these executable names.
+The command-line entry point is `lunport connect <host>`. Windows terminals use `lunport-cli.exe`, installed beside `lunport.exe`.
 
 ## Import and manage keys
 
@@ -138,7 +138,7 @@ Open **Settings → AI access**, enable access and choose the hosts or Groups a 
 
 **Configured** means the settings were saved, not that the client is connected. Start a new Codex or Claude Code session, or quit and reopen Claude Desktop, to load the server. Cursor and VS Code finish installation in their own UI. **Refresh status** checks the local settings again; **Repair setup** can update an existing Lunport entry. A conflicting server name, malformed settings or a managed settings symlink is left untouched, with manual setup available.
 
-For another agent, open **Manual setup & other agents**. Copy or export the JSON `mcpServers` configuration, Codex TOML or VS Code JSON. The same area provides the executable path and `--mcp` argument separately, plus optional Codex/Claude Code terminal commands. These configurations connect a local stdio MCP client on this computer. New configurations register the server as `lunport` and export as `lunport-mcp.json`, `lunport-mcp.toml` or `lunport-vscode-mcp.json`. Existing `sshelter` registrations remain supported and keep their alias and client permissions when repaired. The installed executable path can still end in `sshelter` or `sshelter.exe`; use the actual path shown by the app.
+For another agent, open **Manual setup & other agents**. Copy or export the JSON `mcpServers` configuration, Codex TOML or VS Code JSON. The same area provides the executable path and `--mcp` argument separately, plus optional Codex/Claude Code terminal commands. These configurations connect a local stdio MCP client on this computer. They register the server as `lunport` and export as `lunport-mcp.json`, `lunport-mcp.toml` or `lunport-vscode-mcp.json`. Use the executable path shown by the app.
 
 The Records adapter uses an OS-authenticated local session broker. It can start Lunport in the background; approvals and server trust decisions appear in the app when needed.
 
@@ -175,6 +175,7 @@ Ask reviews the exact command; Auto-log only skips that review. In both modes Lu
 
 Older Lunport versions could also work directly on your OpenSSH configuration. Lunport now keeps hosts only in its own library. When it finds such a workspace, it opens on **Your existing workspace** with **Preview migration** and **Retry**.
 
+<!-- frozen-identity: the folders older versions created on users' disks keep their names -->
 The migration review reads the workspace's local files: `~/.ssh/config` and its Include files, the managed files under `~/.ssh/sshelter/`, the key files under `~/.ssh/sshelter/keys/` and the old `sync-state.json`. It copies the hosts and keys you select into the library, then switches the workspace. It deletes, moves and rewrites none of those files.
 
 A workspace that joined an account of the old chain sync is imported the same way, from its local files. That service is retired, so the account stays behind; turn on encrypted library sync with a central account afterwards. Key material, saved SSH passwords and trust approvals need separate review.
@@ -187,13 +188,15 @@ Connections use Lunport's engine and bundled console helper. They need neither W
 
 **Settings → Updates** shows the installed version, release notes, download progress and Stable/Beta channel. Switching from Beta to Stable keeps the installed version until a newer stable version is available. Installing an update restarts the app and ends active sessions.
 
-On macOS, an old `SSHelter.app` installation is renamed to `Lunport.app` when the updated app starts. The old path remains a compatibility link, so existing absolute MCP and CLI commands keep working. An enabled launch-at-login entry is updated to the new path; a disabled entry stays disabled. Credentials and library data retain their existing identity. macOS may request installation permission once. A cancelled or incomplete rename can be retried in **Settings → About → Finish the Lunport rename**, without reinstalling. A conflicting app at the destination is never overwritten.
+Lunport asks `lunport.ysya.dev` for updates first, which redirects to the release manifests on GitHub, and asks GitHub directly when that address cannot be reached or answers with an error. Either way, an update installs only with Lunport's signature.
+
+On macOS, an app bundle installed under an earlier name is moved to `Lunport.app` when the updated app starts, leaving a link at the old path; macOS may request installation permission once. A cancelled or incomplete move can be retried in **Settings → About → Finish the Lunport rename**, without reinstalling. A conflicting app at the destination is never overwritten.
 
 **Settings → About** contains the Lunport identity, installed version, project, releases, issues and license links. On macOS, **Lunport → About Lunport** also opens the native panel. Local diagnostic logs are available in **Settings → Diagnostics** in Records, or **Discovery & checks** in Legacy.
 
 ### Recover host settings from an old local workspace
 
-In **Import**, choose the old Lunport `sync-state.json`, review the hosts, then confirm. On macOS, the original file is `~/Library/Application Support/org.homelab.sshelter/sync-state.json`; switching servers preserves it while the new workspace lives in a separate `server-workspace-*` folder. Choose the original file on any device that still has the host cache. The old relay does not need to be available.
+In **Import**, choose the old Lunport `sync-state.json`, review the hosts, then confirm. On macOS, the original file is `~/Library/Application Support/dev.ysya.lunport/sync-state.json`; switching servers preserves it while the new workspace lives in a separate `server-workspace-*` folder. Choose the original file on any device that still has the host cache. The old relay does not need to be available.
 
 This restores host aliases, addresses, users, ports, jumps, timeouts, tags and notes. Groups retain their hierarchy, defaults and host membership. The import uses new local host and Group identities and preserves the source file. Assign new SSH keys in the host editor and confirm server fingerprints when connecting; old account state, key material and trust approvals are excluded. After reviewing the local hosts, finish encrypted library setup to sync them to the new account.
 

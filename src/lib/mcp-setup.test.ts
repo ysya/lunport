@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MCP_SERVER_ID, mcpSetupCommand, mcpSetupConfig } from "./mcp-setup";
 
 describe("portable MCP setup", () => {
-  const executable = "/Applications/Lunport.app/Contents/MacOS/sshelter";
+  const executable = "/Applications/Lunport.app/Contents/MacOS/lunport";
 
   it("exports the same adapter for Claude, Cursor and other mcpServers clients", () => {
     expect(JSON.parse(mcpSetupConfig(executable))).toEqual({
@@ -17,7 +17,7 @@ describe("portable MCP setup", () => {
   });
 
   it("keeps Windows paths and quotes literal in JSON and TOML", () => {
-    const path = 'C:\\Users\\A "quoted" name\\Lunport\\sshelter.exe';
+    const path = 'C:\\Users\\A "quoted" name\\Lunport\\lunport.exe';
     expect(JSON.parse(mcpSetupConfig(path)).mcpServers[MCP_SERVER_ID].command).toBe(path);
     expect(mcpSetupConfig(path, "toml")).toContain(`command = ${JSON.stringify(path)}\n`);
   });
@@ -30,12 +30,12 @@ describe("portable MCP setup", () => {
   });
 
   it("does not expand PowerShell variables, backticks or apostrophes", () => {
-    expect(mcpSetupCommand("C:\\O'Brien $env:HOME `x\\sshelter.exe", "codex", "windows"))
-      .toBe("codex mcp add lunport -- 'C:\\O''Brien $env:HOME `x\\sshelter.exe' --mcp");
+    expect(mcpSetupCommand("C:\\O'Brien $env:HOME `x\\lunport.exe", "codex", "windows"))
+      .toBe("codex mcp add lunport -- 'C:\\O''Brien $env:HOME `x\\lunport.exe' --mcp");
   });
 
   it("quotes apostrophes and shell syntax literally for POSIX manual setup", () => {
-    expect(mcpSetupCommand("/tmp/O'Brien $(touch ignored)/sshelter", "codex", "macos"))
-      .toBe("codex mcp add lunport -- '/tmp/O'\\''Brien $(touch ignored)/sshelter' --mcp");
+    expect(mcpSetupCommand("/tmp/O'Brien $(touch ignored)/lunport", "codex", "macos"))
+      .toBe("codex mcp add lunport -- '/tmp/O'\\''Brien $(touch ignored)/lunport' --mcp");
   });
 });

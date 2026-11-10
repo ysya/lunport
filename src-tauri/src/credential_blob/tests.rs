@@ -5,7 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{borrow::Cow, collections::BTreeMap, sync::Mutex};
 
 #[derive(Default)]
 pub(crate) struct Fixture {
@@ -24,17 +24,48 @@ struct State {
     fail_delete: bool,
     fail_cleanup: bool,
     entry_on_blob_read: Option<(String, Vec<u8>)>,
+    /// What every read of a DPAPI file fails with: another process holding it open, say.
+    blob_read_error: Option<std::io::ErrorKind>,
+    /// The Windows error every decryption fails with (`dpapi_failure`).
+    unprotect_error: Option<u32>,
 }
 pub(crate) struct Slot<'a> {
     fixture: &'a Fixture,
-    account: &'a str,
+    account: Cow<'a, str>,
 }
 impl Fixture {
     pub(crate) fn slot<'a>(&'a self, account: &'a str) -> Slot<'a> {
         Slot {
             fixture: self,
-            account,
+            account: Cow::Borrowed(account),
         }
+    }
+    /// The slot of the entry named `name`: several services' entries side by side in one store, over one folder of DPAPI files.
+    pub(crate) fn slot_named(&self, name: String) -> Slot<'_> {
+        Slot {
+            fixture: self,
+            account: Cow::Owned(name),
+        }
+    }
+    /// How many DPAPI files the store holds.
+    pub(crate) fn files(&self) -> usize {
+        self.state.lock().unwrap().blobs.len()
+    }
+    /// The names of the entries the store holds.
+    pub(crate) fn entry_names(&self) -> Vec<String> {
+        self.state.lock().unwrap().entries.keys().cloned().collect()
+    }
+    /// Removes every DPAPI file, as when the folder was lost and its entries were not.
+    pub(crate) fn remove_files(&self) {
+        self.state.lock().unwrap().blobs.clear();
+    }
+    /// Makes every read of a DPAPI file fail with an I/O error of `kind` (`None`: they read again).
+    pub(crate) fn fail_file_reads(&self, kind: Option<std::io::ErrorKind>) {
+        self.state.lock().unwrap().blob_read_error = kind;
+    }
+    /// Makes every decryption fail with the Windows error `code` (`None`: they decrypt again).
+    pub(crate) fn fail_decryption(&self, code: Option<u32>) {
+        self.state.lock().unwrap().unprotect_error = code;
     }
 }
 impl Backend for Slot<'_> {
@@ -43,7 +74,7 @@ impl Backend for Slot<'_> {
         if std::mem::take(&mut s.fail_next_read) {
             return Err(invalid());
         }
-        Ok(s.entries.get(self.account).cloned().map(Zeroizing::new))
+        Ok(s.entries.get(self.account.as_ref()).cloned().map(Zeroizing::new))
     }
     fn set_entry(&self, value: &[u8]) -> Result<(), AppError> {
         if value.len() > NATIVE_BYTES {
@@ -53,7 +84,7 @@ impl Backend for Slot<'_> {
         if s.fail_entry {
             return Err(invalid());
         }
-        s.entries.insert(self.account.into(), value.into());
+        s.entries.insert(self.account.to_string(), value.into());
         if s.readback_error {
             s.fail_next_read = true;
         }
@@ -67,7 +98,7 @@ impl Backend for Slot<'_> {
         if s.fail_delete {
             return Err(invalid());
         }
-        s.entries.remove(self.account);
+        s.entries.remove(self.account.as_ref());
         Ok(())
     }
     fn protect(&self, value: &[u8], entropy: &[u8]) -> Result<Vec<u8>, AppError> {
@@ -89,6 +120,9 @@ impl Backend for Slot<'_> {
         Ok(out)
     }
     fn unprotect(&self, value: &[u8], entropy: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        if let Some(code) = self.fixture.state.lock().unwrap().unprotect_error {
+            return Err(dpapi_failure(code));
+        }
         if value.len() < 40 {
             return Err(invalid());
         }
@@ -106,6 +140,9 @@ impl Backend for Slot<'_> {
     }
     fn read_blob(&self, name: &str, limit: usize) -> Result<Vec<u8>, AppError> {
         let mut s = self.fixture.state.lock().unwrap();
+        if let Some(kind) = s.blob_read_error {
+            return Err(std::io::Error::new(kind, "the file is in use by another process").into());
+        }
         if let Some((account, entry)) = s.entry_on_blob_read.take() {
             s.entries.insert(account, entry);
             s.blobs.remove(name);
@@ -328,4 +365,40 @@ fn an_observed_concurrent_commit_retries_the_new_pointer_after_old_file_cleanup(
         get(&slot, SERVICE, ACCOUNT).unwrap().as_deref(),
         Some(value.as_str())
     );
+}
+
+#[test]
+fn a_file_that_cannot_be_read_for_now_is_not_invalid() {
+    let f = Fixture::default();
+    let slot = f.slot(ACCOUNT);
+    set(&slot, SERVICE, ACCOUNT, &large()).unwrap();
+    // Another process holds the file open: a later read may pass, so the value is not damaged.
+    f.fail_file_reads(Some(std::io::ErrorKind::Other));
+    let error = get(&slot, SERVICE, ACCOUNT).unwrap_err();
+    assert!(!is_invalid(&error), "{error}");
+    assert!(!error.to_string().contains("in use by another process"), "says nothing of the file: {error}");
+    // A file that is not there can never be read.
+    f.fail_file_reads(Some(std::io::ErrorKind::NotFound));
+    assert!(is_invalid(&get(&slot, SERVICE, ACCOUNT).unwrap_err()));
+    f.fail_file_reads(None);
+    assert_eq!(get(&slot, SERVICE, ACCOUNT).unwrap().as_deref(), Some(large().as_str()));
+}
+
+#[test]
+fn only_data_dpapi_cannot_decode_is_invalid() {
+    // CryptUnprotectData reports damaged or tampered data as ERROR_INVALID_DATA (13) or ERROR_INVALID_PARAMETER (87); another failure
+    // (access denied, say) may pass.
+    assert!(is_invalid(&dpapi_failure(13)));
+    assert!(is_invalid(&dpapi_failure(87)));
+    for code in [5, 1722] {
+        let error = dpapi_failure(code);
+        assert!(!is_invalid(&error) && error.to_string().contains(&code.to_string()), "{error}");
+    }
+    let f = Fixture::default();
+    let slot = f.slot(ACCOUNT);
+    set(&slot, SERVICE, ACCOUNT, &large()).unwrap();
+    f.state.lock().unwrap().unprotect_error = Some(5);
+    assert!(!is_invalid(&get(&slot, SERVICE, ACCOUNT).unwrap_err()));
+    f.state.lock().unwrap().unprotect_error = Some(13);
+    assert!(is_invalid(&get(&slot, SERVICE, ACCOUNT).unwrap_err()));
 }

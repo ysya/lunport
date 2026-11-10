@@ -22,11 +22,28 @@ pub(crate) trait Backend {
     fn write_blob(&self, name: &str, value: &[u8]) -> Result<(), AppError>;
     fn remove_blob(&self, name: &str) -> Result<(), AppError>;
 }
+const INVALID: &str = "Protected credential data is unavailable or invalid. Local data is retained.";
 pub(crate) fn invalid() -> AppError {
-    AppError::Other(
-        "Protected credential data is unavailable or invalid. Local data is retained.".into(),
-    )
+    AppError::Other(INVALID.into())
 }
+/// Whether `error` is `invalid()`: the entry or its DPAPI file is damaged or gone, which no retry mends.
+pub(crate) fn is_invalid(error: &AppError) -> bool {
+    matches!(error, AppError::Other(message) if message == INVALID)
+}
+/// What a DPAPI call that failed with the Windows error `code` says. DPAPI reports data it cannot decode (damaged or tampered with) as
+/// `ERROR_INVALID_DATA` or `ERROR_INVALID_PARAMETER` (`CryptUnprotectData`'s documentation): that is `invalid()`. Any other failure may
+/// pass.
+pub(crate) fn dpapi_failure(code: u32) -> AppError {
+    const ERROR_INVALID_DATA: u32 = 13;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    match code {
+        ERROR_INVALID_DATA | ERROR_INVALID_PARAMETER => invalid(),
+        code => AppError::Other(format!(
+            "Protected credential data cannot be decrypted right now (Windows error {code}). Retry; local data is retained."
+        )),
+    }
+}
+const UNREADABLE_NOW: &str = "Protected credential data cannot be read right now. Retry; local data is retained.";
 fn digest(value: &[u8]) -> [u8; 32] {
     Sha256::digest(value).into()
 }
@@ -137,9 +154,14 @@ fn resolve(
     let Some(r) = reference(raw)? else {
         return legacy(raw).map(Zeroizing::new);
     };
+    // A file that is not there can never be read; one that cannot be read for now (another process holds it open, say) may be later.
     let blob = store
         .read_blob(&r.name(), r.ciphertext)
-        .map_err(|_| invalid())?;
+        .map_err(|error| match error {
+            AppError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => invalid(),
+            error if is_invalid(&error) => error,
+            _ => AppError::Other(UNREADABLE_NOW.into()),
+        })?;
     open(store, &r, &blob, service, account)
 }
 pub(crate) fn get(

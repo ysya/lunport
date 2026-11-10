@@ -50,10 +50,8 @@ jobs:
           - platform: ubuntu-26.04-arm # Linux arm64 (free on public repos)
             args: ""
           - platform: windows-latest # Windows x86_64 (NSIS installer)
-            # Bundles sshelter-cli.exe (step "Build the console helper") next to sshelter.exe. The JSON reaches tauri whole only because it
-            # has no backslash and no cmd metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so
-            # it must never get a Windows path or any of % & ^ | < > ( ).
-            args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}'
+            # The step "Build the console helper" adds the argument that bundles the helper.
+            args: ""
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
@@ -86,20 +84,13 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      # sshelter-cli.exe (src-tauri/cli-helper, std only): the console program a Windows terminal runs for Connect, which runs
-      # sshelter.exe (a GUI program) and waits for it (own-ssh spec §7.3). The Windows leg's --config adds it to bundle.externalBin:
-      # tauri build takes it from src-tauri/binaries under the target triple's name and installs it next to sshelter.exe. Plain cargo
-      # builds never look for it. The C runtime is linked in (+crt-static), as tauri build does for sshelter.exe (STATIC_VCRUNTIME): the
-      # installer carries no VC++ runtime.
+      # The console helper a Windows terminal runs for Connect: scripts/windows-console-helper.mjs builds it and puts it where tauri build
+      # bundles it from (its header says why it is built this way). The step's output `args` is what the Windows leg adds to tauri build.
       - name: Build the console helper (Windows)
+        id: helper
         if: startsWith(matrix.platform, 'windows')
         shell: bash
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          cargo build --release --locked --manifest-path src-tauri/cli-helper/Cargo.toml
-          mkdir -p src-tauri/binaries
-          cp src-tauri/cli-helper/target/release/sshelter-cli.exe src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe
+        run: node scripts/windows-console-helper.mjs
 
       - name: Install frontend dependencies
         run: pnpm install
@@ -131,14 +122,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           # Public installers ask users for their own deployed server.
-          SSHELTER_RELAY_URL: ""
+          LUNPORT_RELAY_URL: ""
         with:
           # The release already exists (created by release-please); upload assets by ID without editing its metadata.
           releaseId: ${{ steps.target-release.outputs.id }}
           tagName: ${{ needs.release-please.outputs.tag_name }}
           # The wrapper verifies the App and updater archive before the action uploads them.
           tauriScript: ${{ startsWith(matrix.platform, 'macos') && 'bash scripts/build-macos-release.sh' || '' }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.helper.outputs.args }}
 
       - name: Remove the temporary macOS signing keychain
         if: always() && startsWith(matrix.platform, 'macos')

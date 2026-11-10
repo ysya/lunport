@@ -8,6 +8,7 @@ use crate::sync::{
 };
 use std::collections::BTreeSet;
 
+// frozen-identity: the slug already stored in synced libraries; another slug would not find the library that exists.
 const LIBRARY_SLUG: &str = "sshelter-library";
 const DEVICE_FLAG: &str = "sync_library";
 

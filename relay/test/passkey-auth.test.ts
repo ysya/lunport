@@ -172,7 +172,7 @@ async function begin(
     redirect,
   };
 }
-async function enroll(email = `${random()}@homelab.test`) {
+async function enroll(email = `${random()}@example.com`) {
   const store = env.PASSKEY.getByName(random()),
     virtual = await authenticator(),
     flow = await begin(store);
@@ -253,7 +253,7 @@ describe("built-in Passkey authentication on actual workerd", () => {
       const store = env.PASSKEY.getByName(random()),
         virtual = await authenticator(),
         flow = await begin(store);
-      const options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@homelab.test`),
+      const options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@example.com`),
         challenge = (options.body as any).options.challenge;
       const response = await virtual.registration(
         bad === "challenge" ? encode(new Uint8Array(32)) : challenge,
@@ -345,7 +345,7 @@ describe("built-in Passkey authentication on actual workerd", () => {
     ).toBe(400);
     const another = await begin(store),
       virtual = await authenticator(),
-      options = await store.options(origin, another.id, another.key, "register", "", Date.now(), `${random()}@homelab.test`);
+      options = await store.options(origin, another.id, another.key, "register", "", Date.now(), `${random()}@example.com`);
     const finished = await store.finish(
       origin,
       another.id,
@@ -447,14 +447,14 @@ it("serves built-in login through the private ingress without an OIDC provider",
     (
       await call(
         "/v1/auth/passkey/options",
-        { flow, kind: "register", email: "browser@homelab.test" },
+        { flow, kind: "register", email: "browser@example.com" },
         { origin: "https://evil.test", "x-lunport-flow": key },
       )
     ).status,
   ).toBe(403);
   const options = await call(
     "/v1/auth/passkey/options",
-    { flow, kind: "register", email: "browser@homelab.test" },
+    { flow, kind: "register", email: "browser@example.com" },
     { origin, "x-lunport-flow": key },
   );
   expect(options.status).toBe(200);
@@ -531,7 +531,7 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
       .status,
   ).toBe(409);
   expect(
-    (await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@homelab.test`)).status,
+    (await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@example.com`)).status,
   ).toBe(403);
   const backup = await authenticator(),
     add = await store.options(origin, flow.id, flow.key, "add", managementKey);
@@ -569,7 +569,7 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
     ).status,
   ).toBe(403);
   const otherFlow = await begin(store),
-    otherOptions = await store.options(origin, otherFlow.id, otherFlow.key, "register", "", Date.now(), `${random()}@homelab.test`),
+    otherOptions = await store.options(origin, otherFlow.id, otherFlow.key, "register", "", Date.now(), `${random()}@example.com`),
     other = await authenticator();
   const otherResponse = await other.registration(
     (otherOptions.body as any).options.challenge,
@@ -656,7 +656,7 @@ it("allows only one concurrent code exchange and expires codes, access tokens an
   ).toBeNull();
   const flow = await begin(store),
     virtual = await authenticator(),
-    options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@homelab.test`);
+    options = await store.options(origin, flow.id, flow.key, "register", "", Date.now(), `${random()}@example.com`);
   const result = await store.finish(
     origin,
     flow.id,
@@ -680,7 +680,7 @@ it("allows only one concurrent code exchange and expires codes, access tokens an
     ).status,
   ).toBe(401);
   const expired = await begin(store),
-    expiredOptions = await store.options(origin, expired.id, expired.key, "register", "", Date.now(), `${random()}@homelab.test`);
+    expiredOptions = await store.options(origin, expired.id, expired.key, "register", "", Date.now(), `${random()}@example.com`);
   const completed = await store.finish(
     origin,
     expired.id,

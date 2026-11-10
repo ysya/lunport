@@ -6,11 +6,11 @@ runs release-please and builds installers only when a release PR is merged.
 
 | Workflow | When | Responsibility |
 | --- | --- | --- |
-| CI - App | Every PR; manual full run | Version consistency, CI policy tests and workflow syntax; frontend tests/build for UI changes; macOS and Linux Rust/SSH tests for native changes |
-| CI - Windows | Every PR (Windows suites for native changes); manual | Windows Rust/SSH, console, GUI startup and one native tray smoke test |
-| CI - macOS credentials | Every PR (suites for credential/signing/build scripts or Rust dependencies); manual | Disposable Keychain authorization, frozen helper transport/recovery, signed universal app and updater |
+| CI - App | Every PR; manual full run | Version consistency, CI policy and identity tests, the identity guard and workflow syntax; frontend tests/build for UI changes; macOS and Linux Rust/SSH tests for native changes |
+| CI - Windows | Every PR (Windows suites for native changes and the console helper scripts); manual | Windows Rust/SSH, console, GUI startup and one native tray smoke test |
+| CI - macOS credentials | Every PR (suites for credential/signing/build scripts, the identity files the frozen helpers are pinned to, the identity data the scripts read, `tauri.conf.json` or Rust dependencies); manual | Disposable Keychain authorization, frozen helper transport/recovery, signed universal app and updater |
 | CI - Relay | Relay paths; manual | Relay tests, deployed update script and self-host integration |
-| Packages - Linux upgrade | Installer, icon or meaningful Tauri config changes; manual | DEB/RPM packaging and upgrade from published SSHelter |
+| Packages - Linux upgrade | Installer, icon, meaningful Tauri config, upgrade check or identity data changes; manual | DEB/RPM packaging and upgrade from the published 1.14.4 |
 | Packages - Windows upgrade (manual) | Explicit dispatch | NSIS/MSI contents and upgrade; supports reuse of verified candidates |
 | Release - Stable | Push to main; manual | Release PR/tag, signed installers and update channels |
 | Release - Beta (manual) | Explicit version and notes | Beta installers and update channel |
@@ -28,6 +28,16 @@ so dispatch scripts and Rust caches continue to work.
 - Rust changes run native suites without rebuilding the UI. Changes spanning both
   areas run both. Rust dependency changes also run credential checks.
 - Docs changes run the inexpensive policy/version/workflow check.
+- The Linux upgrade check runs for changes to its script and to the identity data it reads
+  (`scripts/identity.mjs`, `scripts/legacy-identity.json`). The Rust tests compare
+  `scripts/legacy-identity.json` with `legacy_identity`, so it runs the native suites too.
+- `scripts/windows-console-helper.mjs` and `scripts/identity.mjs` run the Windows suite,
+  whose console helper step builds the helper the way the Windows builds do.
+- The macOS credential checks run for changes to the frozen helpers and their scripts, to
+  the identity files that pin the helpers (`src-tauri/src/identity.rs`,
+  `src-tauri/src/legacy_identity.rs`), to the identity data the scripts read
+  (`scripts/identity.mjs`, `scripts/legacy-identity.json`) and to `src-tauri/tauri.conf.json`,
+  whose bundle identifier the test clients are signed with.
 
 ## Required checks and auto-merge
 
@@ -50,11 +60,50 @@ merges a PR once every required check passes; administrators can still merge pas
   deliberate direct push without a PR, dispatch the affected checks explicitly.
 
 The policy has Node-only regression tests, including release version changes,
-dependency/configuration changes, missing files and manual runs:
+dependency/configuration changes, missing files and manual runs. They also check that each
+workflow passes the selection on under its own name and that every job condition reads one
+it declares, since a misspelt output skips the job and a skipped required job reports as
+passing:
 
 ```sh
 node --test scripts/ci-changes.test-node.mjs
 ```
+
+The same job keeps identity values in one place. `scripts/identity-guard.test-node.mjs`
+scans every file git tracks and fails on a name from before 2.0 outside the places
+`scripts/identity-guard.mjs` allows.
+`scripts/identity.test-node.mjs` checks what `scripts/identity.mjs` reads from the Tauri
+configurations, the console helper's crate, `src-tauri/src/identity.rs` and the frozen helper
+manifests;
+`scripts/windows-console-helper.test-node.mjs` checks the step every Windows build uses to
+bundle the console helper; `scripts/legacy-identity.test-node.mjs` checks that the NSIS
+and WiX includes and `scripts/legacy-identity.json` hold the same earlier installer
+identity for both profiles. Every Node script test runs locally with:
+
+```sh
+node --test scripts/*.test-node.mjs
+```
+
+## Update endpoints
+
+The Tauri updater tries its endpoints in order. Stable (`plugins.updater.endpoints` in
+`src-tauri/tauri.conf.json`) asks `https://lunport.ysya.dev/update/stable.json`, then
+`https://github.com/ysya/lunport/releases/latest/download/latest.json`. Beta
+(`BETA_ENDPOINTS` in `src-tauri/src/updater_channel.rs`) asks
+`https://lunport.ysya.dev/update/beta.json`, then
+`https://github.com/ysya/lunport/releases/download/updater-beta/latest.json`. The two
+ysya.dev URLs redirect to those GitHub manifests, so releases and `scripts/beta-channel.mjs`
+keep publishing `latest.json` on GitHub only. Installs before 2.0 ask GitHub directly, so the
+GitHub manifests stay where they are. Every update is verified against the updater public
+key in the Tauri configuration, whichever URL served it.
+
+tauri-plugin-updater (2.10.1) moves on to the next endpoint only after a network error, an
+error status, or a JSON answer that is not an update manifest. Any other successful answer
+ends the check: a body that is not JSON ends it with an error, and `204 No Content` ends it
+with no update. GitHub is therefore the fallback for an outage of the domain (it does not
+resolve, cannot be reached or answers with an error), not for a parked or reused domain,
+whose page answers `200`. Keep `ysya.dev` registered and the `lunport.ysya.dev` redirect
+rules in place: every release from 2.0 asks it first.
 
 ## Tray and Keychain regressions
 

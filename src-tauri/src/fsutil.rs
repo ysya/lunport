@@ -17,7 +17,30 @@ pub(crate) fn check_write(path: &Path) -> Result<(), AppError> {
 }
 
 pub(crate) fn check_write_io(path: &Path) -> std::io::Result<()> {
-    current_write_policy()?.check(path)
+    let policy = current_write_policy()?;
+    match ROOT_MOVE.with(|legacy| legacy.borrow().clone()) {
+        Some(legacy) => policy.check_root_move(path, &legacy),
+        None => policy.check(path),
+    }
+}
+
+thread_local! {
+    /// The data root of the identity before the rename, while this thread's identity migration moves it (`with_root_move`).
+    static ROOT_MOVE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with the development write policy's one exception, for the identity migration: besides the data root, writes may then go
+/// to `legacy`, the data root this profile had before its identity changed, and to the migration's lock and backup beside the root
+/// (`WritePolicy::check_root_move`). Only this thread, only during `f`. Production writes are not restricted either way.
+pub(crate) fn with_root_move<T>(legacy: &Path, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ROOT_MOVE.with(|legacy| *legacy.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(ROOT_MOVE.with(|scope| scope.replace(Some(legacy.to_path_buf()))));
+    f()
 }
 
 pub(crate) fn writes_are_confined() -> bool {
@@ -85,6 +108,74 @@ pub fn app_data_root() -> Result<PathBuf, AppError> {
         .map(|p| p.join(crate::app_profile::CURRENT.identifier()))
 }
 
+/// Renames `from` to `to`, and fails with `AlreadyExists` when something is at `to` already: a plain rename replaces a file there,
+/// and on Unix an empty directory too. A file system without an exclusive rename (Linux before 3.15, an SMB or other network volume)
+/// gets a check of `to` just before the rename, which the caller's lock has to make enough.
+pub(crate) fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let (from_c, to_c) = (CString::new(from.as_os_str().as_bytes())?, CString::new(to.as_os_str().as_bytes())?);
+        let renamed = if unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+        // RENAME_EXCL is a capability of the volume (VOL_CAP_INT_RENAME_EXCL): without it renamex_np answers ENOTSUP.
+        or_rename_if_absent(renamed, &[libc::ENOTSUP], from, to)
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let (from_c, to_c) = (CString::new(from.as_os_str().as_bytes())?, CString::new(to.as_os_str().as_bytes())?);
+        let renamed = if unsafe {
+            libc::renameat2(libc::AT_FDCWD, from_c.as_ptr(), libc::AT_FDCWD, to_c.as_ptr(), libc::RENAME_NOREPLACE)
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+        // Before 3.15 the kernel has no renameat2 (ENOSYS); some file systems refuse the flag (EINVAL).
+        or_rename_if_absent(renamed, &[libc::EINVAL, libc::ENOSYS], from, to)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        let (from, to) = (wide(from), wide(to));
+        // Without MOVEFILE_REPLACE_EXISTING the move fails when `to` exists.
+        if unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error())
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"), windows)))]
+    {
+        rename_if_absent(from, to)
+    }
+}
+
+/// An exclusive rename's result, or, when it failed only because the system cannot rename exclusively (`unsupported` errors), the
+/// rename done the checking way (`rename_if_absent`).
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+pub(crate) fn or_rename_if_absent(renamed: std::io::Result<()>, unsupported: &[i32], from: &Path, to: &Path) -> std::io::Result<()> {
+    match renamed {
+        Err(error) if error.raw_os_error().is_some_and(|code| unsupported.contains(&code)) => rename_if_absent(from, to),
+        renamed => renamed,
+    }
+}
+
+/// `rename_exclusive` where the system has no exclusive rename.
+#[cfg(not(windows))]
+fn rename_if_absent(from: &Path, to: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(to) {
+        Ok(_) => Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} exists", to.display()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::rename(from, to),
+        Err(error) => Err(error),
+    }
+}
+
 /// 確保目錄存在，且（unix）權限為 0700。不存在才建立。
 /// 僅在「建立時」設定權限；既有目錄的權限刻意不改動（避免動到使用者既有的 ~/.ssh）。
 pub fn ensure_dir_secure(dir: &Path) -> Result<(), AppError> {
@@ -138,9 +229,9 @@ pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), AppEr
 }
 
 /// 所有 config 備份的根目錄，位於任何 ssh 可見目錄之外：
-/// `dirs::data_dir()/org.homelab.sshelter/backups`
-/// （macOS: `~/Library/Application Support/org.homelab.sshelter/backups`；
-/// Linux: `~/.local/share/org.homelab.sshelter/backups`）。
+/// `dirs::data_dir()/<app id>/backups`，`<app id>` 是 `identity::current().app_id`
+/// （macOS: `~/Library/Application Support/<app id>/backups`；
+/// Linux: `~/.local/share/<app id>/backups`）。
 ///
 /// 備份絕不能放在目標檔旁邊：使用者的 `Include config.d/*` 之類 glob 會把 `.bak`
 /// 檔當成 live config，讓本 app 的 loader 和真正的 `ssh` 都讀進過期副本。
@@ -151,14 +242,17 @@ pub fn backups_root() -> Result<PathBuf, AppError> {
     let root = if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Development {
         app_data_root()?.join("backups")
     } else {
-        dirs::data_dir()
-            .ok_or_else(|| {
-                AppError::Other("cannot determine user data directory for backups".to_string())
-            })?
-            .join("org.homelab.sshelter")
-            .join("backups")
+        let data_dir = dirs::data_dir().ok_or_else(|| {
+            AppError::Other("cannot determine user data directory for backups".to_string())
+        })?;
+        backups_root_in(&data_dir, crate::identity::current())
     };
     Ok(root)
+}
+
+/// Production's backup root: `identity`'s folder inside `data_dir`, the per-user data directory.
+fn backups_root_in(data_dir: &Path, identity: &crate::identity::Identity) -> PathBuf {
+    data_dir.join(identity.app_id).join("backups")
 }
 
 /// Tests must never touch the real user data dir: one shared per-process temp root. Every test
@@ -382,6 +476,23 @@ mod tests {
         let root = backups_root().unwrap();
         let dir = backup_dir_for(Path::new("/Users/frank/.ssh/config.d/leg.config")).unwrap();
         assert_eq!(dir, root.join("Users/frank/.ssh/config.d"));
+    }
+
+    /// `backups_root()` itself answers with a scratch directory under test, so the Production
+    /// layout is checked through the function it uses in a real build.
+    #[test]
+    fn production_backups_live_under_the_app_id_in_the_user_data_dir() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let root = backups_root_in(data_dir.path(), &crate::identity::PRODUCTION);
+        assert_eq!(
+            root,
+            data_dir.path().join(crate::identity::PRODUCTION.app_id).join("backups")
+        );
+        assert!(root.ends_with("dev.ysya.lunport/backups"), "{}", root.display());
+        // The Development identity names a sibling folder, never the Production one.
+        let development = backups_root_in(data_dir.path(), &crate::identity::DEVELOPMENT);
+        assert!(development.ends_with("dev.ysya.lunport.dev/backups"), "{}", development.display());
+        assert!(!development.starts_with(&root));
     }
 
     #[test]

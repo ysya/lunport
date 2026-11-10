@@ -95,7 +95,7 @@ fn old_own_slot_uses_only_captured_managed_bytes_and_preserves_original_containe
     std::fs::write(&env.state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     let id = "1".repeat(32);
     let name = crate::sync::slot_rules::slot_file_name("old-own", &id);
-    let root = env.ssh_dir.join("sshelter/keys");
+    let root = env.ssh_dir.join("sshelter/keys"); // frozen-identity: the managed folder as it is on users' disks.
     std::fs::create_dir_all(&root).unwrap();
     let raw = crate::sync::slot_rules::test_keys::encrypted();
     std::fs::write(root.join(name), &raw).unwrap();

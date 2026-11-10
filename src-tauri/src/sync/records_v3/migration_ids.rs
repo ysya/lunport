@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+// frozen-identity: the hash domain of the host ids already minted by the v3 migration; another domain makes other ids.
 const DOMAIN: &[u8] = b"sshelter-host-migration-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

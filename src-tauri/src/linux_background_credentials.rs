@@ -31,6 +31,20 @@ pub(super) fn get(account: &str) -> Result<Option<String>, AppError> {
         .map(|value| Some(value.to_owned()))
         .map_err(|_| error())
 }
+/// The accounts saved under `service`, from the `username` attribute of its unlocked items, and how many of its items are locked, whose
+/// attributes are not read. Nothing is unlocked. The identity migration lists what an earlier version saved under its service with it.
+pub(crate) fn accounts<'s>(ss: &'s SecretService<'s>, service: &str) -> Result<(Vec<String>, usize), AppError> {
+    let failed = |error: secret_service::Error| AppError::Other(format!("Secret Service: {error}"));
+    let found = ss.search_items(HashMap::from([("service", service)])).map_err(failed)?;
+    let mut accounts = Vec::new();
+    for item in &found.unlocked {
+        let attributes = item.get_attributes().map_err(failed)?;
+        if attributes.get("service").map(String::as_str) == Some(service) {
+            accounts.extend(attributes.get("username").cloned());
+        }
+    }
+    Ok((accounts, found.locked.len()))
+}
 pub(super) fn set(account: &str, value: &str) -> Result<(), AppError> {
     if value.len() > 1024 * 1024 {
         return Err(error());

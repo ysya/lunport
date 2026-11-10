@@ -1,4 +1,4 @@
-//! `sshelter connect` over the broker's named pipe (plan 1b-3 Task 3): the loop (`run::run`) on Windows against the real broker, served
+//! `lunport connect` over the broker's named pipe (plan 1b-3 Task 3): the loop (`run::run`) on Windows against the real broker, served
 //! on a pipe of the test's own (`pipe_windows::listen`, reached with `pipe_windows::connect` as the CLI reaches it), with a fake engine
 //! and a fake console under the real `Tty`. The keys are typed into the fake console and read by the keys thread
 //! (`run::console_keys_thread`), so they go through the reads that no change of mode may span; the terminal's output goes to writers that
@@ -67,13 +67,13 @@ struct Setup {
     _dir: tempfile::TempDir,
 }
 
-/// `sshelter connect web` against a broker over `engine`, `directory` and `keychain`, served on a pipe of its own, with a fake console on
+/// `lunport connect web` against a broker over `engine`, `directory` and `keychain`, served on a pipe of its own, with a fake console on
 /// which `typed_ahead` was typed before the run began.
 fn connect(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, typed_ahead: &str) -> Setup {
     connect_pausing(engine, directory, keychain, typed_ahead, false)
 }
 
-/// `connect`, and with `pause_on_error` as `sshelter connect --pause-on-error web`.
+/// `connect`, and with `pause_on_error` as `lunport connect --pause-on-error web`.
 fn connect_pausing(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, typed_ahead: &str, pause_on_error: bool) -> Setup {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let engine = Arc::new(engine);
@@ -85,8 +85,8 @@ fn connect_pausing(engine: FakeEngine, directory: FakeDirectory, keychain: MemKe
         Arc::new(FakeConfirmer::default()) as Arc<dyn HostKeyConfirmer>,
     );
     let dir = tempfile::tempdir().unwrap();
-    let pipe = format!("sshelter-cli-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
-    assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &pipe, "sshelter-session", broker.handler()).unwrap(), Started::Running);
+    let pipe = format!("lunport-cli-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
+    assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &pipe, "lunport-session", broker.handler()).unwrap(), Started::Running);
     let stream = pipe_windows::connect(&pipe, Duration::from_secs(5)).expect("the broker serves its pipe");
     let console = FakeConsole::new();
     if !typed_ahead.is_empty() {
@@ -149,7 +149,7 @@ fn finish(setup: Setup) -> (i32, bool, Setup) {
 /// opened, which stayed in the console) reaches the shell, the shell's output reaches the console, a new window size reaches the shell,
 /// and the shell's status is the program's, with the console back at its start.
 #[test]
-fn sshelter_connect_runs_a_shell_over_the_pipe_and_exits_with_its_status() {
+fn lunport_connect_runs_a_shell_over_the_pipe_and_exits_with_its_status() {
     let setup = connect(FakeEngine::new(), pinned_web(), saved_password(), "pwd\r");
     eventually("the console to be raw", 10, || raw(&setup.console));
     eventually("what was typed ahead to reach the shell", 10, || setup.engine.events().contains(&FakeEvent::ShellInput(b"pwd\r".to_vec())));

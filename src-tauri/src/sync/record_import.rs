@@ -177,6 +177,129 @@ pub fn pending_imports(env: &SyncEnv) -> Result<Vec<PendingImport>, AppError> {
     Ok(result)
 }
 
+/// The data root moved whole from `old_root` to `root` (the identity migration renames it): a pending file import keeps the absolute
+/// paths of its source, its provenance and its key copies, and those inside the old root name the same files inside the new one now,
+/// so they are rewritten. The imports of the original workspace and of every server workspace are visited. Journals that are not a
+/// file import's are left as they are: a material import's source is not a file, and a central stage journal keeps no paths. Returns
+/// how many journals changed.
+pub(crate) fn relocate_journals(root: &Path, old_root: &Path) -> Result<usize, AppError> {
+    let mut moves = vec![(old_root.to_path_buf(), root.to_path_buf())];
+    // Canonical paths name the old root through its parent's real path; the parent is still there.
+    if let (Some(parent), Some(old_name), Some(name)) = (old_root.parent(), old_root.file_name(), root.file_name()) {
+        if let Ok(real) = parent.canonicalize() {
+            if real != parent {
+                moves.push((real.join(old_name), real.join(name)));
+            }
+        }
+    }
+    let mut changed = 0;
+    for imports in import_directories(root)? {
+        for entry in fs::read_dir(&imports)? {
+            let entry = entry?;
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if !crate::sync::slot_rules::is_slot_id(&id) || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = imports.join(&id).join("journal.json");
+            let Ok(bytes) = bounded_read(&path, MAX_JOURNAL_BYTES) else { continue };
+            let Ok(mut journal) = serde_json::from_slice::<Journal>(&bytes) else { continue };
+            if journal.source_kind != SourceKind::Files || !relocate_journal(&mut journal, &moves) {
+                continue;
+            }
+            let bytes = serde_json::to_vec_pretty(&journal).map_err(|_| failure("cannot serialize import journal"))?;
+            fsutil::atomic_write(&path, &bytes, 0o600)?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+/// The `imports` directories under `root`: the original workspace's and each server workspace's.
+fn import_directories(root: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let is_directory = |path: &Path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+    let mut directories = vec![root.join("imports")];
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("server-workspace-") {
+            directories.push(entry.path().join("imports"));
+        }
+    }
+    directories.retain(|directory| is_directory(directory) && directory.parent().is_some_and(is_directory));
+    Ok(directories)
+}
+
+/// Rewrites every path of `journal` that starts with the first path of one of `moves` to start with the second; whether any did.
+fn relocate_journal(journal: &mut Journal, moves: &[(PathBuf, PathBuf)]) -> bool {
+    let relocate = |path: &mut PathBuf| {
+        for (from, to) in moves {
+            if let Ok(rest) = path.strip_prefix(from) {
+                *path = to.join(rest);
+                return true;
+            }
+        }
+        false
+    };
+    let mut changed = relocate(&mut journal.source) | relocate(&mut journal.options.home);
+    for file in &mut journal.provenance {
+        changed |= relocate(&mut file.path) | relocate(&mut file.canonical_path);
+    }
+    for copy in journal.copies.values_mut() {
+        changed |= relocate(&mut copy.source) | relocate(&mut copy.canonical_source);
+    }
+    changed
+}
+
+/// A pending file import's journal: its source, provenance and key copy name `source` and `private`, in a journal only shaped like
+/// a real one (digests and keys are placeholders). For tests of what moves a data root.
+#[cfg(test)]
+pub(crate) fn pending_journal_for_tests(id: &str, source: &Path, private: &Path) -> Vec<u8> {
+    let placeholder = "0".repeat(64);
+    let journal = Journal {
+        version: JOURNAL_VERSION,
+        import_id: id.into(),
+        source: source.into(),
+        source_digest: placeholder.clone(),
+        source_kind: SourceKind::Files,
+        material_digests: BTreeMap::new(),
+        central_intent: None,
+        authoritative: None,
+        options: PublicOptions {
+            home: source.parent().unwrap_or(source).into(),
+            env_digest: placeholder.clone(),
+            host_ids: BTreeMap::new(),
+            group_ids: BTreeMap::new(),
+            key_ids: BTreeMap::new(),
+        },
+        provenance: vec![Provenance { path: source.into(), canonical_path: source.into(), digest: placeholder.clone() }],
+        copies: BTreeMap::from([(
+            id.to_string(),
+            KeyCopyConsent {
+                key_id: id.into(),
+                source: private.into(),
+                canonical_source: private.into(),
+                digest: placeholder,
+                public_key: String::new(),
+                fingerprint: String::new(),
+                key_type: String::new(),
+                has_passphrase: false,
+            },
+        )]),
+        hosts: Vec::new(),
+        groups: Vec::new(),
+        keys: BTreeMap::new(),
+        device_id: "0".repeat(32),
+        at_ms: 0,
+        phase: Phase::Prepared,
+        originals_captured: false,
+        original_vault_digest: None,
+        staged_vault_digest: None,
+        staged_key_account: None,
+        completed_hosts: BTreeSet::new(),
+        completed_keys: BTreeSet::new(),
+    };
+    serde_json::to_vec_pretty(&journal).unwrap()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Provenance {
@@ -812,6 +935,7 @@ pub(crate) fn publish_synced_material(
     entry.added_at_ms = at_ms;
     let material_digest = digest(entry.private_key.as_bytes());
     let mut source = Sha256::new();
+    // frozen-identity: the hash domain of the provenance digests already recorded for downloaded keys; another domain changes them.
     source.update(b"sshelter-explicit-key-download-v1");
     source.update(account.chain_id.as_bytes());
     source.update(

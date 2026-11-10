@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { LEGACY_THEME_KEY } from "@/lib/legacy-identity";
+
 afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 
 /** Persisted preferences as an older build wrote them (`version` 0), beside the standalone keys that came before the settings store. */
 function storage(state: Record<string, unknown> | null, standalone: Record<string, string> = {}) {
   let saved = state === null ? null : JSON.stringify({ state, version: 0 });
   vi.stubGlobal("window", { localStorage: {
-    getItem: (key: string) => (key === "sshelter-settings" ? saved : standalone[key] ?? null),
+    getItem: (key: string) => (key === "lunport-settings" ? saved : standalone[key] ?? null),
     setItem: (_key: string, value: string) => { saved = value; },
     removeItem: () => {},
   } });
@@ -30,8 +32,8 @@ describe("the preferred terminal", () => {
     expect(restored.getState().terminalId).toBe("iterm2");
   });
 
-  it("no longer takes the terminal from the standalone key of builds before the settings store", async () => {
-    storage(null, { "sshelter-terminal": "iterm2", "sshelter-theme": "dark" });
+  it("starts from the standalone theme of builds before the settings store, in Lunport's own terminal", async () => {
+    storage(null, { [LEGACY_THEME_KEY]: "dark" });
     const { useSettingsStore } = await import("./settings");
     expect(useSettingsStore.getState()).toMatchObject({ terminalId: "lunport", theme: "dark" });
   });

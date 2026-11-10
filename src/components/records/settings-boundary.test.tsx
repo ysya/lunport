@@ -35,7 +35,7 @@ describe("records settings compatibility", () => {
       allowed_hosts: [], allowed_groups: [],
       pending: [],
       recent: [],
-      executable: "/fixture/sshelter",
+      executable: "/fixture/lunport",
       last_client_at_ms: null,
     });
     for (const category of [

@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import { getColorTheme, type ColorThemeId } from "@/lib/color-themes";
+import { migratedLocalStorage } from "@/lib/legacy-identity";
 
 import {
   clampFontSize,
@@ -15,10 +16,7 @@ import {
 } from "@/lib/settings-logic";
 
 /** localStorage key for ALL persisted preferences (zustand persist envelope). */
-export const SETTINGS_STORAGE_KEY = "sshelter-settings";
-
-/** The pre-settings-store theme key, read ONCE as a migration seed (never written again). */
-const LEGACY_THEME_KEY = "sshelter-theme";
+export const SETTINGS_STORAGE_KEY = "lunport-settings";
 
 /**
  * The persisted envelope's version. 1 (2026-10-25): Lunport's own terminal becomes everyone's preferred terminal once, whatever an
@@ -30,23 +28,6 @@ export const SETTINGS_VERSION = 1;
 export function migrateSettings(persisted: unknown, version: number): Partial<SettingsState> {
   const state = (persisted ?? {}) as Partial<SettingsState>;
   return version < 1 ? { ...state, terminalId: IN_APP_TERMINAL } : state;
-}
-
-/**
- * One-time migration seed: if the old standalone theme key holds an explicit
- * choice, start from it; otherwise default to following the OS. The persist
- * middleware merges `sshelter-settings` (when present) OVER these seeds, so the
- * legacy keys only matter on the very first launch after the upgrade.
- */
-function legacyTheme(): ThemePref {
-  if (typeof window === "undefined") return "system";
-  try {
-    const stored = window.localStorage.getItem(LEGACY_THEME_KEY);
-    if (stored === "light" || stored === "dark") return stored;
-  } catch {
-    // localStorage unavailable — fall through.
-  }
-  return "system";
 }
 
 interface SettingsState {
@@ -113,7 +94,7 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
-      theme: legacyTheme(),
+      theme: "system",
       setTheme: (theme) => set({ theme }),
       colorTheme: "lunport",
       setColorTheme: (colorTheme) => set({ colorTheme: getColorTheme(colorTheme).id }),
@@ -156,6 +137,13 @@ export const useSettingsStore = create<SettingsState>()(
       newTabConnect: false,
       setNewTabConnect: (newTabConnect) => set({ newTabConnect }),
     }),
-    { name: SETTINGS_STORAGE_KEY, version: SETTINGS_VERSION, migrate: migrateSettings },
+    {
+      name: SETTINGS_STORAGE_KEY,
+      version: SETTINGS_VERSION,
+      migrate: migrateSettings,
+      // Builds from before the rename kept these preferences under other keys, and the theme on its own before that: the storage
+      // carries them over to the keys above as it is created, which is before `persist` reads it.
+      storage: createJSONStorage(migratedLocalStorage),
+    },
   ),
 );

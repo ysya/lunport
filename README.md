@@ -6,9 +6,7 @@
   <p><a href="https://github.com/ysya/lunport/releases/latest">Download</a> · <a href="docs/usage.md">User guide</a> · <a href="docs/development.md">Development</a> · <a href="https://github.com/ysya/lunport/issues">Issues</a></p>
 </div>
 
-Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly named **SSHelter**. It combines a local host library, a private-key vault and a built-in SSH engine with optional encrypted sync and controlled AI access through a built-in **MCP (Model Context Protocol) server**.
-
-> **Upgrading from SSHelter:** Lunport continues the same project with a new name and Folded L icon. Existing data, credentials and command-line integrations keep their established identities. Historical [SSHelter 1.0.0](https://github.com/ysya/lunport/releases/tag/v1.0.0) installers retain their original names; use [Releases](https://github.com/ysya/lunport/releases/latest) for the current Stable.
+Lunport is a desktop SSH workspace for **macOS, Windows and Linux**. It combines a local host library, a private-key vault and a built-in SSH engine with optional encrypted sync and controlled AI access through a built-in **MCP (Model Context Protocol) server**.
 
 ## A workspace for your connections
 
@@ -38,7 +36,7 @@ If the workspace cannot open, use the update controls on the error screen to che
 xattr -dr com.apple.quarantine /Applications/Lunport.app
 ```
 
-For the historical SSHelter 1.0.0 app, use `/Applications/SSHelter.app` instead. Subsequent in-app updates do not require this step again.
+Subsequent in-app updates do not require this step again.
 
 **Windows:** the installer is not code-signed, so SmartScreen may show a warning. Choose **More info → Run anyway** to proceed. In-app sessions work directly in Lunport. External connections use the installed console helper and Windows Terminal when available, otherwise Command Prompt. See [Windows integrations](docs/usage.md#windows-integrations).
 
@@ -73,7 +71,7 @@ Before enabling central sync in production:
 - [Development and release workflow](docs/development.md) — local setup, profile isolation, checks and publishing.
 - [Self-host encrypted sync](docs/central-server-configuration.md) — Cloudflare Workers or Docker Compose. The server URL starts blank; use your own deployment.
 - [Release notes](https://github.com/ysya/lunport/releases) and [changelog](CHANGELOG.md).
-- [Rename and upgrade compatibility](src-tauri/installers/README.md).
+- [Installer identity and upgrades](src-tauri/installers/README.md).
 
 ## License
 

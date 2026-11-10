@@ -65,7 +65,7 @@ pub fn cpu_time_ms() -> u128 {
 }
 
 /// The environment variable that tells a test it is the child that `rerun_alone` started.
-const CHILD_VARIABLE: &str = "SSHELTER_TEST_CHILD";
+const CHILD_VARIABLE: &str = "LUNPORT_TEST_CHILD";
 
 /// True in the process `rerun_alone` started.
 pub fn is_child() -> bool {
@@ -87,7 +87,7 @@ pub fn rerun_alone_with(name: &str, configure: impl FnOnce(&mut std::process::Co
 }
 
 /// `rerun_alone_with`, the child reading `stdin` as its standard input instead of nothing: on Windows, a console's input buffer that this
-/// process keeps a handle of too, as a shell and `sshelter-cli.exe` keep the one `sshelter connect` reads.
+/// process keeps a handle of too, as a shell and `lunport-cli.exe` keep the one `lunport connect` reads.
 #[cfg(windows)]
 pub fn rerun_alone_reading(name: &str, stdin: std::process::Stdio, configure: impl FnOnce(&mut std::process::Command)) -> String {
     rerun(name, stdin, configure)

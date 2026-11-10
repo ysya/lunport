@@ -1,5 +1,7 @@
 pub mod write_policy;
 pub mod app_profile;
+pub mod identity;
+pub mod legacy_identity;
 #[cfg(target_os = "macos")]
 mod about;
 pub mod cli;
@@ -13,6 +15,7 @@ mod error;
 mod fsutil;
 mod gcp;
 pub mod host_start;
+pub mod identity_migration;
 mod ipc;
 mod known_hosts;
 #[cfg(target_os = "macos")]
@@ -77,7 +80,7 @@ pub fn run() {
 
 /// The desktop app (main.rs).
 /// - `host`: started with `--host` (or the older `--mcp-host`) by a client that needed it: the
-///   stdio MCP adapter or `sshelter connect` (`host_start`). Closing the window hides it instead
+///   stdio MCP adapter or `lunport connect` (`host_start`). Closing the window hides it instead
 ///   of ending what the clients are using. (When Lunport already runs, such a launch hands over
 ///   without showing a window: `second_launch_shows_window`.)
 /// - `start_hidden`: see `starts_hidden`. A client's start runs in the background: no window
@@ -88,9 +91,9 @@ pub fn run_desktop(host: bool, start_hidden: bool) {
 
 /// Set to `1` by a client on the Lunport it starts (host_start.rs `host_command`).
 /// main.rs reads it, then removes it before anything else runs.
-pub const START_HIDDEN_ENV: &str = "SSHELTER_START_HIDDEN";
+pub const START_HIDDEN_ENV: &str = "LUNPORT_START_HIDDEN";
 
-/// Whether the main window starts hidden, from the value of `SSHELTER_START_HIDDEN`; nothing else
+/// Whether the main window starts hidden, from the value of `LUNPORT_START_HIDDEN`; nothing else
 /// decides it. A restart (an update's "Install & restart") reuses the arguments, the host flag
 /// included, but inherits an environment without the variable, so it comes back with its window.
 pub fn starts_hidden(value: Option<&std::ffi::OsStr>) -> bool {
@@ -110,7 +113,16 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
 pub(crate) fn show_main_window_now(app: &tauri::AppHandle) {
     if app.get_webview_window("main").is_none() {
         let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else { return; };
-        if let Err(error) = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|w| w.build()) {
+        let built = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|window| {
+            // A blocked start must not create the data root, where the WebView keeps its data on Windows and Linux, nor the macOS
+            // WebKit store that has still to move: its window is private, and what WebView2 must keep goes elsewhere.
+            if identity_migration::blocks_startup() {
+                window.incognito(true).data_directory(identity_migration::blocked_webview_directory()).build()
+            } else {
+                window.build()
+            }
+        });
+        if let Err(error) = built {
             diagnostics::tauri_error("main_window_create_failed", &error);
             #[cfg(windows)]
             diagnostics::show_startup_failure();
@@ -149,31 +161,47 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
         macos_health::request(app, macos_health::Surface::Diagnostics);
         return;
     }
-    if second_launch_shows_window(&args) {
+    // The other start ran the migration before it handed over, and may have moved what this one's left: the window hears of it, and
+    // this process restarts when that start moved a credential it reads only when it starts, or, blocked, the folders it waited for.
+    if identity_migration::refresh_after_another_start(second_launch_shows_window(&args)) {
+        app.restart();
+    }
+    // A blocked start has no broker to start: whoever launched again sees why.
+    if second_launch_shows_window(&args) || identity_migration::blocks_startup() {
         show_main_window_by_user(app);
     } else {
         session::app::start(app);
     }
 }
 
+/// The Tauri context this build embeds: `tauri.conf.json` with what `TAURI_CONFIG` merges over it (`tauri:dev` and `tauri:build:dev`
+/// pass `tauri.dev.conf.json`). Tauri keeps only part of the configuration in it, so the startup check and its tests read the
+/// configuration from here, the way the binary sees it. Tests call this instead of expanding `tauri::generate_context!` again: a
+/// Development build on macOS embeds its Info.plist under one fixed symbol, so a second expansion in the library does not compile
+/// there (`symbol _EMBED_INFO_PLIST is already defined`).
+fn embedded_context() -> tauri::Context {
+    tauri::generate_context!()
+}
+
 fn run_app(host: bool, start_hidden: bool) {
-    diagnostics::install();
+    // The data of the identity before the rename has not moved to this version's data root (main.rs ran the migration): an earlier
+    // Lunport still runs, or both roots hold data. Nothing may start that creates or writes the data root, diagnostics included; the
+    // app shows only its window, which says why and how to go on (`identity_migration_status`).
+    let blocked = identity_migration::blocks_startup();
+    if !blocked {
+        diagnostics::install();
+    }
     diagnostics::stage(diagnostics::Stage::Context);
-    let context = tauri::generate_context!();
+    let mut context = embedded_context();
     // macOS must check CoreAudio before WKWebView. Windows must catch WebView2 creation
     // errors explicitly: Tauri's automatic Ready-time creation turns them into a panic.
-    #[cfg(any(target_os = "macos", windows))]
-    let context = {
-        let mut context = context;
+    // A blocked start makes its window itself, private (`show_main_window_now`).
+    if cfg!(any(target_os = "macos", windows)) || blocked {
         for window in &mut context.config_mut().app.windows {
             window.create = false;
         }
-        context
-    };
-    app_profile::CURRENT.verify_configuration(
-        &context.config().identifier,
-        context.config().product_name.as_deref(),
-    ).expect("Lunport profile configuration mismatch");
+    }
+    app_profile::CURRENT.verify_tauri_config(context.config()).expect("Lunport profile configuration mismatch");
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -219,6 +247,11 @@ fn run_app(host: bool, start_hidden: bool) {
         .manage(tray::TrayState::default())
         .manage(quick_connect::QuickConnect::default())
         .setup(move |app| {
+            if blocked {
+                diagnostics::stage(diagnostics::Stage::Window);
+                show_main_window(app.handle());
+                return Ok(());
+            }
             #[cfg(target_os = "macos")]
             macos_install::repair_login();
             diagnostics::stage(diagnostics::Stage::Setup);
@@ -234,7 +267,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::engine::initialize(app.handle())?;
             diagnostics::stage(diagnostics::Stage::Mcp);
             mcp::initialize(app.handle(), host)?;
-            // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
+            // The session broker that `lunport connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
             diagnostics::stage(diagnostics::Stage::Broker);
             session::app::start(app.handle());
             quick_connect::initialize(app.handle());
@@ -301,6 +334,15 @@ fn run_app(host: bool, start_hidden: bool) {
             macos_install::app_installation_status,
             #[cfg(target_os = "macos")]
             macos_install::app_finish_rename,
+            identity_migration::commands::identity_migration_status,
+            identity_migration::commands::identity_migration_retry,
+            identity_migration::commands::identity_migration_retry_credentials,
+            identity_migration::commands::identity_migration_resolve_conflict,
+            identity_migration::commands::identity_migration_continue_without_moving,
+            identity_migration::commands::identity_migration_adopt_credentials,
+            identity_migration::commands::identity_migration_put_off_credentials,
+            identity_migration::commands::identity_migration_mcp_settings,
+            identity_migration::commands::identity_migration_dismiss_mcp_settings,
             quick_connect::app_set_global_hotkey,
             quick_connect::app_take_quick_connect,
             app_home_dir,
@@ -438,7 +480,7 @@ fn run_app(host: bool, start_hidden: bool) {
 mod tests {
     use super::*;
 
-    const EXE: &str = "/Applications/Lunport.app/Contents/MacOS/sshelter";
+    const EXE: &str = "/Applications/Lunport.app/Contents/MacOS/lunport";
 
     /// The decision for a second launch with these arguments.
     fn shows(list: &[&str]) -> bool {
@@ -450,7 +492,7 @@ mod tests {
     fn a_second_host_launch_shows_no_window_with_the_new_flag_or_the_old_one() {
         assert!(!shows(&[EXE, "--host"]));
         assert!(!shows(&[EXE, "--mcp-host"]));
-        assert!(!shows(&[r"C:\Lunport\sshelter.exe", "--host"]));
+        assert!(!shows(&[r"C:\Lunport\lunport.exe", "--host"]));
     }
 
     #[test]
@@ -464,6 +506,13 @@ mod tests {
         assert!(shows(&[EXE, "--host=1"]));
     }
 
+    /// Only programs of one version pass this variable to each other (a client starts the app, main.rs reads it), so it takes the
+    /// app's variable prefix without a fallback to an older name.
+    #[test]
+    fn the_hidden_start_variable_has_the_app_prefix() {
+        assert_eq!(START_HIDDEN_ENV, "LUNPORT_START_HIDDEN");
+    }
+
     #[test]
     fn only_the_hidden_start_variable_starts_the_window_hidden() {
         use std::ffi::OsStr;
@@ -474,11 +523,11 @@ mod tests {
         assert!(!starts_hidden(Some(OsStr::new("true"))));
     }
 
-    /// A normal launch, a client's start (the MCP adapter's, `sshelter connect`'s) and its restart
+    /// A normal launch, a client's start (the MCP adapter's, `lunport connect`'s) and its restart
     /// after an update: visible, hidden, visible. The environments are what each start sees;
     /// main.rs removes the variable.
     #[test]
-    fn a_restart_of_a_client_started_sshelter_shows_its_window() {
+    fn a_restart_of_a_client_started_lunport_shows_its_window() {
         use std::collections::HashMap;
         use std::ffi::OsStr;
         let hidden =

@@ -79,6 +79,45 @@ impl WritePolicy {
             Err(denied())
         }
     }
+
+    /// `check`, with the one exception a confined root has, for the identity migration while it moves `legacy`, the data root this
+    /// profile had before its identity changed, onto the root. Then `path` may also be `legacy` or inside it, the migration's lock
+    /// file beside the root (`<root>.migration.lock`), or a backup of the root (`<root>.backup-<digits>`), which the migration
+    /// makes before it puts the old data in the root's place. `legacy` has to be a directory beside the root, not a link: a link would
+    /// become the root.
+    pub fn check_root_move(&self, path: &Path, legacy: &Path) -> io::Result<()> {
+        let Self::Confined { root } = self else {
+            return Ok(());
+        };
+        if self.check(path).is_ok() {
+            return Ok(());
+        }
+        if !clean_absolute(root) || !clean_absolute(path) || !clean_absolute(legacy) {
+            return Err(denied());
+        }
+        let parent = projected(root.parent().ok_or_else(denied)?)?;
+        let name = root.file_name().ok_or_else(denied)?.to_str().ok_or_else(denied)?;
+        if projected(legacy.parent().ok_or_else(denied)?)? != parent {
+            return Err(denied());
+        }
+        let legacy = parent.join(legacy.file_name().ok_or_else(denied)?);
+        let destination = projected(path)?;
+        if destination == legacy || destination.starts_with(&legacy) {
+            return Ok(());
+        }
+        let beside = destination.parent() == Some(parent.as_path());
+        let file_name = destination.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let lock = file_name.strip_prefix(name) == Some(".migration.lock");
+        let backup = file_name
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(".backup-"))
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+        if beside && (lock || backup) {
+            Ok(())
+        } else {
+            Err(denied())
+        }
+    }
 }
 
 /// The check every guarded file write in the app runs, against the profile this library was built with: unrestricted in
@@ -98,7 +137,7 @@ mod tests {
         let root = temp.path().join("dev");
         let policy = WritePolicy::Confined { root: root.clone() };
         policy
-            .check(&root.join("sandbox-home/.ssh/sshelter/keys/new"))
+            .check(&root.join("sandbox-home/.ssh/sshelter/keys/new")) // frozen-identity: the managed folder as it is on users' disks.
             .unwrap();
         assert!(!root.exists());
     }

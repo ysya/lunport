@@ -1,9 +1,9 @@
 //! Starting Lunport in the background for a client that needs it and finds it not running (own-ssh spec §4): the MCP adapter, and
-//! `sshelter connect` from plan 1b on. Both start the same thing, the app as a host (`--host`, its window hidden), under the same two
+//! `lunport connect` from plan 1b on. Both start the same thing, the app as a host (`--host`, its window hidden), under the same two
 //! locks, so that they never start two. Moved here from `mcp.rs` unchanged, but for four things: the message for "nothing answered" is
 //! the caller's (spec §11 gives the CLI its own); the flag is `--host`, with the old `--mcp-host` still accepted (an update's
 //! "Install & restart" starts the app again with the arguments it was started with); the line it writes to stderr starts with `[host]`
-//! (not `[mcp]`); and the thread that reaps the app it started is `sshelter-host-wait` (not `sshelter-mcp-host-wait`).
+//! (not `[mcp]`); and the thread that reaps the app it started is `lunport-host-wait` (not `lunport-mcp-host-wait`).
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ pub(crate) enum SpawnLocks<G> {
 /// spawn locks and look again: a parallel call or another client may have started Lunport
 /// meanwhile. Only if still nothing answers, start Lunport once and wait for it. Several
 /// near-simultaneous starts could each claim the single instance before the others see it
-/// (macOS), and leave two SSHelters running; so when another client keeps the locks too long,
+/// (macOS), and leave two Lunports running; so when another client keeps the locks too long,
 /// look once more instead of starting a second one. `no_answer` is the error when nothing
 /// answers in the end.
 pub(crate) fn ensure_started<T, G>(
@@ -172,7 +172,7 @@ pub(crate) fn start_host() -> Result<(), String> {
         .map_err(|e| format!("cannot start Lunport desktop: {e}"))?;
     // A launch that hands over exits at once: reap it instead of leaving a zombie behind.
     let _ = thread::Builder::new()
-        .name("sshelter-host-wait".to_string())
+        .name(crate::identity::thread_name("host-wait"))
         .spawn(move || {
             let _ = host.wait();
         });
@@ -180,7 +180,7 @@ pub(crate) fn start_host() -> Result<(), String> {
 }
 
 /// `--host` decides the hand-over and keeps Lunport running when its window closes;
-/// `SSHELTER_START_HIDDEN=1` keeps the window hidden at this start only (lib.rs `starts_hidden`).
+/// `LUNPORT_START_HIDDEN=1` keeps the window hidden at this start only (lib.rs `starts_hidden`).
 fn host_command(exe: &Path) -> Command {
     let mut command = Command::new(exe);
     command
@@ -194,7 +194,7 @@ fn host_command(exe: &Path) -> Command {
 }
 
 /// Start the host outside the client's process group: an AI tool that ends its session by killing
-/// its MCP server's process group, or a terminal tab that is closed with `sshelter connect` in it,
+/// its MCP server's process group, or a terminal tab that is closed with `lunport connect` in it,
 /// must not take Lunport down with it.
 fn detach_from_client(command: &mut Command) {
     #[cfg(unix)]
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_calls_start_sshelter_once() {
+    fn parallel_calls_start_lunport_once() {
         let running = Arc::new(AtomicBool::new(false));
         let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let locks = Arc::new(Mutex::new(()));
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_lock_file_the_call_still_starts_sshelter() {
+    fn without_a_lock_file_the_call_still_starts_lunport() {
         let dir = tempfile::tempdir().unwrap();
         let not_a_dir = dir.path().join("file");
         std::fs::write(&not_a_dir, b"").unwrap();
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn a_client_starts_the_host_with_the_new_flag_and_its_window_hidden() {
         use std::ffi::OsStr;
-        let command = host_command(Path::new("/usr/bin/sshelter"));
+        let command = host_command(Path::new("/usr/bin/lunport"));
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, [OsStr::new(HOST_FLAG)]);
         let flag = command

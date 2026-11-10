@@ -1,5 +1,5 @@
 //! 金鑰保管庫檔(key roadmap 第 2 階段 spec §4.1):這台電腦持有的私鑰,存在 `sync-state.json` 旁邊的 `vault.json`。每一筆以
-//! XChaCha20-Poly1305 個別加密(AAD = `sshelter-vault-v1` + 換行 + 插槽 id),金鑰是 32 bytes 的隨機值,base64 存在系統 keychain:新的保管庫用
+//! XChaCha20-Poly1305 個別加密(AAD = `AAD_PREFIX` + 換行 + 插槽 id),金鑰是 32 bytes 的隨機值,base64 存在系統 keychain:新的保管庫用
 //! 自己的帳戶 `vault:key:<16 個 hex>`(記在檔頭的 `key_account`),計畫 1 的保管庫用 `vault:key`。私鑰原文原樣保存:有 passphrase 的仍是加密狀態(spec §5.5)。
 //! 檔頭只有格式版本、金鑰所在的 keychain 帳戶名稱與這台的 agent 設定(不含祕密)。
 //! 寫入一律原子(`slot_files::write_private`:暫存檔 → rename)、只有擁有者能讀寫:Unix 的暫存檔先設 0600 再寫;Windows 的暫存檔繼承資料夾的權限,
@@ -35,6 +35,7 @@ const VAULT_VERSION: u32 = 2;
 /// 檔頭沒有 `key_account` 的檔案(計畫 1 寫的,或之後沿用 `vault:key` 的)維持第 1 版,舊版照常開啟。有 `key_account` 的是第 2 版:舊版看到「更新版的格式」
 /// 就原地不動,不會因為在 `vault:key` 找不到金鑰而把它當成缺金鑰搬到旁邊。
 const LEGACY_VERSION: u32 = 1;
+// frozen-identity: the AAD every key already in vault.json was sealed with; a different prefix opens none of them.
 const AAD_PREFIX: &str = "sshelter-vault-v1";
 
 /// 保管庫檔的路徑:和 `sync-state.json` 同一個資料夾。
@@ -140,6 +141,10 @@ pub enum VaultError {
     Unreadable { kept_as: Option<String>, reason: String },
     /// 更新版 Lunport 寫的格式:原地不動,保管庫停用。
     Newer { version: u32 },
+    /// The vault's key is not under the current credential service, and it may still be on its way from the service the version before
+    /// the rename saved it under (`identity_migration::missing_vault_key`, asked about this vault's own key account): the vault file
+    /// stays exactly as it is, neither set aside nor started again, and opens once its key has moved.
+    CredentialsPending,
     Other(AppError),
 }
 
@@ -152,6 +157,10 @@ impl std::fmt::Display for VaultError {
             }
             VaultError::Unreadable { kept_as: None, reason } => write!(f, "the vault file is unreadable ({reason})"),
             VaultError::Newer { version } => write!(f, "the vault was written by a newer Lunport (format {version})"),
+            VaultError::CredentialsPending => write!(
+                f,
+                "the vault stays closed while its key may still move from the credentials an earlier version saved; nothing was deleted"
+            ),
             VaultError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -247,7 +256,9 @@ impl Vault {
     /// 開啟 `path` 的保管庫。檔案不存在 → 空的(什麼都不寫,金鑰也還不產生)。先只看 `version`:比本 app 新的格式原地不動,回 `Newer`。
     /// 讀不懂的檔案、或有項目卻缺它的 keychain 帳戶裡的金鑰的檔案(spec §11)不覆寫,搬到旁邊(`vault.unreadable-<ms>.json`、`vault.keyless-<ms>.json`)並回
     /// `Unreadable`;下一次開啟從空的保管庫開始,第一次 `put` 才產生新的金鑰。keychain 讀取出錯(可能只是暫時鎖著)或存的值不是 32 bytes 的 base64
-    /// 時回 `Other`,什麼都不搬。
+    /// 時回 `Other`,什麼都不搬。A key that is missing but may still move from the credential service of the version before the rename
+    /// (`identity_migration::missing_vault_key`) leaves the file as it is, entries or none: `CredentialsPending`. One that stays there
+    /// for good (it can never be read there) is missing like any other, and the reason says where it stayed.
     pub fn open(path: &Path, keychain: &dyn Keychain, now_ms: u64) -> Result<Vault, VaultError> {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -266,8 +277,20 @@ impl Vault {
             Err(e) => return Err(set_aside(path, "unreadable", now_ms, e.to_string())),
         };
         let key = read_key(keychain, file.key_account())?;
-        if key.is_none() && !file.entries.is_empty() {
-            return Err(set_aside(path, "keyless", now_ms, "the vault's key is missing from the keychain".to_string()));
+        if key.is_none() {
+            use crate::identity_migration::MissingVaultKey;
+            let reason = match crate::identity_migration::missing_vault_key(file.key_account()) {
+                // It may still be on its way from the service the version before the rename saved credentials under: until it has
+                // moved, the vault is neither set aside nor started again under a new key.
+                MissingVaultKey::MayStillMove => return Err(VaultError::CredentialsPending),
+                MissingVaultKey::LeftBehind(why) => {
+                    format!("the vault's key stays with the credentials an earlier version saved, where it can never move ({why})")
+                }
+                MissingVaultKey::Lost => "the vault's key is missing from the keychain".to_string(),
+            };
+            if !file.entries.is_empty() {
+                return Err(set_aside(path, "keyless", now_ms, reason));
+            }
         }
         Ok(Vault { path: path.to_path_buf(), key, file })
     }
@@ -1592,6 +1615,67 @@ mod tests {
         std::fs::write(&path, br#"{"version": 99, "entries": {}}"#).unwrap();
         assert!(matches!(stored_ids(&path), Err(VaultError::Newer { version: 99 })));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing was set aside");
+    }
+
+    /// A key the current credential service lacks may still be on its way from the service the version before the rename used
+    /// (`identity_migration::missing_vault_key`): the vault is then neither set aside nor started again, whether or not it holds
+    /// anything, and opens once the key is there.
+    #[test]
+    fn a_vault_whose_key_may_still_move_waits_for_it() {
+        use crate::identity_migration::{with_test_vault_guard, MissingVaultKey};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        Vault::open(&path, &keychain, 1).unwrap().put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+        let account = account_of(&path);
+        let key = keychain.get(&account).unwrap().unwrap();
+        keychain.delete(&account).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let on_its_way = |key_account: String| {
+            move |asked: &str| if asked == key_account { MissingVaultKey::MayStillMove } else { MissingVaultKey::Lost }
+        };
+        let this_vaults_key = on_its_way(account.clone());
+        let opened = with_test_vault_guard(this_vaults_key.clone(), || Vault::open(&path, &keychain, 2));
+        assert!(matches!(opened, Err(VaultError::CredentialsPending)), "{opened:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"], "nothing set aside");
+
+        // A vault that holds nothing is not started again under a new key either.
+        let empty = dir.path().join("empty").join(VAULT_FILE);
+        std::fs::create_dir(empty.parent().unwrap()).unwrap();
+        std::fs::write(&empty, format!(r#"{{"version":2,"key_account":"{account}","entries":{{}}}}"#)).unwrap();
+        let opened = with_test_vault_guard(this_vaults_key.clone(), || Vault::open(&empty, &keychain, 3));
+        assert!(matches!(opened, Err(VaultError::CredentialsPending)), "{opened:?}");
+        assert_eq!(keychain.entry(&account), None, "no key was drawn");
+
+        keychain.set(&account, &key).unwrap();
+        let vault = with_test_vault_guard(this_vaults_key, || Vault::open(&path, &keychain, 4)).unwrap();
+        assert_eq!(vault.get(&"a".repeat(32)).unwrap().unwrap().private_key, test_keys::plain());
+        // Only this vault's own key counts: another vault's key that may still move leaves this one to be set aside as before.
+        keychain.delete(&account).unwrap();
+        let another = on_its_way("vault:key:fedcba9876543210".to_string());
+        let opened = with_test_vault_guard(another, || Vault::open(&path, &keychain, 5));
+        assert!(matches!(opened, Err(VaultError::Unreadable { kept_as: Some(_), .. })), "{opened:?}");
+        // The message of a vault that waits promises no move: it may never come.
+        assert!(VaultError::CredentialsPending.to_string().contains("may still"), "{}", VaultError::CredentialsPending);
+    }
+
+    /// A key that stays under the service of the version before the rename for good (it can never be read there) is not on its way:
+    /// the vault is set aside as for any key that is missing, its file kept, and the reason says where the key stayed.
+    #[test]
+    fn a_vault_whose_key_stays_behind_for_good_is_set_aside_saying_why() {
+        use crate::identity_migration::{with_test_vault_guard, MissingVaultKey};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        Vault::open(&path, &keychain, 1).unwrap().put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+        keychain.delete(&account_of(&path)).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let left_behind = |_: &str| MissingVaultKey::LeftBehind("it can never be read: the item's data is damaged".into());
+        let opened = with_test_vault_guard(left_behind, || Vault::open(&path, &keychain, 2));
+        let Err(VaultError::Unreadable { kept_as: Some(kept_as), reason }) = opened else { panic!("{opened:?}") };
+        assert!(reason.contains("earlier version") && reason.contains("damaged"), "{reason}");
+        assert_eq!(std::fs::read(dir.path().join(kept_as)).unwrap(), saved);
     }
 
     #[test]

@@ -230,7 +230,7 @@ impl McpRuntime {
             recent,
             executable: std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "sshelter".to_string()),
+                .unwrap_or_else(|_| crate::identity::current().main_binary.to_string()),
             last_client_at_ms: (last != 0).then_some(last),
         }
     }

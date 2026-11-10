@@ -17,10 +17,10 @@ use crate::sync::record::SCHEMA_VERSION;
 #[cfg(test)]
 pub const STATE_VERSION: u32 = 1;
 
-/// 內建中繼:建置時由 CI 以 `SSHELTER_RELAY_URL` 注入。沒設定、或設成空字串(GitHub Actions 對未設定的
+/// 內建中繼:建置時由 CI 以 `LUNPORT_RELAY_URL` 注入。沒設定、或設成空字串(GitHub Actions 對未設定的
 /// repository variable 會給空字串)時分兩種模式:debug 建置退回本機 `wrangler dev`(開發用);release 建置
 /// **沒有內建中繼**(空字串)—— 需要同步的使用者在 Settings → Sync 自行填入中繼網址,填好之前不能 Create/Join。
-pub const DEFAULT_RELAY_URL: &str = default_relay_url(option_env!("SSHELTER_RELAY_URL"), cfg!(debug_assertions));
+pub const DEFAULT_RELAY_URL: &str = default_relay_url(option_env!("LUNPORT_RELAY_URL"), cfg!(debug_assertions));
 
 const LOCAL_RELAY_URL: &str = "http://127.0.0.1:8787";
 

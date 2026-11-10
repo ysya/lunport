@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
       freeze_helper:
-        description: Generate a signed fixed-helper candidate artifact for review (never publishes)
+        description: Generate a signed helper v2 candidate artifact for review (never publishes)
         type: boolean
         default: false
 permissions:
@@ -44,6 +44,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      # The scripts below read identity values through scripts/identity.mjs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -59,9 +63,19 @@ jobs:
           LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
           LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
         run: bash scripts/macos-signing.sh prepare
-      - name: Verify exact frozen artifact with two production-signed client builds
-        run: bash scripts/validate-macos-frozen-helper.sh src-tauri/signing
-      - name: Exercise production Rust transport, installer and recovery against the frozen helper
+      # Helper v1 accepts only a parent signed with the previous certificate, which only the bridge is signed with, so both are verified
+      # by their bytes, source and signature alone. They pass whatever helper v2's state.
+      - name: Verify the frozen helper v1
+        run: python3 scripts/verify-macos-credential-helper.py
+      - name: Verify the frozen credential bridge
+        run: python3 src-tauri/signing/legacy/verify-credential-bridge.py
+      # The credential migration's chain as the app runs it: its Rust session, the frozen bridge and the frozen helper v1.
+      - name: Exercise the Rust bridge session against the frozen bridge and helper v1
+        run: bash scripts/validate-macos-helper-rust.sh bridge
+      # Helper v2 keeps Production credentials.
+      - name: Verify the exact frozen helper v2 with two production-signed client builds
+        run: bash scripts/validate-macos-frozen-helper.sh v2 src-tauri/signing
+      - name: Exercise production Rust transport, installer and recovery against the frozen helper v2
         run: bash scripts/validate-macos-helper-rust.sh
       - name: Remove the temporary signing keychain
         if: always()
@@ -72,11 +86,19 @@ jobs:
     needs: changes
     if: needs.changes.outputs.credentials == 'true' && inputs.identity_only != true
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # The scripts below read identity values through scripts/identity.mjs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
       - name: Exercise immutable helper, one-time migration and client authorization
         run: bash scripts/validate-macos-helper.sh
+      # Fixture builds from source, signed with disposable certificates: the bridge -> helper v1 chain and its refusals, helper v2 and
+      # its adopt, in a disposable keychain; on this runner also which program owns the items helper v2 saves, in its login keychain.
+      - name: Exercise the credential bridge, helper v2 and adopt
+        run: bash scripts/validate-macos-bridge.sh
 
   helper-candidate:
     name: Generate helper candidate (manual)
@@ -84,22 +106,32 @@ jobs:
     needs: helper
     runs-on: macos-latest
     timeout-minutes: 10
+    env:
+      # Helper v1 is frozen with the previous certificate, which this repository no longer holds: only helper v2 can be built here.
+      HELPER_VERSION: v2
     steps:
       - uses: actions/checkout@v7
+      # The scripts below read identity values through scripts/identity.mjs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
       - name: Prepare the pinned project signing identity
         env:
           LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
           LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
         run: bash scripts/macos-signing.sh prepare
-      - name: Build a frozen universal helper candidate
-        run: bash scripts/build-macos-credential-helper.sh
+      # Both architectures, signed with the project certificate, then checked by verify-macos-credential-helper.py --version.
+      - name: Build, sign and verify a frozen universal helper candidate
+        run: bash scripts/build-macos-credential-helper.sh "$HELPER_VERSION"
       - name: Verify the exact signed production helper with both client builds
-        run: bash scripts/validate-macos-frozen-helper.sh "$RUNNER_TEMP/lunport-credential-helper-v1-candidate"
+        run: bash scripts/validate-macos-frozen-helper.sh "$HELPER_VERSION" "$RUNNER_TEMP/lunport-credential-helper-$HELPER_VERSION-candidate"
+      # The candidate: credential-helper-<version>.bin, its manifest .json and the .c it was built from, for review before they are
+      # committed.
       - uses: actions/upload-artifact@v7
         with:
           archive: true
-          name: lunport-credential-helper-v1-candidate
-          path: ${{ runner.temp }}/lunport-credential-helper-v1-candidate/
+          name: lunport-credential-helper-${{ env.HELPER_VERSION }}-candidate
+          path: ${{ runner.temp }}/lunport-credential-helper-${{ env.HELPER_VERSION }}-candidate/
           if-no-files-found: error
       - name: Remove the temporary signing keychain
         if: always()
@@ -114,6 +146,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      # The script reads identity values through scripts/identity.mjs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
       - name: Upgrade between differently built executables with a stable signer
         run: bash scripts/validate-macos-keychain.sh
 

@@ -1,4 +1,4 @@
-//! Connect module: terminal detection + per-emulator launch argv for `sshelter connect --id <host id>`.
+//! Connect module: terminal detection + per-emulator launch argv for `lunport connect --id <host id>`.
 //!
 //! Security model: the WebView has NO shell permission. All process spawning happens here in
 //! Rust. We NEVER use `sh -c`; commands are always built as argv vectors.
@@ -180,7 +180,7 @@ fn linux_args(id: &str, argv: &[String]) -> Option<Vec<String>> {
 /// or, when `new_tab` is true and the terminal supports it (iTerm2, Windows Terminal), a new TAB of the
 /// current window (falling back to a new window when none exists).
 /// PURE function. The alias is assumed pre-validated; thin wrapper over `build_launch_command`.
-/// Only the tests use it: every platform connects through `sshelter connect` (`launch_for`).
+/// Only the tests use it: every platform connects through `lunport connect` (`launch_for`).
 #[cfg(test)]
 pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
     build_launch_command(terminal_id, &["ssh".to_string(), alias.to_string()], new_tab)
@@ -338,25 +338,28 @@ fn closes_after_a_failure(terminal_id: &str) -> bool {
     !matches!(terminal_id, "terminal" | "cmd" | "wt")
 }
 
-/// The console helper installed next to `sshelter.exe` on Windows (own-ssh spec §7.3; src-tauri/cli-helper). Release `sshelter.exe` is a
-/// GUI program, which a shell does not wait for and a Windows Terminal tab gives no console; the helper is a console program that runs it
-/// with the same arguments and waits for it.
+/// The file name of the console helper installed next to `lunport.exe` on Windows (own-ssh spec §7.3; src-tauri/cli-helper). Release
+/// `lunport.exe` is a GUI program, which a shell does not wait for and a Windows Terminal tab gives no console; the helper is a console
+/// program that runs it with the same arguments and waits for it.
 #[cfg(any(windows, test))]
-const CONSOLE_HELPER: &str = "sshelter-cli.exe";
+fn console_helper() -> String {
+    format!("{}.exe", crate::identity::current().console_helper)
+}
 
 /// What a Windows terminal runs to connect (own-ssh spec §7.4): the console helper next to Lunport's executable `exe` (an installed
 /// Lunport). Without it a debug build (`debug_build`; a console program) runs `exe` itself, and a release build fails with a sentence
 /// that names the missing helper: its `exe` is a GUI program, which a terminal neither waits for nor gives a console (§7.3).
 #[cfg(any(windows, test))]
 fn connect_program(exe: &std::path::Path, debug_build: bool) -> Result<std::path::PathBuf, AppError> {
-    let helper = exe.with_file_name(CONSOLE_HELPER);
+    let name = console_helper();
+    let helper = exe.with_file_name(&name);
     if helper.is_file() {
         Ok(helper)
     } else if debug_build {
         Ok(exe.to_path_buf())
     } else {
         let dir = exe.parent().unwrap_or(exe);
-        Err(AppError::Other(format!("{CONSOLE_HELPER} is missing from {}. Reinstall Lunport.", dir.display())))
+        Err(AppError::Other(format!("{name} is missing from {}. Reinstall Lunport.", dir.display())))
     }
 }
 
@@ -389,9 +392,9 @@ mod tests {
     }
     #[test]
     fn the_connect_command_reaches_every_terminal() {
-        let argv = connect_id_argv(std::path::Path::new("/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter"), ID, false);
-        assert_eq!(argv, vec!["/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter", "connect", "--id", ID]);
-        let quoted = format!("'/Users/me/My Apps/Lunport.app/Contents/MacOS/sshelter' connect --id {ID}");
+        let argv = connect_id_argv(std::path::Path::new("/Users/me/My Apps/Lunport.app/Contents/MacOS/lunport"), ID, false);
+        assert_eq!(argv, vec!["/Users/me/My Apps/Lunport.app/Contents/MacOS/lunport", "connect", "--id", ID]);
+        let quoted = format!("'/Users/me/My Apps/Lunport.app/Contents/MacOS/lunport' connect --id {ID}");
         for new_tab in [false, true] {
             let terminal = build_launch_command("terminal", &argv, new_tab).unwrap();
             assert_eq!(terminal.args.last().unwrap(), &format!("tell application \"Terminal\" to do script \"{quoted}\""));
@@ -438,22 +441,22 @@ mod tests {
     /// with its backslash escaped.
     #[test]
     fn a_path_with_a_quote_reaches_terminal_quoted_for_the_shell_and_escaped_for_applescript() {
-        let argv = connect_id_argv(std::path::Path::new("/Users/o'neil/Apps/Lunport.app/Contents/MacOS/sshelter"), ID, false);
+        let argv = connect_id_argv(std::path::Path::new("/Users/o'neil/Apps/Lunport.app/Contents/MacOS/lunport"), ID, false);
         let spec = build_launch_command("terminal", &argv, false).unwrap();
-        assert_eq!(spec.args.last().unwrap(), &format!(r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/Lunport.app/Contents/MacOS/sshelter' connect --id {ID}""#));
+        assert_eq!(spec.args.last().unwrap(), &format!(r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/Lunport.app/Contents/MacOS/lunport' connect --id {ID}""#));
     }
 
-    /// Every platform connects through `sshelter connect`, with `--pause-on-error` where a failure would close the window (not in cmd or
+    /// Every platform connects through `lunport connect`, with `--pause-on-error` where a failure would close the window (not in cmd or
     /// Windows Terminal). On Windows the test binary has no console helper beside it, so a debug test build runs the executable itself,
     /// as a debug build of the app does; a release test build says the helper is missing.
     #[test]
-    fn the_launch_runs_sshelter_connect_on_every_platform() {
+    fn the_launch_runs_lunport_connect_on_every_platform() {
         let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
         if cfg!(windows) && cfg!(debug_assertions) {
             assert_eq!(launch_for_id("cmd", ID, false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "--id", ID]);
             assert_eq!(launch_for_id("wt", ID, true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "--id", ID]);
         } else if cfg!(windows) {
-            assert!(launch_for_id("cmd", ID, false).unwrap_err().to_string().starts_with("sshelter-cli.exe is missing from "));
+            assert!(launch_for_id("cmd", ID, false).unwrap_err().to_string().starts_with("lunport-cli.exe is missing from "));
         } else {
             assert_eq!(launch_for_id("kitty", ID, false).unwrap().args, [exe.as_str(), "connect", "--pause-on-error", "--id", ID]);
         }
@@ -471,7 +474,7 @@ mod tests {
         for id in ["terminal", "cmd", "wt"] {
             assert!(!closes_after_a_failure(id), "{id}");
         }
-        let program = std::path::Path::new("/Applications/Lunport.app/Contents/MacOS/sshelter");
+        let program = std::path::Path::new("/Applications/Lunport.app/Contents/MacOS/lunport");
         assert_eq!(connect_id_argv(program, ID, true), [program.to_str().unwrap(), "connect", "--pause-on-error", "--id", ID]);
         assert_eq!(connect_id_argv(program, ID, false), [program.to_str().unwrap(), "connect", "--id", ID]);
         if !cfg!(windows) {
@@ -488,46 +491,46 @@ mod tests {
     /// debug build alike: Windows Terminal runs it directly, in a new window or in a new tab of the last one, and cmd starts it in a new
     /// console that stays open after it; the path with a space in it stays one argument.
     #[test]
-    fn windows_terminals_run_the_console_helper_next_to_sshelter() {
+    fn windows_terminals_run_the_console_helper_next_to_lunport() {
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("Program Files").join("Lunport");
         std::fs::create_dir_all(&installed).unwrap();
-        let exe = installed.join("sshelter.exe");
+        let exe = installed.join("lunport.exe");
         std::fs::write(&exe, b"").unwrap();
-        std::fs::write(installed.join("sshelter-cli.exe"), b"").unwrap();
+        std::fs::write(installed.join("lunport-cli.exe"), b"").unwrap();
         for debug_build in [false, true] {
             let argv = connect_id_argv(&connect_program(&exe, debug_build).unwrap(), ID, false);
-            assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "--id", ID], "debug: {debug_build}");
+            assert_eq!(argv, [installed.join("lunport-cli.exe").to_string_lossy().as_ref(), "connect", "--id", ID], "debug: {debug_build}");
             assert_the_windows_launches_run(&argv);
         }
     }
 
     /// Without the console helper next to it, a debug build (a console program itself) has the terminal run Lunport's executable.
     #[test]
-    fn without_the_console_helper_a_debug_build_runs_sshelter_itself() {
+    fn without_the_console_helper_a_debug_build_runs_lunport_itself() {
         let dir = tempfile::tempdir().unwrap();
         let built = dir.path().join("my builds").join("debug");
         std::fs::create_dir_all(&built).unwrap();
-        let exe = built.join("sshelter.exe");
+        let exe = built.join("lunport.exe");
         std::fs::write(&exe, b"").unwrap();
         // A directory by the helper's name is not the helper.
-        std::fs::create_dir(built.join("sshelter-cli.exe")).unwrap();
+        std::fs::create_dir(built.join("lunport-cli.exe")).unwrap();
         let argv = connect_id_argv(&connect_program(&exe, true).unwrap(), ID, false);
         assert_eq!(argv, [exe.to_string_lossy().as_ref(), "connect", "--id", ID]);
         assert_the_windows_launches_run(&argv);
     }
 
-    /// A release build without the console helper does not hand its sshelter.exe, a GUI program, to a terminal, which would neither wait for
+    /// A release build without the console helper does not hand its lunport.exe, a GUI program, to a terminal, which would neither wait for
     /// it nor give it a console (spec §7.3): Connect fails with a sentence that names the missing file and where it should be.
     #[test]
     fn without_the_console_helper_a_release_build_says_it_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("Program Files").join("Lunport");
         std::fs::create_dir_all(&installed).unwrap();
-        let exe = installed.join("sshelter.exe");
+        let exe = installed.join("lunport.exe");
         std::fs::write(&exe, b"").unwrap();
         let error = connect_program(&exe, false).unwrap_err();
-        assert_eq!(error.to_string(), format!("sshelter-cli.exe is missing from {}. Reinstall Lunport.", installed.display()));
+        assert_eq!(error.to_string(), format!("lunport-cli.exe is missing from {}. Reinstall Lunport.", installed.display()));
     }
 
     /// Both Windows terminals run `argv` as it is: `wt.exe <argv>`, `wt.exe -w 0 nt <argv>` for a new tab, and `cmd /c start "" cmd /k

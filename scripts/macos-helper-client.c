@@ -1,4 +1,5 @@
-// Disposable macOS CI only. All credential data is a fixed public test value.
+// Disposable macOS CI only. All credential data is a fixed public test value. The script that compiles this client defines the identity
+// values of the helper under test (validate-macos-helper.sh, validate-macos-frozen-helper.sh).
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 #include <arpa/inet.h>
@@ -15,13 +16,18 @@
 #define CLIENT_VERSION "1"
 #endif
 #ifndef LUNPORT_CREDENTIAL_SERVICE
-#define LUNPORT_CREDENTIAL_SERVICE "SSHelter Development"
+#error "Define LUNPORT_CREDENTIAL_SERVICE, the service the helper under test keeps its items under"
 #endif
 static const char fixture[] = "public-immutable-helper-upgrade-fixture";
 extern int lunport_validate_credential_peer(int fd, int expected_pid, const char *required);
 #ifndef LUNPORT_HELPER_REQUIREMENT
-#define LUNPORT_HELPER_REQUIREMENT "identifier \"org.homelab.sshelter.credential-helper.v1\""
+#error "Define LUNPORT_HELPER_REQUIREMENT, the pinned requirement of the helper under test"
 #endif
+// The 8-byte magic the helper under test greets with and accepts: "LPKC0001" for helper v1, "LPKC0002" for helper v2.
+#ifndef LUNPORT_HELPER_MAGIC
+#define LUNPORT_HELPER_MAGIC "LPKC0001"
+#endif
+_Static_assert(sizeof(LUNPORT_HELPER_MAGIC) == 9, "LUNPORT_HELPER_MAGIC is 8 characters");
 static int transfer(int fd, void *buffer, size_t length, int writing) {
   unsigned char *cursor = buffer;
   while (length) {
@@ -101,7 +107,7 @@ int main(int argc, char **argv) {
   }
   close(sockets[1]);
   unsigned char hello[8];
-  int greeted = transfer(sockets[0],hello,sizeof(hello),0) && !memcmp(hello,"LPKC0001",8);
+  int greeted = transfer(sockets[0],hello,sizeof(hello),0) && !memcmp(hello,LUNPORT_HELPER_MAGIC,8);
   int trusted = greeted && lunport_validate_credential_peer(sockets[0],pid,LUNPORT_HELPER_REQUIREMENT);
   if (!trusted) {
     close(sockets[0]); kill(pid,SIGKILL); waitpid(pid,NULL,0);
@@ -111,7 +117,8 @@ int main(int argc, char **argv) {
     fprintf(stderr,"helper authentication failed (hello=%d)\n",greeted); return 79;
   }
   if (!strcmp(mode,"helper-rejected")) { close(sockets[0]); kill(pid,SIGKILL); waitpid(pid,NULL,0); return 80; }
-  unsigned char header[18] = {'L','P','K','C','0','0','0','1',1,1};
+  unsigned char header[18] = {0,0,0,0,0,0,0,0,1,1};
+  memcpy(header,LUNPORT_HELPER_MAGIC,8);
   int writing = !strcmp(mode,"set") || !strcmp(mode,"replace");
   if (writing) header[8] = 2;
   if (!strcmp(mode,"delete")) header[8] = 3;

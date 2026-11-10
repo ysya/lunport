@@ -49,7 +49,7 @@ fn real_ssh_installer_preserves_bytes_is_idempotent_and_refuses_symlinks() {
 
     // Exercise both spaces and single quotes in the explicit remote HOME assignment.
     let home = tempfile::Builder::new()
-        .prefix("sshelter deploy's HOME ")
+        .prefix("lunport deploy's HOME ")
         .tempdir()
         .unwrap();
     let ssh = home.path().join(".ssh");
@@ -64,13 +64,13 @@ fn real_ssh_installer_preserves_bytes_is_idempotent_and_refuses_symlinks() {
     let public = server
         .key
         .public_line
-        .strip_suffix(" sshelter-test")
+        .strip_suffix(" lunport-test")
         .unwrap();
     let expected = [original.as_slice(), b"\n", public.as_bytes(), b"\n"].concat();
 
     let first = install(&*session, &home, &server.key.public_line);
     assert_eq!(first.exit_code, Some(0));
-    assert_eq!(first.stdout, b"SSHELTER_ADDED\n");
+    assert_eq!(first.stdout, b"LUNPORT_ADDED\n");
     assert!(first.stderr.is_empty());
     assert_eq!(classify(&first), Outcome::Added);
     assert_eq!(fs::read(&authorized).unwrap(), expected);
@@ -85,7 +85,7 @@ fn real_ssh_installer_preserves_bytes_is_idempotent_and_refuses_symlinks() {
 
     let second = install(&*session, &home, &server.key.public_line);
     assert_eq!(second.exit_code, Some(0));
-    assert_eq!(second.stdout, b"SSHELTER_PRESENT\n");
+    assert_eq!(second.stdout, b"LUNPORT_PRESENT\n");
     assert!(second.stderr.is_empty());
     assert_eq!(classify(&second), Outcome::AlreadyPresent);
     let bytes = fs::read(&authorized).unwrap();

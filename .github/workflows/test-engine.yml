@@ -1,4 +1,4 @@
-# Runs the tests of the SSH engine (src-tauri/src/ssh/) and of what uses it (the session broker, src-tauri/src/session/; sshelter
+# Runs the tests of the SSH engine (src-tauri/src/ssh/) and of what uses it (the session broker, src-tauri/src/session/; lunport
 # connect, src-tauri/src/cli/; starting the app for its clients, host_start) where they can run for real: against a scratch OpenSSH
 # server on macOS and on Linux, and on Linux also against a real OpenSSH with PAM in a container (the logins by password and by
 # keyboard-interactive, which a scratch sshd cannot check). The Windows leg lives in test-windows.yml.
@@ -36,6 +36,12 @@ jobs:
         with:
           node-version: lts/*
       - run: node --test scripts/ci-changes.test-node.mjs
+      - name: Guard against names from before the rename
+        run: node --test scripts/identity-guard.test-node.mjs
+      # scripts/identity.mjs and the Windows builds' console helper step; the identity installs had before 2.0, which the installers and
+      # scripts/legacy-identity.json each hold, for both profiles.
+      - name: Identity values in scripts and installers
+        run: node --test scripts/identity.test-node.mjs scripts/windows-console-helper.test-node.mjs scripts/legacy-identity.test-node.mjs
       - name: Select checks and verify version consistency
         id: select
         env:
@@ -104,10 +110,10 @@ jobs:
       # Keep cold-cache compilation outside the test-process watchdog.
       - name: Compile safe Rust suite
         run: cargo test --locked --lib --no-run
-      # SSHELTER_REQUIRE_OPENSSH=1: a missing sshd is a failure here, not a skipped test.
+      # LUNPORT_REQUIRE_OPENSSH=1: a missing sshd is a failure here, not a skipped test.
       - name: Complete safe Rust suite
         env:
-          SSHELTER_REQUIRE_OPENSSH: "1"
+          LUNPORT_REQUIRE_OPENSSH: "1"
         # CLI tests exercise process-group signals. Isolate their session from the Actions worker
         # and retain a bounded diagnostic if a runner stops making progress.
         run: |
@@ -164,20 +170,20 @@ jobs:
         run: |
           password="$(openssl rand -hex 16)"
           echo "::add-mask::$password"
-          docker build --build-arg TEST_PASSWORD="$password" -t sshelter-pam-sshd tests/pam-sshd
-          docker run -d --name sshelter-pam-sshd -p 127.0.0.1:2222:22 sshelter-pam-sshd
+          docker build --build-arg TEST_PASSWORD="$password" -t lunport-pam-sshd tests/pam-sshd
+          docker run -d --name lunport-pam-sshd -p 127.0.0.1:2222:22 lunport-pam-sshd
           for _ in $(seq 1 30); do
             ssh-keyscan -T 2 -p 2222 127.0.0.1 > /dev/null 2>&1 && break
             sleep 1
           done
           ssh-keyscan -T 2 -p 2222 127.0.0.1 > /dev/null
-          echo "SSHELTER_PAM_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "LUNPORT_PAM_PASSWORD=$password" >> "$GITHUB_ENV"
       # The pam tests are skipped here: the next step runs them against the container.
       - name: Complete safe Rust suite against a scratch sshd
         # Runs even when the container did not start, so that a first run shows both results.
         if: ${{ !cancelled() }}
         env:
-          SSHELTER_REQUIRE_OPENSSH: "1"
+          LUNPORT_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
         run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
 
@@ -191,15 +197,15 @@ jobs:
       - name: Password and keyboard-interactive tests against the container
         if: ${{ !cancelled() }}
         env:
-          SSHELTER_REQUIRE_OPENSSH: "1"
-          SSHELTER_REQUIRE_PAM: "1"
-          SSHELTER_PAM_PORT: "2222"
-          SSHELTER_PAM_USER: sshelter
+          LUNPORT_REQUIRE_OPENSSH: "1"
+          LUNPORT_REQUIRE_PAM: "1"
+          LUNPORT_PAM_PORT: "2222"
+          LUNPORT_PAM_USER: lunport
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
         run: "cargo test --locked --lib -- ssh::engine_tests::login_methods::pam"
       - name: What the container logged
         if: failure()
-        run: docker logs sshelter-pam-sshd || true
+        run: docker logs lunport-pam-sshd || true
 
   profiles:
     name: Production and Development boundaries (${{ matrix.os }})

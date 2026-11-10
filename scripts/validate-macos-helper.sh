@@ -4,6 +4,15 @@ set -euo pipefail
 [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_OS:-} == macOS ]] || { echo 'Disposable macOS CI runner required.' >&2; exit 1; }
 umask 077
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
+# A value of the JSON text given first, by the keys after it.
+json_value() { python3 -c 'import functools, json, sys; print(functools.reduce(lambda value, key: value[key], sys.argv[2:], json.loads(sys.argv[1])))' "$@"; }
+# Helper v1 serves the app as releases before 2.0 were signed and keeps their items, so its fixtures take the identity of that time
+# (scripts/legacy-identity.json) and helper v1's own identifier (its manifest, through scripts/identity.mjs).
+legacy="$(cat "$repo_dir/scripts/legacy-identity.json")"
+current="$(node "$repo_dir/scripts/identity.mjs")"
+client_identifier="$(json_value "$legacy" production appId)"
+service="$(json_value "$legacy" development credentialService)"
+helper_identifier="$(json_value "$current" helperV1 identifier)"
 probe="$(mktemp -d "${RUNNER_TEMP}/lunport-helper.XXXXXX")"
 keychain="$probe/signing.keychain-db"
 account="lunport-ci-helper-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -52,35 +61,35 @@ previous=()
 while IFS= read -r line; do line="${line#*\"}"; line="${line%\"*}"; previous+=("$line"); done < "$probe/search-list.txt"
 security list-keychains -d user -s "$keychain" "${previous[@]}"
 identity="$(/usr/bin/openssl x509 -in "$probe/certificate.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
-requirement="identifier \"org.homelab.sshelter\" and certificate leaf = H\"$identity\""
-python3 - "$probe/config.h" "$requirement" <<'PY'
+requirement="identifier \"$client_identifier\" and certificate leaf = H\"$identity\""
+python3 - "$probe/config.h" "$requirement" "$service" <<'PY'
 import json, pathlib, sys
-pathlib.Path(sys.argv[1]).write_text('#define LUNPORT_CLIENT_REQUIREMENT '+json.dumps(sys.argv[2])+'\n#define LUNPORT_CREDENTIAL_SERVICE "SSHelter Development"\n')
+pathlib.Path(sys.argv[1]).write_text('#define LUNPORT_CLIENT_REQUIREMENT '+json.dumps(sys.argv[2])+'\n#define LUNPORT_CREDENTIAL_SERVICE '+json.dumps(sys.argv[3])+'\n')
 PY
 clang -Wall -Wextra -Werror -Wno-deprecated-declarations \
   -include "$probe/config.h" \
-  "$repo_dir/src-tauri/signing/credential-helper-v1.c" -framework Security -framework CoreFoundation -lbsm -o "$probe/helper"
+  "$repo_dir/src-tauri/signing/legacy/credential-helper-v1.c" -framework Security -framework CoreFoundation -lbsm -o "$probe/helper"
 codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none \
-  --identifier org.homelab.sshelter.credential-helper.v1 "$probe/helper"
+  --identifier "$helper_identifier" "$probe/helper"
 helper_hash="$(codesign --display --verbose=4 "$probe/helper" 2>&1 | sed -n 's/^CDHash=//p')"
-python3 - "$probe/config.h" "$identity" "$helper_hash" <<'PY'
+python3 - "$probe/config.h" "$helper_identifier" "$identity" "$helper_hash" <<'PY'
 import json, pathlib, sys
 with pathlib.Path(sys.argv[1]).open('a') as file:
-    file.write('#define LUNPORT_HELPER_REQUIREMENT '+json.dumps('identifier "org.homelab.sshelter.credential-helper.v1" and certificate leaf = H"'+sys.argv[2]+'" and cdhash H"'+sys.argv[3]+'"')+'\n')
+    file.write('#define LUNPORT_HELPER_REQUIREMENT '+json.dumps('identifier "'+sys.argv[2]+'" and certificate leaf = H"'+sys.argv[3]+'" and cdhash H"'+sys.argv[4]+'"')+'\n')
 PY
 for version in 1 2; do
   clang -Wall -Wextra -Werror -Wno-deprecated-declarations "-DCLIENT_VERSION=\"$version\"" \
     -include "$probe/config.h" "$repo_dir/scripts/macos-helper-client.c" "$repo_dir/src-tauri/src/macos_credential_peer.c" \
     -framework Security -framework CoreFoundation -lbsm -o "$probe/client-$version"
   codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none \
-    --identifier org.homelab.sshelter "$probe/client-$version"
+    --identifier "$client_identifier" "$probe/client-$version"
 done
 if cmp -s "$probe/client-1" "$probe/client-2"; then echo 'Client builds must differ.' >&2; exit 1; fi
 helper_before="$(shasum -a 256 "$probe/helper" | awk '{print $1}')"
 
 "$probe/client-1" set "$probe/helper" "$account-new"
 clang -Wno-deprecated-declarations "$repo_dir/scripts/macos-keychain-probe.c" -framework Security -framework CoreFoundation -o "$probe/metadata"
-"$probe/metadata" partition "$original_default" 'SSHelter Development' "$account-new" > "$probe/partition.txt"
+"$probe/metadata" partition "$original_default" "$service" "$account-new" > "$probe/partition.txt"
 python3 - "$probe/partition.txt" "$helper_hash" <<'PY'
 import pathlib, plistlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
@@ -119,14 +128,14 @@ clang "$probe/forged.c" -o "$probe/forged-helper"
 for variant in adhoc wrong-id unhardened entitlement; do
   cp "$probe/client-2" "$probe/$variant"
   case "$variant" in
-    adhoc) codesign --force --sign - --options runtime --identifier org.homelab.sshelter "$probe/$variant" ;;
-    wrong-id) codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none --identifier org.homelab.unrelated "$probe/$variant" ;;
-    unhardened) codesign --force --sign "$identity" --keychain "$keychain" --timestamp=none --identifier org.homelab.sshelter "$probe/$variant" ;;
+    adhoc) codesign --force --sign - --options runtime --identifier "$client_identifier" "$probe/$variant" ;;
+    wrong-id) codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none --identifier "$client_identifier.unrelated" "$probe/$variant" ;;
+    unhardened) codesign --force --sign "$identity" --keychain "$keychain" --timestamp=none --identifier "$client_identifier" "$probe/$variant" ;;
     entitlement)
       cat > "$probe/unsafe.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>
 EOF
-      codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none --entitlements "$probe/unsafe.plist" --identifier org.homelab.sshelter "$probe/$variant" ;;
+      codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none --entitlements "$probe/unsafe.plist" --identifier "$client_identifier" "$probe/$variant" ;;
   esac
   "$probe/$variant" rejected "$probe/helper" "$account-new"
 done

@@ -1,8 +1,8 @@
-# sshelter-cli.exe: the console program Windows terminals run to reach SSHelter (own-ssh spec §7.3, §7.4). Std only, no dependencies.
+# lunport-cli.exe: the console program Windows terminals run to reach Lunport (own-ssh spec §7.3, §7.4). Std only, no dependencies.
 # A workspace of its own: the app's `cargo build` and `cargo test` (src-tauri) never build it. The Windows release builds compile it
-# first and bundle it next to sshelter.exe (`tauri build --config` with `bundle.externalBin`; see .github/workflows/beta.yml).
+# first and bundle it next to lunport.exe (`tauri build --config` with `bundle.externalBin`; see .github/workflows/beta.yml).
 [package]
-name = "sshelter-cli"
+name = "lunport-cli"
 # Not the app's version; nothing shows it.
 version = "0.1.0"
 edition = "2021"

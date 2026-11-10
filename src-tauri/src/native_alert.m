@@ -2,7 +2,7 @@
 
 // Called only on Tauri's main thread. No WKWebView, CFUserNotification, private
 // API, or system-service manipulation. An app-modal NSAlert owns its own window.
-long sshelter_native_alert(const char *title, const char *message,
+long lunport_native_alert(const char *title, const char *message,
                           const char *const *buttons, unsigned long count) {
     @autoreleasepool {
         NSAlert *alert = [NSAlert new];

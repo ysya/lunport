@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::error::AppError;
 
 /// 插槽目錄,相對於家目錄。主機的 `IdentityFile` 一律寫成 `~/` 加上這個路徑。
+// frozen-identity: the folder that IdentityFile values in users' ssh configs and in synced libraries already name; it never changes.
 pub const SLOT_DIR: &str = ".ssh/sshelter/keys";
 /// 可以同步的私鑰檔大小上限(spec §4.1)。
 #[cfg(test)]
@@ -119,7 +120,7 @@ pub fn unquote(value: &str) -> &str {
     }
 }
 
-/// 一個 `IdentityFile` 值若指到插槽,回傳插槽檔名:`~/.ssh/sshelter/keys/<file>` 或 `%d/.ssh/sshelter/keys/<file>`
+/// 一個 `IdentityFile` 值若指到插槽,回傳插槽檔名:`~/` 或 `%d/` 加上 `SLOT_DIR` 和 `/<file>`
 /// (可加引號),`<file>` 不得含路徑分隔字元。
 pub fn slot_file_of_value(value: &str) -> Option<String> {
     let v = unquote(value);
@@ -793,13 +794,13 @@ mod tests {
 
     #[test]
     fn recognises_slot_values_in_every_spelling() {
-        assert_eq!(slot_file_of_value("~/.ssh/sshelter/keys/id_mac-3fa2c1d9").as_deref(), Some("id_mac-3fa2c1d9"));
-        assert_eq!(slot_file_of_value("\"~/.ssh/sshelter/keys/id_mac-3fa2c1d9\"").as_deref(), Some("id_mac-3fa2c1d9"));
-        assert_eq!(slot_file_of_value("%d/.ssh/sshelter/keys/x-00000000").as_deref(), Some("x-00000000"));
-        assert_eq!(slot_file_of_value("~/.ssh/sshelter/keys/sub/x"), None);
-        assert_eq!(slot_file_of_value("~/.ssh/sshelter/keys/"), None);
+        assert_eq!(slot_file_of_value("~/.ssh/sshelter/keys/id_mac-3fa2c1d9").as_deref(), Some("id_mac-3fa2c1d9")); // frozen-identity: how existing ssh configs spell a slot path.
+        assert_eq!(slot_file_of_value("\"~/.ssh/sshelter/keys/id_mac-3fa2c1d9\"").as_deref(), Some("id_mac-3fa2c1d9")); // frozen-identity: how existing ssh configs spell a slot path.
+        assert_eq!(slot_file_of_value("%d/.ssh/sshelter/keys/x-00000000").as_deref(), Some("x-00000000")); // frozen-identity: how existing ssh configs spell a slot path.
+        assert_eq!(slot_file_of_value("~/.ssh/sshelter/keys/sub/x"), None); // frozen-identity: how existing ssh configs spell a slot path.
+        assert_eq!(slot_file_of_value("~/.ssh/sshelter/keys/"), None); // frozen-identity: how existing ssh configs spell a slot path.
         assert_eq!(slot_file_of_value("~/.ssh/id_mac"), None);
-        assert_eq!(slot_file_of_value("/home/f/.ssh/sshelter/keys/x"), None);
+        assert_eq!(slot_file_of_value("/home/f/.ssh/sshelter/keys/x"), None); // frozen-identity: how existing ssh configs spell a slot path.
     }
 
     #[test]
@@ -812,7 +813,7 @@ mod tests {
         assert_eq!(resolve_identity_value("~\\.ssh\\id_win", home), file("/home/f/.ssh/id_win"));
         assert_eq!(resolve_identity_value("/Users/x/.ssh/k", home), file("/Users/x/.ssh/k"));
         assert_eq!(resolve_identity_value("C:\\Users\\x\\.ssh\\k", home), file("C:\\Users\\x\\.ssh\\k"));
-        assert_eq!(resolve_identity_value("~/.ssh/sshelter/keys/a-12345678", home), IdentityTarget::Slot("a-12345678".into()));
+        assert_eq!(resolve_identity_value("~/.ssh/sshelter/keys/a-12345678", home), IdentityTarget::Slot("a-12345678".into())); // frozen-identity: how existing ssh configs spell a slot path.
         assert_eq!(resolve_identity_value("~/.ssh/id.pub", home), IdentityTarget::Unsupported(REASON_PUBLIC_KEY));
         assert_eq!(resolve_identity_value("~/.ssh/%h", home), IdentityTarget::Unsupported(REASON_TOKENS));
         assert_eq!(resolve_identity_value("${HOME}/.ssh/k", home), IdentityTarget::Unsupported(REASON_TOKENS));

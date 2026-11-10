@@ -1,5 +1,5 @@
 //! What the broker gives the engine for one connect (own-ssh spec §6.1, §7.2, decision 7): the host key policy, over the pins, and the
-//! auth source, over the vault, the keychain and the session's owner (the person at the `sshelter connect` terminal, asked through
+//! auth source, over the vault, the keychain and the session's owner (the person at the `lunport connect` terminal, asked through
 //! `question` frames). One `BrokerAuth` serves one `open_shell`, all its reconnects included: what the person typed lives in memory for
 //! that long (a first contact connects twice: the host key is unknown the first time) and is dropped with it.
 //!

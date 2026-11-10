@@ -114,11 +114,11 @@ fn output_beyond_the_cap_is_cut_off_and_the_connection_survives() {
     let server = Server::start(&tools, &[]);
     let session = open_session(&engine(), &server);
 
-    let result = session.exec("yes sshelter", Duration::from_secs(30), MIB).unwrap();
+    let result = session.exec("yes lunport", Duration::from_secs(30), MIB).unwrap();
     assert!(result.truncated);
     assert_eq!((result.ended, result.exit_code), (Ended::Truncated, None));
     assert_eq!(result.stdout.len() + result.stderr.len(), MIB, "exactly the cap was kept");
-    assert!(result.stdout.starts_with(b"sshelter\nsshelter\n"));
+    assert!(result.stdout.starts_with(b"lunport\nlunport\n"));
 
     let started = Instant::now();
     let next = session.exec("echo alive", ENOUGH, MIB).unwrap();
@@ -199,7 +199,7 @@ fn a_command_cut_off_at_the_cap_is_really_ended_on_the_server() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let pidfile = dir.path().join("pid");
 
-    let command = format!("echo $$ > '{}'; exec yes sshelter", pidfile.display());
+    let command = format!("echo $$ > '{}'; exec yes lunport", pidfile.display());
     let result = session.exec(&command, Duration::from_secs(30), 64 * 1024).unwrap();
     assert_eq!(result.ended, Ended::Truncated);
     gone_from_the_server(&*session, &pidfile, "the capped command to end on the server");

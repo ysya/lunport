@@ -1,4 +1,4 @@
-//! The console `sshelter connect` runs in on Windows (own-ssh spec §7.3, the Windows bullet), apart from the Windows calls: the modes
+//! The console `lunport connect` runs in on Windows (own-ssh spec §7.3, the Windows bullet), apart from the Windows calls: the modes
 //! the console is set to, and the `Tty` and `Restorer` that set them and put the console back. On Windows `terminal_windows.rs` adds
 //! the real console and serves this as `cli::terminal`, with the surface the Unix `terminal.rs` has, so that the loop (`run.rs`) uses
 //! either. Compiled on Windows and in the tests of every platform: the logic is tested against a fake console on macOS and Linux too.

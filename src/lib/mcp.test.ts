@@ -32,7 +32,7 @@ describe("native MCP frontend boundary", () => {
       noninteractive_credentials_supported: false,
       noninteractive_credentials_notice: "Use Ask for stored credentials.",
       audit_error: null, allowed_hosts: [], allowed_groups: [], pending: [], recent: [],
-      executable: "/fixture/sshelter", last_client_at_ms: null,
+      executable: "/fixture/lunport", last_client_at_ms: null,
     };
     const calls = stubBackend(async () => result);
     const client = new QueryClient();

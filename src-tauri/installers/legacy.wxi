@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Windows identity Lunport installs had before 2.0, for main.wxs: where they kept the install directory and what the
+     oldest MSIs named their shortcuts. Only this file and legacy.nsh may hold these names among the installer sources
+     (scripts/identity-guard.mjs). main.wxs defines BundleIdentifier before it includes this file. -->
+<Include xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <?define LegacyManufacturer = "homelab" ?>
+    <!-- The current identity comes from Tauri's variables in main.wxs; this only says which earlier one each profile replaces. -->
+    <?if $(var.BundleIdentifier) = "dev.ysya.lunport" ?>
+        <?define LegacyInstallerIdentity = "SSHelter" ?>
+    <?elseif $(var.BundleIdentifier) = "dev.ysya.lunport.dev" ?>
+        <?define LegacyInstallerIdentity = "SSHelter Dev" ?>
+    <?else?>
+        <?error legacy.wxi knows no earlier Windows identity for $(var.BundleIdentifier) ?>
+    <?endif?>
+    <!-- HKCU key with the install directory: its default value from NSIS, InstallDir from the MSI. -->
+    <?define LegacyProductKey = "Software\$(var.LegacyManufacturer)\$(var.LegacyInstallerIdentity)" ?>
+    <!-- The oldest MSIs named the shortcuts and their Start menu folder after the product, which was then this name. -->
+    <?define LegacyShortcutName = "$(var.LegacyInstallerIdentity)" ?>
+</Include>

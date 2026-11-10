@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn read_capped_missing_file_is_io_error() {
-        let err = read_capped(std::path::Path::new("/nonexistent/sshelter-nope.json"), 16)
+        let err = read_capped(std::path::Path::new("/nonexistent/lunport-nope.json"), 16)
             .unwrap_err();
         assert!(matches!(err, AppError::Io(_)));
     }

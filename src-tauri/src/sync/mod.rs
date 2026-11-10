@@ -9,7 +9,7 @@
 //!   key material and its key-slot file names for the migration review and central's backup admission. Nothing writes them.
 //! - `relay`: the historical chain relay's types the old states carry and the poll timing helpers central's round reuses.
 //! - `env`: the engine's boundary (keychain, events, clock); `runtime`: `SyncCore`, the app's one state holder; `engine`: the
-//!   Tauri shell (the engine lock, the `sshelter-sync` background thread that runs `central::round`, the events).
+//!   Tauri shell (the engine lock, the `lunport-sync` background thread that runs `central::round`, the events).
 //! - `testkit` (tests only): a disposable device with a home, a keychain and a state path.
 
 pub mod records_v3;

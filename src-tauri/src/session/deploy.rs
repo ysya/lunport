@@ -421,10 +421,10 @@ fn classify(result: &ExecResult) -> Outcome {
         return Outcome::Unknown;
     }
     match result.exit_code {
-        Some(0) if result.stderr.is_empty() && result.stdout == b"SSHELTER_ADDED\n" => {
+        Some(0) if result.stderr.is_empty() && result.stdout == b"LUNPORT_ADDED\n" => {
             Outcome::Added
         }
-        Some(0) if result.stderr.is_empty() && result.stdout == b"SSHELTER_PRESENT\n" => {
+        Some(0) if result.stderr.is_empty() && result.stdout == b"LUNPORT_PRESENT\n" => {
             Outcome::AlreadyPresent
         }
         Some(0) => Outcome::Unknown,

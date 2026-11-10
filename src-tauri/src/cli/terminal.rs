@@ -1,4 +1,4 @@
-//! The terminal `sshelter connect` runs in (own-ssh spec §7.3): its modes and its size, through termios (`libc`, already a dependency
+//! The terminal `lunport connect` runs in (own-ssh spec §7.3): its modes and its size, through termios (`libc`, already a dependency
 //! on Unix). Raw while the shell runs, the way OpenSSH sets it; a prompt mode for questions (line editing on, echo off for a password);
 //! cooked otherwise. The mode the terminal had at the start comes back on every way out: the end of the program, a dropped `Tty`, a
 //! panic (`restore_on_panic`), the watchdog that ends a program whose loop does not (`Restorer::hold_restored`), and a stop (Ctrl-Z,

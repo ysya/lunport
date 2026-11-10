@@ -150,7 +150,7 @@ mod tests {
         ] {
             fs::create_dir_all(root.join(path)).unwrap();
         }
-        fs::create_dir_all(env.ssh_dir.join("sshelter/keys/empty")).unwrap();
+        fs::create_dir_all(env.ssh_dir.join("sshelter/keys/empty")).unwrap(); // frozen-identity: the managed folder as it is on users' disks.
         package.files = Files::capture(&env, None).unwrap();
         package.require_supported_files().unwrap();
         package.materials(&keys, &BTreeMap::new()).unwrap();

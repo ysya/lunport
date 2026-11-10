@@ -8,23 +8,26 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 use windows_sys::Win32::{
-    Foundation::LocalFree,
+    Foundation::{GetLastError, LocalFree},
     Security::Cryptography::{
         CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     },
 };
 use zeroize::{Zeroize, Zeroizing};
 
-fn guard() -> MutexGuard<'static, ()> {
+/// Held around every read, write and delete of a credential in this process, the identity migration's included.
+pub(crate) fn guard() -> MutexGuard<'static, ()> {
     static ACCESS: Mutex<()> = Mutex::new(());
     ACCESS.lock().unwrap_or_else(|p| p.into_inner())
 }
-struct Store {
+/// One account's entry under one service, with its DPAPI files in `root`. The identity migration makes one for the service an
+/// earlier version used and one for this version's, over the same files.
+pub(crate) struct Store {
     entry: keyring::Entry,
     root: PathBuf,
 }
 impl Store {
-    fn new(service: &str, account: &str, root: PathBuf) -> Result<Self, AppError> {
+    pub(crate) fn new(service: &str, account: &str, root: PathBuf) -> Result<Self, AppError> {
         Ok(Self {
             entry: keyring::Entry::new(service, account).map_err(super::map_err)?,
             root,
@@ -93,12 +96,16 @@ fn dpapi(value: &[u8], entropy: &[u8], decrypt: bool) -> Result<Zeroizing<Vec<u8
             )
         }
     };
+    if ok == 0 {
+        // SAFETY: reads this thread's last error, which the DPAPI call that just failed set.
+        return Err(blob::dpapi_failure(unsafe { GetLastError() }));
+    }
     let limit = if decrypt {
         blob::MAX_VALUE_BYTES
     } else {
         blob::MAX_BLOB_BYTES
     };
-    if ok == 0 || out.0.pbData.is_null() || out.0.cbData as usize > limit {
+    if out.0.pbData.is_null() || out.0.cbData as usize > limit {
         return Err(blob::invalid());
     }
     // SAFETY: successful DPAPI output is initialized and owned by out until drop.

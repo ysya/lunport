@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { CredentialsPendingNotice } from "@/components/IdentityMigration";
 import { InstallationRenameNotice } from "@/components/InstallationRename";
 import { McpApprovalDialog } from "@/components/McpApprovalDialog";
 import { LegacyMigrationLanding } from "@/components/records/LegacyMigrationLanding";
@@ -45,6 +46,7 @@ function App() {
       )}
       <Toaster />
       <InstallationRenameNotice />
+      <CredentialsPendingNotice />
     </>
   );
 }

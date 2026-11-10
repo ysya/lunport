@@ -1,7 +1,7 @@
 //! The engine against the OpenSSH server that the environment describes: on Windows, the runner's own server, which test-windows.yml
 //! starts and authorizes a throwaway key on (a scratch sshd cannot run there). The test is the same everywhere. Without
-//! `SSHELTER_TEST_SSH_PORT`, `SSHELTER_TEST_SSH_USER` and `SSHELTER_TEST_SSH_KEY` (a passphrase-less OpenSSH private key) it prints
-//! "skipped" and passes, unless `SSHELTER_REQUIRE_TEST_SSH=1` (the Windows job of the CI, where a lost `GITHUB_ENV` line would otherwise
+//! `LUNPORT_TEST_SSH_PORT`, `LUNPORT_TEST_SSH_USER` and `LUNPORT_TEST_SSH_KEY` (a passphrase-less OpenSSH private key) it prints
+//! "skipped" and passes, unless `LUNPORT_REQUIRE_TEST_SSH=1` (the Windows job of the CI, where a lost `GITHUB_ENV` line would otherwise
 //! turn the test into a silent pass) turns that into a failure.
 
 use std::time::Duration;
@@ -14,19 +14,19 @@ use crate::ssh::{AuthMethod, Ended, Hop, SshEngine, Target};
 #[test]
 fn connect_log_in_and_exec_against_the_server_in_the_environment() {
     let (Ok(port), Ok(user), Ok(key_path)) = (
-        std::env::var("SSHELTER_TEST_SSH_PORT"),
-        std::env::var("SSHELTER_TEST_SSH_USER"),
-        std::env::var("SSHELTER_TEST_SSH_KEY"),
+        std::env::var("LUNPORT_TEST_SSH_PORT"),
+        std::env::var("LUNPORT_TEST_SSH_USER"),
+        std::env::var("LUNPORT_TEST_SSH_KEY"),
     ) else {
-        let required = std::env::var("SSHELTER_REQUIRE_TEST_SSH").is_ok_and(|value| value == "1");
-        assert!(!required, "SSHELTER_TEST_SSH_PORT, SSHELTER_TEST_SSH_USER and SSHELTER_TEST_SSH_KEY are required (SSHELTER_REQUIRE_TEST_SSH=1)");
-        eprintln!("skipped: SSHELTER_TEST_SSH_PORT, SSHELTER_TEST_SSH_USER and SSHELTER_TEST_SSH_KEY are not all set");
+        let required = std::env::var("LUNPORT_REQUIRE_TEST_SSH").is_ok_and(|value| value == "1");
+        assert!(!required, "LUNPORT_TEST_SSH_PORT, LUNPORT_TEST_SSH_USER and LUNPORT_TEST_SSH_KEY are required (LUNPORT_REQUIRE_TEST_SSH=1)");
+        eprintln!("skipped: LUNPORT_TEST_SSH_PORT, LUNPORT_TEST_SSH_USER and LUNPORT_TEST_SSH_KEY are not all set");
         return;
     };
     let private_key = std::fs::read_to_string(&key_path).unwrap_or_else(|error| panic!("cannot read {key_path}: {error}"));
     let auth = VaultAuth::new().with_key("k1", &private_key);
     let policy = TestPolicy::trusting();
-    let hop = Hop::new("host-env", "env", "127.0.0.1", port.parse().expect("SSHELTER_TEST_SSH_PORT is a port number"), &user, AuthMethod::Key { key_id: "k1".into() });
+    let hop = Hop::new("host-env", "env", "127.0.0.1", port.parse().expect("LUNPORT_TEST_SSH_PORT is a port number"), &user, AuthMethod::Key { key_id: "k1".into() });
 
     let session = engine().connect(&Target { hops: vec![hop] }, &*policy, &auth).expect("the engine connects and logs in");
     if let Some((_, key)) = policy.seen().first() {
@@ -34,9 +34,9 @@ fn connect_log_in_and_exec_against_the_server_in_the_environment() {
     }
 
     // The output is raw bytes: Windows OpenSSH ends a line with CRLF, a Unix sshd with LF.
-    let hello = session.exec("echo sshelter-engine-ok", Duration::from_secs(60), 1 << 20).expect("exec");
+    let hello = session.exec("echo lunport-engine-ok", Duration::from_secs(60), 1 << 20).expect("exec");
     fact("environment.echo_stdout", format!("{:?}", String::from_utf8_lossy(&hello.stdout)));
-    assert!(String::from_utf8_lossy(&hello.stdout).contains("sshelter-engine-ok"), "stdout was {:?}", String::from_utf8_lossy(&hello.stdout));
+    assert!(String::from_utf8_lossy(&hello.stdout).contains("lunport-engine-ok"), "stdout was {:?}", String::from_utf8_lossy(&hello.stdout));
     assert_eq!((hello.ended, hello.exit_code), (Ended::Exited, Some(0)));
 
     let exit = session.exec("exit 3", Duration::from_secs(60), 1 << 20).expect("exec");

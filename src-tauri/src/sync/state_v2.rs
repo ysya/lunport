@@ -400,6 +400,7 @@ pub struct DeclinedVersion {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SyncNotice {
     /// v1 升級完成(spec §7.6、§8):space「Synced」可改名、其他電腦也要更新;含 `Include` 的區塊留在 `kept_file`;使用者自己放在
+    // frozen-identity: a folder name already on users' disks
     /// `~/.ssh/sshelter/` 的檔案(v1 只有 `hosts.config` 那個 token 是我們的)改成本機檔案,新的完整路徑在 `moved_files`(通常是空的;
     /// 升級中斷後重跑時只列得出這一輪搬的)。`moved_files` 是後來加的欄位:讀舊版寫的狀態檔時缺欄位 = 空。
     Upgraded {
@@ -413,6 +414,7 @@ pub enum SyncNotice {
     /// 改名時新檔名已有檔案:保留舊檔名、不覆蓋(spec §4.3、§9)。同一個目標只提示一次(`SpaceState::rename_blocked`)。
     RenameBlocked { space_id: String, name: String, file_name: String },
     /// 這台的 space 檔改成本機檔案(spec §7.3 離開帳戶;更換同步碼時新帳戶沒有接續的勾選 space 也一樣,§7.5):它們已搬到
+    // frozen-identity: a folder name already on users' disks
     /// `~/.ssh/sshelter-local/`、主 config 以一般的 Include 引入,ssh 照常讀得到,不再同步;`kept_files` 是新的完整路徑。之後建立或
     /// 加入帳戶都不會再動它們,可以用搬移精靈搬進新帳戶的 space。
     LeftAccount { kept_files: Vec<String> },
@@ -595,7 +597,7 @@ mod tests {
             SyncNotice::Upgraded {
                 kept_file: Some("kept-3fa2c1d9.config".to_string()),
                 kept_hosts: vec!["web".to_string()],
-                moved_files: vec!["/Users/me/.ssh/sshelter-local/mine.config".to_string()],
+                moved_files: vec!["/Users/me/.ssh/sshelter-local/mine.config".to_string()], // frozen-identity: a folder name on users' disks.
             },
             SyncNotice::Upgraded { kept_file: None, kept_hosts: Vec::new(), moved_files: Vec::new() },
             SyncNotice::SpaceDeleted { name: "Work".to_string(), by_device: "MacBook-B".to_string() },
@@ -604,7 +606,7 @@ mod tests {
                 name: "Work".to_string(),
                 file_name: "work-3fa2c1d9.config".to_string(),
             },
-            SyncNotice::LeftAccount { kept_files: vec!["/Users/me/.ssh/sshelter-local/work.config".to_string()] },
+            SyncNotice::LeftAccount { kept_files: vec!["/Users/me/.ssh/sshelter-local/work.config".to_string()] }, // frozen-identity: a folder name on users' disks.
             SyncNotice::NewSyncCode,
             SyncNotice::OtherRotation { devices: vec!["MacBook-B".to_string()] },
         ];
@@ -863,13 +865,13 @@ mod tests {
         // 舊版寫的 `upgraded` 提示沒有 `moved_files`:缺欄位 = 空,提示照樣讀得回來(讀不懂的提示會被整則略過,使用者就看不到升級說明了)。
         let mut json = serde_json::to_value(SyncStateV2::fresh("A").unwrap()).unwrap();
         json["notices"] = serde_json::json!([
-            { "kind": "upgraded", "kept_file": "/home/me/.ssh/sshelter-v1-kept.config", "kept_hosts": ["jump"] }
+            { "kind": "upgraded", "kept_file": "/home/me/.ssh/sshelter-v1-kept.config", "kept_hosts": ["jump"] } // frozen-identity: a file name on users' disks, as the notice was saved.
         ]);
         let back: SyncStateV2 = serde_json::from_value(json).unwrap();
         assert_eq!(
             back.notices,
             vec![SyncNotice::Upgraded {
-                kept_file: Some("/home/me/.ssh/sshelter-v1-kept.config".to_string()),
+                kept_file: Some("/home/me/.ssh/sshelter-v1-kept.config".to_string()), // frozen-identity: a file name on users' disks, as the notice was saved.
                 kept_hosts: vec!["jump".to_string()],
                 moved_files: Vec::new(),
             }]

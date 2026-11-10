@@ -313,6 +313,41 @@ fn every_publication_boundary_can_resume_the_same_ids_without_source_deletion() 
         }
     }
 }
+/// The identity migration renames the data root whole. A Development profile's sources live in the sandbox home inside it, so an
+/// import that was interrupted before the rename resumes from the moved root once its journal names the files where they are now.
+#[test]
+fn a_pending_import_resumes_after_its_data_root_moved() {
+    let mut fixture = Fixture::new();
+    let data = fixture.env().state_path.parent().unwrap().to_path_buf();
+    let ssh = data.join("sandbox-home").join(".ssh");
+    fs::create_dir_all(&ssh).unwrap();
+    fixture.source = ssh.join("config");
+    fixture.private = ssh.join("id_ed25519");
+    fs::write(&fixture.private, test_keys::plain()).unwrap();
+    fs::write(
+        &fixture.source,
+        format!("Host web-1\n HostName web-1.example.com\n User frank\n IdentityFile {}\n", fixture.private.display()),
+    )
+    .unwrap();
+    let prepared = fixture.with_copy();
+    let host_id = prepared.preview().candidates[0].id.clone();
+    let interrupted = with_test_step(
+        |step| if step == PublishStep::JournalPrepared { Err(failure("simulated interruption")) } else { Ok(()) },
+        || confirm(&fixture.env(), prepared),
+    );
+    assert!(interrupted.is_err());
+    let id = fs::read_dir(fixture.imports()).unwrap().next().unwrap().unwrap().file_name().to_string_lossy().into_owned();
+
+    let moved = data.with_file_name("moved");
+    fs::rename(&data, &moved).unwrap();
+    let mut env = fixture.env();
+    env.state_path = moved.join("sync-state.json");
+    assert!(resume(&env, &id).is_err(), "the journal still names the files where they were");
+    assert_eq!(relocate_journals(&moved, &data).unwrap(), 1);
+    assert_eq!(resume(&env, &id).unwrap().host_ids, [host_id]);
+    assert_eq!(fixture.state().local.keys.len(), 1);
+    assert_eq!(relocate_journals(&moved, &data).unwrap(), 0, "nothing names the old root any more");
+}
 #[test]
 fn failed_main_state_save_leaves_generation_memory_and_encrypted_material_recoverable() {
     let fixture = std::sync::Arc::new(Fixture::new());

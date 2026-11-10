@@ -3,6 +3,12 @@ set -euo pipefail
 [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_OS:-} == macOS ]] || { echo 'Disposable macOS CI runner required.' >&2; exit 1; }
 umask 077
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
+# A value of the JSON text given first, by the keys after it.
+json_value() { python3 -c 'import functools, json, sys; print(functools.reduce(lambda value, key: value[key], sys.argv[2:], json.loads(sys.argv[1])))' "$@"; }
+# The probes are signed as the production app and keep their items under the Development credential service (scripts/identity.mjs).
+current="$(node "$repo_dir/scripts/identity.mjs")"
+app_id="$(json_value "$current" production appId)"
+service="$(json_value "$current" development credentialService)"
 probe_dir="$(mktemp -d "${RUNNER_TEMP}/lunport-keychain.XXXXXX")"
 keychain="$probe_dir/probe.keychain-db"
 keychain_password="$(/usr/bin/openssl rand -hex 24)"
@@ -11,7 +17,7 @@ original_default="$(security default-keychain -d user | sed 's/^ *"//; s/"$//')"
 security list-keychains -d user > "$probe_dir/search-list.txt"
 cleanup() {
   if [[ -x "$probe_dir/version-1" && -n "${partition_account:-}" ]]; then
-    "$probe_dir/version-1" delete "$original_default" 'SSHelter Development' "$partition_account" || true
+    "$probe_dir/version-1" delete "$original_default" "$service" "$partition_account" || true
   fi
   security default-keychain -d user -s "$original_default" || true
   local previous=()
@@ -50,22 +56,21 @@ for version in 1 2; do
   clang -Wno-deprecated-declarations "-DPROBE_VERSION=\"$version\"" "$repo_dir/scripts/macos-keychain-probe.c" \
     -framework Security -framework CoreFoundation -o "$probe_dir/version-$version"
   codesign --force --sign "$identity" --keychain "$keychain" --timestamp=none \
-    --identifier org.homelab.sshelter "$probe_dir/version-$version"
+    --identifier "$app_id" "$probe_dir/version-$version"
   codesign --verify --strict "$probe_dir/version-$version"
   codesign --display --requirements - "$probe_dir/version-$version" > "$probe_dir/requirement-$version.txt" 2>/dev/null
 done
 cmp "$probe_dir/requirement-1.txt" "$probe_dir/requirement-2.txt"
-grep -F 'identifier "org.homelab.sshelter"' "$probe_dir/requirement-1.txt"
+grep -F "identifier \"$app_id\"" "$probe_dir/requirement-1.txt"
 if grep -E 'cdhash|anchor trusted' "$probe_dir/requirement-1.txt"; then echo 'Unstable or system-trust-dependent requirement.' >&2; exit 1; fi
 if cmp -s "$probe_dir/version-1" "$probe_dir/version-2"; then echo 'Probe builds must differ.' >&2; exit 1; fi
-service='SSHelter Development'
 account="lunport-ci-keychain-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 cp "$probe_dir/version-1" "$probe_dir/current"
 "$probe_dir/current" write "$keychain" "$service" "$account"
 cp "$probe_dir/version-2" "$probe_dir/current"
 "$probe_dir/current" read "$keychain" "$service" "$account"
 cp "$probe_dir/version-2" "$probe_dir/unrelated"
-codesign --force --sign - --identifier org.homelab.sshelter "$probe_dir/unrelated"
+codesign --force --sign - --identifier "$app_id" "$probe_dir/unrelated"
 "$probe_dir/unrelated" denied "$keychain" "$service" "$account"
 
 # Existing login-keychain items can carry a separate cdhash partition gate.

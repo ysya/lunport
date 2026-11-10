@@ -1,13 +1,13 @@
-//! `sshelter-cli.exe`: the console program Windows terminals run to reach Lunport (own-ssh spec §7.3, §7.4).
+//! `lunport-cli.exe`: the console program Windows terminals run to reach Lunport (own-ssh spec §7.3, §7.4).
 //!
-//! Release `sshelter.exe` is a GUI program (`windows_subsystem = "windows"`): a shell does not wait for it, and a Windows Terminal tab
+//! Release `lunport.exe` is a GUI program (`windows_subsystem = "windows"`): a shell does not wait for it, and a Windows Terminal tab
 //! gives it no console. The helper is a console program, so the terminal gives it a console and waits for it. It runs the
-//! `sshelter.exe` in its own directory with exactly its own arguments and its standard input, output and error, waits for it, and leaves
-//! with its exit code; `sshelter.exe connect` attaches to the helper's console. Ctrl-C and Ctrl-Break go to every program on a console
-//! and are `sshelter.exe`'s to handle, so the helper ignores them and keeps waiting. Before it starts `sshelter.exe` the helper reads the
-//! console's four settings that `sshelter.exe connect` changes (the modes of the buffers behind its standard input and output, both code
-//! pages), and it puts them back once `sshelter.exe` has ended: `sshelter.exe` puts them back on every way out it has, but one ended from
-//! outside has none (the NSIS installer ends every `sshelter.exe` of the user at an install, an in-app update and an uninstall).
+//! `lunport.exe` in its own directory with exactly its own arguments and its standard input, output and error, waits for it, and leaves
+//! with its exit code; `lunport.exe connect` attaches to the helper's console. Ctrl-C and Ctrl-Break go to every program on a console
+//! and are `lunport.exe`'s to handle, so the helper ignores them and keeps waiting. Before it starts `lunport.exe` the helper reads the
+//! console's four settings that `lunport.exe connect` changes (the modes of the buffers behind its standard input and output, both code
+//! pages), and it puts them back once `lunport.exe` has ended: `lunport.exe` puts them back on every way out it has, but one ended from
+//! outside has none (the NSIS installer ends every `lunport.exe` of the user at an install, an in-app update and an uninstall).
 //!
 //! Std only, no dependencies. It builds everywhere, so its tests run everywhere; outside Windows it only says that it is for Windows.
 
@@ -17,18 +17,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 /// Lunport's own executable, which the helper runs from its own directory.
-pub const TARGET: &str = "sshelter.exe";
+pub const TARGET: &str = "lunport.exe";
 
 /// What the helper says outside Windows, where it has nothing to do.
-pub const NOT_WINDOWS: &str = "sshelter-cli is for Windows; run sshelter connect instead.";
+pub const NOT_WINDOWS: &str = "lunport-cli is for Windows; run lunport connect instead.";
 
-/// `sshelter.exe` in `dir`, or what the helper says when it is not there (`sshelter-cli: cannot find sshelter.exe in <dir>.`).
+/// `lunport.exe` in `dir`, or what the helper says when it is not there (`lunport-cli: cannot find lunport.exe in <dir>.`).
 pub fn target_in(dir: &Path) -> Result<PathBuf, String> {
     let target = dir.join(TARGET);
     if target.is_file() {
         Ok(target)
     } else {
-        Err(format!("sshelter-cli: cannot find {TARGET} in {}.", dir.display()))
+        Err(format!("lunport-cli: cannot find {TARGET} in {}.", dir.display()))
     }
 }
 
@@ -39,7 +39,7 @@ pub fn relay(target: &Path, args: &[OsString], stderr: &mut dyn Write) -> i32 {
     match Command::new(target).args(args).status() {
         Ok(status) => exit_code(status),
         Err(error) => {
-            let _ = writeln!(stderr, "sshelter-cli: cannot start {}: {error}.", target.display());
+            let _ = writeln!(stderr, "lunport-cli: cannot start {}: {error}.", target.display());
             1
         }
     }
@@ -51,7 +51,7 @@ fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-/// The console control events the helper ignores (wincon.h): the ones `sshelter.exe` handles.
+/// The console control events the helper ignores (wincon.h): the ones `lunport.exe` handles.
 const CTRL_C_EVENT: u32 = 0;
 const CTRL_BREAK_EVENT: u32 = 1;
 
@@ -61,8 +61,8 @@ pub fn ignores(event: u32) -> bool {
     event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT
 }
 
-/// One of the four settings of the console that `sshelter.exe connect` changes while it runs, and puts back on every way out it has
-/// (own-ssh spec §7.3). A `sshelter.exe` ended from outside has no way out: the NSIS installer ends every `sshelter.exe` of the user, a
+/// One of the four settings of the console that `lunport.exe connect` changes while it runs, and puts back on every way out it has
+/// (own-ssh spec §7.3). A `lunport.exe` ended from outside has no way out: the NSIS installer ends every `lunport.exe` of the user, a
 /// session's too, at each install, in-app update and uninstall. So the helper keeps the four as well (`keeping_the_console`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {
@@ -78,7 +78,7 @@ pub enum Setting {
 
 impl Setting {
     /// All four, in the order they are put back: the input's mode first, which the shell needs most (echo, line editing), as
-    /// `sshelter.exe` puts them back.
+    /// `lunport.exe` puts them back.
     pub const ALL: [Setting; 4] = [Setting::InputMode, Setting::OutputMode, Setting::InputCodePage, Setting::OutputCodePage];
 }
 
@@ -91,8 +91,8 @@ pub trait ConsoleSettings {
     fn set(&self, setting: Setting, value: u32) -> std::io::Result<()>;
 }
 
-/// Runs `child` (the relay to `sshelter.exe`) with `console`'s settings kept: each one that can be read is read before `child` starts and
-/// put back once it has ended, whatever it ended with. Where `sshelter.exe` put the console back itself, the same settings are set again
+/// Runs `child` (the relay to `lunport.exe`) with `console`'s settings kept: each one that can be read is read before `child` starts and
+/// put back once it has ended, whatever it ended with. Where `lunport.exe` put the console back itself, the same settings are set again
 /// and nothing changes; where it was ended from outside it put nothing back, and the shell gets its console as it was all the same. A
 /// setting that cannot be read is left alone (a standard handle that is not a console is not the console's to set), and one that cannot
 /// be put back does not stop the others.
@@ -106,16 +106,16 @@ pub fn keeping_the_console(console: &dyn ConsoleSettings, child: impl FnOnce() -
     code
 }
 
-/// The helper with `args` (its arguments after its own name); returns its exit code. It finds `sshelter.exe` in its own directory, stops
-/// Ctrl-C and Ctrl-Break from ending it (before the target starts, so at no moment can a Ctrl-C end the helper and leave `sshelter.exe`
+/// The helper with `args` (its arguments after its own name); returns its exit code. It finds `lunport.exe` in its own directory, stops
+/// Ctrl-C and Ctrl-Break from ending it (before the target starts, so at no moment can a Ctrl-C end the helper and leave `lunport.exe`
 /// running), and relays, keeping the console's settings for the shell (`keeping_the_console`). Without its handler it does not start: a
-/// Ctrl-C would end it and give the terminal back to the shell while `sshelter.exe` still reads the console.
+/// Ctrl-C would end it and give the terminal back to the shell while `lunport.exe` still reads the console.
 #[cfg(windows)]
 pub fn run(args: &[OsString], stderr: &mut dyn Write) -> i32 {
     let dir = match own_directory() {
         Ok(dir) => dir,
         Err(error) => {
-            let _ = writeln!(stderr, "sshelter-cli: cannot find its own directory: {error}.");
+            let _ = writeln!(stderr, "lunport-cli: cannot find its own directory: {error}.");
             return 1;
         }
     };
@@ -127,13 +127,13 @@ pub fn run(args: &[OsString], stderr: &mut dyn Write) -> i32 {
         }
     };
     if let Err(error) = console::ignore_ctrl_c_and_break() {
-        let _ = writeln!(stderr, "sshelter-cli: cannot ignore Ctrl-C and Ctrl-Break: {error}.");
+        let _ = writeln!(stderr, "lunport-cli: cannot ignore Ctrl-C and Ctrl-Break: {error}.");
         return 1;
     }
     keeping_the_console(&console::Standard, || relay(&target, args, stderr))
 }
 
-/// Outside Windows: there is no `sshelter.exe` to run (`sshelter connect` is used directly).
+/// Outside Windows: there is no `lunport.exe` to run (`lunport connect` is used directly).
 #[cfg(not(windows))]
 pub fn run(_args: &[OsString], stderr: &mut dyn Write) -> i32 {
     let _ = writeln!(stderr, "{NOT_WINDOWS}");
@@ -161,7 +161,7 @@ mod console {
     const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 
     // From consoleapi.h, consoleapi2.h and processenv.h; std links kernel32 already. A handler routine is not inherited by the target,
-    // unlike the flag that `SetConsoleCtrlHandler(NULL, TRUE)` sets: `sshelter.exe` gets its Ctrl-C.
+    // unlike the flag that `SetConsoleCtrlHandler(NULL, TRUE)` sets: `lunport.exe` gets its Ctrl-C.
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(event: u32) -> i32>, add: i32) -> i32;
@@ -174,7 +174,7 @@ mod console {
         fn SetConsoleOutputCP(code_page: u32) -> i32;
     }
 
-    /// The helper's console: the buffers behind its standard input and output, which `sshelter.exe` inherits and changes (a mode belongs
+    /// The helper's console: the buffers behind its standard input and output, which `lunport.exe` inherits and changes (a mode belongs
     /// to the buffer, whichever handle sets it), and the console's code pages.
     pub struct Standard;
 
@@ -253,7 +253,7 @@ mod tests {
     impl Scratch {
         fn new(name: &str) -> Scratch {
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-            let dir = std::env::temp_dir().join(format!("sshelter-cli-unit-{}-{name}-{nanos}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("lunport-cli-unit-{}-{name}-{nanos}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)
         }
@@ -266,35 +266,35 @@ mod tests {
     }
 
     #[test]
-    fn without_sshelter_exe_beside_it_the_helper_says_where_it_looked() {
+    fn without_lunport_exe_beside_it_the_helper_says_where_it_looked() {
         let scratch = Scratch::new("missing");
-        let sentence = format!("sshelter-cli: cannot find sshelter.exe in {}.", scratch.0.display());
+        let sentence = format!("lunport-cli: cannot find lunport.exe in {}.", scratch.0.display());
         assert_eq!(target_in(&scratch.0), Err(sentence.clone()));
         // A directory by that name is not the program either.
-        std::fs::create_dir(scratch.0.join("sshelter.exe")).unwrap();
+        std::fs::create_dir(scratch.0.join("lunport.exe")).unwrap();
         assert_eq!(target_in(&scratch.0), Err(sentence));
     }
 
     #[test]
-    fn the_sshelter_exe_beside_it_is_what_the_helper_runs() {
+    fn the_lunport_exe_beside_it_is_what_the_helper_runs() {
         let scratch = Scratch::new("present");
-        std::fs::write(scratch.0.join("sshelter.exe"), b"").unwrap();
-        assert_eq!(target_in(&scratch.0), Ok(scratch.0.join("sshelter.exe")));
+        std::fs::write(scratch.0.join("lunport.exe"), b"").unwrap();
+        assert_eq!(target_in(&scratch.0), Ok(scratch.0.join("lunport.exe")));
     }
 
     /// A target that cannot be started at all: the helper says so and exits 1.
     #[test]
     fn a_target_that_cannot_start_is_reported_with_1() {
         let scratch = Scratch::new("unstartable");
-        let missing = scratch.0.join("sshelter.exe");
+        let missing = scratch.0.join("lunport.exe");
         let mut said = Vec::new();
         assert_eq!(relay(&missing, &[OsString::from("connect")], &mut said), 1);
         let said = String::from_utf8(said).unwrap();
-        assert!(said.starts_with(&format!("sshelter-cli: cannot start {}: ", missing.display())), "{said:?}");
+        assert!(said.starts_with(&format!("lunport-cli: cannot start {}: ", missing.display())), "{said:?}");
         assert!(said.ends_with(".\n"), "{said:?}");
     }
 
-    /// Ctrl-C and Ctrl-Break are `sshelter.exe`'s (the console sends them to every program on it): the helper handles them by doing nothing.
+    /// Ctrl-C and Ctrl-Break are `lunport.exe`'s (the console sends them to every program on it): the helper handles them by doing nothing.
     /// Closing the console, logging off and shutting down go on to the default handler, which ends the helper as it ends everything else.
     #[test]
     fn the_helper_ignores_ctrl_c_and_ctrl_break_and_nothing_else() {
@@ -320,7 +320,7 @@ mod tests {
     enum Call {
         Get(Setting),
         Set(Setting, u32),
-        /// The child (`sshelter.exe`) set this, on the same console.
+        /// The child (`lunport.exe`) set this, on the same console.
         ChildSet(Setting, u32),
     }
 
@@ -394,7 +394,7 @@ mod tests {
     /// A classic console as a new window has it: the input's usual mode (processed, line, echo, insert, quick edit, extended flags,
     /// auto position), the output's (processed, wrap at the end of a line), and the United States' OEM code page in and out.
     const START: [Option<u32>; 4] = [Some(0x01F7), Some(0x0003), Some(437), Some(437)];
-    /// What `sshelter.exe connect` leaves the console in while a shell is open: raw input (no line input, echo or processed input; keys as
+    /// What `lunport.exe connect` leaves the console in while a shell is open: raw input (no line input, echo or processed input; keys as
     /// virtual terminal sequences), virtual terminal output with xterm's line endings, and UTF-8 out. It leaves the input's code page as
     /// it was; another program could change that too.
     const RAW: [u32; 4] = [0x01F7 & !0x0007 | 0x0200, 0x0003 | 0x0004 | 0x0008, 65001, 65001];
@@ -403,9 +403,9 @@ mod tests {
         Setting::ALL.into_iter().zip(values).filter_map(|(setting, value)| value.map(|value| Call::Set(setting, value))).collect()
     }
 
-    /// The helper reads the four settings before `sshelter.exe` starts and puts each back once it has ended, the input's mode first, and
+    /// The helper reads the four settings before `lunport.exe` starts and puts each back once it has ended, the input's mode first, and
     /// whatever it ended with: its own exit (0, the usage's 2, a lost connection's 255), a signal's code (130), or a kill from outside,
-    /// which gives `sshelter.exe` no way out of its own (the installer's; STATUS_CONTROL_C_EXIT too).
+    /// which gives `lunport.exe` no way out of its own (the installer's; STATUS_CONTROL_C_EXIT too).
     #[test]
     fn the_console_is_put_back_after_the_child_whatever_it_ended_with() {
         for code in [0, 1, 2, 130, 255, 0xC000_013A_u32 as i32] {
@@ -462,7 +462,7 @@ mod tests {
         }
     }
 
-    /// A `sshelter.exe` that put the console back itself, as every way out of it does: putting the same settings back changes nothing.
+    /// A `lunport.exe` that put the console back itself, as every way out of it does: putting the same settings back changes nothing.
     #[test]
     fn a_console_the_child_put_back_itself_stays_as_it_is() {
         let console = FakeConsole::new(START);

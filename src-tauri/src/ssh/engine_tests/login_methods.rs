@@ -1,8 +1,8 @@
 //! Logging in with a password and with keyboard-interactive, and what happens to a prompt that is cancelled, late or slow (spec §6.2
 //! step 4). A scratch OpenSSH has no PAM and cannot do either, so the same test bodies run against two servers:
 //! - `toy`: a small SSH server in process (`russh_engine::toy_server`), everywhere, always;
-//! - `pam`: a real OpenSSH with PAM in a container (`src-tauri/tests/pam-sshd`), when `SSHELTER_PAM_PORT`, `SSHELTER_PAM_USER` and
-//!   `SSHELTER_PAM_PASSWORD` say where it is. Without them the `pam` tests print "skipped" and pass, unless `SSHELTER_REQUIRE_PAM=1`
+//! - `pam`: a real OpenSSH with PAM in a container (`src-tauri/tests/pam-sshd`), when `LUNPORT_PAM_PORT`, `LUNPORT_PAM_USER` and
+//!   `LUNPORT_PAM_PASSWORD` say where it is. Without them the `pam` tests print "skipped" and pass, unless `LUNPORT_REQUIRE_PAM=1`
 //!   (the Linux job of the CI) turns that into a failure.
 
 use std::time::{Duration, Instant};
@@ -68,13 +68,13 @@ fn toy_asking(rounds: Vec<Vec<(&str, &str)>>) -> Subject {
 
 fn pam() -> Option<Subject> {
     let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let (Some(port), Some(user), Some(password)) = (variable("SSHELTER_PAM_PORT"), variable("SSHELTER_PAM_USER"), variable("SSHELTER_PAM_PASSWORD")) else {
-        let required = std::env::var("SSHELTER_REQUIRE_PAM").is_ok_and(|value| value == "1");
-        assert!(!required, "SSHELTER_PAM_PORT, SSHELTER_PAM_USER and SSHELTER_PAM_PASSWORD are required (SSHELTER_REQUIRE_PAM=1)");
-        eprintln!("skipped: SSHELTER_PAM_PORT, SSHELTER_PAM_USER and SSHELTER_PAM_PASSWORD are not all set");
+    let (Some(port), Some(user), Some(password)) = (variable("LUNPORT_PAM_PORT"), variable("LUNPORT_PAM_USER"), variable("LUNPORT_PAM_PASSWORD")) else {
+        let required = std::env::var("LUNPORT_REQUIRE_PAM").is_ok_and(|value| value == "1");
+        assert!(!required, "LUNPORT_PAM_PORT, LUNPORT_PAM_USER and LUNPORT_PAM_PASSWORD are required (LUNPORT_REQUIRE_PAM=1)");
+        eprintln!("skipped: LUNPORT_PAM_PORT, LUNPORT_PAM_USER and LUNPORT_PAM_PASSWORD are not all set");
         return None;
     };
-    Some(Subject { port: port.parse().expect("SSHELTER_PAM_PORT is a port number"), user, password, _toy: None })
+    Some(Subject { port: port.parse().expect("LUNPORT_PAM_PORT is a port number"), user, password, _toy: None })
 }
 
 fn engine_with_prompt_wait(wait: Duration) -> RusshEngine {

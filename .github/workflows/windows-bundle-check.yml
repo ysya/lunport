@@ -1,12 +1,13 @@
 # Builds the Windows installers (NSIS and MSI) the way the Windows leg of beta.yml does — every target of tauri.conf.json, the console
-# helper sshelter-cli.exe (src-tauri/cli-helper) built first and bundled through `tauri build --config` (bundle.externalBin) — and checks
-# the result: each installer holds sshelter-cli.exe next to sshelter.exe, the helper needs no VC++ runtime, and the two run `sshelter
-# connect` together, through pipes (the usage and its exit code 2 come back through the helper) and in a console of their own, as a
-# terminal runs them (the GUI sshelter.exe reaches the console through AttachConsole and the handles it inherits: the usage on the
-# console's screen, and the refusal of a session pipe another owner made), where the helper also puts back the console a killed program
-# left changed. Run by hand before a beta (own-ssh plan 1b-3). It publishes nothing: no release and no updater artifacts, so no signing
-# key. Not copied from beta.yml: the version stamp (this build keeps the version in the repository) and the sync relay check (the relay
-# URL does not change the bundle).
+# helper lunport-cli.exe (src-tauri/cli-helper) built first and bundled through `tauri build --config` (bundle.externalBin) — and checks
+# the result: both installers carry the identity of the Tauri configuration and find the one installs had before 2.0 (legacy.nsh,
+# legacy.wxi), each holds lunport-cli.exe next to lunport.exe, the helper needs no VC++ runtime, and the two run `lunport connect`
+# together, through pipes (the usage and its exit code 2 come back through the helper) and in a console of their own, as a terminal runs
+# them (the GUI lunport.exe reaches the console through AttachConsole and the handles it inherits: the usage on the console's screen, and
+# the refusal of a session pipe another owner made), where the helper also puts back the console a killed program left changed. The
+# upgrade job then installs the published 1.14.4 on a clean runner and upgrades it to this candidate (scripts/validate-windows-rebrand.ps1).
+# Run by hand before a beta. It publishes nothing: no release and no updater artifacts, so no signing key. Not copied from beta.yml: the
+# version stamp (this build keeps the version in the repository) and the sync relay check (the relay URL does not change the bundle).
 name: Packages - Windows upgrade (manual)
 
 on:
@@ -48,6 +49,10 @@ jobs:
           node-version: lts/*
           cache: pnpm
 
+      # The earlier identity the installers look for (legacy.nsh, legacy.wxi) is the one the upgrade job installs and checks.
+      - name: The installers' earlier identity matches scripts/legacy-identity.json
+        run: node --test scripts/legacy-identity.test-node.mjs
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -57,16 +62,12 @@ jobs:
           workspaces: "./src-tauri -> target"
           cache-on-failure: true
 
-      # As in beta.yml (its comment says why it is built this way).
+      # As in beta.yml: scripts/windows-console-helper.mjs builds the helper and gives the argument that bundles it.
       - name: Build the console helper (Windows)
+        id: helper
         if: ${{ !inputs.repackage_run_id }}
         shell: bash
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: |
-          cargo build --release --locked --manifest-path src-tauri/cli-helper/Cargo.toml
-          mkdir -p src-tauri/binaries
-          cp src-tauri/cli-helper/target/release/sshelter-cli.exe src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe
+        run: node scripts/windows-console-helper.mjs
 
       - name: Install frontend dependencies
         run: pnpm install
@@ -80,9 +81,10 @@ jobs:
         if: ${{ !inputs.repackage_run_id }}
         uses: tauri-apps/tauri-action@v1
         with:
-          args: --verbose --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          args: --verbose ${{ steps.helper.outputs.args }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Restore verified runtime binaries for installer-only changes
+        id: restore
         if: ${{ inputs.repackage_run_id != '' }}
         shell: pwsh
         env:
@@ -100,7 +102,7 @@ jobs:
           if ($candidate.repository -ne $env:GITHUB_REPOSITORY -or $candidate.source -ne $run.head_sha -or $candidate.source -notmatch '^[a-f0-9]{40}$') { throw 'Candidate provenance mismatch.' }
           $changes = @(& git diff --name-only $candidate.source HEAD)
           if ($LASTEXITCODE -ne 0) { throw 'Cannot compare candidate source.' }
-          $unexpected = @($changes | Where-Object { $_ -notmatch '^(src-tauri/installers/|docs/|scripts/validate-windows-rebrand\.ps1$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
+          $unexpected = @($changes | Where-Object { $_ -notmatch '^(src-tauri/installers/|docs/|scripts/validate-windows-rebrand\.ps1$|scripts/legacy-identity\.(json|test-node\.mjs)$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
           if ($unexpected.Count -ne 0) { throw "Runtime source differs from the candidate: $($unexpected -join ', ')" }
           if (@($candidate.files).Count -ne 2) { throw 'Expected exactly two candidate packages.' }
           foreach ($file in $candidate.files) {
@@ -109,12 +111,18 @@ jobs:
           }
           $nsis = @($candidate.files | Where-Object { $_.path.StartsWith('bundle/nsis/') })
           if ($nsis.Count -ne 1) { throw 'Expected one verified NSIS payload.' }
+          $identity = (node scripts/identity.mjs | Out-String | ConvertFrom-Json).production
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read the identity values.' }
+          $main = $identity.mainBinary
+          $helper = $identity.consoleHelper
           $payload = Join-Path $scratch 'payload'
-          & 7z e (Join-Path $scratch $nsis[0].path) "-o$payload" sshelter.exe sshelter-cli.exe -r -y | Out-Null
+          & 7z e (Join-Path $scratch $nsis[0].path) "-o$payload" "$main.exe" "$helper.exe" -r -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'Cannot extract the verified runtime pair.' }
-          New-Item -ItemType Directory -Force src-tauri/target/release, src-tauri/binaries | Out-Null
-          Copy-Item "$payload/sshelter.exe" src-tauri/target/release/sshelter.exe -Force
-          Copy-Item "$payload/sshelter-cli.exe" src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe -Force
+          New-Item -ItemType Directory -Force src-tauri/target/release | Out-Null
+          Copy-Item "$payload/$main.exe" "src-tauri/target/release/$main.exe" -Force
+          # Into src-tauri/binaries, as the helper step puts a helper it builds, with the argument that bundles it as this step's output.
+          node scripts/windows-console-helper.mjs --from "$payload/$helper.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot put the verified console helper where tauri bundles it from.' }
           $runtimeSource = if ($candidate.runtimeSource) { $candidate.runtimeSource } else { $candidate.source }
           Add-Content $env:GITHUB_ENV "LUNPORT_RUNTIME_SOURCE=$runtimeSource"
           Write-Output "Verified unchanged runtime from $runtimeSource; only installer and validation sources may differ."
@@ -126,23 +134,88 @@ jobs:
         run: |
           pnpm build
           if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
-          node node_modules/@tauri-apps/cli/tauri.js bundle --verbose --bundles nsis,msi --config '{"bundle":{"externalBin":["binaries/sshelter-cli"],"createUpdaterArtifacts":false}}'
+          node node_modules/@tauri-apps/cli/tauri.js bundle --verbose --bundles nsis,msi ${{ steps.restore.outputs.args }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
           if ($LASTEXITCODE -ne 0) { throw 'Installer-only packaging failed.' }
 
-      - name: Record the unsigned candidate source and checksums
+      # A candidate is saved only when both installers carry the identity of the Tauri configuration (product name, publisher, main
+      # binary) and know where installs from before 2.0 registered (legacy.nsh, legacy.wxi; scripts/legacy-identity.json for the check).
+      - name: Check the installer identities and record the unsigned candidate
         shell: pwsh
         run: |
           $base = (Resolve-Path 'src-tauri/target/release').Path
+          $tauri = Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json
+          $legacy = (Get-Content -Raw scripts/legacy-identity.json | ConvertFrom-Json).production
+          $currentKey = "Software\$($tauri.bundle.publisher)\$($tauri.productName)"
+          $legacyKey = "Software\$($legacy.manufacturer)\$($legacy.installerIdentity)"
+          $nsi = @(Get-ChildItem "$base/nsis" -Filter 'installer.nsi' -Recurse)
+          if ($nsi.Count -ne 1) { throw 'Expected one rendered NSIS script.' }
+          $nsisScript = Get-Content $nsi[0].FullName -Raw
+          if ($nsisScript -match '\{\{') { throw 'Unexpanded Handlebars expression in the rendered NSIS script.' }
+          $defines = @(
+            "MANUFACTURER `"$($tauri.bundle.publisher)`"", "PRODUCTNAME `"$($tauri.productName)`"", "BUNDLEID `"$($tauri.identifier)`"",
+            "MAINBINARYNAME `"$($tauri.mainBinaryName)`"", 'UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"',
+            'MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"'
+          )
+          foreach ($define in $defines) { if (-not $nsisScript.Contains("!define $define")) { throw "The rendered NSIS script lacks !define $define" } }
+          if (-not $nsisScript.Contains('!include "legacy.nsh"')) { throw 'The rendered NSIS script does not include legacy.nsh.' }
           $wix = @(Get-ChildItem "$base/wix" -Filter 'main.wxs' -Recurse)
           if ($wix.Count -ne 1) { throw 'Expected one rendered WiX template.' }
           $rendered = Get-Content $wix[0].FullName -Raw
           if ($rendered -match '\{\{') { throw 'Unexpanded Handlebars expression in the rendered WiX template.' }
+          $include = [regex]::Match($rendered, '<\?include\s+(\S+)\s*\?>')
+          if (-not $include.Success -or -not (Test-Path -LiteralPath (Join-Path $wix[0].DirectoryName $include.Groups[1].Value))) { throw 'The rendered WiX template does not include legacy.wxi from the installer sources.' }
           [xml] $xml = $rendered
-          $searches = $xml.SelectNodes("//*[local-name()='RegistrySearch' and starts-with(@Id, 'PrevInstallDir')]")
-          if ($searches.Count -ne 2) { throw 'Expected both previous-directory searches.' }
-          foreach ($search in $searches) {
-            if ($search.GetAttribute('Key') -ne 'Software\homelab\$(var.InstallerIdentity)') { throw 'The rendered WiX search does not use the legacy registry namespace.' }
+          $searches = @($xml.SelectNodes("//*[local-name()='RegistrySearch' and contains(@Id, 'InstallDir')]") | ForEach-Object { "$($_.GetAttribute('Id'))=$($_.GetAttribute('Key'))" })
+          $expected = @('LegacyInstallDirNoName=$(var.LegacyProductKey)', 'LegacyInstallDirWithName=$(var.LegacyProductKey)', "PrevInstallDirNoName=$currentKey", "PrevInstallDirWithName=$currentKey")
+          if (($searches -join '|') -ne ($expected -join '|')) { throw "Unexpected previous-directory searches: $($searches -join ', ')" }
+          # What candle and light made of them: the earlier key from legacy.wxi resolved, the current publisher and the frozen UpgradeCode.
+          $msis = @(Get-ChildItem "$base/bundle/msi" -Filter '*.msi')
+          if ($msis.Count -ne 1) { throw 'Expected one MSI candidate.' }
+          # The Windows Installer objects are called late-bound (Type.InvokeMember), as Microsoft's PowerShell samples call them: read through
+          # PowerShell's own COM binding, Record.StringData gave the same pointer-like number for every Key of RegLocator.
+          function Invoke-Com($Object, [string] $Member, [Reflection.BindingFlags] $Kind, [object[]] $Arguments) {
+            , ($Object.GetType().InvokeMember($Member, $Kind, $null, $Object, $Arguments))
           }
+          $database = Invoke-Com (New-Object -ComObject WindowsInstaller.Installer) OpenDatabase InvokeMethod @($msis[0].FullName, 0)
+          # Each row the query reads, as the array of its fields.
+          function Rows([string] $Query) {
+            $view = Invoke-Com $database OpenView InvokeMethod @($Query)
+            [void] (Invoke-Com $view Execute InvokeMethod $null)
+            while ($null -ne ($record = Invoke-Com $view Fetch InvokeMethod $null)) {
+              $count = Invoke-Com $record FieldCount GetProperty $null
+              , @(for ($field = 1; $field -le $count; $field++) { Invoke-Com $record StringData GetProperty @($field) })
+            }
+            [void] (Invoke-Com $view Close InvokeMethod $null)
+          }
+          # A failing check prints every column of every row it read, with the type of any field that came back as something else than text.
+          function Show-Rows([string] $Table, [string[]] $Columns, [object[]] $Rows) {
+            Write-Host "$($Rows.Count) $Table rows read ($($Columns -join ' | ')):"
+            foreach ($row in $Rows) {
+              Write-Host "  $(@($row | ForEach-Object { if ($_ -is [string]) { "'$_'" } elseif ($null -eq $_) { '<null>' } else { "[$($_.GetType().FullName)] $_" } }) -join ' | ')"
+            }
+          }
+          $locatorColumns = @('Signature_', 'Root', 'Key', 'Name', 'Type')
+          $locatorRows = @(Rows "SELECT ``Signature_``, ``Root``, ``Key``, ``Name``, ``Type`` FROM ``RegLocator``")
+          $locators = @($locatorRows | ForEach-Object { "$($_[0])=$($_[2])" } | Where-Object { $_ -match 'InstallDir' } | Sort-Object)
+          $expectedLocators = @("LegacyInstallDirNoName=$legacyKey", "LegacyInstallDirWithName=$legacyKey", "PrevInstallDirNoName=$currentKey", "PrevInstallDirWithName=$currentKey")
+          if (($locators -join '|') -ne ($expectedLocators -join '|')) {
+            Show-Rows RegLocator $locatorColumns $locatorRows
+            throw "Unexpected MSI registry searches: $($locators -join ', ')"
+          }
+          $propertyRows = @(Rows "SELECT ``Property``, ``Value`` FROM ``Property``")
+          $properties = @{}
+          foreach ($row in $propertyRows) { $properties[[string] $row[0]] = $row[1] }
+          $upgradeCode = [guid]::Empty
+          $mismatch = if ($properties.ProductName -ne $tauri.productName -or $properties.Manufacturer -ne $tauri.bundle.publisher) {
+            "The MSI is $($properties.ProductName) by $($properties.Manufacturer)."
+          } elseif (-not [guid]::TryParse("$($properties.UpgradeCode)", [ref] $upgradeCode) -or $upgradeCode -ne [guid] $tauri.bundle.windows.wix.upgradeCode) {
+            "The MSI UpgradeCode changed: $($properties.UpgradeCode)"
+          }
+          if ($mismatch) {
+            Show-Rows Property @('Property', 'Value') $propertyRows
+            throw $mismatch
+          }
+          Write-Output "Both installers are $($tauri.productName) by $($tauri.bundle.publisher) and find installs registered as $legacyKey."
           $packages = @(Get-ChildItem "$base/bundle/nsis" -Filter '*-setup.exe') + @(Get-ChildItem "$base/bundle/msi" -Filter '*.msi')
           if ($packages.Count -ne 2) { throw 'Expected one NSIS and one MSI candidate.' }
           $files = @($packages | ForEach-Object {
@@ -165,10 +238,13 @@ jobs:
             src-tauri/target/release/nsis/**/*.nsi
             src-tauri/target/release/wix/**/*.wxs
 
-      # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to.
-      - name: The NSIS installer holds sshelter-cli.exe next to sshelter.exe
+      # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to. The program
+      # names are the Tauri configuration's main binary and its console helper; the executables from before 2.0 must be gone.
+      - name: The NSIS installer holds lunport-cli.exe next to lunport.exe
         shell: pwsh
         run: |
+          $main = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).mainBinaryName
+          $legacy = (Get-Content -Raw scripts/legacy-identity.json | ConvertFrom-Json).production
           $installers = @(Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter '*-setup.exe')
           if ($installers.Count -ne 1) { throw "expected one NSIS installer, found $($installers.Count): $($installers.Name -join ', ')" }
           $installer = $installers[0].FullName
@@ -181,22 +257,26 @@ jobs:
           })
           Write-Output "$installer holds:"
           $files | ForEach-Object { Write-Output "  $($_.Path)" }
-          $helper = @($files | Where-Object Name -eq 'sshelter-cli.exe' | ForEach-Object Directory)
-          $app = @($files | Where-Object Name -eq 'sshelter.exe' | ForEach-Object Directory)
-          if ($helper.Count -eq 0) { throw 'the installer has no sshelter-cli.exe' }
-          if ($app.Count -eq 0) { throw 'the installer has no sshelter.exe' }
+          $helper = @($files | Where-Object Name -eq "$main-cli.exe" | ForEach-Object Directory)
+          $app = @($files | Where-Object Name -eq "$main.exe" | ForEach-Object Directory)
+          if ($helper.Count -eq 0) { throw "the installer has no $main-cli.exe" }
+          if ($app.Count -eq 0) { throw "the installer has no $main.exe" }
           if (@($helper | Where-Object { $app -contains $_ }).Count -eq 0) {
-            throw "sshelter-cli.exe ($($helper -join ', ')) is not in the directory of sshelter.exe ($($app -join ', '))"
+            throw "$main-cli.exe ($($helper -join ', ')) is not in the directory of $main.exe ($($app -join ', '))"
           }
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_INSTALLER=$installer"
-          Write-Output 'sshelter-cli.exe is next to sshelter.exe.'
+          $stale = @($files | Where-Object Name -in @("$($legacy.mainBinary).exe", "$($legacy.consoleHelper).exe"))
+          if ($stale.Count -ne 0) { throw "the installer still holds $($stale.Path -join ', ')" }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "LUNPORT_INSTALLER=$installer"
+          Write-Output "$main-cli.exe is next to $main.exe."
           exit 0
 
       # An administrative install (msiexec /a) lays the MSI's files out under TARGETDIR as its Directory table has them, registering
-      # nothing: the helper has to land in the directory of sshelter.exe (where WiX puts external binaries is checked, not assumed).
-      - name: The MSI holds sshelter-cli.exe next to sshelter.exe
+      # nothing: the helper has to land in the directory of lunport.exe (where WiX puts external binaries is checked, not assumed).
+      - name: The MSI holds lunport-cli.exe next to lunport.exe
         shell: pwsh
         run: |
+          $main = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).mainBinaryName
+          $legacy = (Get-Content -Raw scripts/legacy-identity.json | ConvertFrom-Json).production
           $msis = @(Get-ChildItem -Path src-tauri/target/release/bundle/msi -Filter '*.msi')
           if ($msis.Count -ne 1) { throw "expected one MSI, found $($msis.Count): $($msis.Name -join ', ')" }
           $msi = $msis[0].FullName
@@ -207,72 +287,81 @@ jobs:
           $files = @(Get-ChildItem -Path $image -Recurse -File)
           Write-Output "$msi lays out:"
           $files | ForEach-Object { Write-Output "  $($_.FullName.Substring($image.Length + 1))" }
-          $app = @($files | Where-Object Name -eq 'sshelter.exe' | ForEach-Object DirectoryName)
-          $helper = @($files | Where-Object Name -eq 'sshelter-cli.exe' | ForEach-Object DirectoryName)
-          if ($app.Count -eq 0) { throw 'the MSI has no sshelter.exe' }
-          if ($helper.Count -eq 0) { throw 'the MSI has no sshelter-cli.exe' }
+          $app = @($files | Where-Object Name -eq "$main.exe" | ForEach-Object DirectoryName)
+          $helper = @($files | Where-Object Name -eq "$main-cli.exe" | ForEach-Object DirectoryName)
+          if ($app.Count -eq 0) { throw "the MSI has no $main.exe" }
+          if ($helper.Count -eq 0) { throw "the MSI has no $main-cli.exe" }
           if (@($helper | Where-Object { $app -contains $_ }).Count -eq 0) {
-            throw "sshelter-cli.exe ($($helper -join ', ')) is not in the directory of sshelter.exe ($($app -join ', '))"
+            throw "$main-cli.exe ($($helper -join ', ')) is not in the directory of $main.exe ($($app -join ', '))"
           }
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_MSI_DIR=$($app[0])"
-          Write-Output 'sshelter-cli.exe is next to sshelter.exe in the MSI.'
+          $stale = @($files | Where-Object Name -in @("$($legacy.mainBinary).exe", "$($legacy.consoleHelper).exe"))
+          if ($stale.Count -ne 0) { throw "the MSI still holds $($stale.FullName -join ', ')" }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "LUNPORT_MSI_DIR=$($app[0])"
+          Write-Output "$main-cli.exe is next to $main.exe in the MSI."
           exit 0
 
       # The two programs as each installer has them, side by side: the helper must start on a Windows without the VC++ runtime (the
       # runner has one, so the helper's imports are read rather than trusting a start here; both installers hold the same helper), and
-      # `sshelter-cli.exe connect` (no alias) has to bring back the usage of the GUI sshelter.exe and its exit code 2, from each installer.
-      - name: The installers' two programs run sshelter connect
+      # `lunport-cli.exe connect` (no alias) has to bring back the usage of the GUI lunport.exe and its exit code 2, from each installer.
+      - name: The installers' two programs run lunport connect
         shell: pwsh
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP 'installed SSHelter'
-          & 7z e $env:SSHELTER_INSTALLER "-o$dir" sshelter.exe sshelter-cli.exe -r -y | Out-Null
+          $main = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).mainBinaryName
+          $dir = Join-Path $env:RUNNER_TEMP 'installed Lunport'
+          & 7z e $env:LUNPORT_INSTALLER "-o$dir" "$main.exe" "$main-cli.exe" -r -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7-Zip could not extract the two programs (exit $LASTEXITCODE)" }
-          $helper = Join-Path $dir 'sshelter-cli.exe'
+          $helper = Join-Path $dir "$main-cli.exe"
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $dumpbin = @(& $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe')[0]
           if (-not $dumpbin) { throw 'dumpbin.exe not found (vswhere)' }
           $imports = & $dumpbin /nologo /dependents $helper | Out-String
           Write-Output $imports
           if ($LASTEXITCODE -ne 0) { throw "dumpbin could not read $helper (exit $LASTEXITCODE)" }
-          if ($imports -match '(?i)vcruntime|msvcp') { throw 'sshelter-cli.exe needs the VC++ runtime: it was not built with +crt-static' }
-          foreach ($image in @($dir, $env:SSHELTER_MSI_DIR)) {
-            $helper = Join-Path $image 'sshelter-cli.exe'
+          if ($imports -match '(?i)vcruntime|msvcp') { throw "$main-cli.exe needs the VC++ runtime: it was not built with +crt-static" }
+          $usage = "usage: $main connect <alias>"
+          foreach ($image in @($dir, $env:LUNPORT_MSI_DIR)) {
+            $helper = Join-Path $image "$main-cli.exe"
             # Each line the programs wrote, as text (2>&1 hands stderr's lines over as error records).
             $said = (& $helper connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
             $code = $LASTEXITCODE
             Write-Output "$helper connect exited with $code and said:" $said
-            if ($code -ne 2 -or $said -notmatch 'usage: sshelter connect <alias>') { throw "expected the usage of sshelter connect and exit code 2 from $image" }
+            if ($code -ne 2 -or -not $said.Contains($usage)) { throw "expected '$usage' and exit code 2 from $image" }
           }
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_NSIS_DIR=$dir"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "LUNPORT_NSIS_DIR=$dir"
           exit 0
 
-      # The same two programs in a console of their own, as a terminal runs them (own-ssh spec §7.3), from each installer: the helper
+      # The same two programs in a console of their own, as a terminal runs them, from each installer: the helper
       # started with that console's own buffers as its standard handles, as a shell in the console starts a program, and the GUI
-      # sshelter.exe attaching to the helper's console and reading it through the handles it inherits (no step through pipes reaches that).
+      # lunport.exe attaching to the helper's console and reading it through the handles it inherits (no step through pipes reaches that).
       # The console's screen shows the usage (2), and the refusal of a session pipe another owner made (1; the runner is elevated, so the
-      # Administrators group can own the squatter's pipe; the pipe was opened, no SSHelter started). And each installer's helper puts the
-      # console's four settings back after a stand-in sshelter.exe that changed them and was killed, as the NSIS installer kills a
-      # session's sshelter.exe. A test of the app (cli::real_console_tests), built here; test-windows.yml runs it on the debug pair.
+      # Administrators group can own the squatter's pipe; the pipe was opened, no Lunport started). And each installer's helper puts the
+      # console's four settings back after a stand-in lunport.exe that changed them and was killed, as the NSIS installer kills a
+      # session's lunport.exe. A test of the app (cli::real_console_tests), built here; test-windows.yml runs it on the helper as the
+      # Windows builds make it beside the debug lunport.exe.
       - name: The installers' two programs in a console of their own
         shell: pwsh
         working-directory: src-tauri
         run: |
           cargo test --locked --lib --no-run
           if ($LASTEXITCODE -ne 0) { throw "the app's tests did not build (exit $LASTEXITCODE)" }
-          foreach ($image in @($env:SSHELTER_NSIS_DIR, $env:SSHELTER_MSI_DIR)) {
-            $env:SSHELTER_TEST_PAIR = $image
-            $env:SSHELTER_TEST_PAIR_PROFILE = 'production'
+          foreach ($image in @($env:LUNPORT_NSIS_DIR, $env:LUNPORT_MSI_DIR)) {
+            $env:LUNPORT_TEST_PAIR = $image
+            $env:LUNPORT_TEST_PAIR_PROFILE = 'production'
             cargo test --locked --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
             if ($LASTEXITCODE -ne 0) { throw "the pair from $image in a console of its own failed (exit $LASTEXITCODE)" }
           }
           exit 0
 
+  # The published 1.14.4 upgraded to the candidate: by the in-app updater's NSIS run while an earlier MCP adapter runs, by the NSIS
+  # installer run by hand, and by the MSI. One installation under the current identity in the same directory, then the app's first
+  # start moves data, credentials and the login entry, and uninstalling keeps the data. Each failing check is reported at the end.
+  # Installs, credentials and login entries are real, so this runs only on a disposable runner.
   upgrade:
-    name: upgrade published 1.0.0
+    name: upgrade published 1.14.4
     needs: nsis
     if: ${{ always() && (needs.nsis.result == 'success' || inputs.candidate_run_id != '') }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -294,7 +383,7 @@ jobs:
           if ($candidate.repository -ne $env:GITHUB_REPOSITORY -or $candidate.source -ne $run.head_sha -or $candidate.source -notmatch '^[a-f0-9]{40}$') { throw 'Candidate provenance mismatch.' }
           $changes = @(& git diff --name-only $candidate.source HEAD)
           if ($LASTEXITCODE -ne 0) { throw 'Cannot compare candidate source.' }
-          $unexpected = @($changes | Where-Object { $_ -notmatch '^(docs/|scripts/validate-windows-rebrand\.ps1$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
+          $unexpected = @($changes | Where-Object { $_ -notmatch '^(docs/|scripts/validate-windows-rebrand\.ps1$|scripts/legacy-identity\.(json|test-node\.mjs)$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
           if ($unexpected.Count -ne 0) { throw "Product source differs from the candidate: $($unexpected -join ', ')" }
           if (@($candidate.files).Count -ne 2) { throw 'Expected exactly two candidate packages.' }
           foreach ($file in $candidate.files) {
@@ -302,9 +391,9 @@ jobs:
             if ((Get-FileHash (Join-Path $base $file.path) -Algorithm SHA256).Hash -ne $file.sha256) { throw 'Candidate package checksum mismatch.' }
           }
           Write-Output "Verified unsigned candidate from $($candidate.source)"
-          Get-ChildItem "$base/nsis" -Filter '*.nsi' -Recurse | Select-String '^!define (PRODUCTNAME|MAINBINARYNAME|MAINBINARYSRCPATH|BUNDLEID|MANUKEY|MANUPRODUCTKEY|UNINSTKEY|INSTALLERIDENTITY) '
+          Get-ChildItem "$base/nsis" -Filter '*.nsi' -Recurse | Select-String '^!(define (MANUFACTURER|PRODUCTNAME|MAINBINARYNAME|MAINBINARYSRCPATH|BUNDLEID|MANUKEY|MANUPRODUCTKEY|UNINSTKEY|LEGACY_\w+) |include "legacy)'
           exit 0
-      - name: Upgrade published SSHelter 1.0.0 to Lunport on a clean runner
+      - name: Upgrade published 1.14.4 to the candidate on a clean runner
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

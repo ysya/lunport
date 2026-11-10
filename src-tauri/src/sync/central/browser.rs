@@ -100,7 +100,7 @@ impl BrowserLogin {
             .enable_all()
             .build()
             .map_err(|_| error("Could not start local sign-in."))?;
-        std::thread::Builder::new().name("lunport-sign-in".into()).spawn(move || {
+        std::thread::Builder::new().name(crate::identity::thread_name("sign-in")).spawn(move || {
             runtime.block_on(async move {
                 let Ok(listener)=tokio::net::TcpListener::from_std(listener) else {return;};
                 let permits=Arc::new(Semaphore::new(4));

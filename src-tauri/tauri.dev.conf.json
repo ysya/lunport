@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "identifier": "org.homelab.sshelter.dev",
+  "identifier": "dev.ysya.lunport.dev",
   "productName": "Lunport Dev",
+  "mainBinaryName": "lunport",
   "app": {
     "windows": [
       {
@@ -25,6 +26,7 @@
   },
   "bundle": {
     "createUpdaterArtifacts": false,
+    "publisher": "ysya",
     "windows": {
       "wix": {
         "upgradeCode": "cbb71e88-3302-5c89-a246-87037d1645f3"

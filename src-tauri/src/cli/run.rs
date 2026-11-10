@@ -1,4 +1,4 @@
-//! The I/O of `sshelter connect` (own-ssh spec §7.3). Threads of their own read the broker's frames, the person's keys and the signals
+//! The I/O of `lunport connect` (own-ssh spec §7.3). Threads of their own read the broker's frames, the person's keys and the signals
 //! (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT), and put what happened in one queue; the loop takes it out in order,
 //! the client (`client.rs`) says what to do with each, and the loop does it without waiting on anything that can stall: what goes to
 //! the terminal and what goes to the broker is written by a writer thread of each. A terminal that is slow, or a broker that stops
@@ -88,7 +88,7 @@ pub fn run(stream: Stream, request: impl Into<Request>, term: String, tty: &mut 
     };
     let terminal = TerminalWriter::start(stdout, stderr, &inputs);
     let broker = BrokerWriter::start(stream, &inputs);
-    spawn_worker("sshelter-broker", inputs, move |inputs| read_broker(reader, &inputs));
+    spawn_worker("broker", inputs, move |inputs| read_broker(reader, &inputs));
     let mut the_loop = Loop { tty, queue, terminal, broker };
     let (mut client, actions) = Client::start(request, term, size);
     if let Some(code) = the_loop.perform(actions, None) {
@@ -174,7 +174,7 @@ impl Loop<'_> {
                         return self.cut_short(discard_input, status);
                     }
                     if let Err(error) = self.tty.set_mode(mode, discard_input) {
-                        self.terminal.show(Show::Said(format!("sshelter: cannot set the terminal: {error}\n")));
+                        self.terminal.show(Show::Said(format!("lunport: cannot set the terminal: {error}\n")));
                         shown = true;
                     }
                     if discard_input {
@@ -570,7 +570,7 @@ impl TerminalWriter {
         let moving = Arc::clone(&moved);
         let (stopped, writing) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())));
         let (stop, piece_lock) = (Arc::clone(&stopped), Arc::clone(&writing));
-        spawn_worker("sshelter-terminal", inputs.clone(), move |_| {
+        spawn_worker("terminal", inputs.clone(), move |_| {
             let got_on = || *moving.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
             // What a job brings is written a piece at a time, and each piece written counts as getting on. Once the writer is stopped
             // the rest is not written (which is not a failure of the stream).
@@ -699,7 +699,7 @@ impl BrokerWriter {
         let (jobs, given) = std::sync::mpsc::channel::<Post>();
         let size = Arc::new(Mutex::new(None));
         let latest = Arc::clone(&size);
-        spawn_worker("sshelter-to-broker", inputs.clone(), move |_| {
+        spawn_worker("to-broker", inputs.clone(), move |_| {
             // Once a write fails the broker is gone (the reader tells the loop); nothing more is written, and what is given is dropped.
             let mut gone = false;
             for job in given {
@@ -872,7 +872,7 @@ pub fn stdin_thread(inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
 /// `read_keys` on a thread of its own; a terminal that went away is told to the queue as SIGHUP would be.
 #[cfg(unix)]
 fn keys_thread(mut source: impl Keys + Send + 'static, inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
-    spawn_worker("sshelter-keys", inputs, move |inputs| {
+    spawn_worker("keys", inputs, move |inputs| {
         if read_keys(&mut source, &inputs) == KeysEnd::HungUp && inputs.send(Input::Stop(signal::HUP)).is_ok() {
             hung_up();
         }
@@ -940,7 +940,7 @@ fn read_keys(source: &mut impl Keys, inputs: &Inputs) -> KeysEnd {
 /// watchdog).
 #[cfg(any(windows, test))]
 pub fn console_keys_thread(inputs: Inputs, keys: super::console::ConsoleKeys, gone: impl FnOnce() + Send + 'static) {
-    spawn_worker("sshelter-keys", inputs, move |inputs| {
+    spawn_worker("keys", inputs, move |inputs| {
         if read_console(&keys, &inputs) == ConsoleKeysEnd::Gone && inputs.send(Input::Stop(signal::HUP)).is_ok() {
             gone();
         }
@@ -995,12 +995,12 @@ fn read_console(keys: &super::console::ConsoleKeys, inputs: &Inputs) -> ConsoleK
     }
 }
 
-/// Starts `work` on a thread of its own. If that thread panics (the panic hook has put the terminal back by then), or cannot be started,
+/// Starts `work` on a thread of its own, named after the app and its `purpose` (`identity::thread_name`). If that thread panics (the panic hook has put the terminal back by then), or cannot be started,
 /// the queue is told (`Input::Failed`) and the program ends: the loop would otherwise go on, in the mode the terminal was in, with nobody
 /// reading the keys or the signals or the broker, or writing to the terminal or the broker.
-fn spawn_worker(name: &str, inputs: Inputs, work: impl FnOnce(Inputs) + Send + 'static) {
+fn spawn_worker(purpose: &str, inputs: Inputs, work: impl FnOnce(Inputs) + Send + 'static) {
     let failed = inputs.clone();
-    let started = std::thread::Builder::new().name(name.to_string()).spawn(move || {
+    let started = std::thread::Builder::new().name(crate::identity::thread_name(purpose)).spawn(move || {
         let _watch = Watch(inputs.clone());
         work(inputs);
     });
@@ -1027,7 +1027,7 @@ impl Drop for Watch {
 pub fn watch_size(inputs: Inputs, every: Duration, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> SizeWatch {
     let over = Arc::new(AtomicBool::new(false));
     let watching = Arc::clone(&over);
-    spawn_worker("sshelter-size", inputs, move |inputs| {
+    spawn_worker("size", inputs, move |inputs| {
         let mut last = size();
         loop {
             std::thread::sleep(every);
@@ -1101,7 +1101,7 @@ fn signals(inputs: Inputs, terminal: Restorer, watchdog: Watchdog, size: impl Fn
             signal(SignalKind::from_raw(libc::SIGCONT))?,
         ))
     })?;
-    spawn_worker("sshelter-signals", inputs, move |inputs| {
+    spawn_worker("signals", inputs, move |inputs| {
         let sized = |inputs: &Inputs| match size() {
             Some((cols, rows)) => inputs.send(Input::Resize(cols, rows)),
             None => Ok(()),
@@ -1241,7 +1241,7 @@ impl Watchdog {
     pub fn start(terminal: Restorer, grace: Duration, exit: impl FnOnce(i32) + Send + 'static) -> std::io::Result<Watchdog> {
         let alarm = Arc::new(Alarm::default());
         let watching = Arc::clone(&alarm);
-        std::thread::Builder::new().name("sshelter-watchdog".to_string()).spawn(move || {
+        std::thread::Builder::new().name(crate::identity::thread_name("watchdog")).spawn(move || {
             if let Some(code) = watching.wait_for_its_time() {
                 // The terminal stays put back until the program has ended: the loop cannot set its mode again meanwhile.
                 let _held = terminal.hold_restored(WATCHDOG_TERMINAL_WAIT);
@@ -1350,7 +1350,7 @@ mod shared_tests {
         for frame in bytes.chunks(PIECE / 3 * 2 + 1) {
             writer.show(Show::Output(frame.to_vec()));
         }
-        writer.show(Show::Said("sshelter: \u{5bc6}\n".into()));
+        writer.show(Show::Said("lunport: \u{5bc6}\n".into()));
         assert!(writer.written(Duration::from_secs(10)));
         for write in console.writes.lock().unwrap().iter() {
             assert!(std::str::from_utf8(write).is_ok(), "a write of {} bytes is whole characters", write.len());
@@ -1358,7 +1358,7 @@ mod shared_tests {
         assert_eq!(console.all(), text.as_bytes(), "all but the cut character, which waits");
         assert!(writer.stop(Duration::from_secs(10)), "the writer finished");
         assert_eq!(console.all(), bytes, "at the end the cut character is written as it is");
-        assert_eq!(said.all(), "sshelter: \u{5bc6}\n".as_bytes());
+        assert_eq!(said.all(), "lunport: \u{5bc6}\n".as_bytes());
     }
 
     /// Windows' end of a run: the writer writes what it was given, and nothing given after the stop; the console is put back after that.
@@ -1637,7 +1637,7 @@ mod tests {
         }
     }
 
-    /// `sshelter connect web` against a broker over `engine` and `directory`, on the other end of a socket pair, with a fake terminal.
+    /// `lunport connect web` against a broker over `engine` and `directory`, on the other end of a socket pair, with a fake terminal.
     fn connect(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain) -> Setup {
         connect_typing_ahead(engine, directory, keychain, None)
     }
@@ -1699,7 +1699,7 @@ mod tests {
         broker: UnixStream,
     }
 
-    /// `sshelter connect web` with the test as the broker, a fake terminal `termios`, and the terminal's output and error.
+    /// `lunport connect web` with the test as the broker, a fake terminal `termios`, and the terminal's output and error.
     fn by_hand(termios: Arc<FakeTermios>, stdout: Box<dyn Write + Send>, stderr: Box<dyn Write + Send>) -> ByHand {
         let (ours, mut broker) = UnixStream::pair().unwrap();
         let (inputs, queue) = queue();
@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     /// The variable that tells the test below that it is the process that stops.
-    const STOPPING_CHILD: &str = "SSHELTER_TEST_STOPPING_CHILD";
+    const STOPPING_CHILD: &str = "LUNPORT_TEST_STOPPING_CHILD";
 
     /// Ctrl-Z for real: the program stops (the process, all of it), with the terminal put back; it runs again when it is continued, and
     /// then sets its mode again and asks the question again. The process that stops is a child of the test in a process group of its
@@ -2234,6 +2234,20 @@ mod tests {
         assert_eq!(ends_within(5, "the keys thread to stop", move || read_keys(&mut keyboard, &inputs)), KeysEnd::LoopGone);
     }
 
+    /// A worker is named after the app and what it does, as the app's other threads are.
+    #[test]
+    fn a_worker_thread_is_named_after_the_app_and_its_purpose() {
+        let (inputs, mut queue) = queue();
+        let (name, named) = std::sync::mpsc::channel();
+        spawn_worker("keys", inputs.clone(), move |_| {
+            let _ = name.send(std::thread::current().name().map(str::to_string));
+        });
+        drop(inputs);
+        assert_eq!(named.recv_timeout(Duration::from_secs(5)).unwrap().as_deref(), Some("lunport-keys"));
+        // The queue ends when the worker is gone.
+        while queue.next().is_some() {}
+    }
+
     #[test]
     fn a_worker_that_panics_tells_the_queue_and_one_that_returns_does_not() {
         let (inputs, mut queue) = queue();
@@ -2259,7 +2273,7 @@ mod tests {
         let (code, restored, setup) = finish(setup);
         assert_eq!(code, 255);
         assert!(restored, "the terminal is as it was");
-        assert_eq!(setup.stderr.text(), "\nsshelter: an internal error stopped this session.\n");
+        assert_eq!(setup.stderr.text(), "\nlunport: an internal error stopped this session.\n");
         eventually("the session to be closed", 10, || setup.engine.events().contains(&FakeEvent::Closed));
     }
 
@@ -2502,7 +2516,7 @@ mod tests {
         hand.open();
         write_frame(&mut hand.broker, CONTROL, br#"{"type":"teleport"}"#).unwrap();
         assert_eq!(hand.ends_within(Duration::from_secs(5)), (255, true));
-        assert_eq!(stderr.text(), "\nLunport sent a message this version of sshelter cannot read. Quit Lunport and open it again.\n");
+        assert_eq!(stderr.text(), "\nLunport sent a message this version of lunport cannot read. Quit Lunport and open it again.\n");
     }
 
     /// A terminal whose descriptor another program left non-blocking: a write that would block says so (`WouldBlock`) instead of waiting,
@@ -2542,10 +2556,10 @@ mod tests {
         for chunk in output.chunks(32 * 1024) {
             writer.show(Show::Output(chunk.to_vec()));
         }
-        writer.show(Show::Said("sshelter: said after the output\n".into()));
+        writer.show(Show::Said("lunport: said after the output\n".into()));
         assert!(writer.written(Duration::from_secs(10)), "all of it written");
         assert!(*stdout.0.lock().unwrap() == output, "{} of {} bytes shown, or not in order", stdout.len(), output.len());
-        assert_eq!(stderr.text(), "sshelter: said after the output\n");
+        assert_eq!(stderr.text(), "lunport: said after the output\n");
     }
 
     /// A real descriptor left non-blocking, taken from slowly: the writer waits on it (POLLOUT) until it takes more, and nothing is lost.

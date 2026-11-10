@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lunport",
+  "mainBinaryName": "lunport",
   "version": "1.14.4",
-  "identifier": "org.homelab.sshelter",
+  "identifier": "dev.ysya.lunport",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -37,6 +38,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "publisher": "ysya",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -84,6 +86,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdEMkUwQUEzMzNDNTA3QzMKUldUREI4VXpvd291ZlJQU1FKcmt1MlpiZW9nQ1N3NjIyNUJwSlV2RjV0dWJ2UUtQdmV5UUEvdGIK",
       "endpoints": [
+        "https://lunport.ysya.dev/update/stable.json",
         "https://github.com/ysya/lunport/releases/latest/download/latest.json"
       ]
     }

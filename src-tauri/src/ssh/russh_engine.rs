@@ -135,7 +135,7 @@ impl RusshEngine {
     pub fn with_options(options: EngineOptions) -> RusshEngine {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(options.worker_threads.max(1))
-            .thread_name("sshelter-ssh")
+            .thread_name(crate::identity::thread_name("ssh"))
             .enable_all()
             .build()
             .expect("the SSH engine's runtime");

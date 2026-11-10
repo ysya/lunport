@@ -657,7 +657,7 @@ pub(crate) fn launch(app: &tauri::AppHandle, expected: &TunnelRule, ai: Option<c
     };
     let worker_entry = Arc::clone(&entry);
     let app = app.clone();
-    let spawned = std::thread::Builder::new().name("lunport-tunnel".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name(crate::identity::thread_name("tunnel")).spawn(move || {
         let owner = super::auth_window::NativeOwner {
             ai,
             hub: app.state::<AppState>().session.auth_questions.clone(),

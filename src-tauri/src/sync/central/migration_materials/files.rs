@@ -386,7 +386,7 @@ mod tests {
             "staged-only",
             &ecdsa,
         );
-        let keypath = env.ssh_dir.join("sshelter/keys");
+        let keypath = env.ssh_dir.join("sshelter/keys"); // frozen-identity: the managed folder as it is on users' disks.
         write(&keypath.join("original-private"), rsa.as_bytes());
         write(
             &keypath.join("original-private.pub"),
@@ -584,7 +584,7 @@ mod tests {
     ) {
         let device = device();
         let env = device.env();
-        let path = env.ssh_dir.join("sshelter/keys/source");
+        let path = env.ssh_dir.join("sshelter/keys/source"); // frozen-identity: the managed folder as it is on users' disks.
         for raw in [
             "unreadable private source".to_owned(),
             crate::sync::slot_rules::test_keys::encrypted_with_3des_label(),

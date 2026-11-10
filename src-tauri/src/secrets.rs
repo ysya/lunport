@@ -10,7 +10,7 @@ use crate::error::AppError;
 pub(crate) mod credential_blob;
 #[cfg(windows)]
 #[path = "windows_credentials.rs"]
-mod windows_credentials;
+pub(crate) mod windows_credentials;
 
 // Small credentials retain the legacy encoding. Large Windows values use DPAPI
 // files whose exact current contents are pinned by the OS credential entry.
@@ -21,17 +21,20 @@ pub fn set(account: &str, value: &str) -> Result<(), AppError> { windows_credent
 #[cfg(windows)]
 pub fn delete(account: &str) -> Result<(), AppError> { windows_credentials::delete(account) }
 
+// macOS Production keeps credentials with the frozen credential helper v2 (service `identity::PRODUCTION.credential_service`); the
+// helper v1 that versions before 2.0.0 used is never asked here, and only the credential migration reaches it, through the bridge.
 #[cfg(target_os = "macos")]
 #[path = "macos_credential_helper.rs"]
-mod macos_helper;
+pub(crate) mod macos_helper;
 
 /// keychain 的 service 名稱，全 app 固定。
 pub const SERVICE: &str = crate::app_profile::CURRENT.keychain_service();
 
 // A foreground authorization must finish before another protected request starts.
 // No passwords are cached, and the user's Keychain access controls remain in force.
-#[cfg(target_os = "macos")]
-fn access_guard() -> std::sync::MutexGuard<'static, ()> {
+// On Linux it keeps a write from coming between the identity migration's check and its write.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn access_guard() -> std::sync::MutexGuard<'static, ()> {
     static ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     ACCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -54,7 +57,7 @@ fn map_err(e: keyring::Error) -> AppError {
 /// 讀取一筆密碼。沒有這筆項目時回 `Ok(None)`（不是錯誤）。
 #[cfg(not(windows))]
 pub fn get(account: &str) -> Result<Option<String>, AppError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let _access = access_guard();
     #[cfg(target_os = "macos")]
     if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Production {
@@ -95,12 +98,12 @@ pub fn set_noninteractive(account:&str,secret:&str)->Result<(),AppError> {
 }
 #[cfg(target_os="linux")]
 #[path="linux_background_credentials.rs"]
-mod linux_background;
+pub(crate) mod linux_background;
 
 /// 寫入（或覆蓋）一筆密碼。
 #[cfg(not(windows))]
 pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let _access = access_guard();
     #[cfg(target_os = "macos")]
     if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Production {
@@ -113,7 +116,7 @@ pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
 /// 刪除一筆密碼。項目本來就不存在時視為成功（清理路徑要能重複執行）。
 #[cfg(not(windows))]
 pub fn delete(account: &str) -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let _access = access_guard();
     #[cfg(target_os = "macos")]
     if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Production {

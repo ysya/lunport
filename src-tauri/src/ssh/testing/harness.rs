@@ -13,8 +13,8 @@
 //! **A signal that kills the test process leaves its sshd behind.** `Drop` does not run then, and nothing else ties the sshd to the test
 //! process: the listener keeps running and its temp directory stays. The harness cleans up after the fact. `Sshd::start` writes
 //! `owner.pid` (the test process's pid, then the sshd's) into the directory, and every `Sshd::start` begins by sweeping the
-//! `sshelter-sshd-*` directories of the temp dir whose owner no longer exists (`sweep_stale`). So such a listener and directory stay until
-//! the next `Sshd::start` of any test process. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and `rm -r "${TMPDIR:-/tmp}"/sshelter-sshd-*`.
+//! `lunport-sshd-*` directories of the temp dir whose owner no longer exists (`sweep_stale`). So such a listener and directory stay until
+//! the next `Sshd::start` of any test process. By hand: `pkill -f 'lunport-sshd-.*/sshd_config'` and `rm -r "${TMPDIR:-/tmp}"/lunport-sshd-*`.
 //!
 //! **`Drop` and the sweep end the sessions with the listener.** For every connection the sshd forks a process (`sshd-session`), and that
 //! one forks another for the login, which forks the shell or the command; none of them stays in the listener's process group (the
@@ -135,14 +135,14 @@ pub struct Tools {
     pub ssh_keygen: PathBuf,
 }
 
-/// `Some` when sshd, ssh and ssh-keygen are all found. When they are not: `SSHELTER_REQUIRE_OPENSSH=1` (CI) makes that a failure on
+/// `Some` when sshd, ssh and ssh-keygen are all found. When they are not: `LUNPORT_REQUIRE_OPENSSH=1` (CI) makes that a failure on
 /// Unix; anything else prints "skipped" and the caller returns early. Windows never runs the scratch-sshd tests (Win32-OpenSSH's sshd
 /// must run as a service, which the workflow sets up), so there the answer is always a skip.
 pub fn tools() -> Option<Tools> {
     let found = find_sshd().and_then(|sshd| Some(Tools { sshd, ssh: find_in_path("ssh")?, ssh_keygen: find_in_path("ssh-keygen")? }));
     if found.is_none() {
-        let required = cfg!(unix) && std::env::var("SSHELTER_REQUIRE_OPENSSH").is_ok_and(|value| value == "1");
-        assert!(!required, "sshd, ssh and ssh-keygen are required (SSHELTER_REQUIRE_OPENSSH=1)");
+        let required = cfg!(unix) && std::env::var("LUNPORT_REQUIRE_OPENSSH").is_ok_and(|value| value == "1");
+        assert!(!required, "sshd, ssh and ssh-keygen are required (LUNPORT_REQUIRE_OPENSSH=1)");
         eprintln!("skipped: sshd, ssh or ssh-keygen is not found (or this is not a Unix machine)");
     }
     found
@@ -188,7 +188,7 @@ impl KeyKind {
 pub struct TestKey {
     pub private_path: PathBuf,
     pub private_text: String,
-    /// `<type> <base64> sshelter-test`: the authorized_keys form.
+    /// `<type> <base64> lunport-test`: the authorized_keys form.
     pub public_line: String,
 }
 
@@ -209,7 +209,7 @@ pub fn generate_key(tools: &Tools, dir: &Path, name: &str, kind: KeyKind) -> Tes
     let mut public_path = private_path.clone().into_os_string();
     public_path.push(".pub");
     let out = run_bounded(
-        Command::new(&tools.ssh_keygen).args(["-q", "-N", "", "-C", "sshelter-test"]).args(kind.keygen_args()).arg("-f").arg(&private_path),
+        Command::new(&tools.ssh_keygen).args(["-q", "-N", "", "-C", "lunport-test"]).args(kind.keygen_args()).arg("-f").arg(&private_path),
     );
     assert!(out.status.success(), "ssh-keygen failed: {}", String::from_utf8_lossy(&out.stderr));
     let private_text = std::fs::read_to_string(&private_path).expect("read the private key");
@@ -242,8 +242,8 @@ impl Default for SshdOptions {
 ///
 /// **The limit:** `Drop` does not run when a signal kills the test process (`kill -9`, a CI runner cancelling the job), and nothing else
 /// ties the sshd to that process. The listener then keeps running and its directory stays until the next `Sshd::start` (of any test
-/// process) sweeps them, see `sweep_stale` and `owner.pid`. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and
-/// `rm -r "${TMPDIR:-/tmp}"/sshelter-sshd-*`.
+/// process) sweeps them, see `sweep_stale` and `owner.pid`. By hand: `pkill -f 'lunport-sshd-.*/sshd_config'` and
+/// `rm -r "${TMPDIR:-/tmp}"/lunport-sshd-*`.
 pub struct Sshd {
     pub port: u16,
     /// The account sshd authenticates: the user running the tests (without root, sshd can only log in that user).
@@ -334,7 +334,7 @@ fn stop(child: &mut Child) {
 }
 
 /// The start of the name of every scratch directory (`tempfile` adds random characters); the sweep looks for it.
-const DIR_PREFIX: &str = "sshelter-sshd-";
+const DIR_PREFIX: &str = "lunport-sshd-";
 
 /// The file in a scratch directory that says whose it is: the pid of the test process on the first line, the pid of its sshd on the second.
 const OWNER_FILE: &str = "owner.pid";
@@ -371,7 +371,7 @@ static SWEEP: Mutex<()> = Mutex::new(());
 #[cfg(unix)]
 const KILL_WAIT: Duration = Duration::from_secs(5);
 
-/// Cleans up after test processes that a signal killed before `Drop` could run (module doc). In every `sshelter-sshd-*` directory of
+/// Cleans up after test processes that a signal killed before `Drop` could run (module doc). In every `lunport-sshd-*` directory of
 /// `root` (the temp dir) whose `owner.pid` names a process that no longer exists:
 /// - the sshd of that directory is killed, but only if its command line still names this directory's `sshd_config`: a pid can be reused
 ///   by an unrelated program, and such a program is never killed;
@@ -656,8 +656,8 @@ mod tests {
 
     #[test]
     fn a_tool_that_cannot_be_started_is_an_error_that_names_it() {
-        let message = run_within(&mut Command::new("/nonexistent/sshelter-tool"), Duration::from_secs(5)).expect_err("there is no such tool");
-        assert!(message.contains("cannot run") && message.contains("/nonexistent/sshelter-tool"), "{message}");
+        let message = run_within(&mut Command::new("/nonexistent/lunport-tool"), Duration::from_secs(5)).expect_err("there is no such tool");
+        assert!(message.contains("cannot run") && message.contains("/nonexistent/lunport-tool"), "{message}");
     }
 
     /// Four MiB on stdout and on stderr is far more than a pipe holds: the readers must keep up or the tool would block until the deadline.

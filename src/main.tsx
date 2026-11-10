@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import AuthenticationWindow from "./components/AuthenticationWindow";
 import HostKeyWindow from "./components/HostKeyWindow";
+import { IdentityMigrationGate } from "./components/IdentityMigration";
 import "./index.css";
 import { applyInitialAppearance } from "./lib/theme";
 
@@ -28,7 +29,11 @@ const windowLabel = (() => {
 function Root() {
   if (windowLabel === "authentication") return <AuthenticationWindow />;
   if (windowLabel === "hostkey") return <HostKeyWindow />;
-  return <App />;
+  return (
+    <IdentityMigrationGate>
+      <App />
+    </IdentityMigrationGate>
+  );
 }
 
 ReactDOM.createRoot(rootEl).render(

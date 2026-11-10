@@ -250,8 +250,8 @@ fn a_key_the_server_does_not_know_is_refused_without_a_signature() {
 /// signature: `sign` is never called, and the failure says why.
 #[test]
 fn an_rsa_key_is_never_signed_with_sha1() {
-    if std::env::var("SSHELTER_SKIP_SHA1").is_ok_and(|value| value == "1") {
-        eprintln!("skipped: SSHELTER_SKIP_SHA1=1");
+    if std::env::var("LUNPORT_SKIP_SHA1").is_ok_and(|value| value == "1") {
+        eprintln!("skipped: LUNPORT_SKIP_SHA1=1");
         return;
     }
     let Some(tools) = tools() else { return };

@@ -57,7 +57,7 @@ pub(crate) fn dispatch(stream: Stream, pid: Option<u32>, active: &Arc<AtomicUsiz
     let slot = Slot(Arc::clone(active));
     let handle = Arc::clone(handle);
     // spawn 失敗時 closure(連同 `slot` 與串流)被丟掉:計數照樣減回去,連線關掉。
-    let _ = std::thread::Builder::new().name("sshelter-agent-connection".to_string()).spawn(move || {
+    let _ = std::thread::Builder::new().name(crate::identity::thread_name("agent-connection")).spawn(move || {
         let _slot = slot;
         handle(stream, pid);
     });
@@ -86,7 +86,7 @@ pub(crate) fn check_socket_path(sock: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 在 `dir` 開 `sock`(agent 的 `~/.ssh/sshelter/agent`,或 broker 的 `<app data>/ipc`),接受同一使用者的連線,每條交給 `handle`。
+/// 在 `dir` 開 `sock`(broker 的 `<app data>/ipc`),接受同一使用者的連線,每條交給 `handle`。
 /// 另一個 Lunport 已經在提供 → `OtherInstance`;沒人接聽的舊 `sock`(上次當掉留下的)由拿到鎖的這一個換掉。
 #[cfg(unix)]
 pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
@@ -110,7 +110,7 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     // 等連線時不拿鎖(`wait_for_connection`),有連線了才在鎖裡 accept;所以 listener 是 nonblocking,沒接到就回去等。
     listener.set_nonblocking(true)?;
-    std::thread::Builder::new().name("sshelter-ipc-listener".to_string()).spawn(move || {
+    std::thread::Builder::new().name(crate::identity::thread_name("ipc-listener")).spawn(move || {
         // 鎖跟著 listener 持有到行程結束。
         let _lock = lock;
         let active = Arc::new(AtomicUsize::new(0));

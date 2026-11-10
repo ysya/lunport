@@ -1,7 +1,7 @@
-//! The signal numbers `sshelter connect` uses (own-ssh spec §7.3): the status it exits with when a signal ends it (128 + the number),
+//! The signal numbers `lunport connect` uses (own-ssh spec §7.3): the status it exits with when a signal ends it (128 + the number),
 //! and the status of a remote shell a signal killed (128 + the number of the signal SSH names, as a shell reports it). On macOS and
 //! Linux they are the system's own numbers (a test pins each against libc); Windows has no signals of its own, and gets the numbers POSIX
-//! and Linux give them, so that `sshelter connect` exits with the same statuses there (130 for Ctrl-C, 129 for a closed console, 143 for
+//! and Linux give them, so that `lunport connect` exits with the same statuses there (130 for Ctrl-C, 129 for a closed console, 143 for
 //! a request to stop).
 
 /// The terminal went away (Unix), or the console was closed (Windows).

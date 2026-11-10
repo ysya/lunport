@@ -34,9 +34,9 @@ fn a_pty_shell_prints_a_prompt_runs_a_command_and_reports_its_exit_status() {
     probe.wait_for_text(20, "$ ").expect("a prompt");
     fact("shell.first_prompt_ms", started.elapsed().as_millis());
 
-    // "$((6*7))" is typed, "42" is printed: the echo of the typed line does not contain SSHELTER_42.
-    probe.type_line("echo SSHELTER_$((6*7))");
-    probe.wait_for_text(10, "SSHELTER_42").expect("the command's output");
+    // "$((6*7))" is typed, "42" is printed: the echo of the typed line does not contain LUNPORT_42.
+    probe.type_line("echo LUNPORT_$((6*7))");
+    probe.wait_for_text(10, "LUNPORT_42").expect("the command's output");
 
     probe.type_line("exit 3");
     eventually("the shell to report its exit", 10, || probe.shell.exited().is_some());
@@ -67,7 +67,7 @@ fn a_window_change_while_the_shell_runs_is_applied() {
     assert_eq!(probe.stty_size().expect("stty answers"), "30 100");
 }
 
-/// Review focus. The user resizes the terminal the moment `sshelter connect` starts: the broker has the size ready when `shell` returns
+/// Review focus. The user resizes the terminal the moment `lunport connect` starts: the broker has the size ready when `shell` returns
 /// and sends it at once, before the prompt is even drawn (spec §7.2). It must not be lost and must not hurt the shell.
 #[test]
 fn a_window_change_sent_right_after_the_shell_opens_is_applied() {
@@ -112,7 +112,7 @@ fn a_reader_that_stops_reading_does_not_hold_up_the_connection_and_the_gap_is_an
 
     let shell = session.shell(pty(80, 24)).unwrap();
     // Nobody reads yet. `yes` fills the queue in a moment and keeps going.
-    shell.write(b"yes sshelter\n").unwrap();
+    shell.write(b"yes lunport\n").unwrap();
     std::thread::sleep(Duration::from_secs(2));
 
     let started = Instant::now();

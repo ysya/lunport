@@ -7,6 +7,8 @@ on:
       - "src-tauri/icons/**"
       - "src-tauri/installers/**"
       - "scripts/validate-linux-rebrand.py"
+      - "scripts/identity.mjs"
+      - "scripts/legacy-identity.json"
       - "scripts/ci-changes*.mjs"
       - ".github/workflows/rebrand-package-check.yml"
   workflow_dispatch:
@@ -66,7 +68,7 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         with:
           args: --bundles deb,rpm --config '{"bundle":{"createUpdaterArtifacts":false}}'
-      - name: Replace published SSHelter packages with Lunport
+      - name: Upgrade the published 1.14.4 packages to this build
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/validate-linux-rebrand.py

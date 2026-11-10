@@ -49,7 +49,7 @@ fn logs_rotate_as_valid_json_and_refuse_redirected_files() {
 
 #[test]
 fn panic_log_survives_restart_without_serializing_the_payload() {
-    const CHILD: &str = "SSHELTER_TEST_DIAGNOSTICS_CHILD";
+    const CHILD: &str = "LUNPORT_TEST_DIAGNOSTICS_CHILD";
     if let Some(directory) = std::env::var_os(CHILD) {
         install_at(PathBuf::from(directory)).unwrap();
         stage(Stage::Setup);
@@ -102,7 +102,7 @@ fn panic_log_survives_restart_without_serializing_the_payload() {
 #[test]
 #[ignore = "injects a native exception in a disposable child; run separately in Windows CI"]
 fn native_exception_leaves_metadata_for_windows_error_reporting() {
-    const CHILD: &str = "SSHELTER_TEST_NATIVE_CRASH_CHILD";
+    const CHILD: &str = "LUNPORT_TEST_NATIVE_CRASH_CHILD";
     if let Some(directory) = std::env::var_os(CHILD) {
         install_at(PathBuf::from(directory)).unwrap();
         stage(Stage::Window);

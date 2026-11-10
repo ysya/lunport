@@ -3,7 +3,7 @@ import { pushBackendSettings } from "@/lib/backend-settings";
 import { SETTINGS_STORAGE_KEY, useSettingsStore } from "@/stores/settings";
 
 /**
- * The zustand-persist storage envelope for `sshelter-settings`. The current
+ * The zustand-persist storage envelope for `lunport-settings`. The current
  * store has no explicit version, so persist writes `version: 0`.
  */
 export interface SettingsEnvelope {

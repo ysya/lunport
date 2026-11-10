@@ -1,16 +1,16 @@
-//! The helper's relay against a real program: this test binary itself. Started with `SSHELTER_CLI_TEST_RECORD` set, it is the program
-//! at the end of the relay: it writes the arguments it was given to that file and exits with the code in `SSHELTER_CLI_TEST_EXIT`.
-//! Otherwise it runs the tests below, which start it through `sshelter_cli::relay` and, on Windows, through the built `sshelter-cli.exe`
-//! next to a copy of it named `sshelter.exe`. It has no test harness (Cargo.toml): a harness would read the program's arguments as its own
+//! The helper's relay against a real program: this test binary itself. Started with `LUNPORT_CLI_TEST_RECORD` set, it is the program
+//! at the end of the relay: it writes the arguments it was given to that file and exits with the code in `LUNPORT_CLI_TEST_EXIT`.
+//! Otherwise it runs the tests below, which start it through `lunport_cli::relay` and, on Windows, through the built `lunport-cli.exe`
+//! next to a copy of it named `lunport.exe`. It has no test harness (Cargo.toml): a harness would read the program's arguments as its own
 //! options and test filters.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Set for the program at the end of the relay: the file it writes its arguments to.
-const RECORD: &str = "SSHELTER_CLI_TEST_RECORD";
+const RECORD: &str = "LUNPORT_CLI_TEST_RECORD";
 /// The exit code that program leaves with.
-const EXIT: &str = "SSHELTER_CLI_TEST_EXIT";
+const EXIT: &str = "LUNPORT_CLI_TEST_EXIT";
 
 fn main() {
     if let Some(record) = std::env::var_os(RECORD) {
@@ -20,7 +20,7 @@ fn main() {
         ("arguments_reach_the_target_untouched", arguments_reach_the_target_untouched),
         ("the_exit_code_comes_back", the_exit_code_comes_back),
         #[cfg(windows)]
-        ("the_built_helper_runs_the_sshelter_exe_beside_it", the_built_helper_runs_the_sshelter_exe_beside_it),
+        ("the_built_helper_runs_the_lunport_exe_beside_it", the_built_helper_runs_the_lunport_exe_beside_it),
         #[cfg(not(windows))]
         ("outside_windows_the_built_helper_only_says_it_is_for_windows", outside_windows_the_built_helper_only_says_it_is_for_windows),
     ];
@@ -47,12 +47,12 @@ fn arguments_reach_the_target_untouched() {
     let scratch = Scratch::new("arguments");
     let record = scratch.0.join("record");
     let args = awkward_arguments();
-    let code = as_target(&record, 0, || sshelter_cli::relay(&this_program(), &args, &mut std::io::stderr()));
+    let code = as_target(&record, 0, || lunport_cli::relay(&this_program(), &args, &mut std::io::stderr()));
     assert_eq!(code, 0);
     assert_eq!(std::fs::read_to_string(&record).unwrap(), format!("{args:?}"));
 }
 
-/// The program's exit code is the helper's: `sshelter connect`'s 2 for the usage, 130 for Ctrl-C, 255 for a lost connection, and on
+/// The program's exit code is the helper's: `lunport connect`'s 2 for the usage, 130 for Ctrl-C, 255 for a lost connection, and on
 /// Windows any 32-bit code (here STATUS_CONTROL_C_EXIT).
 fn the_exit_code_comes_back() {
     let scratch = Scratch::new("codes");
@@ -62,22 +62,22 @@ fn the_exit_code_comes_back() {
         codes.push(0xC000_013A_u32 as i32);
     }
     for code in codes {
-        let relayed = as_target(&record, code, || sshelter_cli::relay(&this_program(), &[OsString::from("connect")], &mut std::io::stderr()));
+        let relayed = as_target(&record, code, || lunport_cli::relay(&this_program(), &[OsString::from("connect")], &mut std::io::stderr()));
         assert_eq!(relayed, code);
     }
 }
 
-/// The built `sshelter-cli.exe` in a directory with a space in its name, next to a `sshelter.exe` (a copy of this program): it runs it
-/// with its own arguments and leaves with its exit code, an NTSTATUS-sized one (STATUS_CONTROL_C_EXIT) too. Without the `sshelter.exe`
+/// The built `lunport-cli.exe` in a directory with a space in its name, next to a `lunport.exe` (a copy of this program): it runs it
+/// with its own arguments and leaves with its exit code, an NTSTATUS-sized one (STATUS_CONTROL_C_EXIT) too. Without the `lunport.exe`
 /// it says where it looked, and 1.
 #[cfg(windows)]
-fn the_built_helper_runs_the_sshelter_exe_beside_it() {
+fn the_built_helper_runs_the_lunport_exe_beside_it() {
     let scratch = Scratch::new("installed");
     let dir = scratch.0.join("Program Files").join("Lunport");
     std::fs::create_dir_all(&dir).unwrap();
-    let helper = dir.join("sshelter-cli.exe");
-    std::fs::copy(env!("CARGO_BIN_EXE_sshelter-cli"), &helper).unwrap();
-    std::fs::copy(this_program(), dir.join("sshelter.exe")).unwrap();
+    let helper = dir.join("lunport-cli.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_lunport-cli"), &helper).unwrap();
+    std::fs::copy(this_program(), dir.join("lunport.exe")).unwrap();
     let record = scratch.0.join("record");
     let args = awkward_arguments();
     for code in [2, 0xC000_013A_u32 as i32] {
@@ -87,14 +87,14 @@ fn the_built_helper_runs_the_sshelter_exe_beside_it() {
         assert_eq!(std::fs::read_to_string(&record).unwrap(), format!("{args:?}"));
     }
 
-    std::fs::remove_file(dir.join("sshelter.exe")).unwrap();
+    std::fs::remove_file(dir.join("lunport.exe")).unwrap();
     let run = std::process::Command::new(&helper).arg("connect").output().unwrap();
     assert_eq!(run.status.code(), Some(1), "{run:?}");
     let said = String::from_utf8(run.stderr).unwrap();
     // The helper names its directory as Windows gives it its own path, which can spell it differently (short names): compare the
     // directories themselves.
     let named = said
-        .strip_prefix("sshelter-cli: cannot find sshelter.exe in ")
+        .strip_prefix("lunport-cli: cannot find lunport.exe in ")
         .and_then(|rest| rest.strip_suffix(".\n"))
         .unwrap_or_else(|| panic!("{said:?}"));
     assert_eq!(std::fs::canonicalize(named).unwrap(), std::fs::canonicalize(&dir).unwrap(), "{said:?}");
@@ -103,9 +103,9 @@ fn the_built_helper_runs_the_sshelter_exe_beside_it() {
 /// Outside Windows the built helper only says that it is for Windows, and 1.
 #[cfg(not(windows))]
 fn outside_windows_the_built_helper_only_says_it_is_for_windows() {
-    let run = std::process::Command::new(env!("CARGO_BIN_EXE_sshelter-cli")).args(["connect", "web"]).output().unwrap();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_lunport-cli")).args(["connect", "web"]).output().unwrap();
     assert_eq!(run.status.code(), Some(1), "{run:?}");
-    assert_eq!(String::from_utf8(run.stderr).unwrap(), format!("{}\n", sshelter_cli::NOT_WINDOWS));
+    assert_eq!(String::from_utf8(run.stderr).unwrap(), format!("{}\n", lunport_cli::NOT_WINDOWS));
 }
 
 /// The arguments of `arguments_reach_the_target_untouched`.
@@ -169,7 +169,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new(name: &str) -> Scratch {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("sshelter-cli-relay-{}-{name}-{nanos}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lunport-cli-relay-{}-{name}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         Scratch(dir)
     }

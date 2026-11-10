@@ -25,10 +25,12 @@ cleanup() {
 }
 
 verify() {
-  local app="$1" scratch identifier requirement expected actual leaf_sha1 architecture
+  local app="$1" scratch app_id identifier requirement expected actual leaf_sha1 architecture
   [[ -d "$app/Contents" ]] || { echo 'App bundle is missing.' >&2; return 1; }
+  # The production bundle identifier, from the Tauri configuration.
+  app_id="$(node "$repo_dir/scripts/identity.mjs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["production"]["appId"])')"
   identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")
-  [[ "$identifier" == org.homelab.sshelter ]] || { echo 'Unexpected production bundle identifier.' >&2; return 1; }
+  [[ "$identifier" == "$app_id" ]] || { echo "Unexpected bundle identifier $identifier; the production one is $app_id." >&2; return 1; }
   codesign --verify --deep --strict --all-architectures "$app"
   scratch="$(mktemp -d "${RUNNER_TEMP}/lunport-signature.XXXXXX")"
   expected="$(fingerprint "$public_certificate")"
@@ -56,8 +58,8 @@ PY
     printf 'Designated requirement (%s): %s\n' "$architecture" "$requirement"
     # macOS may spell a self-signed certificate as leaf or root; both refer to
     # the same pinned certificate. Neither depends on a per-build hash or trust store.
-    [[ "$requirement" == "designated => identifier \"org.homelab.sshelter\" and certificate leaf = H\"$leaf_sha1\"" ||
-       "$requirement" == "designated => identifier \"org.homelab.sshelter\" and certificate root = H\"$leaf_sha1\"" ]] || {
+    [[ "$requirement" == "designated => identifier \"$app_id\" and certificate leaf = H\"$leaf_sha1\"" ||
+       "$requirement" == "designated => identifier \"$app_id\" and certificate root = H\"$leaf_sha1\"" ]] || {
       rm -rf "$scratch"; echo 'App designated requirement is not the pinned stable identity.' >&2; return 1;
     }
   done

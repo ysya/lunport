@@ -121,7 +121,7 @@ fn cancel(question_id: String) -> Action {
     Action::Send(ClientMessage::Answer { question_id, value: None, cancel: true })
 }
 
-/// What `sshelter connect` was asked for (spec §7.3): the host, and whether a failure before the shell opens waits for Enter.
+/// What `lunport connect` was asked for (spec §7.3): the host, and whether a failure before the shell opens waits for Enter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub host: HostQuery,
@@ -147,10 +147,10 @@ pub const PAUSE_PROMPT: &str = "Press Enter to exit.";
 const PAUSE_MODE: Mode = Mode::Prompt { echo: false };
 
 /// What is said when a thread of the program panicked (the panic itself was reported by the hook, which put the terminal back first).
-const THREAD_FAILED: &str = "sshelter: an internal error stopped this session.";
+const THREAD_FAILED: &str = "lunport: an internal error stopped this session.";
 
 /// What is said when the broker sent a control message this CLI cannot read (`Input::Unreadable`).
-const UNREADABLE: &str = "Lunport sent a message this version of sshelter cannot read. Quit Lunport and open it again.";
+const UNREADABLE: &str = "Lunport sent a message this version of lunport cannot read. Quit Lunport and open it again.";
 
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
 const TYPEAHEAD_LIMIT: usize = 64 * 1024;
@@ -181,7 +181,7 @@ enum Phase {
     Ended,
 }
 
-/// The exit status of `sshelter connect` for a shell that ended with `code` or was killed by `signal` (spec §7.3): the shell's own
+/// The exit status of `lunport connect` for a shell that ended with `code` or was killed by `signal` (spec §7.3): the shell's own
 /// status; for a signal 128 + its number, as a shell reports it; 255 when it ended without either (a lost connection), as ssh does.
 pub fn exit_code(code: Option<u32>, signal: Option<&str>) -> i32 {
     match (code, signal) {
@@ -677,7 +677,7 @@ mod tests {
     /// thread any more): the program ends with 255, as for a lost connection, the terminal put back first and the broker told.
     #[test]
     fn a_failed_thread_ends_the_program_with_255_the_terminal_put_back_and_the_broker_told() {
-        let reason = "sshelter: an internal error stopped this session.";
+        let reason = "lunport: an internal error stopped this session.";
         assert_eq!(
             opened().handle(Input::Failed),
             [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Stderr(format!("\n{reason}\n")), Action::Exit(255)],
@@ -697,7 +697,7 @@ mod tests {
     /// instead of going on without it.
     #[test]
     fn a_message_the_cli_cannot_read_ends_the_session_with_a_sentence() {
-        const SENTENCE: &str = "Lunport sent a message this version of sshelter cannot read. Quit Lunport and open it again.";
+        const SENTENCE: &str = "Lunport sent a message this version of lunport cannot read. Quit Lunport and open it again.";
         assert_eq!(started().handle(Input::Unreadable), [Action::Mode(Mode::Cooked, false), Action::Stderr(format!("{SENTENCE}\n")), Action::Exit(255)]);
         assert_eq!(
             opened().handle(Input::Unreadable),

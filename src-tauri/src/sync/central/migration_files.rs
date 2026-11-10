@@ -111,6 +111,7 @@ impl Files {
             if let Some(ssh) = Directory::open(ssh_dir)? {
                 // Only the caller's SSH base may resolve platform aliases. App-owned components
                 // must be opened relative to that descriptor without following a redirected parent.
+                // frozen-identity: the folder of managed ssh config files and slot keys that users' ssh configs and synced IdentityFile values already name.
                 if let Some(app) = ssh.optional_directory("sshelter")? {
                     if let Some(root) = app.optional_directory("keys")? {
                         result.count()?;
@@ -652,14 +653,14 @@ mod tests {
         let old=env.state_path.clone();
         write(&old,b"old account");
         write(&old.with_file_name("vault.json"),b"old protected material");
-        write(&env.ssh_dir.join("sshelter/keys/retired"),b"old managed key");
+        write(&env.ssh_dir.join("sshelter/keys/retired"),b"old managed key"); // frozen-identity: the managed folder as it is on users' disks.
         let folder=old.parent().unwrap().join(format!("server-workspace-{}","a".repeat(32)));
         env.state_path=folder.join("sync-state.json");
         write(&env.state_path,b"fresh local state");
         let captured=Files::capture(&env,None).unwrap();
         assert_eq!(captured.bytes.len(),1);
         assert_eq!(captured.bytes[Path::new("data/sync-state.json")].as_slice(),b"fresh local state");
-        write(&env.ssh_dir.join("sshelter/keys/new-old-key"),b"another old key");
+        write(&env.ssh_dir.join("sshelter/keys/new-old-key"),b"another old key"); // frozen-identity: the managed folder as it is on users' disks.
         captured.require_unchanged(&env,None).unwrap();
         write(&env.state_path.with_file_name("vault.json"),b"new workspace vault");
         assert!(captured.require_unchanged(&env,None).is_err());
@@ -699,7 +700,7 @@ mod tests {
             &env.ssh_dir.join("id_unmanaged"),
             b"unrelated private key must never be read",
         );
-        let keys = env.ssh_dir.join("sshelter/keys");
+        let keys = env.ssh_dir.join("sshelter/keys"); // frozen-identity: the managed folder as it is on users' disks.
         write(&keys.join("orphan-key"), b"original private bytes");
         write(&keys.join("orphan-key.pub"), b"public bytes");
         write(
@@ -780,7 +781,7 @@ mod tests {
         }
         let device = device();
         let env = device.env();
-        let keys = env.ssh_dir.join("sshelter/keys");
+        let keys = env.ssh_dir.join("sshelter/keys"); // frozen-identity: the managed folder as it is on users' disks.
         fs::create_dir_all(&keys).unwrap();
         let fifo = std::ffi::CString::new(keys.join("fifo").to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
@@ -812,7 +813,7 @@ mod tests {
                 } else {
                     outside.path().to_path_buf()
                 },
-                env.ssh_dir.join("sshelter"),
+                env.ssh_dir.join("sshelter"), // frozen-identity: the managed folder as it is on users' disks.
             )
             .unwrap();
             assert!(Files::capture(&env, None).is_err());
@@ -844,8 +845,8 @@ mod tests {
             assert!(Files::capture(&env, Some(backup)).is_err());
         }
         let outside = tempfile::tempdir().unwrap();
-        fs::create_dir_all(env.ssh_dir.join("sshelter")).unwrap();
-        symlink(outside.path(), env.ssh_dir.join("sshelter/keys")).unwrap();
+        fs::create_dir_all(env.ssh_dir.join("sshelter")).unwrap(); // frozen-identity: the managed folder as it is on users' disks.
+        symlink(outside.path(), env.ssh_dir.join("sshelter/keys")).unwrap(); // frozen-identity: the managed folder as it is on users' disks.
         assert!(Files::capture(&env, None).is_err());
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }

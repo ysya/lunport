@@ -1,5 +1,5 @@
 //! Integration tests of the russh engine against a scratch OpenSSH server (own-ssh spec §12). Each test starts its own sshd; a test
-//! returns early, printing "skipped", where the OpenSSH tools are missing (`SSHELTER_REQUIRE_OPENSSH=1` turns that into a failure).
+//! returns early, printing "skipped", where the OpenSSH tools are missing (`LUNPORT_REQUIRE_OPENSSH=1` turns that into a failure).
 
 mod broker_signals;
 mod connect;

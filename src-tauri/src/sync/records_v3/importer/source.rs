@@ -347,6 +347,7 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 }
 pub(super) fn snapshot_digest(files: &[SourceFile], options: &ImportOptions) -> String {
     let mut hash = Sha256::new();
+    // frozen-identity: the hash domain of the snapshot digests that interrupted imports already hold; another domain changes them.
     hash.update(b"sshelter-import-snapshot-v1");
     let mut field = |bytes: &[u8]| {
         hash.update((bytes.len() as u64).to_be_bytes());

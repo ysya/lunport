@@ -11,8 +11,10 @@ use sha2::Sha256;
 
 use crate::error::AppError;
 
+// frozen-identity: the salt every v1 sync chain was derived with; a different salt derives other keys than the ones already stored and on the relay.
 const HKDF_SALT: &[u8] = b"sshelter-sync-v1";
 /// v2 帳戶與 space0 的 HKDF salt(spec §5.1)。
+// frozen-identity: the salt every account chain and space0 was derived with; a different salt derives other keys, chain ids and tokens.
 const HKDF_SALT_V2: &[u8] = b"sshelter-sync-v2";
 const NONCE_LEN: usize = 24;
 
@@ -82,6 +84,7 @@ fn chain_keys(hk: &Hkdf<Sha256>, prefix: &str) -> ChainKeys {
 /// 助記詞 → seed(BIP39, 空 passphrase) → HKDF 三個用途分離的 32-byte 值。
 pub fn derive_keys(mnemonic: &str) -> Result<ChainKeys, AppError> {
     let seed = seed_of(mnemonic)?;
+    // frozen-identity: the HKDF info of the v1 chain; it derives the chain id and the auth token that the relay already knows.
     Ok(chain_keys(&Hkdf::<Sha256>::new(Some(HKDF_SALT), &seed), "sshelter/v1"))
 }
 
@@ -89,6 +92,7 @@ pub fn derive_keys(mnemonic: &str) -> Result<ChainKeys, AppError> {
 /// 與帳戶 chain 互不相關。
 pub fn derive_account(mnemonic: &str) -> Result<ChainKeys, AppError> {
     let seed = seed_of(mnemonic)?;
+    // frozen-identity: the HKDF info of the account chain; it derives the chain id and the auth token that the relay already knows.
     Ok(chain_keys(&Hkdf::<Sha256>::new(Some(HKDF_SALT_V2), &seed), "sshelter/v2/account"))
 }
 
@@ -96,6 +100,7 @@ pub fn derive_account(mnemonic: &str) -> Result<ChainKeys, AppError> {
 /// 同一把金鑰)。之後新建的 space 一律用 `ChainKeys::generate`。
 pub fn derive_space0(mnemonic: &str) -> Result<ChainKeys, AppError> {
     let seed = seed_of(mnemonic)?;
+    // frozen-identity: the HKDF info of space0; it derives the space id and the key that every device of the account derives again.
     Ok(chain_keys(&Hkdf::<Sha256>::new(Some(HKDF_SALT_V2), &seed), "sshelter/v2/space0"))
 }
 
@@ -314,7 +319,7 @@ mod tests {
 
     #[test]
     fn v2_derivation_matches_pinned_vectors() {
-        // Sync v2 spec §5.4 的已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256,salt "sshelter-sync-v2")。
+        // Sync v2 spec §5.4 的已知答案向量(PBKDF2-HMAC-SHA512 → HKDF-SHA256,salt `HKDF_SALT_V2`)。
         // 互通性的護欄:失敗時錯的是實作,不得更新數值遷就實作。
         let account = derive_account(WORDS).unwrap();
         assert_eq!(account.chain_id, "082945de8b6ccadf9733e9c3748fd20abf985b1d6383f5435e40d67de185a3b0");
@@ -412,10 +417,10 @@ mod tests {
     #[test]
     fn raw_seal_round_trips_and_binds_the_aad() {
         let key = [7u8; 32];
-        let (nonce, ciphertext) = seal_raw(&key, b"sshelter-vault-v1\nabc", b"secret").unwrap();
-        assert_eq!(open_raw(&key, b"sshelter-vault-v1\nabc", &nonce, &ciphertext).unwrap(), b"secret");
-        assert!(open_raw(&key, b"sshelter-vault-v1\nxyz", &nonce, &ciphertext).is_err(), "another AAD does not open it");
-        assert!(open_raw(&[8u8; 32], b"sshelter-vault-v1\nabc", &nonce, &ciphertext).is_err(), "another key does not open it");
+        let (nonce, ciphertext) = seal_raw(&key, b"slot-aad\nabc", b"secret").unwrap();
+        assert_eq!(open_raw(&key, b"slot-aad\nabc", &nonce, &ciphertext).unwrap(), b"secret");
+        assert!(open_raw(&key, b"slot-aad\nxyz", &nonce, &ciphertext).is_err(), "another AAD does not open it");
+        assert!(open_raw(&[8u8; 32], b"slot-aad\nabc", &nonce, &ciphertext).is_err(), "another key does not open it");
         let (second, _) = seal_raw(&key, b"a", b"secret").unwrap();
         assert_ne!(nonce, second, "every seal draws a fresh nonce");
     }

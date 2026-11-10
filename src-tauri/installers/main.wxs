@@ -1,13 +1,9 @@
 <!-- Derived from Tauri CLI 2.11.2; see README.md and LICENSE_TAURI_MIT. -->
 <!-- Double separators before Handlebars expressions; single separators before WiX variables. -->
+<!-- Lunport: the identity of installs from before 2.0 is in legacy.wxi. candle resolves an include from the directory of this
+     generated file, which Tauri writes to target/release/wix/<arch>/ under src-tauri. -->
 <?define BundleIdentifier = "{{bundle_id}}" ?>
-<?if $(var.BundleIdentifier)="org.homelab.sshelter.dev"?>
-    <?define InstallerIdentity = "SSHelter Dev" ?>
-<?elseif $(var.BundleIdentifier)="org.homelab.sshelter"?>
-    <?define InstallerIdentity = "SSHelter" ?>
-<?else?>
-    <?error Unexpected application identity in Lunport installer?>
-<?endif?>
+<?include ..\..\..\..\installers\legacy.wxi ?>
 
 <?if $(sys.BUILDARCH)="x86"?>
     <?define Win64 = "no" ?>
@@ -86,11 +82,16 @@
              match wins. We list the NSIS default-key search first and the MSI InstallDir
              search second so that the MSI-specific path takes priority when both keys exist. -->
         <Property Id="INSTALLDIR">
+          <!-- Lunport: an install from before 2.0 kept its directory under the earlier identity (legacy.wxi), NSIS first and
+               the MSI second as below. Listed first, so the current keys win when both exist. -->
+          <RegistrySearch Id="LegacyInstallDirNoName" Root="HKCU" Key="$(var.LegacyProductKey)" Type="raw" />
+          <RegistrySearch Id="LegacyInstallDirWithName" Root="HKCU" Key="$(var.LegacyProductKey)" Name="InstallDir" Type="raw" />
+
           <!-- First attempt: Search for the default key value (this is how the nsis installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)" Type="raw" />
+          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Type="raw" />
 
           <!-- Second attempt: Search for "InstallDir" which takes priority if found (this is how the msi installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)" Name="InstallDir" Type="raw" />
+          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="InstallDir" Type="raw" />
         </Property>
 
         <!-- launch app checkbox -->
@@ -126,34 +127,34 @@
                 <Component Id="ApplicationShortcutDesktop" Guid="*">
                     <Shortcut Id="ApplicationDesktopShortcut" Name="{{product_name}}" Description="Runs {{product_name}}" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
                     <RemoveFolder Id="DesktopFolder" On="uninstall" />
-                    <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
+                    <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
             </Directory>
             <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
                 <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
             </Directory>
             <Directory Id="ProgramMenuFolder">
-                <Directory Id="LegacyProgramsFolder" Name="$(var.InstallerIdentity)"/>
+                <Directory Id="LegacyProgramsFolder" Name="$(var.LegacyShortcutName)"/>
                 <Directory Id="ApplicationProgramsFolder" Name="{{product_name}}"/>
             </Directory>
         </Directory>
 
-        <!-- The previous MSI intentionally keeps its shortcuts during a major upgrade.
-             Remove only that product's old, installer-owned names when upgrading it. -->
+        <!-- The previous MSI intentionally keeps its shortcuts during a major upgrade; this one replaces those with the
+             current names. Remove the names of the oldest MSIs (legacy.wxi) when upgrading one. -->
         <DirectoryRef Id="DesktopFolder">
             <Component Id="LegacyBrandShortcuts" Guid="*">
                 <Condition>WIX_UPGRADE_DETECTED</Condition>
-                <RemoveFile Id="LegacyDesktopShortcut" Directory="DesktopFolder" Name="$(var.InstallerIdentity).lnk" On="install"/>
-                <RemoveFile Id="LegacyStartShortcut" Directory="LegacyProgramsFolder" Name="$(var.InstallerIdentity).lnk" On="install"/>
-                <RemoveFile Id="LegacyUninstallShortcut" Directory="LegacyProgramsFolder" Name="Uninstall $(var.InstallerIdentity).lnk" On="install"/>
+                <RemoveFile Id="LegacyDesktopShortcut" Directory="DesktopFolder" Name="$(var.LegacyShortcutName).lnk" On="install"/>
+                <RemoveFile Id="LegacyStartShortcut" Directory="LegacyProgramsFolder" Name="$(var.LegacyShortcutName).lnk" On="install"/>
+                <RemoveFile Id="LegacyUninstallShortcut" Directory="LegacyProgramsFolder" Name="Uninstall $(var.LegacyShortcutName).lnk" On="install"/>
                 <RemoveFolder Id="LegacyStartFolder" Directory="LegacyProgramsFolder" On="install"/>
-                <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)" Name="Lunport shortcuts" Type="integer" Value="1" KeyPath="yes"/>
+                <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Lunport shortcuts" Type="integer" Value="1" KeyPath="yes"/>
             </Component>
         </DirectoryRef>
 
         <DirectoryRef Id="INSTALLDIR">
             <Component Id="RegistryEntries" Guid="*">
-                <RegistryKey Root="HKCU" Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)">
+                <RegistryKey Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}">
                     <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
                 </RegistryKey>
                 <!-- Change the Root to HKCU for perUser installations -->
@@ -211,7 +212,7 @@
 							  On="uninstall" />
 
 				<RegistryValue Root="HKCU"
-							   Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)"
+							   Key="Software\\{{manufacturer}}\\{{product_name}}"
 							   Name="Uninstaller Shortcut"
 							   Type="integer"
 							   Value="1"
@@ -230,7 +231,7 @@
                     <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
                 </Shortcut>
                 <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
-                <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\$(var.InstallerIdentity)" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
+                <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
            </Component>
         </DirectoryRef>
 

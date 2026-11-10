@@ -1,0 +1,21 @@
+{
+  "description": "Identity values of installs from before 2.0, for scripts that upgrade or check them. The same values as legacy_identity.rs, which a test in src-tauri/src/identity.rs compares for both profiles; scripts/identity-guard.mjs allows old names here.",
+  "production": {
+    "appId": "org.homelab.sshelter",
+    "credentialService": "SSHelter",
+    "loginItem": "SSHelter",
+    "installerIdentity": "SSHelter",
+    "manufacturer": "homelab",
+    "mainBinary": "sshelter",
+    "consoleHelper": "sshelter-cli"
+  },
+  "development": {
+    "appId": "org.homelab.sshelter.dev",
+    "credentialService": "SSHelter Development",
+    "loginItem": "SSHelter Dev",
+    "installerIdentity": "SSHelter Dev",
+    "manufacturer": "homelab",
+    "mainBinary": "sshelter",
+    "consoleHelper": "sshelter-cli"
+  }
+}

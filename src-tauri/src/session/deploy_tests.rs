@@ -31,7 +31,7 @@ mod shell {
         let home = setup(b"# sentinel without newline");
         let output = run(&home, PLAIN_PUBLIC);
         assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"SSHELTER_ADDED\n");
+        assert_eq!(output.stdout, b"LUNPORT_ADDED\n");
         let path = home.path().join(".ssh/authorized_keys");
         let bytes = fs::read(&path).unwrap();
         assert_eq!(
@@ -40,7 +40,7 @@ mod shell {
         );
         let again = run(&home, PLAIN_PUBLIC);
         assert!(again.status.success());
-        assert_eq!(again.stdout, b"SSHELTER_PRESENT\n");
+        assert_eq!(again.stdout, b"LUNPORT_PRESENT\n");
         assert_eq!(fs::read(path).unwrap(), bytes);
     }
     #[test]
@@ -52,7 +52,7 @@ mod shell {
             let home = setup(line.as_bytes());
             let output = run(&home, PLAIN_PUBLIC);
             assert!(output.status.success());
-            assert_eq!(output.stdout, b"SSHELTER_PRESENT\n");
+            assert_eq!(output.stdout, b"LUNPORT_PRESENT\n");
             assert_eq!(
                 fs::read(home.path().join(".ssh/authorized_keys")).unwrap(),
                 line.as_bytes()
@@ -64,7 +64,7 @@ mod shell {
         let home = setup(original.as_bytes());
         let output = run(&home, PLAIN_PUBLIC);
         assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"SSHELTER_PRESENT\n");
+        assert_eq!(output.stdout, b"LUNPORT_PRESENT\n");
         assert_eq!(
             fs::read(home.path().join(".ssh/authorized_keys")).unwrap(),
             original.as_bytes(),
@@ -99,7 +99,7 @@ mod shell {
             let home = setup(line.as_bytes());
             let output = run(&home, PLAIN_PUBLIC);
             assert!(output.status.success());
-            assert_eq!(output.stdout, b"SSHELTER_ADDED\n");
+            assert_eq!(output.stdout, b"LUNPORT_ADDED\n");
             let bytes = fs::read_to_string(home.path().join(".ssh/authorized_keys")).unwrap();
             assert!(bytes.starts_with(&line));
             assert!(bytes.ends_with(&format!("{PLAIN_PUBLIC}\n")));
@@ -163,7 +163,7 @@ mod shell {
                 mode
             );
         }
-        fs::create_dir(home.path().join(".ssh/.sshelter-deploy-lock")).unwrap();
+        fs::create_dir(home.path().join(".ssh/.lunport-deploy-lock")).unwrap();
         let before = fs::read(home.path().join(".ssh/authorized_keys")).unwrap();
         let start = Instant::now();
         let output = run(&home, PLAIN_PUBLIC);
@@ -215,11 +215,11 @@ fn result(ended: Ended, exit_code: Option<u32>, output: &[u8]) -> ExecResult {
 #[test]
 fn only_known_successful_untruncated_exit_is_installation_success() {
     assert_eq!(
-        classify(&result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n")),
+        classify(&result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n")),
         Outcome::Added
     );
     assert_eq!(
-        classify(&result(Ended::Exited, Some(0), b"SSHELTER_PRESENT\n")),
+        classify(&result(Ended::Exited, Some(0), b"LUNPORT_PRESENT\n")),
         Outcome::AlreadyPresent
     );
     for (end, code) in [
@@ -229,12 +229,12 @@ fn only_known_successful_untruncated_exit_is_installation_success() {
         (Ended::Truncated, Some(0)),
     ] {
         assert_eq!(
-            classify(&result(end, code, b"SSHELTER_ADDED\n")),
+            classify(&result(end, code, b"LUNPORT_ADDED\n")),
             Outcome::Unknown
         );
     }
     assert_eq!(
-        classify(&result(Ended::TimedOut, Some(0), b"SSHELTER_ADDED\n")),
+        classify(&result(Ended::TimedOut, Some(0), b"LUNPORT_ADDED\n")),
         Outcome::TimedOut
     );
     assert_eq!(
@@ -249,7 +249,7 @@ fn only_known_successful_untruncated_exit_is_installation_success() {
         classify(&result(Ended::Exited, Some(70), b"")),
         Outcome::RemoteFailed
     );
-    let mut truncated = result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n");
+    let mut truncated = result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n");
     truncated.truncated = true;
     assert_eq!(classify(&truncated), Outcome::Unknown);
 }
@@ -258,7 +258,7 @@ fn public_preview_then_explicit_confirmation_executes_independent_of_mcp_grants(
     // No MCP runtime, policy, allowlist, or adapter is involved in this human path.
     let e = FakeEngine::new().with_exec(
         &script(PLAIN_PUBLIC).unwrap(),
-        result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+        result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n"),
     );
     let d = FakeDirectory::new()
         .with_host(
@@ -419,7 +419,7 @@ fn completed_exec_with_failed_audit_keeps_outcome_warns_and_never_retries() {
     std::fs::write(home.path().join("missing"), b"sentinel").unwrap();
     let e = FakeEngine::new().with_exec(
         &script(PLAIN_PUBLIC).unwrap(),
-        result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+        result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n"),
     );
     let d = FakeDirectory::new()
         .with_host(
@@ -463,7 +463,7 @@ fn completed_exec_with_failed_audit_keeps_outcome_warns_and_never_retries() {
     assert_eq!(entries[0].outcome, "added");
     assert!(entries[0].detail.is_none());
     assert!(entries[0].command.starts_with("Deploy public key SHA256:"));
-    assert!(!entries[0].command.contains("SSHELTER_ADDED"));
+    assert!(!entries[0].command.contains("LUNPORT_ADDED"));
 }
 #[test]
 fn authentication_abandonment_timeout_and_host_key_refusal_are_distinct() {
@@ -799,7 +799,7 @@ fn public_resolution_and_private_authentication_leave_lifecycle_available() {
     };
     let e = FakeEngine::new().with_exec(
         &script(PLAIN_PUBLIC).unwrap(),
-        result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+        result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n"),
     );
     let c = Connector {
         grants: crate::session::grants::GrantGates::for_tests(),
@@ -1044,7 +1044,7 @@ fn deployment_aba_resolve_cannot_connect_or_execute_on_unreviewed_target() {
     for directory in [AbaDirectory::new(), AbaDirectory::auth_drift()] {
         let engine = RecordingEngine::new(FakeEngine::new().with_exec(
             &script(PLAIN_PUBLIC).unwrap(),
-            result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+            result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n"),
         ));
         let connector = Connector {
             grants: crate::session::grants::GrantGates::for_tests(),
@@ -1100,7 +1100,7 @@ fn deployment_legitimate_new_pin_and_interactive_password_fallback_still_execute
         let directory = FakeDirectory::new().with_host("web", auth.clone());
         let fake = FakeEngine::new().with_exec(
             &script(PLAIN_PUBLIC).unwrap(),
-            result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+            result(Ended::Exited, Some(0), b"LUNPORT_ADDED\n"),
         );
         let engine = RecordingEngine::new(if fallback {
             fake.with_login(FakeLogin::Server(FakeMethods::password("fixture-password")))

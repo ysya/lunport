@@ -58,17 +58,51 @@ ${StrLoc}
 !define WEBVIEW2BOOTSTRAPPERPATH "{{webview2_bootstrapper_path}}"
 !define WEBVIEW2INSTALLERPATH "{{webview2_installer_path}}"
 !define MINIMUMWEBVIEW2VERSION "{{minimum_webview2_version}}"
-; Installer namespaces are persistent identities, separate from the visible product name.
-!if "${BUNDLEID}" == "org.homelab.sshelter"
-  !define INSTALLERIDENTITY "SSHelter"
-!else if "${BUNDLEID}" == "org.homelab.sshelter.dev"
-  !define INSTALLERIDENTITY "SSHelter Dev"
-!else
-  !error "Unexpected application identity in Lunport installer"
-!endif
-!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${INSTALLERIDENTITY}"
+!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
 !define MANUKEY "Software\${MANUFACTURER}"
-!define MANUPRODUCTKEY "${MANUKEY}\${INSTALLERIDENTITY}"
+!define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
+; Lunport: installs from before 2.0 registered another identity (legacy.nsh; hooks.nsh puts its directory on the include
+; path). Their installers were per-user, so these keys are always under HKCU.
+!include "legacy.nsh"
+!define LEGACY_UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_INSTALLER_IDENTITY}"
+!define LEGACY_MANUKEY "Software\${LEGACY_MANUFACTURER}"
+!define LEGACY_MANUPRODUCTKEY "${LEGACY_MANUKEY}\${LEGACY_INSTALLER_IDENTITY}"
+; Lunport: whether this version installs a binary under the earlier console helper's name, which must then stay.
+{{#each binaries}}
+!if "{{this}}" == "${LEGACY_CONSOLE_HELPER}.exe"
+  !define /ifndef LEGACY_CONSOLE_HELPER_IS_CURRENT
+!endif
+{{/each}}
+; Lunport: the directory of an installation from before 2.0, or "": its NSIS product key, else its uninstall entry's
+; InstallLocation, which NSIS writes quoted.
+!macro LunportLegacyInstallDir out
+  ReadRegStr ${out} HKCU "${LEGACY_MANUPRODUCTKEY}" ""
+  ${If} ${out} == ""
+    ReadRegStr ${out} HKCU "${LEGACY_UNINSTKEY}" "InstallLocation"
+    StrCpy $R9 ${out} 1
+    ${If} $R9 == '"'
+      StrCpy ${out} ${out} -1 1
+    ${EndIf}
+  ${EndIf}
+!macroend
+; Lunport: deletes a file of an installation from before 2.0 and names it in the details when it stays because it is in use.
+; No /REBOOTOK: a per-user installer cannot schedule deletes at restart, and the reboot flag would only change the finish page.
+!macro LunportDeleteLegacyFile path
+  Delete "${path}"
+  ${If} ${FileExists} "${path}"
+    DetailPrint "Lunport: ${path} is in use and was not removed."
+  ${EndIf}
+!macroend
+; Lunport: removes the executables from before 2.0 from a directory where this version is installed, keeping any name this
+; version uses. One still in use stays; a later update (RemoveLegacyInstallation) or the uninstaller removes it.
+!macro LunportDeleteLegacyExecutables directory
+  !if "${LEGACY_BINARY}" != "${MAINBINARYNAME}"
+    !insertmacro LunportDeleteLegacyFile "${directory}\${LEGACY_BINARY}.exe"
+  !endif
+  !ifndef LEGACY_CONSOLE_HELPER_IS_CURRENT
+    !insertmacro LunportDeleteLegacyFile "${directory}\${LEGACY_CONSOLE_HELPER}.exe"
+  !endif
+!macroend
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
@@ -208,7 +242,9 @@ Function PageReinstall
     ReadRegStr $R0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$1" "DisplayName"
     ReadRegStr $R1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$1" "Publisher"
     StrCmp "$R0$R1" "${PRODUCTNAME}${MANUFACTURER}" found_wix 0
-    StrCmp "$R0$R1" "${INSTALLERIDENTITY}${MANUFACTURER}" 0 wix_loop
+    ; Lunport: an MSI from before 2.0 has the earlier manufacturer, the oldest ones also the earlier name (legacy.nsh).
+    StrCmp "$R0$R1" "${PRODUCTNAME}${LEGACY_MANUFACTURER}" found_wix 0
+    StrCmp "$R0$R1" "${LEGACY_INSTALLER_IDENTITY}${LEGACY_MANUFACTURER}" 0 wix_loop
     found_wix:
     ReadRegStr $R0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$1" "UninstallString"
     ${StrCase} $R1 $R0 "L"
@@ -648,6 +684,13 @@ Section Install
   !endif
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; Lunport: before 2.0 the executable had another name (legacy.nsh); an AI client's MCP adapter or a terminal session may
+  ; still run it. Only while such an installation is registered or its executable is still here.
+  ReadRegStr $R0 HKCU "${LEGACY_UNINSTKEY}" "UninstallString"
+  ${If} $R0 != ""
+  ${OrIf} ${FileExists} "$INSTDIR\${LEGACY_BINARY}.exe"
+    !insertmacro CheckIfAppIsRunning "${LEGACY_BINARY}.exe" "${PRODUCTNAME}"
+  ${EndIf}
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -694,6 +737,10 @@ Section Install
 
   ; Remove old main binary if it doesn't match new main binary name
   ReadRegStr $OldMainBinaryName SHCTX "${UNINSTKEY}" "MainBinaryName"
+  ; Lunport: the first update after 2.0 finds it under the earlier identity.
+  ${If} $OldMainBinaryName == ""
+    ReadRegStr $OldMainBinaryName HKCU "${LEGACY_UNINSTKEY}" "MainBinaryName"
+  ${EndIf}
   ${If} $OldMainBinaryName != ""
   ${AndIf} $OldMainBinaryName != "${MAINBINARYNAME}.exe"
     Delete "$INSTDIR\$OldMainBinaryName"
@@ -722,6 +769,9 @@ Section Install
     WriteRegStr SHCTX "${UNINSTKEY}" "URLUpdateInfo" "${HOMEPAGE}"
     WriteRegStr SHCTX "${UNINSTKEY}" "HelpLink" "${HOMEPAGE}"
   !endif
+
+  ; Lunport: this version's registration is complete, so remove the one from before 2.0.
+  Call RemoveLegacyInstallation
 
   ; Create start menu shortcut
   !insertmacro MUI_STARTMENU_WRITE_BEGIN Application
@@ -800,6 +850,9 @@ Section Uninstall
     Delete "$INSTDIR\\{{this}}"
   {{/each}}
 
+  ; Lunport: executables from before 2.0 that an update could not remove while they ran, so the directory can go.
+  !insertmacro LunportDeleteLegacyExecutables "$INSTDIR"
+
   ; Delete app associations
   {{#each file_associations as |association| ~}}
     {{#each association.ext as |ext| ~}}
@@ -867,7 +920,9 @@ Section Uninstall
   ; If it doesn't exist, it does nothing.
   ; We do this when not updating (to preserve the registry value on updates)
   ${If} $UpdateMode <> 1
-    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${INSTALLERIDENTITY}"
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+    ; Lunport: and the entry from before 2.0 (legacy.nsh), if the app never started to move it.
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_INSTALLER_IDENTITY}"
   ${EndIf}
 
   ; Delete app data if the checkbox is selected
@@ -901,8 +956,43 @@ SectionEnd
 
 Function RestorePreviousInstallLocation
   ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
+  ; Lunport: the first update after 2.0 finds the directory under the earlier identity.
+  ${If} $4 == ""
+    !insertmacro LunportLegacyInstallDir $4
+  ${EndIf}
   StrCmp $4 "" +2 0
     StrCpy $INSTDIR $4
+FunctionEnd
+
+; Lunport: an installation from before 2.0 is registered under the earlier identity (legacy.nsh). Called once this version's
+; registration is complete, it removes that installation's files and registration in place, so Add/Remove Programs lists one
+; entry; on later updates it removes executables an earlier run could not delete while they ran. Shortcuts are retargeted
+; elsewhere (CreateOrUpdate*Shortcut, hooks.nsh). Application data, saved credentials and the login entry stay: the app moves
+; them to the current identity when it first starts.
+Function RemoveLegacyInstallation
+  !insertmacro LunportLegacyInstallDir $R1
+  ${If} $R1 == ""
+    StrCpy $R1 $INSTDIR
+  ${EndIf}
+  ${If} ${FileExists} "$R1\${MAINBINARYNAME}.exe"
+    ; This version is installed there: keep what it installed (the uninstaller too).
+    !insertmacro LunportDeleteLegacyExecutables "$R1"
+  ${ElseIf} ${FileExists} "$R1\${LEGACY_BINARY}.exe"
+    ; The earlier version is installed in another directory: remove what it put there.
+    !insertmacro LunportDeleteLegacyFile "$R1\${LEGACY_BINARY}.exe"
+    !insertmacro LunportDeleteLegacyFile "$R1\${LEGACY_CONSOLE_HELPER}.exe"
+    Delete "$R1\uninstall.exe"
+    RMDir "$R1"
+    ${If} ${FileExists} "$R1\*.*"
+      DetailPrint "Lunport: $R1, the earlier installation's folder, is not empty and was kept."
+    ${EndIf}
+  ${EndIf}
+  DeleteRegKey HKCU "${LEGACY_UNINSTKEY}"
+  ; The values an earlier NSIS install wrote there. An earlier MSI's values belong to that MSI, which removes them itself.
+  DeleteRegValue HKCU "${LEGACY_MANUPRODUCTKEY}" ""
+  DeleteRegValue HKCU "${LEGACY_MANUPRODUCTKEY}" "Installer Language"
+  DeleteRegKey /ifempty HKCU "${LEGACY_MANUPRODUCTKEY}"
+  DeleteRegKey /ifempty HKCU "${LEGACY_MANUKEY}"
 FunctionEnd
 
 Function Skip
@@ -921,10 +1011,12 @@ Function CreateOrUpdateStartMenuShortcut
   ; migrate old shortcuts to target the new MAINBINARYNAME
   StrCpy $R0 0
 
+  ; Lunport: a shortcut from before 2.0 also carries the earlier identifier as its AppUserModelID; give it the current one.
   !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
   ${If} $0 = 1
     !insertmacro SetShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
     StrCpy $R0 1
   ${EndIf}
 
@@ -932,6 +1024,7 @@ Function CreateOrUpdateStartMenuShortcut
   Pop $0
   ${If} $0 = 1
     !insertmacro SetShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\${PRODUCTNAME}.lnk"
     StrCpy $R0 1
   ${EndIf}
 
@@ -965,6 +1058,8 @@ Function CreateOrUpdateDesktopShortcut
   Pop $0
   ${If} $0 = 1
     !insertmacro SetShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    ; Lunport: with the current AppUserModelID, as in CreateOrUpdateStartMenuShortcut.
+    !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
     Return
   ${EndIf}
 

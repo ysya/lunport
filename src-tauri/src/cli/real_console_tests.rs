@@ -24,12 +24,12 @@
 //! - Raw mode with virtual terminal input gives an arrow as `ESC [ A`; a surrogate pair typed as two records comes in one read.
 //! - Once the console is freed, new reads fail. FreeConsole does not promise cancellation of an already pending synchronous read;
 //!   cancellation and process-exit behavior are checked separately below.
-//! - (Fix round 1, measured in a console shared with another process, as the shell shares its console with `sshelter connect`.) A read a
+//! - (Fix round 1, measured in a console shared with another process, as the shell shares its console with `lunport connect`.) A read a
 //!   process leaves in progress when it ends ends with it: neither a raw read nor a hidden line read with "hun" typed into it takes the
-//!   key or the line typed next, and "hun" never shows; so `sshelter connect`'s own end, which leaves its keys thread in a read, leaves
+//!   key or the line typed next, and "hun" never shows; so `lunport connect`'s own end, which leaves its keys thread in a read, leaves
 //!   the next key to the shell.
 //! - (Final wave, measured the same way.) So does a read on the console input the process was given as its standard input
-//!   (`StdConsole::new`'s standard handle: `sshelter connect` reads the input its shell and `sshelter-cli.exe` hand it), an input that
+//!   (`StdConsole::new`'s standard handle: `lunport connect` reads the input its shell and `lunport-cli.exe` hand it), an input that
 //!   stays open when the process ends (the process that started it keeps a handle of the same input, and reads it next): a raw read and a
 //!   hidden line read with "hun" typed into it, left by a process that returns or that the watchdog ends from another thread, take
 //!   nothing of what is typed next. A cancelled read on that same input does live on and take the next key, so the check sees one that
@@ -307,7 +307,7 @@ fn read_through(console: &Arc<StdConsole>) -> mpsc::Receiver<std::io::Result<Str
     rx
 }
 
-/// The console of this process as `sshelter connect` takes it (`StdConsole::new`), saying when the keys thread starts a read.
+/// The console of this process as `lunport connect` takes it (`StdConsole::new`), saying when the keys thread starts a read.
 struct Watched {
     console: StdConsole,
     reading: AtomicBool,
@@ -340,7 +340,7 @@ impl ConsoleApi for Watched {
     }
 }
 
-/// A program the case `a_read_left_on_the_given_input_takes_nothing` runs, ending as `sshelter connect` ends with its keys thread in a
+/// A program the case `a_read_left_on_the_given_input_takes_nothing` runs, ending as `lunport connect` ends with its keys thread in a
 /// read: the console of the standard input this process was given (`StdConsole::new`, a handle of an input the process that started it
 /// keeps), taken over and set to `mode` through the real gate, its keys thread reading, `typed` typed into that read (through `control`,
 /// a handle that never reads); then the process ends with the read in progress, by returning once the console was put back and the
@@ -583,7 +583,7 @@ fn case(name: &str) {
             drop(tty);
         }
         // Fix round 1, measured: a read another process left in progress when it ended, in the console this one shares with it (the
-        // shell's console, after `sshelter connect` ended), takes nothing of what is typed next: neither a raw read, nor a hidden line read
+        // shell's console, after `lunport connect` ended), takes nothing of what is typed next: neither a raw read, nor a hidden line read
         // with a part of a password typed into it. The process that leaves them is this test binary again, run without a console of its
         // own, so that it shares this one.
         "a_read_an_ended_process_left_takes_nothing" => {
@@ -631,7 +631,7 @@ fn case(name: &str) {
             std::thread::sleep(SETTLE);
             assert!(read.try_recv().is_err(), "the line read waits, \"hun\" in its line");
         }
-        // Fix round 1: what is typed after `sshelter connect` ended is the shell's, whole: the program's own end (its run puts the console
+        // Fix round 1: what is typed after `lunport connect` ended is the shell's, whole: the program's own end (its run puts the console
         // back, then its `Tty` goes) leaves no read of its own in the console it shares with the shell, also when it ended under a hidden
         // question with a part of the answer typed.
         "the_keys_after_the_cli_ended_are_the_shells" => {
@@ -654,7 +654,7 @@ fn case(name: &str) {
             assert_eq!(read.recv_timeout(AT_ONCE).map(|read| read.text), Ok("x\r\n".to_string()), "the first line after the end");
             assert!(!row(console.out, y).contains("hun"), "{:?}", row(console.out, y));
         }
-        // The process that `the_keys_after_the_cli_ended_are_the_shells` runs: `sshelter connect`'s console, keys and end, in raw mode.
+        // The process that `the_keys_after_the_cli_ended_are_the_shells` runs: `lunport connect`'s console, keys and end, in raw mode.
         "end_in_the_shell" => {
             let mut tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
             tty.take_over().unwrap();
@@ -680,8 +680,8 @@ fn case(name: &str) {
             tty.restore();
             drop(tty);
         }
-        // Final wave (F9): the same on the input the ending process was GIVEN as its standard input, the way `sshelter connect`
-        // reads the console input its shell and `sshelter-cli.exe` hand it (`StdConsole::new`, the standard handle). That input stays
+        // Final wave (F9): the same on the input the ending process was GIVEN as its standard input, the way `lunport connect`
+        // reads the console input its shell and `lunport-cli.exe` hand it (`StdConsole::new`, the standard handle). That input stays
         // open when the process ends (this process, its "shell", keeps a handle of the same input and reads it next), so a read left in
         // progress could live on with the input rather than end with the process. First the check is shown to see a read that lives on (a
         // cancelled one, on this input); then the program ends with its keys thread in a read: raw, and a hidden line read with "hun"
@@ -800,7 +800,7 @@ fn case(name: &str) {
 }
 
 /// The variable that names the case a child runs.
-const CASE: &str = "SSHELTER_TEST_CONSOLE_CASE";
+const CASE: &str = "LUNPORT_TEST_CONSOLE_CASE";
 
 /// The cases, each in a child with a console of its own: a read one case leaves waiting cannot take the keys of the next. Every case
 /// runs, and the test fails with all that failed.
@@ -860,12 +860,13 @@ fn a_real_console_works_as_the_keys_reader_needs() {
     assert!(failed.is_empty(), "{} of {} cases failed ({:?}):\n{}", failed.len(), cases.len(), started.elapsed(), failed.join("\n"));
 }
 
-/// The variable that names the directory of the pair `the_pair_in_a_console_of_its_own` runs: `sshelter-cli.exe` and the `sshelter.exe`
-/// beside it (on CI the debug build's, in test-windows.yml, and each installer's release build, in windows-bundle-check.yml).
-const PAIR: &str = "SSHELTER_TEST_PAIR";
+/// The variable that names the directory of the pair `the_pair_in_a_console_of_its_own` runs: `lunport-cli.exe` and the `lunport.exe`
+/// beside it (on CI the helper as the Windows builds make it beside the debug build's `lunport.exe`, in test-windows.yml, and each
+/// installer's release pair, in windows-bundle-check.yml).
+const PAIR: &str = "LUNPORT_TEST_PAIR";
 
 /// The compiled profile of the external pair, which can differ from this test binary.
-const PAIR_PROFILE: &str = "SSHELTER_TEST_PAIR_PROFILE";
+const PAIR_PROFILE: &str = "LUNPORT_TEST_PAIR_PROFILE";
 
 fn pair_profile() -> crate::app_profile::AppProfile {
     match std::env::var(PAIR_PROFILE).as_deref() {
@@ -878,30 +879,30 @@ fn pair_profile() -> crate::app_profile::AppProfile {
 /// The full name of `the_pair_in_a_console_of_its_own`, which its children run again.
 const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_own";
 
-/// Final wave (F10): `sshelter connect`'s way into a console as a terminal gives it, which no other test takes: the console helper
+/// Final wave (F10): `lunport connect`'s way into a console as a terminal gives it, which no other test takes: the console helper
 /// started in a console of its own with that console's own buffers as its standard input, output and error (not a test's pipes), as a
-/// shell in the console starts a program, and `sshelter.exe` on the console handles it inherits through the helper (`StdConsole::new`'s
+/// shell in the console starts a program, and `lunport.exe` on the console handles it inherits through the helper (`StdConsole::new`'s
 /// standard handles; a release build is a GUI program, which attaches to the helper's console first). Each case runs in a child with a
 /// console of its own, which reads what the console's screen shows once the pair has ended:
-/// - `sshelter-cli.exe connect`: the usage on the console, and 2;
-/// - `sshelter-cli.exe connect web` while Lunport's session pipe exists and another owner made it (the Administrators group: the CI
+/// - `lunport-cli.exe connect`: the usage on the console, and 2;
+/// - `lunport-cli.exe connect web` while Lunport's session pipe exists and another owner made it (the Administrators group: the CI
 ///   runner is elevated): the refusal on the console, and 1. On the way the pair attached to the console, read its standard handles as a
 ///   console (`Tty::new`) and refused the pipe in the broker's connect (it did open that very pipe), and it started no Lunport;
-/// - the pair's helper next to a stand-in `sshelter.exe` (this test binary) that changes the console and is ended from outside, as the NSIS
-///   installer ends every `sshelter.exe` at an install, an update and an uninstall: once it has ended the helper puts the console's four
+/// - the pair's helper next to a stand-in `lunport.exe` (this test binary) that changes the console and is ended from outside, as the NSIS
+///   installer ends every `lunport.exe` at an install, an update and an uninstall: once it has ended the helper puts the console's four
 ///   settings back, which the program alone leaves changed, and leaves with its exit code.
 ///
-/// A CI step runs it (`--ignored`) with `SSHELTER_TEST_PAIR` naming the pair's directory
-/// and `SSHELTER_TEST_PAIR_PROFILE` naming its compiled profile.
+/// A CI step runs it (`--ignored`) with `LUNPORT_TEST_PAIR` naming the pair's directory
+/// and `LUNPORT_TEST_PAIR_PROFILE` naming its compiled profile.
 #[test]
-#[ignore = "runs the console pair in the directory SSHELTER_TEST_PAIR names (a CI step)"]
+#[ignore = "runs the console pair in the directory LUNPORT_TEST_PAIR names (a CI step)"]
 fn the_pair_in_a_console_of_its_own() {
     if is_child() {
         pair_case(&std::env::var(CASE).expect("the case"));
         return;
     }
-    let dir = PathBuf::from(std::env::var_os(PAIR).expect("SSHELTER_TEST_PAIR names the directory of sshelter-cli.exe and sshelter.exe"));
-    for program in ["sshelter-cli.exe", "sshelter.exe"] {
+    let dir = PathBuf::from(std::env::var_os(PAIR).expect("LUNPORT_TEST_PAIR names the directory of lunport-cli.exe and lunport.exe"));
+    for program in ["lunport-cli.exe", "lunport.exe"] {
         assert!(dir.join(program).is_file(), "{program} is not in {}", dir.display());
     }
     // winbase.h: a console of its own for the child.
@@ -925,9 +926,9 @@ fn pair_case(name: &str) {
     match name {
         "the_usage_on_the_console" => {
             let (code, screen) = run_the_pair(&dir, &["connect"]);
-            eprintln!("sshelter-cli.exe connect ended with {code}; the console shows:\n{screen}");
-            assert!(screen.contains("usage: sshelter connect <alias>"), "the usage is not on the console:\n{screen}");
-            assert!(screen.contains("sshelter connect --id <host id>"), "the usage is not on the console:\n{screen}");
+            eprintln!("lunport-cli.exe connect ended with {code}; the console shows:\n{screen}");
+            assert!(screen.contains("usage: lunport connect <alias>"), "the usage is not on the console:\n{screen}");
+            assert!(screen.contains("lunport connect --id <host id>"), "the usage is not on the console:\n{screen}");
             assert_eq!(code, 2);
         }
         "a_pipe_another_owner_made_is_refused_on_the_console" => {
@@ -937,10 +938,10 @@ fn pair_case(name: &str) {
             let squatter = crate::ipc::pipe_windows::testing::squat_as_administrators(&name)
                 .expect("the Administrators group can own the pipe: the runner is elevated");
             let (code, screen) = run_the_pair(&dir, &["connect", "web"]);
-            eprintln!("sshelter-cli.exe connect web ended with {code}; the console shows:\n{screen}");
-            let started = sshelters_left();
+            eprintln!("lunport-cli.exe connect web ended with {code}; the console shows:\n{screen}");
+            let started = lunports_left();
             assert!(started.is_empty(), "a Lunport was started (process ids {started:?}), and is stopped now");
-            assert!(a_client_came(&squatter), r"sshelter.exe did not open \\.\pipe\{name}");
+            assert!(a_client_came(&squatter), r"lunport.exe did not open \\.\pipe\{name}");
             let label = match profile {
                 crate::app_profile::AppProfile::Production => "session",
                 crate::app_profile::AppProfile::Development => "dev",
@@ -949,16 +950,16 @@ fn pair_case(name: &str) {
             assert!(screen.contains(&refused), "the refusal is not on the console:\n{screen}");
             assert_eq!(code, 1);
         }
-        // Residual R2 (own-ssh spec §7.3): a `sshelter.exe` ended from outside puts nothing back; its helper does, once it has ended.
-        // The pair's helper is copied next to a stand-in `sshelter.exe` (`KILLED_PROGRAM`). First the stand-in alone: the console's four
+        // Residual R2 (own-ssh spec §7.3): a `lunport.exe` ended from outside puts nothing back; its helper does, once it has ended.
+        // The pair's helper is copied next to a stand-in `lunport.exe` (`KILLED_PROGRAM`). First the stand-in alone: the console's four
         // settings are left changed, so the check sees a console that was not put back. Then through the helper, as a terminal runs it.
         "the_helper_puts_back_the_console_a_killed_program_changed" => {
             let before = settings();
             let scratch = tempfile::tempdir().expect("a scratch directory");
-            let helper = scratch.path().join("sshelter-cli.exe");
-            let program = scratch.path().join("sshelter.exe");
-            std::fs::copy(dir.join("sshelter-cli.exe"), &helper).expect("a copy of the pair's helper");
-            std::fs::copy(std::env::current_exe().expect("this test binary"), &program).expect("this test binary as sshelter.exe");
+            let helper = scratch.path().join("lunport-cli.exe");
+            let program = scratch.path().join("lunport.exe");
+            std::fs::copy(dir.join("lunport-cli.exe"), &helper).expect("a copy of the pair's helper");
+            std::fs::copy(std::env::current_exe().expect("this test binary"), &program).expect("this test binary as lunport.exe");
             let killed = |path: &Path| {
                 let mut command = std::process::Command::new(path);
                 command.args(["--exact", PAIR_TEST, "--nocapture", "--test-threads=1", "--include-ignored"]).env(CASE, KILLED_PROGRAM);
@@ -967,7 +968,7 @@ fn pair_case(name: &str) {
 
             let (code, screen) = killed(&program);
             let left = settings();
-            eprintln!("sshelter.exe alone ended with {code}; the console's settings were {before:?}, and are {left:?}");
+            eprintln!("lunport.exe alone ended with {code}; the console's settings were {before:?}, and are {left:?}");
             assert_eq!(code, KILLED as i32, "the stand-in did not end as it should; the console shows:\n{screen}");
             let changed = [before.0 != left.0, before.1 != left.1, before.2 != left.2, before.3 != left.3];
             assert_eq!(changed, [true; 4], "the stand-in did not change every setting: {before:?}, then {left:?}");
@@ -976,13 +977,13 @@ fn pair_case(name: &str) {
 
             let (code, screen) = killed(&helper);
             let after = settings();
-            eprintln!("sshelter-cli.exe ended with {code}; the console's settings were {before:?}, and are {after:?}");
+            eprintln!("lunport-cli.exe ended with {code}; the console's settings were {before:?}, and are {after:?}");
             assert_eq!(code, KILLED as i32, "the helper did not leave with its program's exit code; the console shows:\n{screen}");
             assert_eq!(after, before, "the helper did not put the console back once its program had ended");
         }
-        // The stand-in `sshelter.exe`, run alone and by the helper. As `sshelter connect`, it takes over the console of the standard
+        // The stand-in `lunport.exe`, run alone and by the helper. As `lunport connect`, it takes over the console of the standard
         // handles it was given (`StdConsole::new`) and sets raw mode (the input's mode and the output's); it changes both code pages too,
-        // each to another than the console started with (`sshelter connect` sets the output's to UTF-8 and leaves the input's; the helper
+        // each to another than the console started with (`lunport connect` sets the output's to UTF-8 and leaves the input's; the helper
         // keeps all four). Then it is ended from outside, as the NSIS installer ends it (`TerminateProcess`): no way out of it runs, so
         // nothing of its own puts the console back.
         KILLED_PROGRAM => {
@@ -1010,7 +1011,7 @@ fn pair_case(name: &str) {
     }
 }
 
-/// The program `the_helper_puts_back_the_console_a_killed_program_changed` runs as `sshelter.exe` (a case of `pair_case` that this test
+/// The program `the_helper_puts_back_the_console_a_killed_program_changed` runs as `lunport.exe` (a case of `pair_case` that this test
 /// binary runs as that program, not one of the test's own).
 const KILLED_PROGRAM: &str = "a_program_that_changes_the_console_and_is_killed";
 
@@ -1028,9 +1029,9 @@ fn put_back((input_mode, output_mode, input_cp, output_cp): (u32, u32, u32, u32)
     }
 }
 
-/// Runs `sshelter-cli.exe` of `dir` with `args` in this process's console (`run_in_this_console`).
+/// Runs `lunport-cli.exe` of `dir` with `args` in this process's console (`run_in_this_console`).
 fn run_the_pair(dir: &Path, args: &[&str]) -> (i32, String) {
-    let mut command = std::process::Command::new(dir.join("sshelter-cli.exe"));
+    let mut command = std::process::Command::new(dir.join("lunport-cli.exe"));
     command.args(args);
     run_in_this_console(&mut command)
 }
@@ -1120,9 +1121,9 @@ fn a_client_came(pipe: &OwnedHandle) -> bool {
     }
 }
 
-/// The processes called `sshelter.exe` that are running (their ids). Once the pair has ended, any is a Lunport it started: each is
+/// The processes called `lunport.exe` that are running (their ids). Once the pair has ended, any is a Lunport it started: each is
 /// stopped, so that it does not outlive the test.
-fn sshelters_left() -> Vec<u32> {
+fn lunports_left() -> Vec<u32> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
@@ -1136,7 +1137,7 @@ fn sshelters_left() -> Vec<u32> {
         let mut more = Process32FirstW(snapshot, &mut entry) != 0;
         while more {
             let length = entry.szExeFile.iter().position(|&unit| unit == 0).unwrap_or(entry.szExeFile.len());
-            if String::from_utf16_lossy(&entry.szExeFile[..length]).eq_ignore_ascii_case("sshelter.exe") {
+            if String::from_utf16_lossy(&entry.szExeFile[..length]).eq_ignore_ascii_case("lunport.exe") {
                 found.push(entry.th32ProcessID);
             }
             more = Process32NextW(snapshot, &mut entry) != 0;

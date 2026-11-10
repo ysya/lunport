@@ -1,5 +1,9 @@
 //! One-time bundle rename. The old absolute path remains a compatibility symlink.
 //! Runs before Cocoa, the broker and updater learn this process's executable path.
+use crate::app_profile::AppProfile;
+// rename(2) can overwrite an empty destination; an exclusive rename never replaces one.
+use crate::fsutil::rename_exclusive;
+use crate::{identity, legacy_identity};
 use serde::{Deserialize, Serialize};
 use std::os::unix::{
     fs::{symlink, MetadataExt},
@@ -28,17 +32,32 @@ struct Plan {
     new: PathBuf,
 }
 
-fn old_names(development: bool) -> &'static [&'static str] {
+/// The profile that the `development` flag of these functions stands for.
+fn profile_of(development: bool) -> AppProfile {
     if development {
-        &["SSHelter Dev.app", "sshelter Dev.app"]
+        AppProfile::Development
     } else {
-        &["SSHelter.app", "sshelter.app"]
+        AppProfile::Production
     }
 }
-fn bundle_for(executable: &Path) -> Option<&Path> {
+
+/// The names the app bundle of this profile had before the rename.
+fn old_names(development: bool) -> impl Iterator<Item = &'static str> {
+    legacy_identity::of(profile_of(development))
+        .bundle_names
+        .into_iter()
+}
+
+/// The name of the app bundle of this profile, which is the bundle an old one is renamed to.
+fn new_name(development: bool) -> String {
+    format!("{}.app", profile_of(development).identity().product_name)
+}
+
+/// The app bundle that holds `executable`, when its path is `<bundle>/Contents/MacOS/<binary>`.
+fn bundle_of<'a>(executable: &'a Path, binary: &str) -> Option<&'a Path> {
     let macos = executable.parent()?;
     let contents = macos.parent()?;
-    if executable.file_name()? != "sshelter"
+    if executable.file_name()? != binary
         || macos.file_name()? != "MacOS"
         || contents.file_name()? != "Contents"
     {
@@ -46,20 +65,22 @@ fn bundle_for(executable: &Path) -> Option<&Path> {
     }
     contents.parent()
 }
+/// The bundle that holds `executable`, an executable of this version.
+fn bundle_for(executable: &Path) -> Option<&Path> {
+    bundle_of(executable, identity::current().main_binary)
+}
+/// The executable of this version in `bundle`.
 fn bundle_exe(bundle: &Path) -> PathBuf {
-    bundle.join("Contents/MacOS/sshelter")
+    bundle
+        .join("Contents/MacOS")
+        .join(identity::current().main_binary)
 }
 fn validate_plan(plan: &Plan, development: bool) -> io::Result<()> {
     let name = plan.old.file_name().and_then(|v| v.to_str()).unwrap_or("");
-    let new_name = if development {
-        "Lunport Dev.app"
-    } else {
-        "Lunport.app"
-    };
     if !plan.old.is_absolute()
-        || !old_names(development).contains(&name)
+        || !old_names(development).any(|old| old == name)
         || plan.old.parent() != plan.new.parent()
-        || plan.new.file_name().and_then(|v| v.to_str()) != Some(new_name)
+        || plan.new.file_name().and_then(|v| v.to_str()) != Some(new_name(development).as_str())
     {
         return Err(io::Error::other("Invalid application rename plan"));
     }
@@ -69,19 +90,6 @@ fn same_executable(a: &Path, b: &Path) -> bool {
     match (fs::metadata(a), fs::metadata(b)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
         _ => false,
-    }
-}
-
-/// rename(2) can overwrite an empty destination; RENAME_EXCL never replaces one.
-fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-    let from = CString::new(from.as_os_str().as_bytes())?;
-    let to = CString::new(to.as_os_str().as_bytes())?;
-    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
     }
 }
 
@@ -174,22 +182,12 @@ fn read_plan(executable: &Path, development: bool, data: &Path) -> io::Result<Op
         return Ok(None);
     };
     let name = bundle.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let plan = if old_names(development).contains(&name) {
+    let plan = if old_names(development).any(|old| old == name) {
         Some(Plan {
             old: bundle.to_path_buf(),
-            new: bundle.with_file_name(if development {
-                "Lunport Dev.app"
-            } else {
-                "Lunport.app"
-            }),
+            new: bundle.with_file_name(new_name(development)),
         })
-    } else if name
-        == if development {
-            "Lunport Dev.app"
-        } else {
-            "Lunport.app"
-        }
-    {
+    } else if name == new_name(development) {
         let path = journal_path(data);
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -276,13 +274,15 @@ fn shell_quote(value: &std::ffi::OsStr) -> io::Result<String> {
 }
 // Only the system interpreter is elevated. The fixed program and literal paths
 // come from this running process, never from a mutable on-disk app executable.
+// `__OLD_NAMES__` and `__NEW_NAME__` become JSON, which JavaScript reads as it is.
 const AUTHORIZED_MOVE_SCRIPT: &str = r#"
 ObjC.import('Foundation');
 function run(argv) {
     if (argv.length !== 2) throw Error('Invalid installation arguments');
     var old = argv[0], next = argv[1];
-    if (!(old.endsWith('/SSHelter.app') || old.endsWith('/sshelter.app')) ||
-        next !== old.slice(0, old.lastIndexOf('/') + 1) + 'Lunport.app') {
+    var folder = old.slice(0, old.lastIndexOf('/') + 1);
+    if (!__OLD_NAMES__.some(function (name) { return old.endsWith('/' + name); }) ||
+        next !== folder + __NEW_NAME__) {
         throw Error('Invalid installation paths');
     }
     var manager = $.NSFileManager.defaultManager;
@@ -290,18 +290,26 @@ function run(argv) {
     if (!manager.moveItemAtPathToPathError($(old), $(next), Ref())) {
         throw Error('The application could not be moved');
     }
-    if (!manager.createSymbolicLinkAtPathWithDestinationPathError($(old), $('Lunport.app'), Ref())) {
+    if (!manager.createSymbolicLinkAtPathWithDestinationPathError($(old), $(__NEW_NAME__), Ref())) {
         manager.moveItemAtPathToPathError($(next), $(old), Ref());
         throw Error('The compatibility link could not be created');
     }
 }
 "#;
 
+/// The script that moves the production bundle: the old names it accepts and the name it moves to are the identity modules'.
+fn authorized_move_script() -> io::Result<String> {
+    let old_names: Vec<&str> = old_names(false).collect();
+    Ok(AUTHORIZED_MOVE_SCRIPT
+        .replace("__OLD_NAMES__", &serde_json::to_string(&old_names)?)
+        .replace("__NEW_NAME__", &serde_json::to_string(&new_name(false))?))
+}
+
 fn authorization_command(plan: &Plan) -> io::Result<String> {
     validate_plan(plan, false)?;
     Ok(format!(
         "/usr/bin/osascript -l JavaScript -e {} {} {}",
-        shell_quote(std::ffi::OsStr::new(AUTHORIZED_MOVE_SCRIPT))?,
+        shell_quote(std::ffi::OsStr::new(&authorized_move_script()?))?,
         shell_quote(plan.old.as_os_str())?,
         shell_quote(plan.new.as_os_str())?,
     ))
@@ -315,7 +323,7 @@ fn authorize_move(executable: &Path, old_name: &std::ffi::OsStr) -> io::Result<(
     }
     let plan = Plan {
         old: bundle.to_path_buf(),
-        new: bundle.with_file_name("Lunport.app"),
+        new: bundle.with_file_name(new_name(false)),
     };
     let command = authorization_command(&plan)?;
     let script = format!(
@@ -391,29 +399,66 @@ fn refresh_registration(bundle: &Path) {
     }
 }
 
-/// Update only this app's existing launch entry; absent means disabled and stays absent.
-pub(crate) fn repair_login_at(home: &Path, executable: &Path) -> io::Result<bool> {
-    let Some(bundle) = bundle_for(executable) else {
-        return Ok(false);
-    };
-    if bundle.file_name().and_then(|v| v.to_str()) != Some("Lunport.app") {
-        return Ok(false);
-    }
-    let path = home.join("Library/LaunchAgents/SSHelter.plist");
-    let metadata = match fs::symlink_metadata(&path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+/// The launch agent at `path` as read, its bytes and its property list: `None` when there is none, an error when it is not a small
+/// regular file or not a property list.
+pub(crate) fn read_login_entry(path: &Path) -> io::Result<Option<(Vec<u8>, plist::Value)>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         other => other?,
     };
     if !metadata.is_file() || metadata.len() > 65536 {
         return Err(io::Error::other("Invalid login entry"));
     }
-    let before = fs::read(&path)?;
-    let mut value = plist::Value::from_reader(std::io::Cursor::new(&before))
+    let bytes = fs::read(path)?;
+    let value = plist::Value::from_reader(io::Cursor::new(&bytes))
         .map_err(|_| io::Error::other("Cannot parse login entry"))?;
+    Ok(Some((bytes, value)))
+}
+
+/// Writes the launch agent `entry` to `path` as XML, atomically and for its owner only. `before`, when given, is what `path` must still
+/// hold: a change made meanwhile is not overwritten.
+pub(crate) fn write_login_entry(path: &Path, entry: &plist::Value, before: Option<&[u8]>) -> io::Result<()> {
+    let mut bytes = Vec::new();
+    entry.to_writer_xml(&mut bytes).map_err(io::Error::other)?;
+    if before.is_some_and(|before| fs::read(path).ok().as_deref() != Some(before)) {
+        return Err(io::Error::other("Login entry changed; retry later"));
+    }
+    crate::fsutil::atomic_write(path, &bytes, 0o600).map_err(io::Error::other)
+}
+
+/// Points this app's existing launch agents at `executable` where they still name it by a path from before a rename. The agent under
+/// the current login item and the one from before the identity rename are both this app's (the identity migration moves the second to
+/// the first, `identity_migration::login_item`); an absent one means launch at login is off, and stays absent. Each agent is repaired on
+/// its own: one that cannot be read or written is reported after the other was repaired. Whether one changed.
+pub(crate) fn repair_login_at(home: &Path, executable: &Path) -> io::Result<bool> {
+    let Some(bundle) = bundle_for(executable) else {
+        return Ok(false);
+    };
+    if bundle.file_name().and_then(|v| v.to_str()) != Some(new_name(false).as_str()) {
+        return Ok(false);
+    }
+    let (mut repaired, mut failure) = (false, None);
+    // Production's: only Production has a login item.
+    for label in [identity::PRODUCTION.login_item, legacy_identity::PRODUCTION.login_item] {
+        let path = home.join(format!("Library/LaunchAgents/{label}.plist"));
+        match repair_agent(&path, label, bundle, executable) {
+            Ok(changed) => repaired |= changed,
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    failure.map_or(Ok(repaired), Err)
+}
+
+fn repair_agent(path: &Path, label: &str, bundle: &Path, executable: &Path) -> io::Result<bool> {
+    let Some((before, mut value)) = read_login_entry(path)? else {
+        return Ok(false);
+    };
     let dictionary = value
         .as_dictionary_mut()
         .ok_or_else(|| io::Error::other("Invalid login entry"))?;
-    if dictionary.get("Label").and_then(|v| v.as_string()) != Some("SSHelter") {
+    if dictionary.get("Label").and_then(|v| v.as_string()) != Some(label) {
         return Ok(false);
     }
     let Some(args) = dictionary
@@ -425,31 +470,34 @@ pub(crate) fn repair_login_at(home: &Path, executable: &Path) -> io::Result<bool
     let Some(first) = args.first().and_then(|v| v.as_string()) else {
         return Ok(false);
     };
-    let old = Path::new(first);
-    let Some(old_bundle) = bundle_for(old) else {
-        return Ok(false);
-    };
-    if old_bundle.parent() != bundle.parent()
-        || !old_names(false).contains(
-            &old_bundle
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or(""),
-        )
-    {
-        return Ok(false);
-    }
-    if !same_executable(old, executable) {
+    if !names_earlier_executable(Path::new(first), bundle, executable) {
         return Ok(false);
     }
     args[0] = plist::Value::String(executable.to_string_lossy().into_owned());
-    let mut bytes = Vec::new();
-    value.to_writer_xml(&mut bytes).map_err(io::Error::other)?;
-    if fs::read(&path)? != before {
-        return Err(io::Error::other("Login entry changed; retry later"));
-    }
-    crate::fsutil::atomic_write(&path, &bytes, 0o600).map_err(io::Error::other)?;
+    write_login_entry(path, &value, Some(&before))?;
     Ok(true)
+}
+
+/// Whether `program` is the executable of `bundle`, which runs as `executable`, under a path from before a rename:
+/// - in a bundle with an old name beside `bundle`, under the current or the old executable name: the bundle rename left a compatibility
+///   link there, through which the old bundle's path leads to the executable that runs;
+/// - in `bundle` itself under the old executable name, which no longer exists: 1.14.4 was `Lunport.app` already, and the update replaced
+///   the bundle that still had the old executable.
+fn names_earlier_executable(program: &Path, bundle: &Path, executable: &Path) -> bool {
+    let old_binary = legacy_identity::PRODUCTION.main_binary;
+    let Some(program_bundle) =
+        bundle_of(program, identity::current().main_binary).or_else(|| bundle_of(program, old_binary))
+    else {
+        return false;
+    };
+    if program_bundle == bundle {
+        return program.file_name() == Some(old_binary.as_ref())
+            && matches!(fs::symlink_metadata(program), Err(e) if e.kind() == io::ErrorKind::NotFound);
+    }
+    let name = program_bundle.file_name().and_then(|v| v.to_str()).unwrap_or("");
+    program_bundle.parent() == bundle.parent()
+        && old_names(false).any(|old| old == name)
+        && same_executable(&bundle_exe(program_bundle), executable)
 }
 
 pub(crate) fn repair_login() {

@@ -1,10 +1,11 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 
 import { DEFAULT_HOST_PREVIEW_WIDTH, clampHostPreviewWidth } from "@/lib/host-preview-width";
+import { migratedLocalStorage } from "@/lib/legacy-identity";
 
 /** localStorage key for persisted sidebar NAVIGATION state (the Library sidebar, collapsed Groups, the details width). */
-export const UI_STORAGE_KEY = "sshelter-ui";
+export const UI_STORAGE_KEY = "lunport-ui";
 
 export type SettingsCategory =
   | "general"
@@ -43,7 +44,7 @@ interface UiState {
 /**
  * 只放「會話內」UI 狀態,永不鏡像後端資料(後端資料由 TanStack Query 持有)。持久化偏好一律住在
  * `useSettingsStore`(zustand persist)。例外:`librarySidebarCollapsed`、`collapsedRecordGroups` 與
- * `hostPreviewWidth` 是側邊欄的導覽/版面狀態,透過 `partialize` 單獨持久化到 `sshelter-ui`。
+ * `hostPreviewWidth` 是側邊欄的導覽/版面狀態,透過 `partialize` 單獨持久化到 `lunport-ui`。
  */
 export const useUiStore = create<UiState>()(
   persist(
@@ -70,6 +71,8 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: UI_STORAGE_KEY,
+      // Builds from before the rename kept this state under another key: the storage carries it over as it is created, before `persist` reads it.
+      storage: createJSONStorage(migratedLocalStorage),
       // Only the sidebar's navigation and layout state survives restarts; everything else is session-only.
       partialize: (s) => ({
         librarySidebarCollapsed: s.librarySidebarCollapsed,

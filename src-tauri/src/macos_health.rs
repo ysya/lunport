@@ -8,7 +8,7 @@ use tauri::Manager;
 
 const PROBE_LIMIT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(10);
-const FAULT_FILE: &str = "SSHELTER_TEST_COREAUDIO_FILE";
+const FAULT_FILE: &str = "LUNPORT_TEST_COREAUDIO_FILE";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Surface {
@@ -227,6 +227,10 @@ fn diagnostics(app: &tauri::AppHandle, result: &str) {
         crate::app_profile::CURRENT, std::env::consts::ARCH, SystemTime::now(), PROBE_LIMIT.as_millis()
     );
     let saved = (|| -> Result<_, crate::error::AppError> {
+        // A start whose data has not moved yet must not create the data root.
+        if crate::identity_migration::blocks_startup() {
+            return Err(crate::error::AppError::Other("the data folder is not in place yet".into()));
+        }
         let dir = crate::fsutil::app_data_root()?.join("diagnostics");
         crate::fsutil::ensure_dir_secure(&dir)?;
         let path = dir.join("window-health.txt");
@@ -302,7 +306,7 @@ fn native_dialog(app: &tauri::AppHandle, title: &str, message: &str, buttons: &[
 fn appkit_alert(title: &str, message: &str, buttons: &[&str]) -> i64 {
     use std::ffi::{c_char, c_long, c_ulong, CString};
     unsafe extern "C" {
-        fn sshelter_native_alert(
+        fn lunport_native_alert(
             title: *const c_char,
             message: *const c_char,
             buttons: *const *const c_char,
@@ -316,7 +320,7 @@ fn appkit_alert(title: &str, message: &str, buttons: &[&str]) -> i64 {
     // The bridge copies the strings while these allocations are alive. Caller
     // schedules this function on the main thread; NSAlert runs its modal loop.
     unsafe {
-        sshelter_native_alert(
+        lunport_native_alert(
             title.as_ptr(),
             message.as_ptr(),
             pointers.as_ptr(),
@@ -361,7 +365,6 @@ fn probe() -> Result<(), ProbeError> {
     let mut command = Command::new(exe);
     command
         .arg("--coreaudio-probe")
-        .env_remove("SSHELTER_ASKPASS")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -562,7 +565,7 @@ mod tests {
         );
         assert!(matches!(
             run_probe(
-                &mut Command::new("/no/such/sshelter"),
+                &mut Command::new("/no/such/lunport"),
                 Duration::from_secs(2)
             ),
             Err(ProbeError::Start(_))

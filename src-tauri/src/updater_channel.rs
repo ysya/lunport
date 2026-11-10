@@ -1,7 +1,8 @@
-//! Beta 更新頻道。
-//! Stable 頻道沿用前端 `@tauri-apps/plugin-updater` 的 `check()`(讀 tauri.conf.json 的網址);
-//! 這裡只處理 Beta:以 `updater_builder().endpoints(...)` 改讀 `updater-beta` release 的清單。
-//! 簽章驗證與「遠端版本較新才更新(不降版)」沿用 plugin 預設。
+//! The Beta update channel.
+//! The Stable channel uses the frontend's `check()` from `@tauri-apps/plugin-updater`, which reads the endpoints in tauri.conf.json;
+//! this module handles Beta only, reading the manifest of the `updater-beta` release through `updater_builder().endpoints(...)`.
+//! Both channels list lunport.ysya.dev first, which redirects to the manifest on GitHub, and GitHub itself second: the updater tries
+//! them in order. Signature checks and "update only to a newer version" are the plugin's defaults.
 
 use std::sync::Mutex;
 
@@ -15,8 +16,12 @@ fn require_updates_allowed() -> Result<(), AppError> {
     else { Err(AppError::Other("updates are disabled in the development profile".into())) }
 }
 
-/// Beta 頻道的更新清單(由 CI 的 scripts/beta-channel.mjs 維護)。
-pub const BETA_ENDPOINT: &str = "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json";
+/// The Beta channel's update manifest, tried in this order: lunport.ysya.dev, which redirects to the manifest that CI's
+/// scripts/beta-channel.mjs keeps on GitHub, then that manifest on GitHub itself.
+pub const BETA_ENDPOINTS: [&str; 2] = [
+    "https://lunport.ysya.dev/update/beta.json",
+    "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json",
+];
 
 const NOTHING_PENDING: &str = "no beta update is ready to install; check for updates again";
 
@@ -67,8 +72,11 @@ where
     (on_chunk, on_finish)
 }
 
-fn beta_endpoint() -> Result<Url, AppError> {
-    Url::parse(BETA_ENDPOINT).map_err(|e| AppError::Other(format!("invalid beta update endpoint: {e}")))
+fn beta_endpoints() -> Result<Vec<Url>, AppError> {
+    BETA_ENDPOINTS
+        .iter()
+        .map(|endpoint| Url::parse(endpoint).map_err(|e| AppError::Other(format!("invalid beta update endpoint {endpoint}: {e}"))))
+        .collect()
 }
 
 /// 取出等待安裝的更新:每個檢查到的更新最多安裝一次;沒有(app 重開過、或已裝過)就請使用者重新檢查。
@@ -97,7 +105,7 @@ pub async fn updater_check_beta(app: AppHandle) -> Result<Option<UpdateInfo>, Ap
 
         let updater = app
             .updater_builder()
-            .endpoints(vec![beta_endpoint()?])
+            .endpoints(beta_endpoints()?)
             .map_err(plugin_error)?
             .build()
             .map_err(plugin_error)?;
@@ -142,10 +150,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_beta_endpoint_is_the_updater_beta_release_manifest() {
-        let url = beta_endpoint().unwrap();
-        assert_eq!(url.scheme(), "https");
-        assert_eq!(url.as_str(), "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json");
+    fn beta_endpoints_try_ysya_dev_then_github() {
+        let urls: Vec<String> = beta_endpoints().unwrap().iter().map(Url::to_string).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://lunport.ysya.dev/update/beta.json",
+                "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json",
+            ]
+        );
+    }
+
+    /// The Stable channel's endpoints are the Tauri configuration's; the Development configuration, which never updates, adds none.
+    #[test]
+    fn stable_endpoints_try_ysya_dev_then_github() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["plugins"]["updater"]["endpoints"],
+            serde_json::json!([
+                "https://lunport.ysya.dev/update/stable.json",
+                "https://github.com/ysya/lunport/releases/latest/download/latest.json",
+            ])
+        );
+        let development: serde_json::Value = serde_json::from_str(include_str!("../tauri.dev.conf.json")).unwrap();
+        assert!(development["plugins"]["updater"].is_null());
     }
 
     #[test]

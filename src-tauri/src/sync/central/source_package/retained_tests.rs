@@ -680,7 +680,7 @@ fn unjoined_v2_own_slots_remain_retained_public_metadata_without_cloud_authority
         serde_json::to_vec(&old).unwrap(),
     )
     .unwrap();
-    let root = env.ssh_dir.join("sshelter/keys");
+    let root = env.ssh_dir.join("sshelter/keys"); // frozen-identity: the managed folder as it is on users' disks.
     std::fs::create_dir_all(&root).unwrap();
     let raw = crate::sync::slot_rules::test_keys::encrypted();
     std::fs::write(root.join(name), &raw).unwrap();

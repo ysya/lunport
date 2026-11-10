@@ -145,7 +145,7 @@ pub fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientKind {
-    /// `sshelter connect`.
+    /// `lunport connect`.
     Connect,
     /// The MCP adapter (phase 2).
     Mcp,

@@ -1,0 +1,39 @@
+#!/bin/bash
+# Generate the bridge candidate ONCE, in CI of the archive repository, the only place the previous
+# project certificate still exists (its key never leaves GitHub's runner). Normal release builds
+# never run this: the app embeds the committed artifact, which helper v1 accepts as its parent
+# only because it carries the previous app identifier and certificate.
+set -euo pipefail
+[[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_OS:-} == macOS ]] || exit 1
+: "${APPLE_SIGNING_IDENTITY:?Prepare the previous project signing identity first}"
+here="$(cd "$(dirname "$0")" && pwd)"
+output="${RUNNER_TEMP:?}/lunport-credential-bridge-candidate"
+[[ ! -e "$output" ]] || exit 1
+mkdir -m 700 "$output"
+source_file="$here/credential-bridge.c"
+for architecture in arm64 x86_64; do
+  minimum=11.0
+  [[ "$architecture" != x86_64 ]] || minimum=10.13
+  clang -target "$architecture-apple-macos$minimum" -Os -Wall -Wextra -Werror -Wno-deprecated-declarations \
+    "$source_file" -framework Security -framework CoreFoundation -lbsm -o "$output/$architecture"
+done
+lipo -create "$output/arm64" "$output/x86_64" -output "$output/credential-bridge.bin"
+rm "$output/arm64" "$output/x86_64"
+codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp=none \
+  --identifier org.homelab.sshelter "$output/credential-bridge.bin"
+codesign --verify --strict --all-architectures "$output/credential-bridge.bin"
+cp "$source_file" "$output/credential-bridge.c"
+python3 - "$output" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+output = pathlib.Path(sys.argv[1])
+manifest = {"protocol":1,"artifact_sha256":hashlib.sha256((output/'credential-bridge.bin').read_bytes()).hexdigest(),
+            "source_sha256":hashlib.sha256((output/'credential-bridge.c').read_bytes()).hexdigest(),
+            "identifier":"org.homelab.sshelter"}
+manifest['cdhashes'] = {}
+for arch in ['arm64','x86_64']:
+    details = subprocess.check_output(['codesign','--display','--verbose=4','--arch',arch,str(output/'credential-bridge.bin')],stderr=subprocess.STDOUT,text=True)
+    manifest['cdhashes'][arch] = next(line.removeprefix('CDHash=') for line in details.splitlines() if line.startswith('CDHash='))
+(output/'credential-bridge.json').write_text(json.dumps(manifest,indent=2)+'\n')
+print(json.dumps(manifest,indent=2))
+PY
+python3 "$here/verify-credential-bridge.py" "$output"

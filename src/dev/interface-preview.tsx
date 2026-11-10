@@ -57,7 +57,7 @@ else {
   let passwordSaveFailed = false;
   // Aliases without spaces, which the host editor accepts on save.
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate" || scenario === "iap") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
-  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/lunport", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
   if (scenario === "mcp-audit") {
     const entry: McpAuditEntry = {
       id: "fixture-command", client: "Example AI client", host_id: overview.hosts[0].id,
@@ -372,7 +372,7 @@ else {
           updateOverview({ hosts: [...overview.hosts.filter((host) => !preview.candidates.some((candidate) => candidate.id === host.id)), ...preview.candidates.map((candidate) => hostView({ ...candidate, readiness: { kind: candidate.payload.imported ? "needs_review" : "ready" } }))] });
           return { overview, receipt: { import_id: "fixture-import", host_ids: preview.candidates.map((host) => host.id), copied_key_ids: (args.copyKeyIds as string[]).filter((id) => preview.key_references.some((reference) => reference.key_id === id && reference.resolved_path)) } };
         }
-        if (command === "mcp_setup_overview") return { sandbox: true, executable: "/fixture/sshelter", clients: ["codex", "claude_code", "claude_desktop", "cursor", "vscode"].map(client => ({ client, state: "not_added", config_path: null, message: null })) };
+        if (command === "mcp_setup_overview") return { sandbox: true, executable: "/fixture/lunport", clients: ["codex", "claude_code", "claude_desktop", "cursor", "vscode"].map(client => ({ client, state: "not_added", config_path: null, message: null })) };
         if (command === "mcp_status") return mcp;
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
         if (command === "mcp_set_group_allowed") {

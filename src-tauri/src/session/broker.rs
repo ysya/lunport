@@ -337,7 +337,7 @@ impl Broker {
         let worker = {
             let (broker, conn) = (Arc::clone(self), conn.clone());
             let pty = Pty { term: pty.term, cols: pty.cols, rows: pty.rows };
-            std::thread::Builder::new().name("sshelter-session".to_string()).spawn(move || {
+            std::thread::Builder::new().name(crate::identity::thread_name("session")).spawn(move || {
                 let _over = SessionOver { broker: &broker, conn: &conn };
                 broker.run_session(&conn, &host, pty);
             })
@@ -378,7 +378,7 @@ impl Broker {
         let _=set_read_timeout(&reader,None);
         let Ok(closer)=reader.try_clone() else {locked(&self.table).mcp.remove(&id);self.changed.notify_all();return;};
         let broker=self.clone(); let worker_cancel=cancel.clone();
-        let worker=std::thread::Builder::new().name("sshelter-mcp-session".into()).spawn(move||{
+        let worker=std::thread::Builder::new().name(crate::identity::thread_name("mcp-session")).spawn(move||{
             struct Leaving<'a>{broker:&'a Broker,id:u64,closer:Stream}
             impl Drop for Leaving<'_>{fn drop(&mut self){hang_up(&self.closer);locked(&self.broker.table).mcp.remove(&self.id);self.broker.changed.notify_all();}}
             let _leave=Leaving{broker:&broker,id,closer};
@@ -615,7 +615,7 @@ fn hello_version(payload: &[u8]) -> Option<u64> {
     message.get("version")?.as_u64()
 }
 
-/// Reads the first message of a connection, which has to be the `hello` of `sshelter connect` in this protocol version. Anything else is
+/// Reads the first message of a connection, which has to be the `hello` of `lunport connect` in this protocol version. Anything else is
 /// refused by name with an `error` event (spec §7.2), and `false` comes back: the connection is closed, and nothing was started. The
 /// version is looked at first: a client of another version may say hello in ways this version cannot read, and what helps its user then
 /// is to be told to quit Lunport and open it again, whoever the client says it is.
@@ -632,7 +632,7 @@ fn greet(reader: &mut Stream, link: &dyn ClientLink) -> Greeting {
         First::Control(payload) => {
             if let Ok(ClientMessage::Hello {client:ClientKind::Mcp,version:super::protocol::MCP_PROTOCOL_VERSION,client_info})=decode::<ClientMessage>(&payload) {return Greeting::Mcp(client_info);}
             if let Some(version) = hello_version(&payload).filter(|version| *version != u64::from(PROTOCOL_VERSION)) {
-                let text = format!("This sshelter speaks protocol {version} and the Lunport that is running speaks {PROTOCOL_VERSION}. Quit Lunport and open it again.");
+                let text = format!("This lunport speaks protocol {version} and the Lunport that is running speaks {PROTOCOL_VERSION}. Quit Lunport and open it again.");
                 return refuse(kinds::PROTOCOL, text);
             }
             match decode::<ClientMessage>(&payload) {
@@ -857,7 +857,7 @@ impl Owner for ConnectionOwner {
     }
 }
 
-/// The process chain without Lunport's own executable: `sshelter connect` is Lunport, and the person's program is what started it.
+/// The process chain without Lunport's own executable: `lunport connect` is Lunport, and the person's program is what started it.
 pub fn without_own_executable(chain: Vec<ProcInfo>, own: Option<&Path>) -> Vec<ProcInfo> {
     let Some(own) = own else { return chain };
     chain.into_iter().filter(|process| process.path.as_deref().map(Path::new) != Some(own)).collect()
@@ -1276,7 +1276,7 @@ mod tests {
         let error = |kind: &str, text: &str| vec![ServerMessage::Event(Event::Error { kind: kind.into(), text: text.into() })];
         assert_eq!(
             refused(&[ClientMessage::Hello { client: ClientKind::Connect, version: 2, client_info: None }]),
-            error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the Lunport that is running speaks 1. Quit Lunport and open it again.")
+            error(kinds::PROTOCOL, "This lunport speaks protocol 2 and the Lunport that is running speaks 1. Quit Lunport and open it again.")
         );
         assert_eq!(refused(&[ClientMessage::Hello { client: ClientKind::Mcp, version: PROTOCOL_VERSION, client_info: None }]), error(kinds::UNSUPPORTED, "The MCP adapter cannot use Lunport's sessions yet."));
         assert_eq!(
@@ -1414,18 +1414,18 @@ mod tests {
             }
         };
         read_until(&mut client, "$ ");
-        client.type_text("echo SSHELTER_$((6*7))\r");
-        read_until(&mut client, "SSHELTER_42");
+        client.type_text("echo LUNPORT_$((6*7))\r");
+        read_until(&mut client, "LUNPORT_42");
         client.type_text("exit 7\r");
         assert_eq!(client.rest().1, [ServerMessage::Exited { code: Some(7), signal: None }]);
         crate::ssh::testing::eventually("the session to be forgotten", 10, || !broker.has_sessions());
     }
 
     #[test]
-    fn the_requester_chain_leaves_out_sshelters_own_executable() {
+    fn the_requester_chain_leaves_out_lunports_own_executable() {
         let process = |pid: u32, path: &str| ProcInfo { pid, ppid: pid + 1, path: Some(path.into()), argv: vec![path.into()] };
-        let own = Path::new("/Applications/Lunport.app/Contents/MacOS/sshelter");
-        let chain = vec![process(10, "/Applications/Lunport.app/Contents/MacOS/sshelter"), process(11, "/bin/zsh"), process(12, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")];
+        let own = Path::new("/Applications/Lunport.app/Contents/MacOS/lunport");
+        let chain = vec![process(10, "/Applications/Lunport.app/Contents/MacOS/lunport"), process(11, "/bin/zsh"), process(12, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")];
         let kept = without_own_executable(chain, Some(own));
         assert_eq!(kept.iter().map(|process| process.pid).collect::<Vec<_>>(), [11, 12]);
         assert_eq!(without_own_executable(vec![process(10, "/usr/bin/ssh")], None).len(), 1, "nothing to leave out when the own path is unknown");
@@ -1861,7 +1861,7 @@ mod tests {
     fn a_first_message_the_broker_cannot_use_is_answered_before_the_connection_closes() {
         let world = world(FakeEngine::new());
         let error = |kind: &str, text: &str| vec![ServerMessage::Event(Event::Error { kind: kind.into(), text: text.into() })];
-        let other_version = error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the Lunport that is running speaks 1. Quit Lunport and open it again.");
+        let other_version = error(kinds::PROTOCOL, "This lunport speaks protocol 2 and the Lunport that is running speaks 1. Quit Lunport and open it again.");
         let unreadable = error(kinds::PROTOCOL, "Lunport could not read the first message.");
         let not_hello = error(kinds::PROTOCOL, "The first message must be hello.");
         let not_open_shell = error(kinds::PROTOCOL, "Lunport expected open_shell.");
@@ -1869,7 +1869,7 @@ mod tests {
         // What the client writes, as frames (type, payload), and what it must be told.
         let cases: Vec<(&str, Vec<(u8, &[u8])>, Vec<ServerMessage>)> = vec![
             ("a client kind this version does not know, of another version", vec![(CONTROL, br#"{"type":"hello","client":"agent","version":2}"#)], other_version.clone()),
-            ("an mcp client of an unsupported version", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":3}"#)], error(kinds::PROTOCOL, "This sshelter speaks protocol 3 and the Lunport that is running speaks 1. Quit Lunport and open it again.")),
+            ("an mcp client of an unsupported version", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":3}"#)], error(kinds::PROTOCOL, "This lunport speaks protocol 3 and the Lunport that is running speaks 1. Quit Lunport and open it again.")),
             ("a hello without a version", vec![(CONTROL, br#"{"type":"hello","client":"connect"}"#)], unreadable.clone()),
             ("text that is not JSON", vec![(CONTROL, b"hello?")], unreadable.clone()),
             ("a frame of a type there is not", vec![(3, b"x")], unreadable.clone()),
@@ -2210,7 +2210,7 @@ mod windows_tests {
         Data(Vec<u8>),
     }
 
-    /// A client of the broker, speaking the protocol over the pipe as `sshelter connect` does.
+    /// A client of the broker, speaking the protocol over the pipe as `lunport connect` does.
     struct Client {
         stream: PipeStream,
     }
@@ -2296,8 +2296,8 @@ mod windows_tests {
             hello_wait,
         );
         let dir = tempfile::tempdir().unwrap();
-        let pipe = format!("sshelter-broker-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
-        assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &pipe, "sshelter-session", broker.handler()).unwrap(), Started::Running);
+        let pipe = format!("lunport-broker-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &pipe, "lunport-session", broker.handler()).unwrap(), Started::Running);
         World { broker, engine, pipe, _dir: dir }
     }
 

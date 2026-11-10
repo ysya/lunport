@@ -11,7 +11,7 @@ function render(data?: SetupOverview) {
   return renderToStaticMarkup(<QueryClientProvider client={query}><McpClientSetup /></QueryClientProvider>);
 }
 const overview: SetupOverview = {
-  sandbox: false, executable: "/Applications/Lunport.app/Contents/MacOS/sshelter",
+  sandbox: false, executable: "/Applications/Lunport.app/Contents/MacOS/lunport",
   clients: [
     { client: "codex", state: "configured", config_path: "/fixture/.codex/config.toml", message: null },
     { client: "claude_code", state: "not_added", config_path: "/fixture/.claude.json", message: null },
@@ -35,7 +35,7 @@ describe("multi-agent MCP setup", () => {
     expect(html).toContain("Export MCP configuration");
     expect(html).toContain("Copy MCP command path");
     expect(html).toContain("New server name:");
-    expect(html).toContain("registrations and executable paths remain supported");
+    expect(html).toContain("Setups from earlier versions are still recognized under their previous server name or program path; Repair setup moves them to this name and program.");
     expect(html).toContain("&quot;lunport&quot;");
     expect(html).toContain("Arguments:");
     expect(html).toContain("--mcp");

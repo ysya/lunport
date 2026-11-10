@@ -1,4 +1,4 @@
-//! `sshelter connect` (own-ssh spec §7.3): the terminal's end of a session in the app, on macOS and Linux (a terminal, termios and
+//! `lunport connect` (own-ssh spec §7.3): the terminal's end of a session in the app, on macOS and Linux (a terminal, termios and
 //! signals) and on Windows (a console, its modes and its control events; plan 1b-3).
 
 pub mod client;
@@ -33,18 +33,18 @@ use std::sync::Arc;
 use crate::session::protocol::HostQuery;
 use client::{Request, PAUSE_PROMPT};
 
-/// What `sshelter connect` prints when the app does not answer after it was started (spec §7.3, §11).
+/// What `lunport connect` prints when the app does not answer after it was started (spec §7.3, §11).
 pub const NOT_STARTED: &str = "Lunport did not start within 12 seconds.";
 
 /// The flag of `Request::pause_on_error`, before the host: Lunport's Connect gives it to a terminal that closes its window with the
 /// program (spec §7.4). It is not in the usage, which is for people.
 pub const PAUSE_ON_ERROR: &str = "--pause-on-error";
 
-/// What `sshelter connect` prints when standard input is not a terminal (spec §7.3).
-pub const NEEDS_TERMINAL: &str = "sshelter connect needs a terminal.";
+/// What `lunport connect` prints when standard input is not a terminal (spec §7.3).
+pub const NEEDS_TERMINAL: &str = "lunport connect needs a terminal.";
 
-/// How `sshelter connect` is used.
-pub const USAGE: &str = "usage: sshelter connect <alias>\n       sshelter connect --id <host id>";
+/// How `lunport connect` is used.
+pub const USAGE: &str = "usage: lunport connect <alias>\n       lunport connect --id <host id>";
 
 /// What the arguments after `connect` ask for: the host, an alias or `--id` and a host id, after `--pause-on-error` when it is given.
 pub fn parse_args(args: &[String]) -> Result<Request, String> {
@@ -100,8 +100,8 @@ pub fn term_from(value: Option<std::ffi::OsString>) -> String {
     value.and_then(|value| value.into_string().ok()).filter(|term| !term.is_empty()).unwrap_or_else(|| "xterm-256color".to_string())
 }
 
-/// `sshelter connect <arguments>`: returns the exit code (main.rs exits with it). Started before anything of Tauri. The order is fixed:
-/// the arguments are looked at first (the usage, and 2), then the terminal (`sshelter connect needs a terminal.`, and 1), and only then is
+/// `lunport connect <arguments>`: returns the exit code (main.rs exits with it). Started before anything of Tauri. The order is fixed:
+/// the arguments are looked at first (the usage, and 2), then the terminal (`lunport connect needs a terminal.`, and 1), and only then is
 /// Lunport reached, or started.
 #[cfg(unix)]
 pub fn run_connect(args: &[OsString]) -> i32 {
@@ -129,11 +129,25 @@ pub fn run_connect(args: &[OsString]) -> i32 {
 pub(crate) fn reach_broker() -> Result<UnixStream, String> {
     use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
 
-    let socket = match crate::fsutil::app_data_root() {
-        Ok(root) => crate::session::socket_path(&root),
-        Err(error) => return Err(format!("sshelter: {error}")),
-    };
-    ensure_started(|| UnixStream::connect(&socket).ok(), take_spawn_locks, start_host, START_WAIT, NOT_STARTED)
+    through_gate(|| {
+        let socket = match crate::fsutil::app_data_root() {
+            Ok(root) => crate::session::socket_path(&root),
+            Err(error) => return Err(format!("lunport: {error}")),
+        };
+        ensure_started(|| UnixStream::connect(&socket).ok(), take_spawn_locks, start_host, START_WAIT, NOT_STARTED)
+    })
+}
+
+/// `reach`, the way to the broker through the data root (its socket path, its spawn lock), only once `ready` (the identity migration's
+/// `ensure_ready`) says the data of the identity before the rename is in that root; its refusal otherwise.
+pub(crate) fn gated<T>(ready: impl FnOnce() -> Result<(), String>, reach: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    ready()?;
+    reach()
+}
+
+/// `gated` with this process's own migration as the gate: what both `reach_broker`s go through.
+pub(crate) fn through_gate<T>(reach: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    gated(crate::identity_migration::ensure_ready, reach)
 }
 
 /// One session on the terminal `api`; `reach` finds the broker, starting Lunport if it must, and `signals` takes over the signals
@@ -170,13 +184,13 @@ fn session(
     let watchdog = match run::Watchdog::start(terminal.clone(), run::STOP_GRACE, |code| std::process::exit(code)) {
         Ok(watchdog) => watchdog,
         Err(error) => {
-            let _ = writeln!(stderr, "sshelter: cannot take over the terminal's signals: {error}");
+            let _ = writeln!(stderr, "lunport: cannot take over the terminal's signals: {error}");
             return 1;
         }
     };
     if let Err(error) = signals(inputs.clone(), terminal, watchdog.clone(), size) {
         watchdog.stand_down();
-        let _ = writeln!(stderr, "sshelter: cannot take over the terminal's signals: {error}");
+        let _ = writeln!(stderr, "lunport: cannot take over the terminal's signals: {error}");
         return 1;
     }
     let hung_up = watchdog.clone();
@@ -197,11 +211,11 @@ fn own_writer<W: std::io::Write + std::os::fd::AsFd + std::os::fd::AsRawFd + Sen
     }
 }
 
-/// `sshelter connect <arguments>` on Windows: returns the exit code (main.rs exits with it). The order is Unix's, with the console's
+/// `lunport connect <arguments>` on Windows: returns the exit code (main.rs exits with it). The order is Unix's, with the console's
 /// steps in it: the arguments first (the usage, and 2); then the console of the process that started this one is attached when this
 /// one has none (a release build is a GUI program; attaching sets the process's control handlers aside, so none is installed before),
 /// and only then are the console's buffers looked up (`StdConsole::new`: a GUI program's standard handles are usually not valid before
-/// the attach); then the console check (`sshelter connect needs a terminal.`, and 1), and Lunport reached, or started. The console is
+/// the attach); then the console check (`lunport connect needs a terminal.`, and 1), and Lunport reached, or started. The console is
 /// changed only once every way out can put it back (`session`).
 #[cfg(windows)]
 pub fn run_connect(args: &[OsString]) -> i32 {
@@ -245,14 +259,16 @@ const PIPE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(windows)]
 pub(crate) fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, String> {
     use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
-    let name = crate::session::pipe_name().map_err(|error| format!("sshelter: {error}"))?;
-    let answering = || match crate::ipc::pipe_windows::connect(&name, PIPE_BUSY_WAIT) {
-        Ok(stream) => Some(Ok(stream)),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Some(Err(refused(&error))),
-        // Nobody serves the pipe, or every instance stayed busy: Lunport is started (one that runs already takes over the start).
-        Err(_) => None,
-    };
-    ensure_started(answering, take_spawn_locks, start_host, START_WAIT, NOT_STARTED)?
+    through_gate(|| {
+        let name = crate::session::pipe_name().map_err(|error| format!("lunport: {error}"))?;
+        let answering = || match crate::ipc::pipe_windows::connect(&name, PIPE_BUSY_WAIT) {
+            Ok(stream) => Some(Ok(stream)),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Some(Err(refused(&error))),
+            // Nobody serves the pipe, or every instance stayed busy: Lunport is started (one that runs already takes over the start).
+            Err(_) => None,
+        };
+        ensure_started(answering, take_spawn_locks, start_host, START_WAIT, NOT_STARTED)?
+    })
 }
 
 /// What is said when the broker's pipe cannot be used: the sentence `connect` gives a pipe another program made, and otherwise (the system
@@ -261,7 +277,7 @@ pub(crate) fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, Str
 fn refused(error: &std::io::Error) -> String {
     match error.raw_os_error() {
         None => error.to_string(),
-        Some(_) => format!("sshelter: cannot connect to Lunport ({error})"),
+        Some(_) => format!("lunport: cannot connect to Lunport ({error})"),
     }
 }
 
@@ -300,7 +316,7 @@ fn session(
     let watchdog = match run::Watchdog::start(terminal, run::STOP_GRACE, |code| std::process::exit(code)) {
         Ok(watchdog) => watchdog,
         Err(error) => {
-            let _ = writeln!(stderr, "sshelter: cannot take over the console's control keys: {error}");
+            let _ = writeln!(stderr, "lunport: cannot take over the console's control keys: {error}");
             return 1;
         }
     };
@@ -308,13 +324,13 @@ fn session(
     let over = run::Over::default();
     if let Err(error) = control_events(run::ControlEvents::new(inputs.clone(), watchdog.clone(), over.clone())) {
         watchdog.stand_down();
-        let _ = writeln!(stderr, "sshelter: cannot take over the console's control keys: {error}");
+        let _ = writeln!(stderr, "lunport: cannot take over the console's control keys: {error}");
         return 1;
     }
     // Every way out can put the console back now. A console without virtual terminal sequences cannot be taken over, and says so.
     if let Err(error) = tty.take_over() {
         watchdog.stand_down();
-        let _ = writeln!(stderr, "sshelter: {error}");
+        let _ = writeln!(stderr, "lunport: {error}");
         return 1;
     }
     let gone = watchdog.clone();
@@ -506,7 +522,7 @@ mod tests {
             let terminal = FakeTermios::new();
             let (ours, theirs) = UnixStream::pair().unwrap();
             let failing = |_, _, _, _| -> io::Result<()> { Err(io::Error::other("no handlers")) };
-            assert_eq!(session_with(terminal.clone(), move || Ok(ours), failing), (1, "sshelter: cannot take over the terminal's signals: no handlers\n".to_string()));
+            assert_eq!(session_with(terminal.clone(), move || Ok(ours), failing), (1, "lunport: cannot take over the terminal's signals: no handlers\n".to_string()));
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
             theirs.set_nonblocking(true).unwrap();
             let read = std::io::Read::read(&mut &theirs, &mut [0u8; 64]);
@@ -516,14 +532,14 @@ mod tests {
         /// Without a terminal on standard input the CLI says so and ends with 1 (spec §7.3), and it does so before it reaches Lunport, let
         /// alone starts it: a program that cannot talk to a terminal must not launch the app just to say that.
         #[test]
-        fn without_a_terminal_the_cli_says_so_before_it_reaches_or_starts_sshelter() {
+        fn without_a_terminal_the_cli_says_so_before_it_reaches_or_starts_lunport() {
             let reach = || -> Result<UnixStream, String> { panic!("Lunport must not be reached, let alone started, without a terminal") };
-            assert_eq!(session_on(Arc::new(NotATerminal), reach), (1, "sshelter connect needs a terminal.\n".to_string()));
+            assert_eq!(session_on(Arc::new(NotATerminal), reach), (1, "lunport connect needs a terminal.\n".to_string()));
         }
 
         /// Spec §11: when nothing answers after Lunport was started, the sentence and 1; the terminal was never changed.
         #[test]
-        fn when_nothing_answers_the_cli_says_sshelter_did_not_start_and_leaves_the_terminal_alone() {
+        fn when_nothing_answers_the_cli_says_lunport_did_not_start_and_leaves_the_terminal_alone() {
             let terminal = FakeTermios::new();
             assert_eq!(session_on(terminal.clone(), || Err(NOT_STARTED.to_string())), (1, "Lunport did not start within 12 seconds.\n".to_string()));
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
@@ -533,7 +549,7 @@ mod tests {
         /// (once) before it ends with 1; the terminal is left as it was, with its own line editing for that Enter. Without a terminal there
         /// is nothing to wait on: the sentence, and 1.
         #[test]
-        fn with_pause_on_error_sshelter_that_cannot_be_reached_is_said_and_waits_for_enter() {
+        fn with_pause_on_error_lunport_that_cannot_be_reached_is_said_and_waits_for_enter() {
             let terminal = FakeTermios::new();
             let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
             let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before Lunport answers") };
@@ -544,7 +560,7 @@ mod tests {
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
             let reach = || -> Result<UnixStream, String> { panic!("Lunport must not be reached, let alone started, without a terminal") };
             let wait = || panic!("nothing to wait on without a terminal");
-            assert_eq!(session_asked(request, Arc::new(NotATerminal), reach, signals, wait), (1, "sshelter connect needs a terminal.\n".to_string()));
+            assert_eq!(session_asked(request, Arc::new(NotATerminal), reach, signals, wait), (1, "lunport connect needs a terminal.\n".to_string()));
         }
 
         /// The CLI's own setup failing (its signals cannot be taken over) is said and ends with 1 at once, `--pause-on-error` or not:
@@ -557,7 +573,7 @@ mod tests {
             let failing = |_, _, _, _| -> io::Result<()> { Err(io::Error::other("no handlers")) };
             let wait = || panic!("the CLI's own failure does not wait for Enter");
             let said = session_asked(request, terminal.clone(), move || Ok(ours), failing, wait);
-            assert_eq!(said, (1, "sshelter: cannot take over the terminal's signals: no handlers\n".to_string()));
+            assert_eq!(said, (1, "lunport: cannot take over the terminal's signals: no handlers\n".to_string()));
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
         }
     }
@@ -579,10 +595,10 @@ mod tests {
         fn a_pipe() -> (PipeStream, tempfile::TempDir) {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let dir = tempfile::tempdir().unwrap();
-            let name = format!("sshelter-cli-session-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
+            let name = format!("lunport-cli-session-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
             let kept = Arc::new(Mutex::new(Vec::new()));
             let handler: Handler = Arc::new(move |stream, _pid| kept.lock().unwrap().push(stream));
-            assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &name, "sshelter-test", handler).unwrap(), Started::Running);
+            assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &name, "lunport-test", handler).unwrap(), Started::Running);
             (pipe_windows::connect(&name, Duration::from_secs(5)).unwrap(), dir)
         }
 
@@ -610,17 +626,17 @@ mod tests {
 
         /// Spec §7.3: input that is not a console is said, with 1, before Lunport is reached, let alone started.
         #[test]
-        fn without_a_console_the_cli_says_so_before_it_reaches_or_starts_sshelter() {
+        fn without_a_console_the_cli_says_so_before_it_reaches_or_starts_lunport() {
             let console = FakeConsole::new();
             console.fail(|call| *call == Call::Get(Setting::InputMode));
             let reach = || -> Result<PipeStream, String> { panic!("Lunport must not be reached, let alone started, without a console") };
             let events = |_| -> io::Result<()> { panic!("nothing is taken over without a console") };
-            assert_eq!(session_with(console, reach, events), (1, "sshelter connect needs a terminal.\n".to_string()));
+            assert_eq!(session_with(console, reach, events), (1, "lunport connect needs a terminal.\n".to_string()));
         }
 
         /// Spec §11: when nothing answers after Lunport was started, the sentence and 1; the console was never changed.
         #[test]
-        fn when_nothing_answers_the_cli_says_sshelter_did_not_start_and_leaves_the_console_alone() {
+        fn when_nothing_answers_the_cli_says_lunport_did_not_start_and_leaves_the_console_alone() {
             let console = FakeConsole::new();
             let events = |_| -> io::Result<()> { panic!("nothing is taken over before Lunport answers") };
             assert_eq!(session_with(console.clone(), || Err(NOT_STARTED.to_string()), events), (1, "Lunport did not start within 12 seconds.\n".to_string()));
@@ -630,7 +646,7 @@ mod tests {
         /// Spec §7.3, `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
         /// (once), the console as it was (its own line editing), before it ends with 1.
         #[test]
-        fn with_pause_on_error_sshelter_that_cannot_be_reached_is_said_and_waits_for_enter() {
+        fn with_pause_on_error_lunport_that_cannot_be_reached_is_said_and_waits_for_enter() {
             let console = FakeConsole::new();
             let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
             let events = |_| -> io::Result<()> { panic!("nothing is taken over before Lunport answers") };
@@ -651,14 +667,14 @@ mod tests {
             let failing = |_| -> io::Result<()> { Err(io::Error::other("no handler")) };
             let wait = || panic!("the CLI's own failure does not wait for Enter");
             let said = session_asked(request.clone(), console, move || Ok(stream), failing, wait);
-            assert_eq!(said, (1, "sshelter: cannot take over the console's control keys: no handler\n".to_string()));
+            assert_eq!(said, (1, "lunport: cannot take over the console's control keys: no handler\n".to_string()));
             let console = FakeConsole::new();
             console.refuse(|call| matches!(call, Call::Set(Setting::OutputMode, _)));
             let (stream, _dir) = a_pipe();
             let events = |_| -> io::Result<()> { Ok(()) };
             let (code, said) = session_asked(request, console, move || Ok(stream), events, || panic!("the CLI's own failure does not wait for Enter"));
             assert_eq!(code, 1);
-            assert!(said.starts_with("sshelter: the console does not support virtual terminal sequences ("), "{said}");
+            assert!(said.starts_with("lunport: the console does not support virtual terminal sequences ("), "{said}");
         }
 
         /// Without its control handler the program could not keep the console (Ctrl-C at a hidden password, or the window closed, would end
@@ -669,7 +685,7 @@ mod tests {
             let (stream, _dir) = a_pipe();
             let failing = |_| -> io::Result<()> { Err(io::Error::other("no handler")) };
             let said = session_with(console.clone(), move || Ok(stream), failing);
-            assert_eq!(said, (1, "sshelter: cannot take over the console's control keys: no handler\n".to_string()));
+            assert_eq!(said, (1, "lunport: cannot take over the console's control keys: no handler\n".to_string()));
             assert!(console.changes().is_empty(), "the console was not changed");
         }
 
@@ -691,7 +707,7 @@ mod tests {
             let (code, said) = session_with(console.clone(), move || Ok(stream), events);
             assert_eq!(*unchanged.lock().unwrap(), Some(true), "the control events were taken over before any change");
             assert_eq!(code, 1);
-            assert!(said.starts_with("sshelter: the console does not support virtual terminal sequences ("), "{said}");
+            assert!(said.starts_with("lunport: the console does not support virtual terminal sequences ("), "{said}");
             assert_eq!(console.now(), console.start, "left as it was");
         }
     }
@@ -703,12 +719,12 @@ mod tests {
         let squatted = std::io::Error::new(std::io::ErrorKind::PermissionDenied, r"Another program is using Lunport's session pipe (\\.\pipe\x)");
         assert_eq!(refused(&squatted), r"Another program is using Lunport's session pipe (\\.\pipe\x)");
         let denied = std::io::Error::from_raw_os_error(5);
-        assert!(refused(&denied).starts_with("sshelter: cannot connect to Lunport ("), "{}", refused(&denied));
+        assert!(refused(&denied).starts_with("lunport: cannot connect to Lunport ("), "{}", refused(&denied));
     }
 
     /// Spec §11: the sentence, exactly, when the app does not answer.
     #[test]
-    fn when_nothing_answers_after_the_start_the_cli_says_sshelter_did_not_start() {
+    fn when_nothing_answers_after_the_start_the_cli_says_lunport_did_not_start() {
         use crate::host_start::{ensure_started, SpawnLocks};
         let mut starts = 0;
         let result: Result<(), String> = ensure_started(

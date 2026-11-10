@@ -5,9 +5,15 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
     throw 'This isolated startup smoke test is restricted to the disposable GitHub Actions runner.'
 }
-$seed = Join-Path $env:RUNNER_TEMP 'sshelter-synced-startup.json'
+# Where test-windows.yml has the native tray smoke test export its synced fixture (LUNPORT_TEST_SYNCED_STATE_OUT).
+$seed = Join-Path $env:RUNNER_TEMP 'synced-startup.json'
 if (-not (Test-Path $seed)) { throw 'The native sync test did not export its fixture.' }
-$profileDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'org.homelab.sshelter.dev'
+# The Development identity, from the Tauri configuration this GUI is built with. Cargo names the executable after the
+# package, which is the main binary name (src-tauri/src/identity.rs).
+$production = Get-Content -Raw (Join-Path $PSScriptRoot '..\src-tauri\tauri.conf.json') | ConvertFrom-Json
+$development = Get-Content -Raw (Join-Path $PSScriptRoot '..\src-tauri\tauri.dev.conf.json') | ConvertFrom-Json
+$title = $development.app.windows[0].title
+$profileDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) $development.identifier
 $statePath = Join-Path $profileDirectory 'sync-state.json'
 if (Test-Path $statePath) { throw 'Refusing to replace an existing Development workspace.' }
 
@@ -15,7 +21,11 @@ $priorConfig = $env:TAURI_CONFIG
 try {
     # Cargo-only CI normally embeds the Production config. Explicitly select the same identity
     # as tauri.dev.conf.json for this debug GUI; app_profile verifies it before creating Tauri.
-    $env:TAURI_CONFIG = '{"identifier":"org.homelab.sshelter.dev","productName":"Lunport Dev","app":{"windows":[{"label":"main","title":"Lunport Dev","width":1100,"height":720,"visible":false}]}}'
+    $env:TAURI_CONFIG = @{
+        identifier = $development.identifier
+        productName = $development.productName
+        app = @{ windows = @(@{ label = 'main'; title = $title; width = 1100; height = 720; visible = $false }) }
+    } | ConvertTo-Json -Depth 5 -Compress
     cargo build --locked --features development-profile
     if ($LASTEXITCODE -ne 0) { throw 'Development GUI build failed.' }
 } finally {
@@ -24,9 +34,9 @@ try {
 New-Item -ItemType Directory -Force -Path $profileDirectory | Out-Null
 Copy-Item $seed $statePath
 $logPath = Join-Path $profileDirectory 'diagnostics\app.log'
-$program = (Resolve-Path 'target\debug\sshelter.exe').Path
-$stdout = Join-Path $env:RUNNER_TEMP 'sshelter-startup.stdout'
-$stderr = Join-Path $env:RUNNER_TEMP 'sshelter-startup.stderr'
+$program = (Resolve-Path "target\debug\$($production.mainBinaryName).exe").Path
+$stdout = Join-Path $env:RUNNER_TEMP 'lunport-startup.stdout'
+$stderr = Join-Path $env:RUNNER_TEMP 'lunport-startup.stderr'
 function ConvertFrom-CompleteLogLines {
     param([AllowEmptyString()][string]$LogText)
     # Explicit types also cover an empty file observed between creation and the first append.
@@ -41,6 +51,7 @@ if (@(ConvertFrom-CompleteLogLines '').Count -ne 0) { throw 'Empty log parsing f
 if (@(ConvertFrom-CompleteLogLines '{"pid":1}').Count -ne 0) { throw 'Incomplete log parsing failed.' }
 $probe = @(ConvertFrom-CompleteLogLines ('{"pid":1}' + "`r`n" + '{"pid":2'))
 if ($probe.Count -ne 1 -or $probe[0].pid -ne 1) { throw 'Complete-line log parsing failed.' }
+$env:RUST_BACKTRACE = '1'
 $process = Start-Process $program -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 function Read-ProcessEvents {
     [string]$logText = Get-Content -LiteralPath $logPath -Raw
@@ -58,7 +69,7 @@ try {
                 throw 'Startup diagnostics recorded a native initialization failure.'
             }
             $setupReady = [bool]($events | Where-Object { $_.event -eq 'startup_stage' -and $_.stage -eq 'ready' })
-            if ($setupReady -and $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq 'Lunport Dev') {
+            if ($setupReady -and $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) {
                 $ready = $true
                 break
             }
@@ -79,6 +90,13 @@ try {
     }
     Write-Output 'Actual Windows Development GUI: synced 17-host/Group fixture, WebView2 HWND, background status and normal shutdown passed. No credential fixture or production workspace was used.'
     $events | ConvertTo-Json -Depth 4
+} catch {
+    # A failed start says why only in what the GUI wrote: its standard error (a Rust panic lands there) and its diagnostics log.
+    foreach ($output in @(@('standard error', $stderr), @('standard output', $stdout), @('diagnostics log', $logPath))) {
+        Write-Output "--- Development GUI $($output[0])"
+        if (Test-Path -LiteralPath $output[1]) { Get-Content -LiteralPath $output[1] -Tail 80 } else { Write-Output '(none)' }
+    }
+    throw
 } finally {
     $process.Refresh()
     if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }

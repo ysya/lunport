@@ -14,10 +14,10 @@ Cloudflare stores account/device authority and encrypted Vault records in SQLite
 
 ## Account names and sign-in
 
-Lunport is intended as a service for your homelab. On your own server, choose **Create an account**, enter an email as the account name, and create a Passkey. Account names are trimmed and case-insensitive; plus tags and dots are preserved. Email is **not verified** and is **not an account recovery method**. There is no SMTP configuration, verification mail, email login link or email password reset. Keep a backup Passkey using the browser's Passkey management flow.
+Lunport syncs through a server you run yourself. On your own server, choose **Create an account**, enter an email as the account name, and create a Passkey. Account names are trimmed and case-insensitive; plus tags and dots are preserved. Email is **not verified** and is **not an account recovery method**. There is no SMTP configuration, verification mail, email login link or email password reset. Keep a backup Passkey using the browser's Passkey management flow.
 
 On another device, use the same server, sign in with the account's Passkey, and enter the same sync unlock password in the app. Browser sign-in and the account name never supply the encryption password or Vault keys. If the Passkey provider does not make the credential available on that device, use its cross-device authentication or add a backup Passkey while signed in.
 
 A local library stays bound to the account that created it. To start over with a new account on the same server, sign out, expand **Account and device settings**, and choose **Start with a new account and restart**. This opens an empty workspace and closes terminal sessions; it does not delete real SSH configuration or private-key files. An older Passkey can still sign in to its original account; creating an email-named account creates a separate account.
 
-Both Cloudflare and Docker run the same registration and Passkey protocol. Neither deployment needs a mail provider. A server operator controls network access and registration exposure for their homelab.
+Both Cloudflare and Docker run the same registration and Passkey protocol. Neither deployment needs a mail provider. A server operator controls network access and registration exposure for their deployment.

@@ -1,5 +1,5 @@
 [package]
-name = "sshelter"
+name = "lunport"
 version = "1.14.4"
 description = "Lunport — your SSH workspace for hosts, keys, Groups and encrypted library sync."
 authors = ["Frank Sung"]
@@ -12,7 +12,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "sshelter_lib"
+name = "lunport_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
@@ -91,7 +91,7 @@ signature = "2"
 # SSH engine (src/ssh/): russh is imported by src/ssh/russh_engine.rs only. Pinned to the exact version the phase-0 spike measured.
 russh = "=0.64.1"
 # russh runs on tokio. The engine owns a dedicated runtime (rt-multi-thread, net, time) and drives it with block_on; `macros` is for select!.
-# `signal`: `sshelter connect` follows the terminal's size (SIGWINCH), stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT, and puts the
+# `signal`: `lunport connect` follows the terminal's size (SIGWINCH), stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT, and puts the
 # terminal back for Ctrl-Z (SIGTSTP) and sets it again when it continues (SIGCONT) (src/cli/run.rs).
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 
@@ -116,10 +116,14 @@ tauri-plugin-single-instance = "~2.4.5"
 # 程序的執行檔路徑用 Win32_System_Threading 的 QueryFullProcessImageNameW。
 # agent 的 named pipe(src/agent/pipe_windows.rs):Win32_System_Pipes 給 CreateNamedPipeW、ConnectNamedPipe 與 GetNamedPipeClientProcessId,
 # ConnectNamedPipe 的參數含 OVERLAPPED 指標,windows-sys 把它放在 Win32_System_IO 後面。
-# `sshelter connect`'s console (src/cli/terminal_windows.rs): Win32_System_Console for the console's modes, code pages, window size and
+# `lunport connect`'s console (src/cli/terminal_windows.rs): Win32_System_Console for the console's modes, code pages, window size and
 # input buffer.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ErrorReporting", "Win32_System_IO", "Win32_System_Kernel", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# The launch-at-login entry's move to the current name (src/identity_migration/login_item.rs) reads and writes the Run key and Task
+# Manager's StartupApproved\Run with the winreg the autostart plugin's auto-launch uses, so both write the values alike. This version is
+# already in Cargo.lock through auto-launch.
+winreg = "=0.10.1"
 
 # 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):macOS 用 libc 的 proc_pidinfo、proc_pidpath 與 sysctl(KERN_PROCARGS2);
 # Linux 只讀 /proc。libc 已在 Cargo.lock(其他套件的相依),不需下載。
@@ -133,8 +137,13 @@ secret-service = { version = "=5.1.0", features = ["rt-tokio-crypto-rust"] }
 
 # keyring's attributes API reads the password on macOS. Query native metadata instead.
 # This is the same Security.framework version already used by keyring.
+# The credential migration builds its attribute-only keychain query itself, so that a test can read every key of it
+# (src/identity_migration/credentials_macos.rs): the bindings and Core Foundation wrappers security-framework itself uses,
+# at the versions it already brings into Cargo.lock.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "=3.7.0"
+security-framework-sys = "=2.17.0"
+core-foundation = "=0.10.1"
 plist = "=1.9.0"
 
 # 在 debug 建置裡產生 RSA 金鑰(vault::generate)要好幾分鐘;只替大數運算的套件開最佳化就降到幾秒(rsa 套件的 README 也這樣建議)。

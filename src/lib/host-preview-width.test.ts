@@ -59,7 +59,7 @@ describe("persisted connection details width", () => {
   async function launch(saved?: Record<string, unknown>) {
     const items = new Map<string, string>();
     if (saved)
-      items.set("sshelter-ui", JSON.stringify({ state: saved, version: 0 }));
+      items.set("lunport-ui", JSON.stringify({ state: saved, version: 0 }));
     vi.stubGlobal("window", {
       localStorage: {
         getItem: (key: string) => items.get(key) ?? null,
@@ -76,7 +76,7 @@ describe("persisted connection details width", () => {
     expect(first.store.getState().hostPreviewWidth).toBe(400);
     first.store.getState().setHostPreviewWidth(600);
     const second = await launch(
-      JSON.parse(first.items.get("sshelter-ui")!).state,
+      JSON.parse(first.items.get("lunport-ui")!).state,
     );
     expect(second.store.getState().hostPreviewWidth).toBe(600);
     second.store.getState().setHostPreviewWidth(1000);

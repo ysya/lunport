@@ -948,6 +948,7 @@ pub async fn records_import_preview(
                 .into_iter()
                 .map(|h| h.host.id)
                 .collect();
+            // frozen-identity: the folder of managed ssh config files and slot keys that users' ssh configs and synced IdentityFile values already name.
             let managed = env.ssh_dir.join("sshelter");
             if let Ok(entries) = std::fs::read_dir(managed) {
                 for entry in entries.take(128).flatten() {

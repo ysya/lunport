@@ -1,4 +1,4 @@
-//! What `sshelter connect` takes from and gives to the Windows console, apart from the Windows calls (`inputs_windows.rs` makes them):
+//! What `lunport connect` takes from and gives to the Windows console, apart from the Windows calls (`inputs_windows.rs` makes them):
 //! the keys read as UTF-16 turned into the UTF-8 the remote takes, the remote's UTF-8 cut into pieces the console is given whole
 //! characters of, and the console's control events turned into the inputs the loop knows (own-ssh spec §7.3, the Windows bullet).
 //! Compiled on Windows and in the tests of every platform.

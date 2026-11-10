@@ -215,7 +215,7 @@ fn listen_on(dir: &std::path::Path, handler: crate::ipc::server::Handler) -> Res
 /// The broker's endpoint (spec §4): the user's named pipe on Windows, with the lock in `dir` as on the other platforms.
 #[cfg(windows)]
 fn listen_on(dir: &std::path::Path, handler: crate::ipc::server::Handler) -> Result<crate::ipc::server::Started, AppError> {
-    crate::ipc::pipe_windows::listen(dir, &super::pipe_name()?, "sshelter-session", handler)
+    crate::ipc::pipe_windows::listen(dir, &super::pipe_name()?, &crate::identity::thread_name("session"), handler)
 }
 
 /// Whether any session is open.

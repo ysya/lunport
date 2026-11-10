@@ -46,7 +46,7 @@ export function AboutPane() {
         <SettingsRow label="License" description={product.license}><Button variant="outline" size="sm" onClick={() => void open("/blob/main/LICENSE")}>View license<ExternalLink className="size-3.5" /></Button></SettingsRow>
       </SettingsGroup>
     </Section>
-    <p className="text-xs leading-relaxed text-muted-foreground">{product.copyright}<br />Formerly SSHelter.</p>
+    <p className="text-xs leading-relaxed text-muted-foreground">{product.copyright}</p>
     <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Terminal credits and licenses</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-[11px]">{terminalNotices}</pre></details>
   </div>;
 }

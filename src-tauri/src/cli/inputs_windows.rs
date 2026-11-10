@@ -1,4 +1,4 @@
-//! The Windows calls of `sshelter connect` beyond the console's modes (own-ssh spec §7.3, the Windows bullet): the console a release
+//! The Windows calls of `lunport connect` beyond the console's modes (own-ssh spec §7.3, the Windows bullet): the console a release
 //! build attaches to, the console's control events, and the console as the terminal's output. What these do, without the Windows calls,
 //! is tested on every platform: the control events in `run::ControlEvents` and `console_inputs::control`, the output's whole characters
 //! in `run::Output::console`.
@@ -18,9 +18,9 @@ use super::run::{ControlEvents, Output};
 use super::terminal::StdConsole;
 
 /// Attaches this process to the console of the process that started it, when it has none: a release build is a GUI program, which
-/// `sshelter-cli.exe` starts in its console (spec §7.3). A process that has a console already (a debug build is a console program) is
+/// `lunport-cli.exe` starts in its console (spec §7.3). A process that has a console already (a debug build is a console program) is
 /// refused with ERROR_ACCESS_DENIED and keeps its own; one whose parent has none stays without, and the console check then says that
-/// `sshelter connect` needs a terminal.
+/// `lunport connect` needs a terminal.
 pub fn attach_console() {
     // SAFETY: no pointers; it attaches this process to its parent's console, or fails and changes nothing.
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };

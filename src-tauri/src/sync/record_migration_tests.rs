@@ -73,11 +73,11 @@ fn a_workspace_that_joined_the_retired_chain_sync_imports_its_local_files() {
     let d = TestDevice::with_main_config(
         "d",
         &TestClock::new(),
-        "Include ~/.ssh/sshelter/work.config\nHost local\n HostName local.test\n PreferredAuthentications password\n",
+        "Include ~/.ssh/sshelter/work.config\nHost local\n HostName local.test\n PreferredAuthentications password\n", // frozen-identity: the managed folder as it is on users' disks.
     );
-    fs::create_dir_all(d.ssh_dir().join("sshelter")).unwrap();
+    fs::create_dir_all(d.ssh_dir().join("sshelter")).unwrap(); // frozen-identity: the managed folder as it is on users' disks.
     fs::write(
-        d.ssh_dir().join("sshelter/work.config"),
+        d.ssh_dir().join("sshelter/work.config"), // frozen-identity: the managed folder as it is on users' disks.
         "Host web\n HostName web.test\n PreferredAuthentications password\n",
     )
     .unwrap();

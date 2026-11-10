@@ -307,6 +307,7 @@ fn fresh_from(env: &SyncEnv, id: &str, name: &str, url: &str) -> Result<SyncStat
 }
 fn stable_key_id(space: &str, value: &str) -> String {
     let mut h = Sha256::new();
+    // frozen-identity: the hash domain of the key ids already derived from legacy references; another domain makes other ids.
     h.update(b"sshelter-legacy-key-reference-v1");
     for v in [space, value] {
         h.update((v.len() as u64).to_be_bytes());
@@ -517,6 +518,7 @@ fn managed_templates(
                 {
                     return Err(failure("legacy managed source filename is invalid"));
                 }
+                // frozen-identity: the folder of managed ssh config files and slot keys that users' ssh configs and synced IdentityFile values already name.
                 let path = env.ssh_dir.join("sshelter").join(&space.file_name);
                 if path.exists() {
                     files.insert(
@@ -529,6 +531,7 @@ fn managed_templates(
         }
     }
     if input.legacy_v1.is_some() && !input.code.is_empty() {
+        // frozen-identity: the managed hosts file that existing ssh configs include.
         let path = env.ssh_dir.join("sshelter/hosts.config");
         if path.exists() {
             files.insert(

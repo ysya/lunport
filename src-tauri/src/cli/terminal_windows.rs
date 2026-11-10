@@ -1,4 +1,4 @@
-//! The console `sshelter connect` runs in on Windows (own-ssh spec §7.3, the Windows bullet), served as `cli::terminal`: the modes, the
+//! The console `lunport connect` runs in on Windows (own-ssh spec §7.3, the Windows bullet), served as `cli::terminal`: the modes, the
 //! `Tty` and its `Restorer`, and the keys read without spanning a change of mode, are the platform-neutral part's (`console.rs`, tested on
 //! every platform), and this file adds the console of this process (`StdConsole`), through windows-sys.
 
@@ -33,7 +33,7 @@ pub const QUESTION_READ_ENDS_ITS_LINE: bool = true;
 
 /// The console of this process: its input buffer and its active screen buffer.
 ///
-/// The input is standard input. A pipe or a file there is not a console, and `Tty::new` refuses it (`sshelter connect needs a
+/// The input is standard input. A pipe or a file there is not a console, and `Tty::new` refuses it (`lunport connect needs a
 /// terminal.`, spec §7.3). Only a process that has no standard input at all (a GUI program can start without one) has the console's
 /// input buffer opened by name (`CONIN$`). The output is standard output when that is the console's screen buffer, and the active
 /// screen buffer opened by name (`CONOUT$`) otherwise (standard output redirected, or none): the output's mode and the window's size
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32).kind(), io::ErrorKind::InvalidInput);
     }
 
-    /// Spec §7.3: standard input that is not a console is refused at the start (the CLI then says `sshelter connect needs a
+    /// Spec §7.3: standard input that is not a console is refused at the start (the CLI then says `lunport connect needs a
     /// terminal.`), with a clear error, before anything about the console is changed. First a pipe of the test's own as the input,
     /// whatever this process's standard input is; then this process's own console, when its standard input is not a console either.
     /// On CI (a job's standard input is a pipe) that second half must run.

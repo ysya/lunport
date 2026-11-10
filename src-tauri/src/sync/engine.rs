@@ -1,5 +1,5 @@
 //! The sync engine's Tauri shell: the cross-process engine lock, startup (the records probe and the account keys), the
-//! `sshelter-sync` background thread that runs central sync's rounds with their poll intervals and backoff, and the events
+//! `lunport-sync` background thread that runs central sync's rounds with their poll intervals and backoff, and the events
 //! the engine sends the window. Everything that touches the network runs on that thread or in `spawn_blocking`; the lock
 //! order is lifecycle → core.
 
@@ -339,7 +339,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
         }
     }
     let(tx,rx)=mpsc::channel();*WAKER.get_or_init(||Mutex::new(None)).lock().unwrap()=Some(tx);
-    let handle=app.clone();std::thread::Builder::new().name("sshelter-sync".into()).stack_size(SYNC_THREAD_STACK).spawn(move||worker_loop(handle,rx)).map_err(AppError::Io)?;
+    let handle=app.clone();std::thread::Builder::new().name(crate::identity::thread_name("sync")).stack_size(SYNC_THREAD_STACK).spawn(move||worker_loop(handle,rx)).map_err(AppError::Io)?;
     Ok(())
 }
 

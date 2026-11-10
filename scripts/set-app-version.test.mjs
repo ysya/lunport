@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { setCargoPackageVersion, setJsonVersion } from "./set-app-version.mjs";
 
 const CARGO = `[package]
-name = "sshelter"
+name = "lunport"
 version = "0.16.0"
 edition = "2021"
 
@@ -23,7 +23,7 @@ version = "2"
 describe("setCargoPackageVersion", () => {
   it("changes only the [package] version", () => {
     const out = setCargoPackageVersion(CARGO, "0.16.1-1");
-    expect(out).toContain('[package]\nname = "sshelter"\nversion = "0.16.1-1"\n');
+    expect(out).toContain('[package]\nname = "lunport"\nversion = "0.16.1-1"\n');
     expect(out).toContain('serde = { version = "1", features = ["derive"] }');
     expect(out).toContain('[dependencies.tauri]\nversion = "2"\n');
   });
@@ -39,7 +39,7 @@ describe("setCargoPackageVersion", () => {
 
   it("writes the version literally, even when it contains replacement patterns", () => {
     const out = setCargoPackageVersion(CARGO, "1.0.0-$&");
-    expect(out).toContain('[package]\nname = "sshelter"\nversion = "1.0.0-$&"\n');
+    expect(out).toContain('[package]\nname = "lunport"\nversion = "1.0.0-$&"\n');
   });
 
   it("accepts stamping the version that is already there", () => {
@@ -49,12 +49,12 @@ describe("setCargoPackageVersion", () => {
 
 describe("setJsonVersion", () => {
   it("replaces the top-level version and keeps the other keys", () => {
-    const out = JSON.parse(setJsonVersion('{"name":"sshelter","version":"0.16.0","private":true}', "0.16.1-1"));
-    expect(out).toEqual({ name: "sshelter", version: "0.16.1-1", private: true });
+    const out = JSON.parse(setJsonVersion('{"name":"lunport","version":"0.16.0","private":true}', "0.16.1-1"));
+    expect(out).toEqual({ name: "lunport", version: "0.16.1-1", private: true });
   });
 
   it("fails loudly when there is no top-level version", () => {
-    expect(() => setJsonVersion('{"name":"sshelter"}', "0.16.1-1")).toThrow(/version/);
+    expect(() => setJsonVersion('{"name":"lunport"}', "0.16.1-1")).toThrow(/version/);
   });
 });
 
@@ -71,7 +71,7 @@ describe("CLI", () => {
     const dir = mkdtempSync(join(tmpdir(), "set-app-version-"));
     dirs.push(dir);
     mkdirSync(join(dir, "src-tauri"));
-    writeFileSync(join(dir, "package.json"), '{"name":"sshelter","version":"0.16.0"}\n');
+    writeFileSync(join(dir, "package.json"), '{"name":"lunport","version":"0.16.0"}\n');
     writeFileSync(join(dir, "src-tauri", "tauri.conf.json"), '{"productName":"Lunport","version":"0.16.0"}\n');
     writeFileSync(join(dir, "src-tauri", "Cargo.toml"), CARGO);
     return dir;
@@ -85,7 +85,7 @@ describe("CLI", () => {
     expect(result.status).toBe(0);
     expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version).toBe("0.16.1-1");
     expect(JSON.parse(readFileSync(join(dir, "src-tauri", "tauri.conf.json"), "utf8")).version).toBe("0.16.1-1");
-    expect(readFileSync(join(dir, "src-tauri", "Cargo.toml"), "utf8")).toContain('[package]\nname = "sshelter"\nversion = "0.16.1-1"\n');
+    expect(readFileSync(join(dir, "src-tauri", "Cargo.toml"), "utf8")).toContain('[package]\nname = "lunport"\nversion = "0.16.1-1"\n');
   });
 
   it("rejects anything but X.Y.Z-N before touching a file", () => {

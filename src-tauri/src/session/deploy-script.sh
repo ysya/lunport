@@ -10,14 +10,14 @@ cd "$HOME" || exit 70
 if [ -e .ssh ]; then [ -d .ssh ] || exit 70; else mkdir .ssh || exit 70; fi
 chmod 700 .ssh || exit 70
 cd .ssh || exit 70
-[ ! -L .sshelter-deploy-lock ] || exit 70
+[ ! -L .lunport-deploy-lock ] || exit 70
 attempt=0
-until mkdir .sshelter-deploy-lock 2>/dev/null; do
+until mkdir .lunport-deploy-lock 2>/dev/null; do
     attempt=$((attempt + 1))
     [ "$attempt" -lt 5 ] || exit 75
     sleep 1
 done
-trap 'rmdir .sshelter-deploy-lock 2>/dev/null || :' 0
+trap 'rmdir .lunport-deploy-lock 2>/dev/null || :' 0
 trap 'exit 74' 1 2 3 15
 [ ! -L authorized_keys ] || exit 70
 if [ -e authorized_keys ]; then
@@ -52,12 +52,12 @@ function token(    c, word, quoted, escaped) {
 }
 END { exit !found }
 ' authorized_keys; then
-    printf 'SSHELTER_PRESENT\n'
+    printf 'LUNPORT_PRESENT\n'
 else
     status=$?
     [ "$status" -eq 1 ] || exit 70
     # Preserve an unterminated last line; an additional empty line is harmless.
     if [ -s authorized_keys ]; then printf '\n' >> authorized_keys || exit 70; fi
     printf '%s\n' '__PUBLIC__' >> authorized_keys || exit 70
-    printf 'SSHELTER_ADDED\n'
+    printf 'LUNPORT_ADDED\n'
 fi
