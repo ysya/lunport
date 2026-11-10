@@ -8,6 +8,7 @@ import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
 import { recordOverview } from "./fixtures";
 import { DISABLED, buttonTag, buttonsIn, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { Dialog } from "@/components/ui/dialog";
+import { AlertDialog } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
@@ -394,6 +395,23 @@ describe("opening the editor from the page", () => {
     expect((elementsOf(tree, Dialog)[0].props as unknown as { open: boolean }).open).toBe(false);
     expect(elementsOf(tree, DatabaseRow)).toHaveLength(1);
     expect(typeof (elementsOf(tree, DatabaseRow)[0].props as unknown as { edit: unknown }).edit).toBe("function");
+  });
+
+  it("closing_the_dialog_with_changes_asks_with_the_words_the_tunnels_page_uses", () => {
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, [row()]);
+    const tree = renderHook(client, () => DatabasesPanel({ overview: recordOverview() }));
+    // The delete confirmation is the other one; the dialog that asks about discarding is closed until a changed dialog is closed.
+    const asking = elementsOf(tree, AlertDialog).filter((dialog) => textIn(dialog).includes("Discard database changes?"));
+    expect(asking).toHaveLength(1);
+    expect(elementsOf(tree, AlertDialog)).toHaveLength(2);
+    expect((asking[0].props as unknown as { open: boolean }).open).toBe(false);
+    expect(textIn(asking[0])).toContain("Your unsaved changes will be lost.");
+    const answers = buttonsIn(asking[0]).map((button) => textIn(button));
+    expect(answers).toContain("Discard");
+    expect(textIn(asking[0])).toContain("Keep editing");
+    // Escape, a click outside and the X all go to the same place as Cancel: the editor dialog's own close handler.
+    expect(typeof (elementsOf(tree, Dialog)[0].props as unknown as { onOpenChange: unknown }).onOpenChange).toBe("function");
   });
 });
 

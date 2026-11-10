@@ -9,8 +9,9 @@ import { buttonsIn, buttonTag, DISABLED, elementsOf, text, textIn } from "@/comp
 import { tauriInvoke } from "@/lib/ipc";
 import { renderHook } from "@/lib/test-ipc";
 import { databaseInstancesQuery, newDatabase, suggestPort, type InstanceSummary, type SavedDatabase } from "@/lib/databases";
-import { gcloudAccountsKey, pamSuggestionsQuery, type GcloudAccountsView } from "@/lib/transports";
+import { gcloudAccountsKey, newPamCheck, pamSuggestionsQuery, type GcloudAccountsView } from "@/lib/transports";
 import {
+  changed,
   DatabaseEditor,
   DatabaseEditorView,
   instanceProblem,
@@ -519,6 +520,46 @@ describe("the New database dialog", () => {
     expect(shown(SAVED, [other("00000000000000a2", 6544)])).toEqual({ sharing: true, port: 6543 });
   });
 
+  it("changed_tells_whether_the_draft_is_still_the_database_the_dialog_opened_with", () => {
+    const opened = opening(newDatabase(), []);
+    expect(changed(opened, opened)).toBe(false);
+    // A copy is no change.
+    expect(changed({ ...opened }, opened)).toBe(false);
+    expect(changed(JSON.parse(JSON.stringify(SAVED)), SAVED)).toBe(false);
+    // Every field the dialog sets counts.
+    const edits: Partial<SavedDatabase>[] = [
+      { name: "Orders" },
+      { project: PROD },
+      { region: "asia-east1" },
+      { instance: "orders-pg" },
+      { environment: "prod" },
+      { account: "frank@example.com" },
+      { default_database: "orders" },
+      { pam: newPamCheck() },
+      { local_port: null },
+      { local_port: 6544 },
+    ];
+    for (const edit of edits) expect(changed({ ...opened, ...edit }, opened), JSON.stringify(edit)).toBe(true);
+    expect(changed({ ...SAVED, pam: null }, SAVED)).toBe(true);
+    expect(changed({ ...SAVED, pam: { ...SAVED.pam!, entitlements: ["prod-operate"] } }, SAVED)).toBe(true);
+    expect(changed({ ...SAVED, pam: { ...SAVED.pam!, duration_secs: 3600 } }, SAVED)).toBe(true);
+    // Changed and changed back is not a change.
+    expect(changed({ ...SAVED, name: "Orders (prod)", local_port: 6544 }, SAVED)).toBe(true);
+    expect(changed({ ...SAVED, name: "Orders", local_port: 6543 }, SAVED)).toBe(false);
+  });
+
+  it("typing_a_name_and_typing_it_back_leaves_the_dialog_unchanged", () => {
+    const dialog = editor(SAVED);
+    typeInto(dialog.tree(), "Name", "Orders (prod)");
+    expect(changed(dialog.kept.draft, SAVED)).toBe(true);
+    typeInto(dialog.tree(), "Name", "Orders");
+    expect(changed(dialog.kept.draft, SAVED)).toBe(false);
+    // The PAM check switched off and on again is a new check, and that is a change from one with two entitlements.
+    switchOf(dialog.tree(), "Requires a PAM grant").onCheckedChange(false);
+    switchOf(dialog.tree(), "Requires a PAM grant").onCheckedChange(true);
+    expect(changed(dialog.kept.draft, SAVED)).toBe(true);
+  });
+
   it("sharing_proposes_the_first_free_port_and_off_offers_none", () => {
     const dialog = editor(newDatabase(), { used: [6543, 6544] });
     expect(switchOf(dialog.tree(), "Let other apps connect").checked).toBe(false);
@@ -653,6 +694,33 @@ describe("the dialog as the Databases page mounts it", () => {
     expect(opened.instances).toEqual(listed([ORDERS_PG]));
     expect(viewOf(client, { initial: newDatabase() }).props.lookup).toEqual({ account: null, project: "" });
     expect(viewOf(client, { initial: SAVED }).props.lookup).toEqual({ account: SAVED.account, project: SAVED.project });
+  });
+
+  it("tells_the_page_after_every_change_whether_the_draft_differs_from_what_the_dialog_opened_with", () => {
+    const onDirty = vi.fn();
+    const saved = viewOf(cache(), { initial: SAVED, onDirty }).props;
+    // Nothing is reported before something changes.
+    expect(onDirty).not.toHaveBeenCalled();
+    saved.onDraft({ ...SAVED, name: "Orders (prod)" });
+    expect(onDirty).toHaveBeenLastCalledWith(true);
+    // Typed back to what it opened with: not changed.
+    saved.onDraft({ ...saved.draft, name: SAVED.name });
+    expect(onDirty).toHaveBeenLastCalledWith(false);
+    // A new database opens shared on its first free port, and that is not a change; the first thing typed is.
+    const fresh = viewOf(cache(), { initial: newDatabase(), existing: [{ ...SAVED, id: "00000000000000a2", local_port: 6543 }], onDirty }).props;
+    expect(fresh.draft.local_port).toBe(6544);
+    fresh.onDraft({ ...fresh.draft });
+    expect(onDirty).toHaveBeenLastCalledWith(false);
+    fresh.onDraft({ ...fresh.draft, name: "Orders" });
+    expect(onDirty).toHaveBeenLastCalledWith(true);
+    fresh.onDraft({ ...fresh.draft, local_port: null });
+    expect(onDirty).toHaveBeenLastCalledWith(true);
+    expect(onDirty).toHaveBeenCalledTimes(5);
+  });
+
+  it("changes_without_anyone_listening_for_the_dirt", () => {
+    const view = viewOf(cache(), { initial: SAVED }).props;
+    expect(() => view.onDraft({ ...SAVED, name: "Orders (prod)" })).not.toThrow();
   });
 
   it("skips_the_ports_of_the_other_databases_and_hands_over_what_it_was_given", () => {

@@ -5,7 +5,7 @@ import { Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Sq
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
-import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel } from "@/components/ui/alert-dialog";
+import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { TaskDialogContent } from "@/components/app/TaskDialog";
 import { revealHidden } from "@/lib/reveal-hidden";
@@ -123,6 +123,9 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   const [editing, setEditing] = useState<{ key: number; initial: SavedDatabase; expected: SavedDatabase | null } | null>(null);
   const openings = useRef(0);
   const [editorError, setEditorError] = useState<string | null>(null);
+  // Whether what is in the editor differs from what it opened with, and whether closing it is being asked about.
+  const [dirty, setDirty] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   // The dialog takes a moment to animate out once `editing` is null; its title and body keep what they showed until then.
   const shown = useLastNonNull(editing);
   const rows = query.data ?? [];
@@ -135,17 +138,25 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     flight.current = true; setBusy(true); setError(null); setEditorError(null);
     const failure = await runDatabaseAction(client, run);
     if (!inEditor) setError(failure);
-    else if (failure === null) setEditing(null);
+    else if (failure === null) { setEditing(null); setDirty(false); }
     else setEditorError(failure);
     flight.current = false; setBusy(false);
   };
   // A new database, or a saved one, which is also what its save is compared against: nothing is saved over a version the list does not show.
   const edit = (row: DatabaseView | null) => {
     setEditorError(null);
+    setDirty(false);
     openings.current += 1;
     setEditing({ key: openings.current, ...(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null }) });
   };
-  const closeEditor = () => { if (!flight.current) setEditing(null); };
+  // Cancel, the X, Escape and a click outside all close the dialog from here: not while a save is under way, and only once the person
+  // has said that changes may be lost.
+  const closeEditor = () => {
+    if (flight.current) return;
+    if (dirty) setDiscarding(true);
+    else setEditing(null);
+  };
+  const discard = () => { setDiscarding(false); setDirty(false); setEditing(null); };
   const save = (next: SavedDatabase) => { if (editing) void action(async () => { await saveDatabase(next, editing.expected); }, true); };
   // The grant is read again too, so that the row shows what was requested.
   const requestGrant = (id: string) => void action(async () => {
@@ -179,8 +190,9 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     </div>}
     <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">
       <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
-      {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} />}
+      {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} onDirty={setDirty} />}
     </TaskDialogContent></Dialog>
+    <AlertDialog open={discarding} onOpenChange={setDiscarding}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard database changes?</AlertDialogTitle><AlertDialogDescription>Your unsaved changes will be lost.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={discard}>Discard</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleting && revealHidden(deleting.database.name)}?</AlertDialogTitle><AlertDialogDescription>{deleting?.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>;
 }

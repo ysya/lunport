@@ -100,6 +100,11 @@ const withPam = (draft: SavedDatabase, on: boolean): SavedDatabase => ({ ...draf
 const withEntitlements = (draft: SavedDatabase, entitlements: string[]): SavedDatabase => ({ ...draft, pam: draft.pam && { ...draft.pam, entitlements } });
 const withSharing = (draft: SavedDatabase, on: boolean, used: number[]): SavedDatabase => ({ ...draft, local_port: on ? suggestPort(used) : null });
 
+/** Whether the draft is no longer the database the dialog opened with: any field that differs, typed and typed back counting as none. */
+export function changed(draft: SavedDatabase, opened: SavedDatabase): boolean {
+  return JSON.stringify(draft) !== JSON.stringify(opened);
+}
+
 /** The database as it is saved: its typed names without the spaces around them. */
 const finished = (draft: SavedDatabase): SavedDatabase => ({ ...draft, name: draft.name.trim(), default_database: draft.default_database.trim() });
 
@@ -361,6 +366,8 @@ export type DatabaseEditorProps = {
   error: string | null;
   onSave: (next: SavedDatabase) => void;
   onCancel: () => void;
+  /** Told after every change whether the draft now differs from the database the dialog opened with, so that closing it can ask first. */
+  onDirty?: (dirty: boolean) => void;
 };
 
 /** How long typing in the project or account must pause before Google is asked about what was typed. */
@@ -372,13 +379,19 @@ const LOOKUP_DELAY_MS = 400;
  * draft holds once typing in them has paused (`LOOKUP_DELAY_MS`), not about every start of a project id typed by hand; the dialog opens
  * with what it was given, without waiting.
  */
-export function DatabaseEditor({ initial, existing, busy, error, onSave, onCancel }: DatabaseEditorProps) {
-  const [draft, setDraft] = useState(() => opening(initial, existing));
+export function DatabaseEditor({ initial, existing, busy, error, onSave, onCancel, onDirty }: DatabaseEditorProps) {
+  const [opened] = useState(() => opening(initial, existing));
+  const [draft, setDraft] = useState(opened);
   const [mode, setMode] = useState<Mode>(() => (initial.instance === "" ? "pick" : "manual"));
   const [connection, setConnection] = useState(() => (located(initial) ? connectionName(initial) : ""));
   const project = useDebounced(draft.project, LOOKUP_DELAY_MS);
   const account = useDebounced(draft.account, LOOKUP_DELAY_MS);
   const settled = project === draft.project && account === draft.account;
+  // Every change to the draft comes through here, and says whether the draft still is what the dialog opened with.
+  const change = (next: SavedDatabase) => {
+    setDraft(next);
+    onDirty?.(changed(next, opened));
+  };
   const list = useQuery({ ...databaseInstancesQuery(account, project), enabled: mode === "pick" && isProjectId(project) });
   return (
     <DatabaseEditorView
@@ -390,7 +403,7 @@ export function DatabaseEditor({ initial, existing, busy, error, onSave, onCance
       used={usedPorts(existing)}
       busy={busy}
       error={error}
-      onDraft={setDraft}
+      onDraft={change}
       onMode={setMode}
       onConnection={setConnection}
       onSave={onSave}
