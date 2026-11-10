@@ -27,6 +27,7 @@ pub(crate) use types::{
 };
 // Execution types shared by Records MCP and the human deployment integration.
 pub(crate) use types::{Ended, ExecResult};
+pub(crate) use types::RemoteListing;
 #[cfg(test)]
 pub(crate) use types::Phase;
 

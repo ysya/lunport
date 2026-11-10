@@ -95,6 +95,19 @@ export type RecordHostView = {
     key_id?: string;
   };
 };
+
+export type RemoteFileEntry = { name: string; kind: "directory" | "file" | "symlink" | "other"; size: number };
+export type RemoteListing = { path: string; entries: RemoteFileEntry[] };
+
+export const recordsFilesList = (hostId: string, path: string) =>
+  tauriInvoke<RemoteListing>("records_files_list", { hostId, path });
+
+export const recordsFilesTransfer = (input: {
+  id: string; hostId: string; direction: "upload" | "download"; localPath: string; remotePath: string; overwrite: boolean;
+}) => tauriInvoke<number>("records_files_transfer", input);
+
+export const recordsFilesCancel = (id: string) =>
+  tauriInvoke<void>("records_files_cancel", { id });
 export type KeySlotPayload = {
   schema: number;
   name: string;

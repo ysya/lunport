@@ -49,6 +49,27 @@ fn scp_transfers_binary_file_in_both_directions() {
     assert!(too_small.is_empty(), "the configured limit rejects before writing file bytes");
 }
 
+#[test]
+fn sftp_lists_remote_files_and_directories() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &["Subsystem sftp internal-sftp"]);
+    let session = open_session(&engine(), &server);
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::write(scratch.path().join("sample.txt"), b"hello").unwrap();
+    std::fs::write(scratch.path().join("report 'draft;.txt"), b"draft").unwrap();
+    std::fs::create_dir(scratch.path().join("folder")).unwrap();
+
+    let listing = session.sftp_list(&scratch.path().to_string_lossy(), ENOUGH).unwrap();
+    #[cfg(unix)]
+    assert_eq!(listing.path, scratch.path().canonicalize().unwrap().to_string_lossy());
+    #[cfg(windows)]
+    assert!(!listing.path.is_empty());
+    assert!(listing.entries.iter().any(|entry| entry.name == "sample.txt" && entry.kind == "file" && entry.size == 5));
+    assert!(listing.entries.iter().any(|entry| entry.name == "report 'draft;.txt" && entry.kind == "file" && entry.size == 5));
+    assert!(listing.entries.iter().any(|entry| entry.name == "folder" && entry.kind == "directory"));
+    assert!(!listing.entries.iter().any(|entry| entry.name == "." || entry.name == ".."));
+}
+
 /// The command has no terminal, and its output is bytes the engine does not touch: CRLF stays CRLF.
 #[test]
 fn a_command_has_no_pty_and_its_output_is_not_reshaped() {

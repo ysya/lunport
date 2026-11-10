@@ -90,6 +90,8 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 signature = "2"
 # SSH engine (src/ssh/): russh is imported by src/ssh/russh_engine.rs only. Pinned to the exact version its behaviour was measured against.
 russh = "=0.64.1"
+# Remote directory browsing uses SFTP on the existing authenticated SSH channel.
+russh-sftp = "=3.0.1"
 # russh runs on tokio. The engine owns a dedicated runtime (rt-multi-thread, net, time) and drives it with block_on; `macros` is for select!.
 # `signal`: `lunport connect` follows the terminal's size (SIGWINCH), stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT, and puts the
 # terminal back for Ctrl-Z (SIGTSTP) and sets it again when it continues (SIGCONT) (src/cli/run.rs).

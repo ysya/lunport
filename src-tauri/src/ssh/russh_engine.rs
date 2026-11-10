@@ -1150,6 +1150,12 @@ impl Session for RusshSession {
         self.runtime.handle().block_on(scp_download_on(server, remote_path, destination, max_bytes, timeout))
     }
 
+    fn sftp_list(&self, remote_path: &str, timeout: Duration) -> Result<super::types::RemoteListing, SessionError> {
+        if !self.is_alive() { return Err(SessionError::Closed); }
+        let destination = self.connection.destination()?;
+        self.runtime.handle().block_on(sftp_list_on(destination, remote_path, timeout))
+    }
+
     fn is_alive(&self) -> bool {
         self.connection.is_open()
     }
@@ -1399,6 +1405,59 @@ async fn scp_download_on(server: &Established, remote_path: &str, destination: &
     wire.send(&[0]).await?;
     wire.finish().await?;
     Ok(size)
+}
+
+async fn sftp_list_on(server: &Established, remote_path: &str, timeout: Duration) -> Result<super::types::RemoteListing, SessionError> {
+    use super::types::{RemoteFileEntry, RemoteListing};
+    use russh_sftp::client::{error::Error as SftpError, RawSftpSession};
+    use russh_sftp::protocol::StatusCode;
+
+    let work = async {
+        let channel = open_channel(server, CHANNEL_SETUP_LIMIT).await?;
+        sent(channel.request_subsystem(true, "sftp")).await?;
+        let sftp = RawSftpSession::new(channel.into_stream());
+        sftp.init().await
+            .map_err(|_| SessionError::Channel("The SSH server did not start SFTP. Enable SFTP to browse files.".into()))?;
+        let path = sftp.realpath(remote_path.to_string()).await
+            .map_err(|error| SessionError::Channel(format!("remote folder could not be opened: {error}")))?
+            .files.into_iter().next().ok_or_else(|| SessionError::Channel("remote folder has no canonical path".into()))?.filename;
+        if path.is_empty() || path.len() > 4096
+            || path.chars().any(|c| c.is_control() || crate::session::auth::is_deceptive_format(c)) {
+            return Err(SessionError::Channel("remote folder path cannot be displayed safely".into()));
+        }
+        let handle = sftp.opendir(path.clone()).await
+            .map_err(|error| SessionError::Channel(format!("remote folder could not be opened: {error}")))?.handle;
+        let mut entries = Vec::new();
+        loop {
+            let batch = match sftp.readdir(handle.clone()).await {
+                Ok(batch) => batch,
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+                Err(error) => return Err(SessionError::Channel(format!("remote folder could not be listed: {error}"))),
+            };
+            for entry in batch.files {
+                let name = entry.filename;
+                if name == "." || name == ".." { continue; }
+                if entries.len() >= 5000 {
+                    return Err(SessionError::Channel("remote folder has more than 5,000 entries".into()));
+                }
+                if name.is_empty() || name.len() > 255 || name.contains('/')
+                    || name.chars().any(|c| c.is_control() || crate::session::auth::is_deceptive_format(c)) {
+                    return Err(SessionError::Channel("remote folder contains a name that cannot be displayed safely".into()));
+                }
+                let kind = entry.attrs.file_type();
+                entries.push(RemoteFileEntry {
+                    name,
+                    kind: if kind.is_dir() { "directory" } else if kind.is_file() { "file" } else if kind.is_symlink() { "symlink" } else { "other" }.into(),
+                    size: entry.attrs.len(),
+                });
+            }
+        }
+        entries.sort_by(|a, b| (a.kind != "directory", a.name.to_lowercase()).cmp(&(b.kind != "directory", b.name.to_lowercase())));
+        let _ = sftp.close(handle).await;
+        let _ = sftp.close_session();
+        Ok(RemoteListing { path, entries })
+    };
+    tokio::time::timeout(timeout, work).await.map_err(|_| SessionError::Timeout)?
 }
 
 /// Appends as much of `data` to `stream` as the cap leaves room for (`other` is the length of the other stream); false when some of it did not fit.

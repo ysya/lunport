@@ -135,8 +135,15 @@ describe("connection library browsing", () => {
         />,
       );
       expect(buttonTag(html, "Connect")).toContain(DISABLED);
+      expect(buttonTag(html, "Files")).toContain(DISABLED);
       expect(html).toContain("Review settings");
     }
+  });
+  it("offers file browsing for a ready saved host", () => {
+    const html = renderToStaticMarkup(
+      <HostPreview host={hostView()} overview={recordOverview()} connect={vi.fn()} edit={vi.fn()} close={vi.fn()} busy={false} />,
+    );
+    expect(buttonTag(html, "Files")).not.toContain(DISABLED);
   });
 });
 

@@ -227,6 +227,9 @@ fn read_audit_bytes(reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
 }
 
 impl McpRuntime {
+    pub(crate) fn file_transfer_limit_mib(&self) -> u32 {
+        transfer_limit_mib(&self.policy.lock().unwrap())
+    }
     fn status(&self) -> McpStatus {
         let policy = self.policy.lock().unwrap().clone();
         let mut pending: Vec<_> = self
