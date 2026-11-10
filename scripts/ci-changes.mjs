@@ -29,6 +29,28 @@ export function withoutVersion(path, text) {
   return undefined;
 }
 
+function withoutCargoDependencies(text) {
+  let dependencyTable = false;
+  return text.split("\n").filter(line => {
+    if (/^\s*\[/.test(line)) {
+      const table = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line)?.[1];
+      dependencyTable = /^(?:dependencies|dev-dependencies|build-dependencies|target\..*\.dependencies)$/.test(table ?? "");
+    }
+    return !dependencyTable;
+  }).join("\n");
+}
+
+function withoutTauriCommandRegistration(text) {
+  const marker = ".invoke_handler(tauri::generate_handler![";
+  const start = text.indexOf(marker);
+  if (start < 0 || text.indexOf(marker, start + marker.length) >= 0) throw new Error("Tauri command registration changed shape");
+  const closing = /\n[ \t]*\]\)/g;
+  closing.lastIndex = start + marker.length;
+  const end = closing.exec(text);
+  if (!end) throw new Error("Tauri command registration has no closing bracket");
+  return text.slice(0, start) + marker + "…])" + text.slice(end.index + end[0].length);
+}
+
 export function selectChecks(files, readRevision, force = false) {
   const checks = { frontend: force, native: force, profiles: force, packages: force, credentials: force, windows: force };
   for (const path of files) {
@@ -51,7 +73,24 @@ export function selectChecks(files, readRevision, force = false) {
     // The release-profile test links the app library and checks profile selection,
     // identity, guarded writes and central sync. Other Rust changes use the full
     // platform debug suites without rebuilding both release profiles.
-    if (/^src-tauri\/(?:Cargo\.(?:toml|lock)|build\.rs|tauri(?:\.dev)?\.conf\.json|tests\/app_profile_build\.rs|src\/(?:app_profile|identity|legacy_identity|write_policy|lib)\.rs)$/.test(path) || path.startsWith("src-tauri/src/sync/central/") || path.startsWith("vendor/tauri-runtime-wry/")) checks.profiles = true;
+    if (path === "src-tauri/Cargo.toml") {
+      try {
+        const base = withoutCargoDependencies(withoutVersion(path, readRevision("base", path)));
+        const head = withoutCargoDependencies(withoutVersion(path, readRevision("head", path)));
+        if (base !== head) checks.profiles = true;
+      } catch {
+        checks.profiles = true;
+      }
+    }
+    if (path === "src-tauri/src/lib.rs") {
+      try {
+        if (withoutTauriCommandRegistration(readRevision("base", path)) !== withoutTauriCommandRegistration(readRevision("head", path))) checks.profiles = true;
+      } catch {
+        checks.profiles = true;
+      }
+    }
+    // A lockfile update changes dependencies, not the app's profile selection.
+    if (/^src-tauri\/(?:build\.rs|tauri(?:\.dev)?\.conf\.json|tests\/app_profile_build\.rs|src\/(?:app_profile|identity|legacy_identity|write_policy)\.rs)$/.test(path) || path.startsWith("src-tauri/src/sync/central/") || path.startsWith("vendor/tauri-runtime-wry/")) checks.profiles = true;
     // The Rust tests compare legacy_identity with scripts/legacy-identity.json; the Linux upgrade check reads it and scripts/identity.mjs.
     if (path.startsWith("src-tauri/") || path.startsWith("vendor/tauri-runtime-wry/") || /^scripts\/(validate-group-order-compat\.sh|compat\/|validate-windows-startup\.ps1|legacy-identity\.json$)/.test(path)) checks.native = true;
     if (/^src-tauri\/(tauri.*\.json$|icons\/|installers\/)/.test(path) || /^scripts\/(validate-linux-rebrand\.py|identity\.mjs|legacy-identity\.json)$/.test(path) || path === ".github/workflows/rebrand-package-check.yml") checks.packages = true;

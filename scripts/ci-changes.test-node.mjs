@@ -33,6 +33,26 @@ test("version-only release edits skip compilation, dependency and config edits d
   assert.notEqual(withoutVersion("src-tauri/Cargo.lock", lock("1")), withoutVersion("src-tauri/Cargo.lock", lock("2")));
 });
 
+test("Cargo dependency updates keep native checks without repeating release-profile builds", () => {
+  const base = `[package]\nname = "${PACKAGE}"\nversion = "2.0.0"\n[features]\ndefault = ["central-sync"]\n[dependencies]\nrussh = "1"\n[build-dependencies]\ncc = "1"\n[target.'cfg(windows)'.dependencies]\nwindows-sys = "1"\n`;
+  const head = base.replace('russh = "1"', 'russh = "2"').replace('cc = "1"', 'cc = "2"').replace('windows-sys = "1"', 'windows-sys = "2"');
+  const lock = `[[package]]\nname = "${PACKAGE}"\nversion = "2.0.0"\n[[package]]\nname = "russh"\nversion = "1"`;
+  const read = (revision, path) => path.endsWith("Cargo.toml") ? revision === "base" ? base : head : revision === "base" ? lock : lock.replace('version = "1"', 'version = "2"');
+  assert.deepEqual(selectChecks(["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"], read), { ...unchanged, native: true, credentials: true });
+  assert.deepEqual(selectChecks(["src-tauri/Cargo.lock"], read), { ...unchanged, native: true, credentials: true });
+  assert.equal(selectChecks(["src-tauri/Cargo.toml"], (revision) => revision === "base" ? base : head.replace('default = ["central-sync"]', 'default = []')).profiles, true);
+  assert.equal(selectChecks(["src-tauri/Cargo.toml"], noRead).profiles, true);
+});
+
+test("Tauri command registration changes do not repeat release-profile builds", () => {
+  const base = 'pub use sync::central::controller::enabled as central_sync_available;\n.invoke_handler(tauri::generate_handler![\n    command_a,\n])\n';
+  const head = base.replace('    command_a,', '    command_a,\n    command_b,');
+  const read = revision => revision === "base" ? base : head;
+  assert.deepEqual(selectChecks(["src-tauri/src/lib.rs"], read), { ...unchanged, native: true });
+  assert.equal(selectChecks(["src-tauri/src/lib.rs"], revision => revision === "base" ? base : head.replace("central_sync_available", "central_sync_unavailable")).profiles, true);
+  assert.equal(selectChecks(["src-tauri/src/lib.rs"], noRead).profiles, true);
+});
+
 test("missing version files run checks, docs skip builds, manual runs force all routes", () => {
   assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], noRead), { ...unchanged, native: true, profiles: true, packages: true, credentials: true });
   assert.deepEqual(selectChecks(["README.md", "src-tauri/signing/README.md"], noRead), unchanged);
@@ -94,7 +114,6 @@ test("release profile boundaries run only when their build inputs or assertions 
     "src-tauri/src/sync/central/controller.rs",
     "src-tauri/tests/app_profile_build.rs",
     "src-tauri/Cargo.toml",
-    "src-tauri/Cargo.lock",
     "src-tauri/build.rs",
     "src-tauri/tauri.conf.json",
     "src-tauri/tauri.dev.conf.json",

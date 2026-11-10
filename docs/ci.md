@@ -29,9 +29,11 @@ so dispatch scripts and Rust caches continue to work.
   areas run both. Rust dependency changes also run credential checks.
 - Release-profile boundary builds run on all three desktop platforms when their
   profile, identity, write policy, central sync capability, library entry point,
-  build configuration or test
-  changes. Other Rust changes keep the full platform debug suites and skip the
-  extra production and development release builds.
+  build configuration or test changes. Dependency-only Cargo manifest and lockfile
+  changes keep the full platform debug suites and macOS credential checks, and skip
+  the extra production and development release builds. Adding Tauri command
+  registrations alone also skips those profile builds; changes elsewhere in
+  `src-tauri/src/lib.rs` still run them.
 - Docs changes run the inexpensive policy/version/workflow check.
 - The Linux upgrade check runs for changes to its script and to the identity data it reads
   (`scripts/identity.mjs`, `scripts/legacy-identity.json`). The Rust tests compare
