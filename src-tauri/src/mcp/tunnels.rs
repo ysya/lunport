@@ -607,10 +607,28 @@ pub(super) fn start(
     connector: &Connector<'_>,
     owner: &dyn crate::session::auth::Owner,
     input: &Value,
+    context: RequestContext,
+    cancel: &CancelToken,
+    approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
+    launch: &Launch<'_>,
+) -> Result<Value, String> {
+    start_within(env, runtime, tunnels, connector, owner, input, context, cancel, approve, launch, START_WAIT)
+}
+
+/// `start`, waiting up to `wait` for the launched tunnel to run or fail.
+#[allow(clippy::too_many_arguments)]
+fn start_within(
+    env: &SyncEnv,
+    runtime: &McpRuntime,
+    tunnels: &Tunnels,
+    connector: &Connector<'_>,
+    owner: &dyn crate::session::auth::Owner,
+    input: &Value,
     mut context: RequestContext,
     cancel: &CancelToken,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
     launch: &Launch<'_>,
+    wait: Duration,
 ) -> Result<Value, String> {
     let policy = enabled_policy(runtime)?;
     let key = tunnel_ref(input)?;
@@ -653,6 +671,8 @@ pub(super) fn start(
     let noting = activity::NotingOwner { inner: owner, declines: &declines };
     let confirmer = records::ClientConfirmer::new(connector.confirmer, records::asker(&context, mode, Unreviewed::Tunnel));
     let mut launched: Option<Arc<Entry>> = None;
+    // Whether the tunnel ran by the time the call answered: one still connecting then is recorded as starting, not as started.
+    let mut running = false;
     let result = (|| {
         if mode == ApprovalMode::Ask {
             let decided = approve(&request);
@@ -684,7 +704,8 @@ pub(super) fn start(
         let entry = launch(&rule, approved.clone(), mode, records::client_label(&context))?;
         launched = Some(Arc::clone(&entry));
         // The answer is the tunnel as last seen, so that its state, the message and the audit agree.
-        let seen = wait_for_start(&entry, cancel, START_WAIT)?;
+        let seen = wait_for_start(&entry, cancel, wait)?;
+        running = matches!(seen.phase, TunnelPhase::Running);
         let current = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
         let mut view = tunnels.list(&current).into_iter().find(|view| view.rule.id == rule.id).ok_or("The saved tunnel no longer exists.")?;
         view.live = seen;
@@ -709,7 +730,12 @@ pub(super) fn start(
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
-        outcome: if result.is_ok() { "tunnel_started" } else { "tunnel_not_started" }.into(),
+        outcome: match &result {
+            Ok(_) if running => "tunnel_started",
+            Ok(_) => "tunnel_starting",
+            Err(_) => "tunnel_not_started",
+        }
+        .into(),
         review: if mode == ApprovalMode::AutoLog { Some(McpReview::AutoLog) } else { decision.and_then(activity::review_of) },
         stop: result.as_ref().err().map(|error: &String| {
             let declined = declines

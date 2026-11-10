@@ -1051,6 +1051,42 @@ fn tunnel_entries_name_the_host_and_the_tunnel_apart() {
     assert_eq!(names(&r), ("tunnel_stopped".to_string(), "web-1".to_string(), Some("Database".to_string())));
 }
 
+/// A tunnel still connecting when the start stops waiting is not recorded as started: the answer says it is still connecting, and its
+/// audit entry says so too.
+#[test]
+fn a_tunnel_still_connecting_when_the_start_answers_is_recorded_as_starting() {
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    let web = host(&d, &r, "web-1", true);
+    let id = created(&d, &r, &tunnels);
+    let route = Route::to(&web, true);
+    // The launched tunnel never leaves Connecting.
+    let launches = Launches::new(&d, &tunnels, None);
+    let launch = |rule: &TunnelRule, approved, mode, who| launches.launch(rule, approved, mode, who);
+    let value = start_within(
+        &d.env(),
+        &r,
+        &tunnels,
+        &route.connector(),
+        &FakeOwner::default(),
+        &json!({"tunnel": "Database"}),
+        RequestContext::default(),
+        &CancelToken::default(),
+        &never,
+        &launch,
+        Duration::from_millis(100),
+    )
+    .unwrap();
+    assert_eq!(value["tunnel"]["state"], "connecting");
+    assert_eq!(value["message"], "The tunnel is still connecting; read list_tunnels for its state.");
+    let entry = last_entry(&r);
+    assert_eq!(entry.outcome, "tunnel_starting");
+    assert_eq!(stop_of(&entry), None);
+    assert_eq!(entry.review, Some(McpReview::AutoLog));
+    tunnels.entry(&id).unwrap().stop();
+}
+
 #[test]
 fn start_tunnel_records_refused_no_answer_and_errors_apart() {
     for (decision, review, kind) in [
