@@ -1,16 +1,20 @@
-//! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save and delete them.
+//! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them.
+use super::connect::CancelToken;
+use super::database_ports::{ensure_password, CloudSqlUpstream, DatabasePorts, NO_LOCAL_PORT};
 use super::tunnels::{main_only, snapshot};
 use crate::{
     error::AppError,
+    state::AppState,
     sync::{
         databases::{self, SavedDatabase},
-        env::SyncEnv,
+        env::{OsKeychain, SyncEnv},
         records_v3::SyncStateV3,
         transports,
     },
 };
 use serde::Serialize;
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::BTreeSet, sync::Arc};
+use tauri::Manager;
 
 /// Where the local port of a database stands on this device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -24,6 +28,13 @@ pub enum DatabasePhase {
     Running,
     Stopping,
     Error,
+}
+
+impl DatabasePhase {
+    /// Starting, running or stopping: the port holds its address or its connections here.
+    pub(crate) fn busy(self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Stopping)
+    }
 }
 
 /// What this device runs for a database. It never syncs: another device runs, or does not run, its own.
@@ -58,12 +69,16 @@ pub struct DatabaseView {
     pub removed: bool,
 }
 
-/// Every saved database with what this device runs for it, by name and then by identity.
-fn views(state: &SyncStateV3) -> Vec<DatabaseView> {
+/// Every saved database with what this device runs for it (`ports`), by name and then by identity. A database that runs here although its
+/// record is gone is listed too, so that it can be stopped.
+fn views(state: &SyncStateV3, ports: &DatabasePorts) -> Vec<DatabaseView> {
     let mut views: Vec<DatabaseView> = databases::view(state)
         .into_iter()
-        .map(|row| DatabaseView { database: row.database, live: DatabaseLive::default(), synced: row.synced, blocked: row.blocked, removed: false })
+        .map(|row| DatabaseView { live: ports.live(&row.database.id), database: row.database, synced: row.synced, blocked: row.blocked, removed: false })
         .collect();
+    let saved: BTreeSet<String> = views.iter().map(|view| view.database.id.clone()).collect();
+    let removed = ports.unsaved(&|id| saved.contains(id));
+    views.extend(removed.into_iter().map(|(database, live)| DatabaseView { database, live, synced: false, blocked: true, removed: true }));
     views.sort_by_cached_key(|view| (view.database.name.to_lowercase(), view.database.id.clone()));
     views
 }
@@ -97,10 +112,36 @@ fn delete(env: &SyncEnv, expected: SavedDatabase) -> Result<(), String> {
     edit(env, &id, Some(&expected), None).map(|_| ())
 }
 
+/// Runs `change` on the library, unless the database `id` runs here: a running database is not changed.
+fn unless_running<T>(app: &tauri::AppHandle, id: &str, change: impl FnOnce(&SyncEnv) -> Result<T, String>) -> Result<T, String> {
+    app.state::<AppState>().session.databases.edit(id, || crate::sync::engine::with_env(app, change).map_err(|e| e.to_string())?)
+}
+
+/// Starts the saved database `id` on its local port, with the password this device keeps for it. The port is registered with the broker,
+/// so that quitting the app stops it, and its grant questions go through the broker's gates, which hosts use as well.
+fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    super::app::start(app);
+    let state = app.state::<AppState>();
+    let broker = state.session.broker.lock().unwrap().clone().ok_or("Lunport's connection service is unavailable. Restart Lunport and try again.")?;
+    let ports = &state.session.databases;
+    ports.use_upstream(|| Arc::new(CloudSqlUpstream::for_app(app, &broker)));
+    // The database is read and started under the edit lock, so that no save comes in between.
+    let _editing = ports.editing();
+    let database =
+        databases::view(&snapshot(app)?).into_iter().map(|row| row.database).find(|database| database.id == id).ok_or("The saved database no longer exists.")?;
+    if database.local_port.is_none() {
+        return Err(NO_LOCAL_PORT.to_string());
+    }
+    let password = ensure_password(&OsKeychain, id)?;
+    let quit = CancelToken::default();
+    let registration = broker.register_tunnel(quit.clone())?;
+    ports.start(&database, password, quit, Box::new(registration))
+}
+
 #[tauri::command]
 pub async fn databases_list(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<Vec<DatabaseView>, String> {
     main_only(&window, "Database")?;
-    tauri::async_runtime::spawn_blocking(move || Ok(views(&snapshot(&app)?)))
+    tauri::async_runtime::spawn_blocking(move || Ok(views(&snapshot(&app)?, &app.state::<AppState>().session.databases)))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -113,22 +154,42 @@ pub async fn databases_save(
     expected: Option<SavedDatabase>,
 ) -> Result<SavedDatabase, String> {
     main_only(&window, "Database")?;
-    tauri::async_runtime::spawn_blocking(move || crate::sync::engine::with_env(&app, |env| save(env, database, expected)).map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = database.id.clone();
+        unless_running(&app, &id, |env| save(env, database, expected))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn databases_delete(app: tauri::AppHandle, window: tauri::WebviewWindow, expected: SavedDatabase) -> Result<(), String> {
     main_only(&window, "Database")?;
-    tauri::async_runtime::spawn_blocking(move || crate::sync::engine::with_env(&app, |env| delete(env, expected)).map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = expected.id.clone();
+        unless_running(&app, &id, |env| delete(env, expected))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn databases_start(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    tauri::async_runtime::spawn_blocking(move || start(&app, &id)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn databases_stop(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    app.state::<AppState>().session.databases.stop(&id);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::database_ports::tests::FakeUpstream;
     use crate::sync::{
         databases::{
             tests::{database, state},
@@ -139,6 +200,8 @@ mod tests {
         transports::{tests::in_central_mode, PamCheck},
     };
     use serde_json::json;
+    use std::time::{Duration, Instant};
+    use zeroize::Zeroizing;
 
     const ORDERS: &str = "00000000000000a1";
     const ANALYTICS: &str = "00000000000000a2";
@@ -169,7 +232,7 @@ mod tests {
 
     /// What `databases_list` shows the device now.
     fn listed(d: &TestDevice) -> Vec<DatabaseView> {
-        views(&record_runtime::snapshot(&d.env()).unwrap().0)
+        views(&record_runtime::snapshot(&d.env()).unwrap().0, &DatabasePorts::default())
     }
 
     fn new_with_justification() -> SavedDatabase {
@@ -187,7 +250,7 @@ mod tests {
 
     #[test]
     fn databases_list_shows_saved_databases_as_stopped() {
-        assert!(views(&state()).is_empty());
+        assert!(views(&state(), &DatabasePorts::default()).is_empty());
         let orders = database(ORDERS);
         let analytics = named(ANALYTICS, "analytics");
         let copy = named(ORDERS_COPY, "Orders");
@@ -195,7 +258,7 @@ mod tests {
         for (database, now) in [(&orders, 10), (&analytics, 11), (&copy, 12)] {
             saved = databases::set(&saved, &database.id, None, Some(database.clone()), now).unwrap();
         }
-        let listed = views(&saved);
+        let listed = views(&saved, &DatabasePorts::default());
         let by_name: Vec<&SavedDatabase> = listed.iter().map(|view| &view.database).collect();
         assert_eq!(by_name, vec![&analytics, &orders, &copy], "by name whatever the case, then by identity");
         for view in &listed {
@@ -208,13 +271,43 @@ mod tests {
     #[test]
     fn a_library_database_is_listed_as_synced_and_a_paused_library_blocks_it() {
         let library = databases::set(&in_central_mode(state()), ORDERS, None, Some(database(ORDERS)), 10).unwrap();
-        let listed = views(&library);
+        let listed = views(&library, &DatabasePorts::default());
         assert_eq!(listed.len(), 1);
         assert!(listed[0].synced && !listed[0].blocked && !listed[0].removed);
         let mut paused = library;
         paused.shared_writes_blocked = true;
-        let listed = views(&paused);
+        let listed = views(&paused, &DatabasePorts::default());
         assert!(listed[0].synced && listed[0].blocked && !listed[0].removed);
+    }
+
+    #[test]
+    fn a_running_database_is_listed_with_its_port_and_one_deleted_elsewhere_to_be_stopped() {
+        let ports = DatabasePorts::new(Arc::new(FakeUpstream::default()));
+        let saved = databases::set(&state(), ORDERS, None, Some(database(ORDERS)), 10).unwrap();
+        // Started on a port the system picks; the record keeps its own.
+        let started = SavedDatabase { local_port: Some(0), ..database(ORDERS) };
+        ports.start(&started, Zeroizing::new("c2VjcmV0LXBvcnQtcGFzc3dvcmQtMDEy".into()), CancelToken::default(), Box::new(())).unwrap();
+        let listed = views(&saved, &ports);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].database, database(ORDERS), "the record as it is saved");
+        assert_eq!(listed[0].live, ports.live(ORDERS));
+        assert_eq!(listed[0].live.phase, DatabasePhase::Running);
+        assert!(listed[0].live.port.is_some_and(|port| port != 0));
+        assert!(!listed[0].removed);
+        // Deleted on another device while it runs here: it is listed as it runs, to be stopped.
+        let deleted = databases::set(&saved, ORDERS, Some(&database(ORDERS)), None, 11).unwrap();
+        let listed = views(&deleted, &ports);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].database, started);
+        assert!(listed[0].removed && listed[0].blocked && !listed[0].synced);
+        assert_eq!(listed[0].live.phase, DatabasePhase::Running);
+        ports.stop(ORDERS);
+        let end = Instant::now() + Duration::from_secs(10);
+        while ports.running(ORDERS) {
+            assert!(Instant::now() < end, "the port stops");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(views(&deleted, &ports).is_empty(), "once stopped it is gone");
     }
 
     #[test]

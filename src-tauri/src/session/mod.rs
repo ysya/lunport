@@ -28,6 +28,8 @@ pub fn ipc_dir(app_data: &Path) -> PathBuf {
 #[derive(Default)]
 pub struct SessionRuntime {
     pub tunnels: tunnels::Tunnels,
+    /// The local ports of the saved databases this device runs.
+    pub(crate) databases: database_ports::DatabasePorts,
     pub embedded: std::sync::Arc<embedded::Terminals>,
     pub deployments: deploy::Deployments,
     pub auth_questions: std::sync::Arc<auth_window::AuthHub>,
@@ -45,6 +47,7 @@ pub mod transports;
 pub mod tunnels;
 pub mod databases;
 pub(crate) mod database_access;
+pub(crate) mod database_ports;
 pub(crate) mod pgwire;
 pub mod embedded;
 pub mod auth;

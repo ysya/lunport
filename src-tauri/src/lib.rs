@@ -415,6 +415,8 @@ fn run_app(host: bool, start_hidden: bool) {
             session::databases::databases_list,
             session::databases::databases_save,
             session::databases::databases_delete,
+            session::databases::databases_start,
+            session::databases::databases_stop,
             session::transports::transports_oslogin_profile,
             session::transports::transports_pam_status,
             session::transports::transports_pam_request,
