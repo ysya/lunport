@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use zeroize::Zeroizing;
 
@@ -21,15 +21,17 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const ADC_FILE: &str = "application_default_credentials.json";
 
-/// An access token and the Google account it belongs to.
+/// An access token, the Google account it belongs to and when it stops working.
 pub struct Token {
     pub value: Secret,
     pub account: String,
+    /// When the token expires, as the wall clock will read then; `None` when the source does not know.
+    pub expires_at: Option<SystemTime>,
 }
 
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Token").field("account", &self.account).field("value", &"<redacted>").finish()
+        f.debug_struct("Token").field("account", &self.account).field("value", &"<redacted>").field("expires_at", &self.expires_at).finish()
     }
 }
 
@@ -341,6 +343,16 @@ impl FileStore {
     }
 }
 
+/// The wall-clock time of `at`, an instant on the monotonic clock the cache keeps its expiries on, worked out from both clocks as they
+/// read now; `None` when it does not fit the wall clock's range.
+fn wall_clock(at: Instant) -> Option<SystemTime> {
+    let now = Instant::now();
+    match at.checked_duration_since(now) {
+        Some(ahead) => SystemTime::now().checked_add(ahead),
+        None => SystemTime::now().checked_sub(now.duration_since(at)),
+    }
+}
+
 /// A reqwest error without the URL it carries (the token endpoint is fixed and the text should stay short).
 fn describe(error: &reqwest::Error) -> String {
     let text = error.to_string();
@@ -358,18 +370,16 @@ impl TokenSource for FileStore {
             let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(cached) = cache.get(&path) {
                 if cached.expires_at > Instant::now() + REFRESH_MARGIN {
-                    return Ok(Token { value: cached.token.clone(), account: cached.account.clone() });
+                    return Ok(Token { value: cached.token.clone(), account: cached.account.clone(), expires_at: wall_clock(cached.expires_at) });
                 }
             }
         }
         let credentials = read_credentials(&path, account)?;
         let (token, lifetime) = self.refresh(&credentials)?;
         let account = credentials.account;
-        self.cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(path, Cached { token: token.clone(), account: account.clone(), expires_at: Instant::now() + lifetime });
-        Ok(Token { value: token, account })
+        let expires_at = Instant::now() + lifetime;
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner).insert(path, Cached { token: token.clone(), account: account.clone(), expires_at });
+        Ok(Token { value: token, account, expires_at: wall_clock(expires_at) })
     }
 }
 
@@ -380,7 +390,7 @@ pub struct StaticToken(pub String);
 #[cfg(test)]
 impl TokenSource for StaticToken {
     fn access_token(&self, account: Option<&str>) -> Result<Token, AuthError> {
-        Ok(Token { value: Zeroizing::new(self.0.clone()), account: account.unwrap_or("static@example.com").to_string() })
+        Ok(Token { value: Zeroizing::new(self.0.clone()), account: account.unwrap_or("static@example.com").to_string(), expires_at: None })
     }
 }
 
@@ -542,6 +552,28 @@ mod tests {
         store.set_cached_expiry(&path, Instant::now() + Duration::from_secs(4 * 60));
         store.access_token(Some("frank@example.com")).unwrap();
         mock.assert();
+    }
+
+    /// A token says when it expires: a fresh one by the `expires_in` the token service answered (the mock's is 3599 seconds), and one
+    /// answered from the cache by the end the cache holds, not by a new hour.
+    #[test]
+    fn a_token_reports_when_it_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "legacy_credentials/frank@example.com/adc.json", &authorized_user("frank@example.com", "rt-frank"));
+        let mut server = mockito::Server::new();
+        token_mock(&mut server, "rt-frank", "ya29.frank");
+        let store = store(dir.path(), None, &server);
+
+        let asked = SystemTime::now();
+        let fresh = store.access_token(Some("frank@example.com")).unwrap();
+        let lifetime = fresh.expires_at.expect("a token from the token service has an end").duration_since(asked).expect("the end is ahead");
+        assert!((Duration::from_secs(3598)..=Duration::from_secs(3601)).contains(&lifetime), "{lifetime:?}");
+
+        store.set_cached_expiry(&path, Instant::now() + Duration::from_secs(1000));
+        let cached = store.access_token(Some("frank@example.com")).unwrap();
+        let lifetime = cached.expires_at.expect("a cached token has an end too").duration_since(SystemTime::now()).expect("the end is ahead");
+        assert!((Duration::from_secs(998)..=Duration::from_secs(1001)).contains(&lifetime), "{lifetime:?}");
+        assert_eq!(cached.value.as_str(), "ya29.frank", "the cached token is the one that was refreshed");
     }
 
     #[test]

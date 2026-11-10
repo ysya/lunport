@@ -569,7 +569,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut answers = self.answers.lock().unwrap();
             let answer = if answers.len() > 1 { answers.pop_front().unwrap() } else { answers.front().cloned().unwrap() };
-            answer.map(|value| Token { value: Zeroizing::new(value), account: account.unwrap_or("static@example.com").to_string() })
+            answer.map(|value| Token { value: Zeroizing::new(value), account: account.unwrap_or("static@example.com").to_string(), expires_at: None })
         }
     }
 

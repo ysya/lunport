@@ -7,10 +7,14 @@
 //! `cli` finds and runs the gcloud executable for the account actions of the Google Cloud page, the one place
 //! Lunport runs gcloud.
 //!
+//! `cloudsql` is the Cloud SQL Admin API behind the saved databases: an instance's connect settings, the client certificate Cloud SQL
+//! signs for a key made for one connection, and a project's PostgreSQL instances.
+//!
 //! `relay.rs` and `iap.rs` are ported from gcloud (Apache License 2.0); see `NOTICE.md` in this directory.
 
 pub mod auth;
 pub mod cli;
+pub mod cloudsql;
 pub mod credentials;
 pub mod iap;
 pub mod oslogin;

@@ -18,10 +18,15 @@ pub struct AppState {
     /// The one client for Google's APIs: its token cache and its library clients serve the connections and the
     /// Google Cloud panel alike, so a grant check costs one search, not a sign-in.
     pub gcp: Arc<crate::gcp::rest::RestClient>,
+    /// The Cloud SQL Admin API for the databases. It signs with `gcp`'s token source, so a database connection and the Google Cloud page share
+    /// one token cache.
+    pub sqladmin: Arc<dyn crate::gcp::cloudsql::SqlAdmin>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        let gcp = Arc::new(crate::gcp::rest::RestClient::new(Arc::new(crate::gcp::auth::FileStore::from_environment())));
+        let sqladmin = Arc::new(crate::gcp::cloudsql::RestSqlAdmin::new(gcp.tokens()));
         Self {
             background_credentials_only: AtomicBool::new(false),
             tray_visible: AtomicBool::new(true),
@@ -29,7 +34,8 @@ impl Default for AppState {
             mcp: crate::mcp::McpRuntime::default(),
             sync: crate::sync::runtime::SyncRuntime::default(),
             session: crate::session::SessionRuntime::default(),
-            gcp: Arc::new(crate::gcp::rest::RestClient::new(Arc::new(crate::gcp::auth::FileStore::from_environment()))),
+            gcp,
+            sqladmin,
         }
     }
 }
