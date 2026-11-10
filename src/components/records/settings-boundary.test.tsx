@@ -27,6 +27,7 @@ describe("records settings compatibility", () => {
     const client = new QueryClient();
     client.setQueryData(mcpStatusKey, {
       approval_mode: "ask",
+      max_transfer_mib: 1024,
       noninteractive_credentials_supported: false,
       noninteractive_credentials_notice: "Ask required for stored credentials",
       audit_error: null,

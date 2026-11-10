@@ -62,6 +62,18 @@ const PROPOSAL_WORDS: Record<string, { title: string; description: string; butto
     button: "Start tunnel", hostLine: hostId,
     note: "Check who can reach the listener before starting. Requests expire after 120 seconds; a changed route requires fresh approval.",
   },
+  scp_upload: {
+    title: "Upload this file?",
+    description: "Lunport will copy the local file to this host. Review both paths; an existing remote file may be replaced.",
+    button: "Upload file", hostLine: hostId,
+    note: "The AI client cannot approve this request. Requests expire after 120 seconds.",
+  },
+  scp_download: {
+    title: "Download this file?",
+    description: "Lunport will copy the remote file to this computer. Review both paths; an existing local file will not be replaced.",
+    button: "Download file", hostLine: hostId,
+    note: "The AI client cannot approve this request. Requests expire after 120 seconds.",
+  },
 };
 
 export function McpApprovalCardView({ request, busy, armed, expired = false, onAnswer }: McpApprovalCardViewProps) {
@@ -70,6 +82,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
   const endpoint = `${request.user ? `${revealHidden(request.user)}@` : ""}${revealHidden(request.hostname ?? request.alias)}${request.port ? `:${request.port}` : ""}`;
   const proposal = request.host_proposal;
   const words = proposal ? PROPOSAL_WORDS[proposal.kind] ?? PROPOSAL_WORDS.create_host : null;
+  const transfer = proposal?.kind === "scp_upload" || proposal?.kind === "scp_download";
 
   return (
     <>
@@ -86,7 +99,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
         <div className="space-y-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
           <p>Host: {revealHidden(request.alias)} · {words ? words.hostLine(request) : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
           <p>Resolved: {endpoint}</p>
-          {!proposal && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
+          {(!proposal || transfer) && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
           <McpAttribution requestedBy={request.requested_by} requesterId={request.requester_id} clientInfo={request.client_info} />
         </div>
         {proposal ? (

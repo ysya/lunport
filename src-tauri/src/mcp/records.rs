@@ -892,6 +892,8 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "get_host"
             | "get_effective_config"
             | "ssh_exec"
+            | "scp_upload"
+            | "scp_download"
             | "create_host"
             | "verify_host_key"
             | "update_host"
@@ -1114,6 +1116,31 @@ pub(crate) fn dispatch(
                 },
                 context,
                 &|policy, id| permissions::authorize(&state, policy, id),
+            )
+        }
+        "scp_upload" | "scp_download" => {
+            let kind = if method == "scp_upload" { super::transfers::TransferKind::Upload } else { super::transfers::TransferKind::Download };
+            let alias = string_param(params, "alias")?;
+            let local_path = params.get("local_path").and_then(Value::as_str).ok_or("missing local_path")?;
+            let remote_path = params.get("remote_path").and_then(Value::as_str).ok_or("missing remote_path")?;
+            let timeout = match params.get("timeout_seconds") {
+                None => 300,
+                Some(value) => value.as_u64().filter(|seconds| (1..=3600).contains(seconds)).ok_or("timeout_seconds must be an integer from 1 to 3600")?,
+            };
+            let owner = crate::session::auth_window::NativeOwner {
+                ai: Some(asker(&context, policy.approval_mode, Unreviewed::Transfer)),
+                hub: state.session.auth_questions.clone(),
+                surface: Arc::new(crate::session::auth_window::TauriAuthSurface { app: app.clone() }),
+                request_id: context.id.clone(),
+                cancel: cancel.clone(),
+            };
+            super::transfers::execute_context(
+                &state.mcp, connector, kind, alias, local_path, remote_path, timeout, cancel, &owner,
+                &|request| state.mcp.wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                    crate::show_main_window(app);
+                    let _ = app.emit("mcp://approval-requested", request);
+                }),
+                context, &|current, id| permissions::authorize(&state, current, id),
             )
         }
         _ => Err(format!("Unknown MCP method: {method}")),

@@ -23,6 +23,7 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -1137,6 +1138,18 @@ impl Session for RusshSession {
         self.runtime.handle().block_on(exec_on(destination, command, timeout, output_cap))
     }
 
+    fn scp_upload(&self, remote_path: &str, name: &str, size: u64, source: &mut dyn Read, timeout: Duration) -> Result<u64, SessionError> {
+        if !self.is_alive() { return Err(SessionError::Closed); }
+        let destination = self.connection.destination()?;
+        self.runtime.handle().block_on(scp_upload_on(destination, remote_path, name, size, source, timeout))
+    }
+
+    fn scp_download(&self, remote_path: &str, destination: &mut dyn Write, max_bytes: u64, timeout: Duration) -> Result<u64, SessionError> {
+        if !self.is_alive() { return Err(SessionError::Closed); }
+        let server = self.connection.destination()?;
+        self.runtime.handle().block_on(scp_download_on(server, remote_path, destination, max_bytes, timeout))
+    }
+
     fn is_alive(&self) -> bool {
         self.connection.is_open()
     }
@@ -1229,6 +1242,163 @@ async fn exec_on(destination: &Established, command: &str, timeout: Duration, ou
         Ended::Disconnected
     };
     Ok(result)
+}
+
+fn scp_bad(message: &str) -> SessionError { SessionError::Channel(message.into()) }
+
+fn scp_path(path: &str) -> Result<String, SessionError> {
+    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+        return Err(scp_bad("SCP path is empty, too long or contains a control character"));
+    }
+    Ok(format!("'{}'", path.replace('\'', "'\\''")))
+}
+
+/// The legacy SCP dialogue carries file bytes and acknowledgements on one SSH channel. Keep exit status and stderr separate from file data.
+struct ScpWire {
+    channel: Channel<Msg>,
+    pending: Vec<u8>,
+    offset: usize,
+    exit_status: Option<u32>,
+    deadline: Instant,
+}
+
+impl ScpWire {
+    async fn open(destination: &Established, command: String, timeout: Duration) -> Result<Self, SessionError> {
+        let deadline = Instant::now() + timeout.min(LONGEST_TIMEOUT);
+        let channel = open_channel(destination, CHANNEL_SETUP_LIMIT).await?;
+        tokio::time::timeout_at(deadline, channel.exec(true, command)).await
+            .map_err(|_| SessionError::Timeout)?
+            .map_err(channel_error)?;
+        Ok(Self { channel, pending: Vec::new(), offset: 0, exit_status: None, deadline })
+    }
+
+    async fn send(&self, bytes: &[u8]) -> Result<(), SessionError> {
+        tokio::time::timeout_at(self.deadline, self.channel.data_bytes(bytes.to_vec())).await
+            .map_err(|_| SessionError::Timeout)?
+            .map_err(channel_error)
+    }
+
+    async fn fill(&mut self) -> Result<(), SessionError> {
+        while self.offset == self.pending.len() {
+            let message = tokio::time::timeout_at(self.deadline, self.channel.wait()).await
+                .map_err(|_| SessionError::Timeout)?
+                .ok_or_else(|| scp_bad("remote SCP ended before the file transfer completed"))?;
+            match message {
+                ChannelMsg::Data { data } => { self.pending = data.to_vec(); self.offset = 0; }
+                ChannelMsg::ExtendedData { .. } | ChannelMsg::Eof | ChannelMsg::Close => {}
+                ChannelMsg::ExitStatus { exit_status } => self.exit_status = Some(exit_status),
+                ChannelMsg::Failure => return Err(scp_bad("remote SCP refused the command")),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn read_byte(&mut self) -> Result<u8, SessionError> {
+        self.fill().await?;
+        let byte = self.pending[self.offset];
+        self.offset += 1;
+        Ok(byte)
+    }
+
+    async fn line(&mut self) -> Result<Vec<u8>, SessionError> {
+        let mut line = Vec::new();
+        loop {
+            let byte = self.read_byte().await?;
+            if byte == b'\n' { return Ok(line); }
+            if line.len() >= 4096 { return Err(scp_bad("remote SCP sent an oversized line")); }
+            line.push(byte);
+        }
+    }
+
+    async fn acknowledgement(&mut self) -> Result<(), SessionError> {
+        match self.read_byte().await? {
+            0 => Ok(()),
+            1 | 2 => {
+                let message = String::from_utf8_lossy(&self.line().await?).chars().filter(|c| !c.is_control()).take(256).collect::<String>();
+                Err(SessionError::Channel(format!("remote SCP refused the transfer: {message}")))
+            }
+            _ => Err(scp_bad("remote SCP sent an invalid acknowledgement")),
+        }
+    }
+
+    async fn copy_exact(&mut self, destination: &mut dyn Write, mut size: u64) -> Result<(), SessionError> {
+        while size > 0 {
+            self.fill().await?;
+            let count = (self.pending.len() - self.offset).min(32 * 1024).min(size as usize);
+            destination.write_all(&self.pending[self.offset..self.offset + count])
+                .map_err(|_| scp_bad("writing the local download failed"))?;
+            self.offset += count;
+            size -= count as u64;
+        }
+        Ok(())
+    }
+
+    async fn finish(mut self) -> Result<(), SessionError> {
+        tokio::time::timeout_at(self.deadline, self.channel.eof()).await
+            .map_err(|_| SessionError::Timeout)?
+            .map_err(channel_error)?;
+        loop {
+            let message = tokio::time::timeout_at(self.deadline, self.channel.wait()).await
+                .map_err(|_| SessionError::Timeout)?;
+            match message {
+                None => break,
+                Some(ChannelMsg::ExitStatus { exit_status }) => self.exit_status = Some(exit_status),
+                Some(ChannelMsg::Failure) => return Err(scp_bad("remote SCP failed")),
+                _ => {}
+            }
+        }
+        match self.exit_status { Some(0) => Ok(()), _ => Err(scp_bad("remote SCP did not exit successfully")) }
+    }
+}
+
+async fn scp_upload_on(destination: &Established, remote_path: &str, name: &str, size: u64, source: &mut dyn Read, timeout: Duration) -> Result<u64, SessionError> {
+    if name.is_empty() || name == "." || name == ".." || name.len() > 255 || name.chars().any(|c| c.is_control() || c == '/' || c == '\\') {
+        return Err(scp_bad("local file name cannot be sent through SCP"));
+    }
+    let mut wire = ScpWire::open(destination, format!("scp -t -- {}", scp_path(remote_path)?), timeout).await?;
+    wire.acknowledgement().await?;
+    wire.send(format!("C0644 {size} {name}\n").as_bytes()).await?;
+    wire.acknowledgement().await?;
+    let mut remaining = size;
+    let mut buffer = [0u8; 32 * 1024];
+    while remaining > 0 {
+        let count = (remaining as usize).min(buffer.len());
+        source.read_exact(&mut buffer[..count]).map_err(|_| scp_bad("reading the local upload failed"))?;
+        wire.send(&buffer[..count]).await?;
+        remaining -= count as u64;
+    }
+    wire.send(&[0]).await?;
+    wire.acknowledgement().await?;
+    wire.finish().await?;
+    Ok(size)
+}
+
+async fn scp_download_on(server: &Established, remote_path: &str, destination: &mut dyn Write, max_bytes: u64, timeout: Duration) -> Result<u64, SessionError> {
+    let mut wire = ScpWire::open(server, format!("scp -f -- {}", scp_path(remote_path)?), timeout).await?;
+    wire.send(&[0]).await?;
+    let first = wire.read_byte().await?;
+    if first == 1 || first == 2 {
+        let message = String::from_utf8_lossy(&wire.line().await?).chars().filter(|c| !c.is_control()).take(256).collect::<String>();
+        return Err(SessionError::Channel(format!("remote SCP refused the transfer: {message}")));
+    }
+    if first != b'C' { return Err(scp_bad("remote SCP did not send a regular file")); }
+    let header = wire.line().await?;
+    let header = std::str::from_utf8(&header).map_err(|_| scp_bad("remote SCP sent an invalid file header"))?;
+    let mut fields = header.splitn(3, ' ');
+    let mode = fields.next().unwrap_or_default();
+    let size = fields.next().unwrap_or_default().parse::<u64>().map_err(|_| scp_bad("remote SCP sent an invalid file size"))?;
+    let name = fields.next().unwrap_or_default();
+    if mode.len() != 4 || !mode.bytes().all(|c| (b'0'..=b'7').contains(&c)) || name.is_empty() || name == "." || name == ".." || name.chars().any(|c| c.is_control() || c == '/' || c == '\\') {
+        return Err(scp_bad("remote SCP sent an invalid file header"));
+    }
+    if size > max_bytes { return Err(scp_bad("remote file exceeds the download size limit")); }
+    wire.send(&[0]).await?;
+    wire.copy_exact(destination, size).await?;
+    wire.acknowledgement().await?;
+    wire.send(&[0]).await?;
+    wire.finish().await?;
+    Ok(size)
 }
 
 /// Appends as much of `data` to `stream` as the cap leaves room for (`other` is the length of the other stream); false when some of it did not fit.

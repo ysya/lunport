@@ -57,7 +57,7 @@ else {
   let passwordSaveFailed = false;
   // Aliases without spaces, which the host editor accepts on save.
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate" || scenario === "iap") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
-  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/lunport", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", max_transfer_mib: 1024, allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/lunport", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
   // The `mcp-audit` scenario: AI activity of every kind, today and yesterday, on the fixture hosts and on one no longer in the library.
   let activity: McpAuditEntry[] = [];
   if (scenario === "mcp-audit") {
@@ -406,6 +406,7 @@ else {
         }
         if (command === "mcp_set_host_allowed") return mcp = { ...mcp, allowed_hosts: args.allowed ? [...new Set([...mcp.allowed_hosts, String(args.alias)])] : mcp.allowed_hosts.filter((id) => id !== args.alias) };
         if (command === "mcp_set_approval_mode") return mcp = { ...mcp, approval_mode: String(args.approvalMode) };
+        if (command === "mcp_set_transfer_limit") return mcp = { ...mcp, max_transfer_mib: Number(args.maxTransferMib) };
         if (command === "records_key_generate" || command === "records_key_import" || command === "records_key_import_file") {
           overview = { ...overview, generation: String(Number(overview.generation) + 1), keys: [...overview.keys, { ...overview.keys[0], id: String(overview.keys.length + 10).padStart(32, "0"), public: { ...overview.keys[0].public!, name: String(args.name) } }] };
           return overview;

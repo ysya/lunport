@@ -5,6 +5,7 @@
 //! while another writes, which needs a shared reference), and `AuthSource::public_key` exists (russh's public-key login announces the
 //! public key before it asks for a signature, and neither `Hop` nor `sign` carries it).
 
+use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use super::error::{AuthError, ConnectError, SessionError};
@@ -48,6 +49,16 @@ pub trait Session: Send + Sync {
     /// then ends as `Ended::TimedOut`, or fails with `SessionError::Timeout` (a request was not taken) or `SessionError::Channel` (the
     /// channel did not open).
     fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError>;
+
+    /// Copies one regular file using the remote server's SCP program. The caller owns the local file and bounds its size.
+    fn scp_upload(&self, _remote_path: &str, _name: &str, _size: u64, _source: &mut dyn Read, _timeout: Duration) -> Result<u64, SessionError> {
+        Err(SessionError::Channel("SCP upload is unavailable in this SSH engine.".into()))
+    }
+
+    /// Reads one remote file into a caller-owned destination. An oversized file is rejected before its bytes are written.
+    fn scp_download(&self, _remote_path: &str, _destination: &mut dyn Write, _max_bytes: u64, _timeout: Duration) -> Result<u64, SessionError> {
+        Err(SessionError::Channel("SCP download is unavailable in this SSH engine.".into()))
+    }
 
     /// Whether the connection (every hop of it) is still up, judged from the connection's own state and never from an error variant.
     ///

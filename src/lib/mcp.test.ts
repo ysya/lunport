@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AuthRequest } from "@/bindings/AuthRequest";
 import type { McpStatus } from "@/bindings/McpStatus";
 import { renderHook, stubBackend } from "./test-ipc";
-import { useSetMcpApprovalMode, useSetMcpGroupAllowed, mcpStatusKey } from "./mcp";
+import { useSetMcpApprovalMode, useSetMcpGroupAllowed, useSetMcpTransferLimit, mcpStatusKey } from "./mcp";
 import { resolveAuthentication, followAuthentication } from "./authentication";
 
 const eventSource = vi.hoisted(() => ({
@@ -29,6 +29,7 @@ describe("native MCP frontend boundary", () => {
   it("sends an explicit risk acknowledgment to native mode change and reflects returned policy", async () => {
     const result: McpStatus = {
       approval_mode: "auto_log", enabled: true, bridge_active: true,
+      max_transfer_mib: 1024,
       noninteractive_credentials_supported: false,
       noninteractive_credentials_notice: "Use Ask for stored credentials.",
       audit_error: null, allowed_hosts: [], allowed_groups: [], pending: [], recent: [],
@@ -39,6 +40,16 @@ describe("native MCP frontend boundary", () => {
     const mutation = renderHook(client, useSetMcpApprovalMode);
     await mutation.mutateAsync({ approvalMode: "auto_log", riskAcknowledged: true });
     expect(calls).toEqual([["mcp_set_approval_mode", { approvalMode: "auto_log", riskAcknowledged: true }]]);
+    expect(client.getQueryData(mcpStatusKey)).toEqual(result);
+  });
+
+  it("sends a transfer limit in MiB and refreshes the native policy", async () => {
+    const result = { max_transfer_mib: 2048 };
+    const calls = stubBackend(async () => result);
+    const client = new QueryClient();
+    const mutation = renderHook(client, useSetMcpTransferLimit);
+    await mutation.mutateAsync(2048);
+    expect(calls).toEqual([["mcp_set_transfer_limit", { maxTransferMib: 2048 }]]);
     expect(client.getQueryData(mcpStatusKey)).toEqual(result);
   });
 

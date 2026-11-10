@@ -32,6 +32,7 @@ const CHIPS: { kind: ActivityKind | "all"; label: string }[] = [
 
 const ACTIONS: { action: ActionKind; label: string }[] = [
   { action: "command", label: "Commands" },
+  { action: "transfer", label: "File transfers" },
   { action: "tunnel", label: "Tunnels" },
   { action: "change", label: "Host and route changes" },
   { action: "server_key", label: "Server keys" },
@@ -100,7 +101,7 @@ export function AiActivityView({
       : entries.length === 0 ? <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-14 text-center">
         <Bot className="size-7 text-muted-foreground" aria-hidden="true" />
         <h2 className="font-medium">No AI activity yet</h2>
-        <p className="max-w-sm text-sm text-muted-foreground">Commands, tunnels, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.</p>
+        <p className="max-w-sm text-sm text-muted-foreground">Commands, file transfers, tunnels, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.</p>
         <Button variant="outline" onClick={openAiSettings}>Set up AI access</Button>
       </div>
       : <>
@@ -108,7 +109,7 @@ export function AiActivityView({
           <div className="flex flex-wrap items-center gap-3">
             <div className="relative min-w-48 flex-1">
               <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" />
-              <Input id="activity-search" aria-label="Search AI activity" placeholder="Search commands, hosts or clients…" className="pl-9"
+              <Input id="activity-search" aria-label="Search AI activity" placeholder="Search actions, hosts or clients…" className="pl-9"
                 value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} />
             </div>
             <select aria-label="AI client" className={cn(selectClass, "sm:w-44")} value={filters.client === null ? "" : optionValue(filters.client)}

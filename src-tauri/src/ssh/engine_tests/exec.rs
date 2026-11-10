@@ -25,6 +25,30 @@ fn exec_returns_stdout_stderr_and_the_exit_code() {
     assert!(!result.truncated);
 }
 
+#[test]
+fn scp_transfers_binary_file_in_both_directions() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+    let scratch = tempfile::tempdir().unwrap();
+    let remote = scratch.path().join("scp 'sample; file.bin");
+    let content = b"\0binary\ntext\xff";
+
+    let mut source = std::io::Cursor::new(content);
+    let uploaded = session.scp_upload(&remote.to_string_lossy(), "scp 'sample; file.bin", content.len() as u64, &mut source, ENOUGH).unwrap();
+    assert_eq!(uploaded, content.len() as u64);
+    assert_eq!(std::fs::read(&remote).unwrap(), content);
+
+    let mut downloaded = Vec::new();
+    let size = session.scp_download(&remote.to_string_lossy(), &mut downloaded, MIB as u64, ENOUGH).unwrap();
+    assert_eq!(size, content.len() as u64);
+    assert_eq!(downloaded, content);
+
+    let mut too_small = Vec::new();
+    assert!(session.scp_download(&remote.to_string_lossy(), &mut too_small, 2, ENOUGH).is_err());
+    assert!(too_small.is_empty(), "the configured limit rejects before writing file bytes");
+}
+
 /// The command has no terminal, and its output is bytes the engine does not touch: CRLF stays CRLF.
 #[test]
 fn a_command_has_no_pty_and_its_output_is_not_reshaped() {

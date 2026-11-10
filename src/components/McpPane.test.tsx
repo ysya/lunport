@@ -12,6 +12,7 @@ vi.mock("@/lib/queries", async load => ({
 }));
 const status: McpStatus = {
   enabled: true, bridge_active: true, approval_mode: "ask",
+  max_transfer_mib: 1024,
   noninteractive_credentials_supported: false,
   noninteractive_credentials_notice: "Stored credentials require Ask on macOS.",
   audit_error: "Audit file unavailable", allowed_hosts: ["0000000000000001"], allowed_groups: [], pending: [],
@@ -34,6 +35,12 @@ function render(overview = recordOverview(), data: McpStatus = status, onOpenAct
 const text = (html: string) => html.replace(/<[^>]*>/g, "").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
 describe("Records AI Access", () => {
+  it("shows the current file transfer limit as an editable MiB setting", () => {
+    const html = render();
+    expect(html).toContain("Single-file transfer limit");
+    expect(html).toMatch(/type="number"[^>]*value="1024"/);
+    expect(html).toContain("Save limit");
+  });
   it("offers Ask and Auto-log and shows the actual platform credential capability", () => {
     const html = render();
     expect(html).toContain("Auto-log");

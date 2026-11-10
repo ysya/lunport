@@ -6,7 +6,7 @@ import type { McpWindow } from "@/bindings/McpWindow";
 /** What became of an AI request, as the AI activity page sorts it; "unknown" is counted under All only. */
 export type ActivityKind = "succeeded" | "failed" | "not_run" | "error" | "unknown";
 /** The kinds of action the page filters by. */
-export type ActionKind = "command" | "tunnel" | "change" | "server_key";
+export type ActionKind = "command" | "transfer" | "tunnel" | "change" | "server_key";
 
 export interface ActivityResult { kind: ActivityKind; label: string }
 /** A row's title, the host apart from the words around it. */
@@ -38,6 +38,7 @@ const STOPS: Record<McpStopKind, ActivityResult> = {
 
 /** The connection management outcomes that succeeded, by their label. */
 const DONE = new Map([
+  ["scp_uploaded", "Uploaded"], ["scp_downloaded", "Downloaded"],
   ["host_created", "Host created"], ["host_updated", "Host updated"], ["host_key_verified", "Fingerprint verified"],
   ["transport_set", "Route saved"], ["transport_removed", "Route removed"],
   ["tunnel_created", "Tunnel created"], ["tunnel_updated", "Tunnel updated"], ["tunnel_deleted", "Tunnel deleted"],
@@ -45,6 +46,7 @@ const DONE = new Map([
 ]);
 /** The connection management outcomes that did not complete. */
 const NOT_DONE = new Set([
+  "scp_not_uploaded", "scp_not_downloaded",
   "host_creation_not_completed", "host_update_not_completed", "host_key_not_verified", "transport_not_set", "transport_not_removed",
   "tunnel_not_created", "tunnel_not_updated", "tunnel_not_deleted", "tunnel_not_started",
 ]);
@@ -91,6 +93,7 @@ export function activityResult(entry: McpAuditEntry): ActivityResult {
 }
 
 export function actionKind(entry: McpAuditEntry): ActionKind {
+  if (entry.outcome.startsWith("scp_")) return "transfer";
   if (entry.outcome.startsWith("tunnel_")) return "tunnel";
   if (entry.outcome.startsWith("host_key_")) return "server_key";
   if (entry.outcome.startsWith("transport_") || CHANGES.has(entry.outcome)) return "change";
@@ -117,6 +120,8 @@ const TUNNEL_VERBS = new Map<string, Columns>([
   ["tunnel_stopped", ["Stopped", "Stopped", "Stopped"]],
 ]);
 const COMMAND_TITLES: Columns = ["Ran a command on ", "Asked to run a command on ", "Could not run a command on "];
+const UPLOAD_TITLES: Columns = ["Uploaded a file to ", "Asked to upload a file to ", "Could not upload a file to "];
+const DOWNLOAD_TITLES: Columns = ["Downloaded a file from ", "Asked to download a file from ", "Could not download a file from "];
 
 /** What the request was, by what became of it (`kind`). An entry from before tunnels were named apart has the tunnel in its alias. */
 export function activityTitle(entry: McpAuditEntry, kind: ActivityKind): ActivityTitle {
@@ -125,6 +130,12 @@ export function activityTitle(entry: McpAuditEntry, kind: ActivityKind): Activit
   if (verbs) {
     const before = entry.tunnel ? `${verbs[column]} tunnel ${entry.tunnel} through ` : `${verbs[column]} tunnel `;
     return { before, host: entry.alias, after: "" };
+  }
+  if (entry.outcome === "scp_uploaded" || entry.outcome === "scp_not_uploaded") {
+    return { before: UPLOAD_TITLES[column], host: entry.alias, after: "" };
+  }
+  if (entry.outcome === "scp_downloaded" || entry.outcome === "scp_not_downloaded") {
+    return { before: DOWNLOAD_TITLES[column], host: entry.alias, after: "" };
   }
   return { before: (HOST_TITLES.get(entry.outcome) ?? COMMAND_TITLES)[column], host: entry.alias, after: "" };
 }
@@ -150,7 +161,9 @@ export function reviewSentence(entry: McpAuditEntry): string {
     case "refused": return "You refused it in Lunport’s window.";
     case "no_answer": return "Lunport’s window got no answer.";
     case "auto_log":
-      return actionKind(entry) === "tunnel" ? "Auto-log: started without per-tunnel review." : "Auto-log: ran without per-command review.";
+      return actionKind(entry) === "tunnel" ? "Auto-log: started without per-tunnel review."
+        : actionKind(entry) === "transfer" ? "Auto-log: transferred without per-transfer review."
+        : "Auto-log: ran without per-command review.";
     case "not_asked": return "This action has no approval step.";
   }
   if (entry.stop) return "It stopped before its review.";

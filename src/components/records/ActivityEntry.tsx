@@ -64,7 +64,9 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
     durationLabel(entry),
   ].filter(Boolean).join(" · ");
   const reason = entry.stop?.reason;
-  const command = actionKind(entry) === "command";
+  const action = actionKind(entry);
+  const command = action === "command";
+  const transfer = action === "transfer";
   // The header toggles the details, unless the click selected text or was on the host's button.
   const toggleFromHeader = (event: MouseEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
@@ -73,8 +75,8 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
   };
   const copy = () => {
     copyText(entry.command).then(
-      () => toast.success("Command copied"),
-      (error: unknown) => toast.error("Could not copy the command", { description: revealHidden(errorMessage(error)) }),
+      () => toast.success(transfer ? "Transfer paths copied" : "Command copied"),
+      (error: unknown) => toast.error(transfer ? "Could not copy transfer paths" : "Could not copy the command", { description: revealHidden(errorMessage(error)) }),
     );
   };
   return <li className="min-w-0 rounded-lg border bg-card">
@@ -106,7 +108,7 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
     </div>
     {expanded && <div id={detailsId} className="space-y-3 border-t px-3 py-3 text-xs select-text">
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5">
-        {entry.command && <><dt className="text-muted-foreground">Command</dt>
+        {entry.command && <><dt className="text-muted-foreground">{transfer ? "Transfer paths" : "Command"}</dt>
           <dd><pre className="max-h-48 overflow-auto font-mono whitespace-pre-wrap break-all"><code>{revealHidden(entry.command)}</code></pre></dd></>}
         <dt className="text-muted-foreground">Result</dt><dd>{revealHidden(resultSentence(entry, result))}</dd>
         <dt className="text-muted-foreground">Review</dt><dd>{reviewSentence(entry)}</dd>
@@ -129,7 +131,7 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
             <Button size="sm" variant="outline" disabled aria-describedby={`${detailsId}-gone`}><Server className="size-3.5" />Show host</Button>
             <span id={`${detailsId}-gone`} className="sr-only">{HOST_GONE}</span>
           </span>}
-        {entry.command && <Button size="sm" variant="outline" onClick={copy}><Copy className="size-3.5" />Copy command</Button>}
+        {entry.command && <Button size="sm" variant="outline" onClick={copy}><Copy className="size-3.5" />{transfer ? "Copy transfer paths" : "Copy command"}</Button>}
       </div>
     </div>}
   </li>;
