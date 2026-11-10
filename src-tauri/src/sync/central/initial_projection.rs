@@ -61,16 +61,18 @@ pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
     }
 }
 
-/// What this device keeps by host id, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate:
-/// its routes, which the publish step moves into the library while it has their hosts, and
-/// what its grant requests taught it.
-/// - A first publication (`host_ids` is `None`) keeps every host's id, so it keeps both as they are.
-/// - An adoption or a replacement gives the hosts new ids (`host_ids`): every route that applies on the source, a replaced library's
-///   included, follows its host as this device's own, with its grant memory; one whose host does not survive goes
+/// What this device keeps, which the shadow leaves out (`Candidate::from_owner`), back in the final candidate as this device's own,
+/// for the publish step to move into the library:
+/// - Its routes, and what its grant requests taught it about each host. A first publication (`host_ids` is `None`) keeps every host's
+///   id, so it keeps both as they are. An adoption or a replacement gives the hosts new ids (`host_ids`): every route that applies on
+///   the source, a replaced library's included, follows its host with its grant memory, and one whose host does not survive goes
 ///   (`transports::follow_hosts`).
+/// - Its search scopes, the memory of its grant requests per entitlement, and its saved databases. None names a host, so all of them
+///   stay whatever `host_ids` is: the ones of the library the source leaves as well as this device's own
+///   (`pam_records::preserve_on_leave`, `databases::preserve_on_leave`).
 ///
-/// A route whose host the library's Catalog already holds a route for gives way to it, as a delta projection decides. The candidate
-/// gets the state version they need.
+/// What the new library's Catalog already holds wins over the copy kept here, as a delta projection decides: its route for a host,
+/// and its scope, memory or database of the same id. The candidate gets the state version they need.
 fn keep_routes(
     source: &SyncStateV3,
     candidate: &mut SyncStateV3,
@@ -86,10 +88,9 @@ fn keep_routes(
             transports::follow_hosts(source, candidate, host_ids, now).map_err(|_| invalid())?
         }
     }
-    // Search scopes and grant memory name no host: they stay as they are, for the publish step to move in. The
-    // library's own, from its Catalog, give way to none of them: a memory or scope of the same id the library holds wins.
+    // Search scopes, grant memory and saved databases name no host: they stay as they are, for the publish step to move in. A row of
+    // the same id in the new library's account wins over the copy kept here (below).
     crate::sync::pam_records::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
-    // Saved databases name no host either: they stay the same way, and the library's own Catalog wins for a database it holds.
     crate::sync::databases::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
     if let Some(account) = &candidate.account {
         candidate.local.pam_records.retain(|key, _| !account.records.contains_key(key));

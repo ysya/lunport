@@ -13,6 +13,7 @@ use crate::{
     sync::{
         record::{record_key, LocalRecord, RecordKind},
         records_v3::{self, HostScope, LocalKeyMetadata, SpaceStateV3, SyncStateV3},
+        state_v2::AccountState,
         transports,
     },
     vault::store::ReadOnlyVault,
@@ -83,6 +84,40 @@ pub(super) fn holds_local(
         matches!(&basis.remote.scope, Some(HostScope::Space { space_id: id }) if id == space_id)
             && (replica.pending.contains_key(opaque) || replica.conflicts.contains_key(opaque))
     })
+}
+/// What one kind of Catalog rider has of its own when a projection rebuilds its rows (`replace_rows`): how its account rows are told
+/// apart, the copies this device keeps of it alone, and the local state version its rows need.
+struct Rider<'a> {
+    is_id: fn(&str) -> bool,
+    kept: &'a mut BTreeMap<String, LocalRecord>,
+    needs: u32,
+}
+/// Rebuilds the account rows of one kind of Catalog rider from the Catalog's entries, `rows` being their `(wire id, payload)` as the
+/// kind's `catalog_rows` gives them: the kind's earlier rows go, each entry becomes a row numbered after the earlier row of its id,
+/// and the copy this device kept alone of an entry goes with it. A copy of something the Catalog holds no entry for stays, for the
+/// publish step to move in. A Catalog that holds any entry raises the state `version` to what the rows need.
+fn replace_rows(
+    rider: Rider,
+    rows: Vec<(String, serde_json::Value)>,
+    account: &mut AccountState,
+    version: &mut u32,
+    receipt: &Receipt,
+    observed: u64,
+) -> Result<(), AppError> {
+    let is_id = rider.is_id;
+    let of_kind = |row: &LocalRecord| row.record.kind == RecordKind::Meta && is_id(&row.record.id);
+    let previous: BTreeMap<_, _> = account.records.iter().filter(|(_, row)| of_kind(row)).map(|(key, row)| (key.clone(), row.clone())).collect();
+    account.records.retain(|_, row| !of_kind(row));
+    let any = !rows.is_empty();
+    for (id, payload) in rows {
+        let key = record_key(RecordKind::Meta, &id);
+        account.records.insert(key.clone(), fresh(previous.get(&key), RecordKind::Meta, &id, payload, receipt, observed)?);
+        rider.kept.remove(&key);
+    }
+    if any {
+        *version = (*version).max(rider.needs);
+    }
+    Ok(())
 }
 /// Reads Catalog `value` into `state`'s rows: collections, tunnel rows, route rows, the rows of search scopes, grant memory and saved
 /// databases, and the Local group order. The delta projection reads the library's Catalog with it, and the Catalog merge the merged one
@@ -216,38 +251,24 @@ pub(super) fn catalog(
         state.version = state.version.max(transports::SYNC_STATE_VERSION);
     }
     // Search scopes and grant memory take the same path, and need their version too.
-    let previous_pam: BTreeMap<_, _> = account
-        .records
-        .iter()
-        .filter(|(_, r)| r.record.kind == RecordKind::Meta && crate::sync::pam_records::is_id(&r.record.id))
-        .map(|(k, r)| (k.clone(), r.clone()))
-        .collect();
-    account.records.retain(|_, r| !(r.record.kind == RecordKind::Meta && crate::sync::pam_records::is_id(&r.record.id)));
-    for (id, payload) in crate::sync::pam_records::catalog_rows(value) {
-        let key = record_key(RecordKind::Meta, &id);
-        account.records.insert(key.clone(), fresh(previous_pam.get(&key), RecordKind::Meta, &id, payload, receipt, observed)?);
-        state.local.pam_records.remove(&key);
-    }
-    if !value.pam_scopes.is_empty() || !value.pam_requests.is_empty() {
-        state.version = state.version.max(crate::sync::pam_records::STATE_VERSION);
-    }
+    replace_rows(
+        Rider { is_id: crate::sync::pam_records::is_id, kept: &mut state.local.pam_records, needs: crate::sync::pam_records::STATE_VERSION },
+        crate::sync::pam_records::catalog_rows(value),
+        account,
+        &mut state.version,
+        receipt,
+        observed,
+    )?;
     // Saved databases take the same path. Only the ones the library now holds retire this device's own: one the Catalog holds no entry
     // for stays here, for the publish step to move in.
-    let previous_databases: BTreeMap<_, _> = account
-        .records
-        .iter()
-        .filter(|(_, r)| r.record.kind == RecordKind::Meta && crate::sync::databases::is_id(&r.record.id))
-        .map(|(k, r)| (k.clone(), r.clone()))
-        .collect();
-    account.records.retain(|_, r| !(r.record.kind == RecordKind::Meta && crate::sync::databases::is_id(&r.record.id)));
-    for (id, payload) in crate::sync::databases::catalog_rows(value) {
-        let key = record_key(RecordKind::Meta, &id);
-        account.records.insert(key.clone(), fresh(previous_databases.get(&key), RecordKind::Meta, &id, payload, receipt, observed)?);
-        state.local.databases.remove(&key);
-    }
-    if !value.databases.is_empty() {
-        state.version = state.version.max(crate::sync::databases::STATE_VERSION);
-    }
+    replace_rows(
+        Rider { is_id: crate::sync::databases::is_id, kept: &mut state.local.databases, needs: crate::sync::databases::STATE_VERSION },
+        crate::sync::databases::catalog_rows(value),
+        account,
+        &mut state.version,
+        receipt,
+        observed,
+    )?;
     state.local.group_order = value
         .group_orders
         .iter()
@@ -1062,6 +1083,27 @@ pub(super) mod tests {
             "this device's copy of the library's database goes; the one the library does not hold waits"
         );
         assert_eq!(next.version, databases::STATE_VERSION);
+    }
+
+    /// Search scopes and grant memory are rebuilt by the same rule as databases: a scope the library now holds retires this device's copy,
+    /// and one the Catalog holds no entry for stays here, for the publish step to move in.
+    #[test]
+    fn a_local_search_scope_the_catalog_holds_no_entry_for_stays() {
+        use crate::sync::pam_records::{self, PamScope};
+        let scope = |id: &str, parent: &str| PamScope { id: id.into(), parent: parent.into(), location: "global".into(), account: None };
+        let (held, mine) = (scope("00000000000000a1", "projects/acme-dev-654321"), scope("00000000000000a2", "projects/acme-prod-123456"));
+        let own = [&held, &mine].into_iter().fold(crate::sync::databases::tests::state(), |state, saved| pam_records::save_scope(&state, saved.clone(), 1).unwrap());
+        let mut local = cache_with_host(HOST);
+        local.state.local.pam_records = own.local.pam_records;
+        local.state.version = local.state.version.max(pam_records::STATE_VERSION);
+        let next = project_delta(&local, &Catalog { pam_scopes: vec![held.clone()], ..Catalog::default() });
+        assert_eq!(pam_records::scopes(&next), vec![held]);
+        assert_eq!(
+            next.local.pam_records.keys().collect::<Vec<_>>(),
+            [&record_key(RecordKind::Meta, &pam_records::scope_wire_id(&mine.id))],
+            "this device's copy of the library's scope goes; the one the library does not hold waits"
+        );
+        assert_eq!(next.version, pam_records::STATE_VERSION);
     }
 
     #[test]

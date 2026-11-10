@@ -45,10 +45,12 @@ pub(super) fn catalog_settled(state: &SyncStateV3, keys: &VaultKeys) -> Result<b
         && basis_of(replica, ledger, &opaque) == replica.current.get(&opaque))
 }
 
-/// The publish step as a pure transition: `state` with the routes saved on this
-/// device alone that the library takes made its rows (`transports::publish_local`), or `None` when none moves. It waits while the
-/// Catalog is not settled (`catalog_settled`): while the library's latest Catalog is not yet read into this device's rows, or is in
-/// conflict. The central dispatch saves what it returns before its capture.
+/// The publish step as a pure transition: `state` with what this device kept alone made the library's rows, or `None` when nothing
+/// moves. Three steps run in turn, each on the state the one before returned and each moving only what the library has room for: the
+/// routes (`transports::publish_local`), then the search scopes and grant memory (`pam_records::publish_local`), then the saved
+/// databases (`databases::publish_local`). What comes back holds every move of the three. It waits while the Catalog is not settled
+/// (`catalog_settled`): while the library's latest Catalog is not yet read into this device's rows, or is in conflict. The central
+/// dispatch saves what it returns before its capture.
 pub(super) fn move_local_routes(
     state: &SyncStateV3,
     keys: &VaultKeys,
@@ -57,8 +59,6 @@ pub(super) fn move_local_routes(
     if (state.local.transports.is_empty() && state.local.pam_records.is_empty() && state.local.databases.is_empty()) || !catalog_settled(state, keys)? {
         return Ok(None);
     }
-    // Search scopes and grant memory this device kept alone move in by the same step.
-    // So do the saved databases it kept alone.
     let routed = crate::sync::transports::publish_local(state, now)?;
     let pam = crate::sync::pam_records::publish_local(routed.as_ref().unwrap_or(state), now).map_err(AppError::Other)?;
     let databases = crate::sync::databases::publish_local(pam.as_ref().or(routed.as_ref()).unwrap_or(state), now).map_err(AppError::Other)?;

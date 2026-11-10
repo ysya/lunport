@@ -2328,6 +2328,27 @@ fn adopting_a_library_whose_catalog_holds_a_route_keeps_the_route() {
     });
 }
 
+/// Adopting a library whose Catalog holds a saved database keeps the database, as the library's: the initial projection writes its
+/// row into the account, from which its ledger rebuilds the Catalog, and the state takes the version the row needs.
+#[test]
+fn adopting_a_library_whose_catalog_holds_a_database_keeps_the_database() {
+    use crate::sync::databases::{self, tests::database};
+    let f = fixture(true);
+    let s = service(&f);
+    let saved = database("00000000000000d1");
+    catalog_edit(&f, &mut s.rows.lock().unwrap(), |catalog| catalog.databases.push(saved.clone()));
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let state = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert_eq!(databases::view(&state).into_iter().map(|row| (row.database, row.synced)).collect::<Vec<_>>(), [(saved.clone(), true)]);
+        assert_eq!(state.version, databases::STATE_VERSION);
+        crate::sync::records_v3::validate_state(&state).unwrap();
+        assert!(s.rows.lock().unwrap().len() > f.rows.len() + 1, "the device's own library was merged in too");
+    });
+}
+
 /// Adoption keeps the routes this device saved, and what its grant requests taught it,
 /// under the ids the merge gives their hosts. They stay this device's until the publish step moves them into the library.
 #[test]
