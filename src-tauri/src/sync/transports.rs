@@ -39,7 +39,7 @@ const MAX_ENTITLEMENTS: usize = 8;
 /// The most routes one library holds, as many as it holds tunnels. The central Catalog enforces it.
 pub const MAX_ROUTES: usize = 256;
 /// The refusal of a save that would leave the library's Catalog too large for one sync record.
-pub const NO_ROOM: &str = "This library has no room for more routes or tunnels: together they would exceed what one sync record holds. Remove a route or a tunnel, then try again.";
+pub const NO_ROOM: &str = "This library has no room for more routes, tunnels or databases: together they would exceed what one sync record holds. Remove a route, a tunnel or a database, then try again.";
 /// The refusal of a save whose displayed route is no longer the saved one: `set`'s compare-and-set (`RepositoryError::RouteChanged`).
 pub const ROUTE_CHANGED: &str = "The host's route changed while you were editing; reload and try again.";
 /// What the host editor says of a library whose writes are blocked. A route write refused for that reason reads the same (`refusal`).

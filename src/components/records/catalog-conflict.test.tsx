@@ -50,7 +50,7 @@ describe("a Catalog conflict", () => {
   it("names each colliding item and its two versions in plain words", () => {
     const words = shown(review());
     for (const expected of [
-      "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes and collections wait on this device.",
+      "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes, databases, search scopes, grant memory and collections wait on this device.",
       "Tunnel “Database”",
       "127.0.0.1:15432 → db.internal:5432 through prod-jump",
       "127.0.0.1:15433 → db.internal:5432 through prod-jump",
@@ -166,7 +166,7 @@ describe("a conflict row", () => {
 
   it("draws the Catalog as its items, not as a record", () => {
     const words = row(conflict({ kind: "meta", name: "meta", local: { tunnels: [] }, remote: { tunnels: [] }, can_copy: false, catalog: review() }));
-    expect(words).toContain("Tunnels, routes and collections");
+    expect(words).toContain("Tunnels, routes, databases and collections");
     expect(words).toContain("Tunnel “Database”");
     expect(words).not.toContain("meta");
     expect(words).not.toContain("key material or library structure");

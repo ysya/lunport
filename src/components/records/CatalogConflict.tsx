@@ -8,8 +8,8 @@ import { tunnelRoute } from "@/lib/tunnels";
 /* The shared Catalog's row in Central conflicts: the items both devices changed, in plain
    words. Every other change of both devices merges on its own; a choice settles only these. */
 
-export const CATALOG_TITLE = "Tunnels, routes and collections";
-const COLLIDING = "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes and collections wait on this device.";
+export const CATALOG_TITLE = "Tunnels, routes, databases and collections";
+const COLLIDING = "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes, databases, search scopes, grant memory and collections wait on this device.";
 const WAITING = "Lunport combines both devices’ changes on the next sync.";
 export const CATALOG_CHOICE_NOTE = "Every other change from both devices stays. Previous versions are kept in an encrypted local recovery snapshot on this device.";
 export const catalogChoiceTitle = (choice: "local" | "remote") =>

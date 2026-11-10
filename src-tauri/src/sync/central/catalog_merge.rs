@@ -229,7 +229,7 @@ impl Over {
             Self::GroupOrders => (format!("order more groups than one library holds ({MAX_ORDERED_GROUPS})"), "some groups"),
             Self::Size => (
                 format!("are more than one library record holds ({} KB)", super::wire::MAX_PLAINTEXT_BYTES / 1024),
-                "some tunnels or routes",
+                "some tunnels, routes or databases",
             ),
         };
         format!("Together, both devices’ changes {held}. Remove {remove} on this device; Lunport combines both devices’ changes on the next sync.")
@@ -575,7 +575,7 @@ pub(super) mod tests {
         assert_eq!(over, Over::Size);
         assert_eq!(
             over.sentence(),
-            "Together, both devices’ changes are more than one library record holds (64 KB). Remove some tunnels or routes on this device; Lunport combines both devices’ changes on the next sync."
+            "Together, both devices’ changes are more than one library record holds (64 KB). Remove some tunnels, routes or databases on this device; Lunport combines both devices’ changes on the next sync."
         );
     }
 
