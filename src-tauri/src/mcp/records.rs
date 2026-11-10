@@ -10,6 +10,7 @@ use crate::session::{auth::Reply, protocol::QuestionKind};
 use crate::ssh::{
     AuthMethod, AuthSource, ConnectError, Ended, HostKeyPolicy, Session, SshEngine, Target,
 };
+use super::activity::{reason_text, review_of, stop_for, Declines, NotingOwner};
 
 #[derive(Default)]
 pub(super) struct AuditLog {
@@ -177,6 +178,13 @@ impl<'a> ClientConfirmer<'a> {
     pub(crate) fn answer(&self, stopped: Option<&str>) -> Option<String> {
         self.outcome.lock().unwrap().as_ref().map(|outcome| outcome.sentence(stopped))
     }
+    /// The first question that ended without trust, as the activity page shows what stopped the request: refused, or not answered.
+    pub(crate) fn declined(&self) -> Option<(McpStopKind, McpWindow)> {
+        self.outcome.lock().unwrap().as_ref().map(|outcome| match outcome {
+            KeyOutcome::Refused { .. } => (McpStopKind::Refused, McpWindow::ServerKey),
+            KeyOutcome::Unanswered { .. } => (McpStopKind::NoAnswer, McpWindow::ServerKey),
+        })
+    }
     fn note(&self, outcome: KeyOutcome) {
         self.outcome.lock().unwrap().get_or_insert(outcome);
     }
@@ -244,10 +252,19 @@ pub(crate) fn verify_route(
     Ok(verified)
 }
 
-/// The audit entry of a trust decision an AI client's request asked for, as `verify_host_key` writes it.
-pub(crate) fn trust_entry(context: &RequestContext, host_id: &str, alias: &str, mode: ApprovalMode, verified: bool) -> McpAuditEntry {
+/// The audit entry of a trust decision an AI client's request asked for, as `verify_host_key` writes it: the handshake started at `at_ms`,
+/// and `stop` is what kept the key from being trusted (`None`: it was verified). No approval window reviews it; the trust window is the
+/// person's decision.
+pub(crate) fn trust_entry(
+    context: &RequestContext,
+    host_id: &str,
+    alias: &str,
+    mode: ApprovalMode,
+    at_ms: u64,
+    stop: Option<McpStop>,
+) -> McpAuditEntry {
     McpAuditEntry {
-        at_ms: unix_ms(),
+        at_ms,
         completed_at_ms: unix_ms(),
         id: context.id.clone(),
         client: "mcp".into(),
@@ -257,7 +274,9 @@ pub(crate) fn trust_entry(context: &RequestContext, host_id: &str, alias: &str, 
         requested_by: context.requested_by.clone(),
         requester_id: context.requester_id.clone(),
         client_info: context.client_info.clone(),
-        outcome: if verified { "host_key_verified" } else { "host_key_not_verified" }.into(),
+        outcome: if stop.is_none() { "host_key_verified" } else { "host_key_not_verified" }.into(),
+        review: Some(McpReview::NotAsked),
+        stop,
         ..Default::default()
     }
 }
@@ -265,7 +284,8 @@ pub(crate) fn trust_entry(context: &RequestContext, host_id: &str, alias: &str, 
 /// Before an AI client's call connects through a hop whose server key this device has not verified, the person
 /// decides on it in Lunport's host key window, as `verify_host_key` asks: no credential for the destination is asked before that. The
 /// hops are those of `target`, the route the request was approved for, and their keys are looked at as they are now (the person may
-/// have verified one while an approval was open). The decision is audited.
+/// have verified one while an approval was open). The decision is audited; `declines` holds the credential and grant questions `owner`
+/// noted, for what stopped it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_unverified(
     runtime: &McpRuntime,
@@ -273,6 +293,7 @@ pub(crate) fn verify_unverified(
     query: &HostQuery,
     target: &Target,
     owner: &dyn Owner,
+    declines: &Declines,
     cancel: &CancelToken,
     guard: &(dyn Fn() -> Result<(), String> + Sync),
     confirmer: &ClientConfirmer<'_>,
@@ -292,8 +313,12 @@ pub(crate) fn verify_unverified(
     }
     let (context, mode) = audit;
     let destination = target.hops.last().ok_or("No destination.")?;
+    let started = unix_ms();
     let verified = verify_route(connector, query, target, owner, cancel, guard, confirmer);
-    runtime.record(trust_entry(context, destination.id.as_str(), &destination.alias, mode, verified.is_ok()));
+    let stop = verified.as_ref().err().map(|error| {
+        stop_for(error, None, declines.first().or_else(|| confirmer.declined()), runtime.withdrawn(mode, cancel))
+    });
+    runtime.record(trust_entry(context, destination.id.as_str(), &destination.alias, mode, started, stop));
     verified.map_err(|error| confirmer.answer(Some(stopped)).unwrap_or(error))?;
     // A key that is not verified by the time the call connects (another device changed the pin in between) is the connection's to ask
     // about, in its own window, in both modes.
@@ -554,6 +579,12 @@ pub(super) fn execute_context(
     let done = AtomicBool::new(false);
     // A request the policy already denies is audited as denied, never as canceled by the watcher.
     let allowed = policy.enabled && authorize(&policy, &host_id).is_ok();
+    // What the request's windows decided, for its audit entry: the approval window's decision, the credential and grant questions the
+    // person declined or left unanswered, and the server key questions.
+    let mut decision = None;
+    let declines = Declines::default();
+    let owner = NotingOwner { inner: owner, declines: &declines };
+    let confirmer = ClientConfirmer::new(connector.confirmer, asker(&context, mode, Unreviewed::Command));
     let result = std::thread::scope(|scope| {
         // Revoke/disable and disconnect wake native authentication and approval while the worker waits.
         scope.spawn(|| {
@@ -573,7 +604,9 @@ pub(super) fn execute_context(
                 return Err("MCP request was denied by host policy".into());
             }
             if mode == ApprovalMode::Ask {
-                match approve(&request) {
+                let decided = approve(&request);
+                decision = Some(decided);
+                match decided {
                     ApprovalDecision::Allow => {}
                     ApprovalDecision::Deny => return Err("MCP request was denied".into()),
                     ApprovalDecision::TimedOut => return Err("MCP approval timed out".into()),
@@ -584,8 +617,7 @@ pub(super) fn execute_context(
                 }
             }
             check()?;
-            let confirmer = ClientConfirmer::new(connector.confirmer, asker(&context, mode, Unreviewed::Command));
-            verify_unverified(runtime, connector, &query, &target, owner, cancel, &check, &confirmer, (&context, mode), COMMAND_STOPPED)?;
+            verify_unverified(runtime, connector, &query, &target, &owner, &declines, cancel, &check, &confirmer, (&context, mode), COMMAND_STOPPED)?;
             let check_resolved = |actual: &Target| approved.check_resolved(actual, connector.keys);
             let check_connected = |actual: &Target| {
                 check()?;
@@ -605,7 +637,7 @@ pub(super) fn execute_context(
                 grants: connector.grants,
             };
             let connected = guarded
-                .connect(&query, owner, cancel)
+                .connect(&query, &owner, cancel)
                 .map_err(|e| confirmer.answer(Some(COMMAND_STOPPED)).unwrap_or(e.text))?;
             if let Some(answer) = confirmer.answer(Some(COMMAND_STOPPED)) {
                 connected.session.close();
@@ -650,6 +682,18 @@ pub(super) fn execute_context(
         result
     });
     let value = result.as_ref().ok();
+    let review = if !allowed {
+        None
+    } else if mode == ApprovalMode::AutoLog {
+        Some(McpReview::AutoLog)
+    } else {
+        decision.and_then(review_of)
+    };
+    let stop = match &result {
+        Ok(_) => None,
+        Err(error) if !allowed => Some(McpStop { kind: McpStopKind::NotAllowed, window: None, reason: Some(reason_text(error)) }),
+        Err(error) => Some(stop_for(error, decision, declines.first().or_else(|| confirmer.declined()), runtime.withdrawn(mode, cancel))),
+    };
     runtime.record(McpAuditEntry {
         id: context.id,
         alias: destination.alias.clone(),
@@ -660,7 +704,7 @@ pub(super) fn execute_context(
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
-        at_ms: unix_ms(),
+        at_ms: request.requested_at_ms,
         completed_at_ms: unix_ms(),
         outcome: if cancel.is_cancelled() {
             "canceled"
@@ -688,6 +732,8 @@ pub(super) fn execute_context(
             .and_then(|n| i64::try_from(n).ok()),
         signal: value.and_then(|v| v["signal"].as_str().map(str::to_owned)),
         detail: None,
+        review,
+        stop,
         ..Default::default()
     });
     match result {
@@ -1925,6 +1971,161 @@ mod behavior_tests {
             assert!(d.approved(&web), "{mode:?}");
             assert!(executed(&e), "{mode:?}");
         }
+    }
+
+    // ---- What the AI activity page reads of a command: when it was requested, how its review went and what stopped it ----
+
+    use crate::mcp::{McpReview, McpStopKind, McpWindow};
+
+    fn last(r: &McpRuntime) -> McpAuditEntry {
+        r.recent.lock().unwrap()[0].clone()
+    }
+    fn stop_of(entry: &McpAuditEntry) -> Option<(McpStopKind, Option<McpWindow>)> {
+        entry.stop.as_ref().map(|stop| (stop.kind, stop.window))
+    }
+
+    #[test]
+    fn a_command_records_when_it_was_requested_and_its_review() {
+        let r = runtime(ApprovalMode::Ask);
+        let requested = AtomicU64::new(0);
+        run(&r, &FakeEngine::new(), &directory(AuthMethod::Password, true), &FakeOwner::typing(&["secret"]), &|request| {
+            requested.store(request.requested_at_ms, Ordering::SeqCst);
+            // The person takes a moment to approve: the entry's start is the request, not the end.
+            thread::sleep(Duration::from_millis(20));
+            ApprovalDecision::Allow
+        })
+        .unwrap();
+        let entry = last(&r);
+        assert_eq!(entry.at_ms, requested.load(Ordering::SeqCst));
+        assert!(entry.completed_at_ms >= entry.at_ms + 20, "{} {}", entry.at_ms, entry.completed_at_ms);
+        assert_eq!(entry.review, Some(McpReview::Approved));
+        assert_eq!(entry.stop, None);
+        assert_eq!(entry.outcome, "allowed");
+
+        let r = runtime(ApprovalMode::AutoLog);
+        run(&r, &FakeEngine::new(), &directory(AuthMethod::Password, true), &FakeOwner::typing(&["secret"]), &|_| panic!("auto-log never asks approval"))
+            .unwrap();
+        assert_eq!(last(&r).review, Some(McpReview::AutoLog));
+        assert_eq!(last(&r).stop, None);
+    }
+
+    #[test]
+    fn approval_decisions_are_stops_in_the_approval_window() {
+        for (decision, review, stop, outcome) in [
+            (ApprovalDecision::Deny, Some(McpReview::Refused), (McpStopKind::Refused, Some(McpWindow::Approval)), "denied"),
+            (ApprovalDecision::TimedOut, Some(McpReview::NoAnswer), (McpStopKind::NoAnswer, Some(McpWindow::Approval)), "timed_out"),
+            (ApprovalDecision::Cancel, None, (McpStopKind::Canceled, Some(McpWindow::Approval)), "canceled"),
+        ] {
+            let r = runtime(ApprovalMode::Ask);
+            assert!(run(&r, &FakeEngine::new(), &directory(AuthMethod::Password, true), &FakeOwner::default(), &|_| decision).is_err());
+            let entry = last(&r);
+            assert_eq!(entry.review, review, "{decision:?}");
+            assert_eq!(stop_of(&entry), Some(stop), "{decision:?}");
+            assert!(entry.stop.as_ref().and_then(|stop| stop.reason.as_ref()).is_some(), "{decision:?}");
+            assert_eq!(entry.outcome, outcome, "{decision:?}");
+        }
+    }
+
+    #[test]
+    fn a_host_ai_access_does_not_allow_is_not_allowed() {
+        let r = runtime(ApprovalMode::Ask);
+        r.policy.lock().unwrap().allowed_hosts.clear();
+        assert!(run(&r, &FakeEngine::new(), &directory(AuthMethod::Password, true), &FakeOwner::default(), &|_| panic!("never asks")).is_err());
+        let entry = last(&r);
+        assert_eq!(stop_of(&entry), Some((McpStopKind::NotAllowed, None)));
+        assert_eq!(entry.review, None);
+        assert_eq!(entry.outcome, "denied");
+    }
+
+    #[test]
+    fn a_refused_or_unanswered_server_key_is_a_stop_not_an_error() {
+        for refuse in [true, false] {
+            let (decision, kind) = if refuse { (Decision::Refuse, McpStopKind::Refused) } else { (Decision::Unanswered, McpStopKind::NoAnswer) };
+            let r = runtime(ApprovalMode::AutoLog);
+            let window = FakeConfirmer::deciding(vec![decision]);
+            assert!(run_with(&r, &FakeEngine::new(), &directory(AuthMethod::Password, false), &FakeOwner::default(), &window, &|_| panic!("auto-log never asks approval"))
+                .is_err());
+            let recent = r.recent.lock().unwrap().clone();
+            let (command, trust) = (&recent[0], &recent[1]);
+            assert_eq!(stop_of(command), Some((kind, Some(McpWindow::ServerKey))), "refuse: {refuse}");
+            assert!(command.stop.as_ref().and_then(|stop| stop.reason.as_deref()).unwrap().contains("server key of web"), "refuse: {refuse}");
+            assert_eq!(trust.outcome, "host_key_not_verified");
+            assert_eq!(trust.review, Some(McpReview::NotAsked));
+            assert_eq!(stop_of(trust), Some((kind, Some(McpWindow::ServerKey))), "refuse: {refuse}");
+        }
+    }
+
+    #[test]
+    fn a_declined_or_unanswered_password_is_a_stop_not_an_error() {
+        for (reply, kind) in [(Reply::Cancelled, McpStopKind::Refused), (Reply::TimedOut, McpStopKind::NoAnswer)] {
+            let r = runtime(ApprovalMode::AutoLog);
+            let owner = FakeOwner::answering(vec![reply]);
+            let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("secret")));
+            assert!(run(&r, &engine, &directory(AuthMethod::Password, true), &owner, &|_| panic!("auto-log never asks approval")).is_err());
+            assert_eq!(stop_of(&last(&r)), Some((kind, Some(McpWindow::Credentials))), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_declined_or_unanswered_grant_is_a_stop() {
+        use crate::session::testing::{grant_need, NeedsGrant};
+        for (reply, kind) in [(Reply::Cancelled, McpStopKind::Refused), (Reply::TimedOut, McpStopKind::NoAnswer)] {
+            let r = runtime(ApprovalMode::AutoLog);
+            let engine = FakeEngine::new();
+            let inner = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+            let directory = NeedsGrant::new(&inner, grant_need("web", "acme-prod-123456"));
+            let owner = FakeOwner::answering(vec![reply]);
+            let connector = Connector {
+                engine: &engine,
+                directory: &directory,
+                keys: &FakeKeys::new(),
+                keychain: &MemKeychain::default(),
+                confirmer: &FakeConfirmer::default(),
+                grants: crate::session::grants::GrantGates::for_tests(),
+            };
+            assert!(execute(&r, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| panic!("auto-log never asks approval")).is_err());
+            assert_eq!(stop_of(&last(&r)), Some((kind, Some(McpWindow::Grant))), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_connection_failure_is_an_error_with_its_reason() {
+        let r = runtime(ApprovalMode::AutoLog);
+        let hop = crate::ssh::HopRef { id: "id-web".into(), alias: "web".into(), hostname: "web.example.com".into(), port: 22, user: "frank".into() };
+        let engine = FakeEngine::new().failing_with(ConnectError::Unreachable { hop, reason: "connection refused".into() });
+        let error = run(&r, &engine, &directory(AuthMethod::Password, true), &FakeOwner::typing(&["secret"]), &|_| panic!("auto-log never asks approval"))
+            .unwrap_err();
+        let entry = last(&r);
+        assert_eq!(stop_of(&entry), Some((McpStopKind::Error, None)));
+        assert_eq!(entry.stop.as_ref().and_then(|stop| stop.reason.clone()), Some(crate::mcp::activity::reason_text(&error)));
+        assert_eq!(entry.review, Some(McpReview::AutoLog));
+    }
+
+    /// A guard: output stays out of the audit, also when the command fails.
+    #[test]
+    fn output_never_reaches_the_audit_even_when_the_command_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        let r = runtime(ApprovalMode::AutoLog);
+        r.load_audit(path.clone());
+        let engine = FakeEngine::new().with_exec(
+            "uptime",
+            ExecResult {
+                ended: Ended::Exited,
+                exit_code: Some(1),
+                signal: None,
+                stdout: b"OUTPUT_SECRET_SENTINEL".to_vec(),
+                stderr: b"OUTPUT_SECRET_SENTINEL".to_vec(),
+                truncated: false,
+            },
+        );
+        let value = run(&r, &engine, &directory(AuthMethod::Password, true), &FakeOwner::typing(&["secret"]), &|_| panic!("auto-log never asks approval"))
+            .unwrap();
+        assert_eq!(value["exit_code"], 1);
+        let entry = last(&r);
+        assert_eq!(entry.stop, None);
+        assert_eq!(entry.exit_code, Some(1));
+        assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains("OUTPUT_SECRET_SENTINEL"));
     }
 }
 

@@ -282,6 +282,64 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         assert!(r.records_active.lock().unwrap().is_empty());
     }
 }
+/// What the AI activity page reads of verify_host_key: a refusal in the trust window is the person's, a host whose AI access ended meanwhile
+/// is an error, and a request withdrawn meanwhile is canceled.
+#[test]
+fn verify_host_key_records_refusals_apart_from_errors() {
+    use crate::mcp::{McpReview, McpStopKind, McpWindow};
+    use crate::session::connect::{HostKeyConfirmer, HostKeyQuestion};
+    let stop_of = |r: &McpRuntime| {
+        let entry = r.recent.lock().unwrap()[0].clone();
+        assert_eq!(entry.review, Some(McpReview::NotAsked));
+        assert_eq!(entry.outcome, "host_key_not_verified");
+        assert!(entry.at_ms > 0 && entry.at_ms <= entry.completed_at_ms);
+        entry.stop.map(|stop| (stop.kind, stop.window))
+    };
+    let r = runtime(ApprovalMode::Ask);
+    r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+    let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+    let refuse = FakeConfirmer::deciding(vec![Decision::Refuse]);
+    let connector = Connector {
+        grants: crate::session::grants::GrantGates::for_tests(),
+        directory: &directory,
+        engine: &FakeEngine::new(),
+        confirmer: &refuse,
+        keys: &FakeKeys::new(),
+        keychain: &MemKeychain::default(),
+    };
+    assert!(verify(&r, &connector, "web", RequestContext::default(), &CancelToken::default(), &FakeOwner::default(), &ensure_allowed).is_err());
+    assert_eq!(stop_of(&r), Some((McpStopKind::Refused, Some(McpWindow::ServerKey))));
+
+    // Trusted in the window, but the host's AI access ended (or the request was withdrawn) before the key was saved.
+    struct Meanwhile<'a>(&'a McpRuntime, bool);
+    impl HostKeyConfirmer for Meanwhile<'_> {
+        fn confirm(&self, q: &HostKeyQuestion, c: &CancelToken) -> Option<String> {
+            if self.1 {
+                c.cancel();
+            } else {
+                self.0.policy.lock().unwrap().allowed_hosts.clear();
+            }
+            Some(q.fingerprint.clone())
+        }
+    }
+    for (cancel_it, kind) in [(false, McpStopKind::Error), (true, McpStopKind::Canceled)] {
+        let r = runtime(ApprovalMode::Ask);
+        r.policy.lock().unwrap().allowed_hosts.insert("id-web".into());
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+        let window = Meanwhile(&r, cancel_it);
+        let connector = Connector {
+            grants: crate::session::grants::GrantGates::for_tests(),
+            directory: &directory,
+            engine: &FakeEngine::new(),
+            confirmer: &window,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+        };
+        assert!(verify(&r, &connector, "web", RequestContext::default(), &CancelToken::default(), &FakeOwner::default(), &ensure_allowed).is_err());
+        assert_eq!(stop_of(&r), Some((kind, None)), "cancel: {cancel_it}");
+    }
+}
+
 /// verify_host_key on a host that needs a Privileged Access Manager grant asks for one in Lunport's Request-a-grant window,
 /// in both modes, and then shows the server key.
 #[test]

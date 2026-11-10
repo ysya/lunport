@@ -924,9 +924,17 @@ pub(super) fn verify(
     // nothing goes ahead without review.
     let asker = crate::session::protocol::AiAsker { client: records::client_label(&context), unreviewed: None };
     let confirmer = records::ClientConfirmer::new(connector.confirmer, asker);
-    let result = records::verify_route(connector, &query, &target, owner, cancel, &guard, &confirmer)
+    // A jump host's credential or grant question the person declined or left unanswered is what stopped the verification.
+    let declines = activity::Declines::default();
+    let owner = activity::NotingOwner { inner: owner, declines: &declines };
+    let started = unix_ms();
+    let result = records::verify_route(connector, &query, &target, &owner, cancel, &guard, &confirmer)
         .and_then(|value| serde_json::to_value(value).map_err(|_| "Could not encode verified identity.".into()));
-    runtime.record(records::trust_entry(&context, &host, alias, policy.approval_mode, result.is_ok()));
+    let stop = result.as_ref().err().map(|error| {
+        let declined = declines.first().or_else(|| confirmer.declined());
+        activity::stop_for(error, None, declined, runtime.withdrawn(policy.approval_mode, cancel))
+    });
+    runtime.record(records::trust_entry(&context, &host, alias, policy.approval_mode, started, stop));
     result
 }
 

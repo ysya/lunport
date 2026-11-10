@@ -666,7 +666,9 @@ pub(super) fn start(
             permissions::ensure_record(&runtime.policy.lock().unwrap().clone(), &current, &rule.host_id)?;
             approved.check(connector, &query)
         };
-        records::verify_unverified(runtime, connector, &query, &target, owner, cancel, &host_still_allowed, &confirmer, (&context, mode), TUNNEL_STOPPED)?;
+        let declines = activity::Declines::default();
+        let noting = activity::NotingOwner { inner: owner, declines: &declines };
+        records::verify_unverified(runtime, connector, &query, &target, &noting, &declines, cancel, &host_still_allowed, &confirmer, (&context, mode), TUNNEL_STOPPED)?;
         let entry = launch(&rule, approved.clone(), mode, records::client_label(&context))?;
         // The answer is the tunnel as last seen, so that its state, the message and the audit agree.
         let seen = wait_for_start(&entry, cancel, START_WAIT)?;
