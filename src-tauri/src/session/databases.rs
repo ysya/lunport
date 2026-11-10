@@ -214,7 +214,7 @@ fn unlock_writes(ports: &DatabasePorts, id: &str, method: UnlockMethod, confirme
 
 /// The app's session broker, started when it is not yet: its gates are the ones hosts ask for a grant through, and a database's grant
 /// goes through them as well.
-fn broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, String> {
+fn started_broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, String> {
     super::app::start(app);
     let broker = app.state::<AppState>().session.broker.lock().unwrap().clone();
     broker.ok_or_else(|| "Lunport's connection service is unavailable. Restart Lunport and try again.".to_string())
@@ -223,7 +223,7 @@ fn broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, String> {
 /// Starts the saved database `id` on its local port, with the password this device keeps for it. The port is registered with the broker,
 /// so that quitting the app stops it, and its grant questions go through the broker's gates, which hosts use as well.
 fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
-    let broker = broker(app)?;
+    let broker = started_broker(app)?;
     let state = app.state::<AppState>();
     let ports = &state.session.databases;
     ports.use_upstream(|| Arc::new(CloudSqlUpstream::for_app(app, &broker)));
@@ -357,7 +357,7 @@ pub async fn databases_pam_status(app: tauri::AppHandle, window: tauri::WebviewW
 pub async fn databases_request_grant(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
     main_only(&window, "Database")?;
     tauri::async_runtime::spawn_blocking(move || {
-        let broker = broker(&app)?;
+        let broker = started_broker(&app)?;
         let database = saved(&snapshot(&app)?, &id)?;
         CloudSqlUpstream::for_app(&app, &broker).request_grant(&database, &CancelToken::default())
     })
