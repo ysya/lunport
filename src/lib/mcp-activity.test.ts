@@ -58,6 +58,9 @@ describe("AI activity results", () => {
     [{ outcome: "tunnel_started", command: "" }, "succeeded", "Tunnel started"],
     [{ outcome: "tunnel_starting", command: "" }, "unknown", "Still connecting"],
     [{ outcome: "tunnel_stopped", command: "" }, "succeeded", "Tunnel stopped"],
+    [{ outcome: "scp_uploaded", command: "Upload /tmp/report.txt → /srv/report.txt", ended: null, exit_code: null }, "succeeded", "Uploaded"],
+    [{ outcome: "scp_downloaded", command: "Download /tmp/report.txt ← /srv/report.txt", ended: null, exit_code: null }, "succeeded", "Downloaded"],
+    [{ outcome: "scp_not_uploaded", command: "Upload /tmp/report.txt → /srv/report.txt", stop: stop("refused", "approval") }, "not_run", "Refused by you"],
     ...[
       "host_creation_not_completed", "host_update_not_completed", "host_key_not_verified", "transport_not_set", "transport_not_removed",
       "tunnel_not_created", "tunnel_not_updated", "tunnel_not_deleted", "tunnel_not_started",
@@ -89,6 +92,7 @@ describe("AI activity results", () => {
   it.each([
     ["allowed", "command"], ["error", "command"], ["a_future_outcome", "command"],
     ["tunnel_started", "tunnel"], ["tunnel_starting", "tunnel"], ["tunnel_not_deleted", "tunnel"], ["tunnel_stopped", "tunnel"],
+    ["scp_uploaded", "transfer"], ["scp_not_downloaded", "transfer"],
     ["host_key_verified", "server_key"], ["host_key_not_verified", "server_key"],
     ["host_created", "change"], ["host_creation_not_completed", "change"], ["host_updated", "change"], ["host_update_not_completed", "change"],
     ["transport_set", "change"], ["transport_not_removed", "change"],
@@ -117,6 +121,8 @@ describe("AI activity titles", () => {
     const title = activityTitle(proposed, activityResult(proposed).kind);
     expect(title).toEqual({ before: "Proposed a new host ", host: "db-replica", after: "" });
     expect(titleText(title)).toBe("Proposed a new host db-replica");
+    expect(titleText(activityTitle(entry({ outcome: "scp_uploaded" }), "succeeded"))).toBe("Uploaded a file to web-1");
+    expect(titleText(activityTitle(entry({ outcome: "scp_not_downloaded" }), "not_run"))).toBe("Asked to download a file from web-1");
   });
 
   it.each([
@@ -156,6 +162,7 @@ describe("AI activity review and result sentences", () => {
     expect(reviewSentence(entry({ review: "no_answer" }))).toBe("Lunport’s window got no answer.");
     expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log" }))).toBe("Auto-log: ran without per-command review.");
     expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log", outcome: "tunnel_started", tunnel: "Database" }))).toBe("Auto-log: started without per-tunnel review.");
+    expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log", outcome: "scp_uploaded" }))).toBe("Auto-log: transferred without per-transfer review.");
     expect(reviewSentence(entry({ review: "not_asked", outcome: "tunnel_stopped" }))).toBe("This action has no approval step.");
     expect(reviewSentence(entry({ review: null, stop: stop("canceled", "approval") }))).toBe("It stopped before its review.");
     expect(reviewSentence(older({ mode: "ask" }))).toBe("Recorded in Ask mode.");

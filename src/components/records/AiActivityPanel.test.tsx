@@ -112,7 +112,7 @@ describe("AI activity page", () => {
   it("empty, no-match and load-failure states", () => {
     const empty = text(render([]));
     expect(empty).toContain("No AI activity yet");
-    expect(empty).toContain("Commands, tunnels, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.");
+    expect(empty).toContain("Commands, file transfers, tunnels, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.");
     expect(empty).not.toContain("each request");
     expect(empty).toContain("Set up AI access");
     const none = text(render(timeline, { filters: { ...NO_FILTERS, kind: "error" } }));

@@ -51,6 +51,7 @@ import {
   useSetMcpEnabled,
   mcpGroupKey,
   useSetMcpApprovalMode,
+  useSetMcpTransferLimit,
 } from "@/lib/mcp";
 
 import {
@@ -706,6 +707,13 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
   const now = useNow();
   const setEnabled = useSetMcpEnabled();
   const setMode = useSetMcpApprovalMode();
+  const setTransferLimit = useSetMcpTransferLimit();
+  const [transferLimitInput, setTransferLimitInput] = useState(() => String(status.data?.max_transfer_mib ?? 1024));
+  useEffect(() => {
+    if (status.data) setTransferLimitInput(String(status.data.max_transfer_mib));
+  }, [status.data?.max_transfer_mib]);
+  const transferLimit = Number(transferLimitInput);
+  const transferLimitValid = /^\d+$/.test(transferLimitInput) && Number.isSafeInteger(transferLimit) && transferLimit >= 1 && transferLimit <= 10_240;
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
   const applyMode = (approvalMode: "ask" | "auto_log", riskAcknowledged: boolean) =>
@@ -744,8 +752,8 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
 
       {records && (
         <Section
-          title="Command approval"
-          description="Ask reviews each complete command before execution. Switching mode cancels active requests."
+          title="AI operation approval"
+          description="Ask reviews each command or file transfer before execution. Switching mode cancels active requests."
         >
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -772,11 +780,28 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log only skips command review. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
+            Auto-log skips command and file transfer review. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
           </p>
+        </Section>
+      )}
+      {records && (
+        <Section title="File transfers" description="Set the largest single file an AI client can upload or download through Lunport SCP on this device.">
+          <SettingsGroup>
+            <SettingsRow id="set-mcp-transfer-limit" label="Single-file transfer limit" description="1–10,240 MiB. The default is 1,024 MiB; changing the limit cancels active transfers.">
+              <form className="flex items-center gap-2" onSubmit={(event) => {
+                event.preventDefault();
+                if (transferLimitValid && status.data && transferLimit !== status.data.max_transfer_mib) setTransferLimit.mutate(transferLimit);
+              }}>
+                <Input aria-label="Single-file transfer limit in MiB" type="number" min={1} max={10_240} step={1} value={transferLimitInput}
+                  onChange={(event) => setTransferLimitInput(event.target.value)} className="w-28" disabled={!status.data || setTransferLimit.isPending} />
+                <span className="text-sm text-muted-foreground">MiB</span>
+                <Button type="submit" size="sm" variant="outline" disabled={!status.data || setTransferLimit.isPending || !transferLimitValid || transferLimit === status.data.max_transfer_mib}>Save limit</Button>
+              </form>
+            </SettingsRow>
+          </SettingsGroup>
         </Section>
       )}
       <AlertDialog
@@ -788,9 +813,9 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
       >
         <AlertDialogContent onEscapeKeyDown={event => { if (setMode.isPending) event.preventDefault(); }}>
           <AlertDialogHeader>
-            <AlertDialogTitle>Allow commands without review?</AlertDialogTitle>
+            <AlertDialogTitle>Allow AI operations without review?</AlertDialogTitle>
             <AlertDialogDescription>
-              Auto-log lets local MCP clients execute arbitrary shell commands on every allowed host, including current and future members of allowed Groups, without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
+              Auto-log lets local MCP clients execute shell commands and transfer files on every allowed host, including current and future members of allowed Groups, without asking you first. Commands can delete files or change services, and transfers can replace remote files or copy files to this computer. The audit records public metadata, not command output or file contents; logging cannot undo an action.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <label className="flex items-start gap-2 text-sm">
@@ -800,7 +825,7 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
               disabled={setMode.isPending}
               onChange={event => setRiskAcknowledged(event.target.checked)}
             />
-            I understand that allowed hosts can be changed or lose data without a per-command review.
+            I understand that commands and file transfers can change or expose data without per-operation review.
           </label>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={setMode.isPending}>Cancel</AlertDialogCancel>

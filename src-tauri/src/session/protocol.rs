@@ -308,6 +308,8 @@ pub enum Unreviewed {
     Command,
     /// `start_tunnel` starts its tunnel.
     Tunnel,
+    /// `scp_upload` or `scp_download` transfers one file.
+    Transfer,
 }
 
 /// The longest grant the window lets a person ask for, in minutes, and the longest justification: the limits of the grant memory

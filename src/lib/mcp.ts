@@ -106,3 +106,12 @@ export function useSetMcpApprovalMode() {
     onError: (error) => toast.error("Could not update approval mode", { description: errorMessage(error) }),
   });
 }
+
+export function useSetMcpTransferLimit() {
+  const queryClient = useQueryClient();
+  return useMutation<McpStatus, unknown, number>({
+    mutationFn: (maxTransferMib) => tauriInvoke<McpStatus>("mcp_set_transfer_limit", { maxTransferMib }),
+    onSuccess: (status) => queryClient.setQueryData(mcpStatusKey, status),
+    onError: (error) => toast.error("Could not update file transfer limit", { description: errorMessage(error) }),
+  });
+}

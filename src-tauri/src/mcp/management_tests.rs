@@ -396,7 +396,9 @@ fn records_tool_inventory_is_explicit() {
             "update_tunnel",
             "delete_tunnel",
             "start_tunnel",
-            "stop_tunnel"
+            "stop_tunnel",
+            "scp_upload",
+            "scp_download"
         ]
     );
 }
