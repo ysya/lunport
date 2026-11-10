@@ -1,0 +1,143 @@
+import "./databases.css";
+import { useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/app/PageHeader";
+import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel } from "@/components/ui/alert-dialog";
+import { revealHidden } from "@/lib/reveal-hidden";
+import { errorMessage } from "@/lib/utils";
+import type { RecordOverview } from "@/lib/records";
+import { useNow } from "@/lib/use-now";
+import type { PamCheck } from "@/lib/transports";
+import {
+  connectionsLine,
+  databaseBusy,
+  databaseGrantLine,
+  databasePamStatusKey,
+  databasePamStatusQuery,
+  databasePhases,
+  databaseRoute,
+  databasesQuery,
+  deleteDatabase,
+  localAddress,
+  requestDatabaseGrant,
+  runDatabaseAction,
+  startDatabase,
+  stopDatabase,
+  type DatabaseView,
+} from "@/lib/databases";
+import { EnvironmentBadge } from "./DatabaseBadges";
+
+/**
+ * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
+ * Drawn only for a database with a grant check. A grant that is missing or ends within five minutes is in the warning color and comes
+ * with Request grant; a read that fails shows its error in place of whatever an earlier read found, as a host's details pane does.
+ */
+function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: string; pam: PamCheck; busy: boolean; request: () => void }) {
+  const now = useNow(1000);
+  const read = useQuery(databasePamStatusQuery(id));
+  const status = read.isError ? null : (read.data ?? null);
+  const grant = status ? databaseGrantLine(status, pam, now) : null;
+  const line = revealHidden(grant ? grant.text : read.isError ? errorMessage(read.error) : "Checking the grant…");
+  const tone = grant?.tone === "held" ? "text-primary" : grant?.tone === "warning" ? "text-warning" : "text-muted-foreground";
+  return <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${tone}`}>
+    <LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate" title={line}>{line}</span>
+    {grant?.request && <Button size="xs" variant="outline" className="ml-1 shrink-0 text-foreground" aria-label={`Request grant for ${revealHidden(name)}`} disabled={busy} onClick={request}>Request grant</Button>}
+  </span>;
+}
+
+/**
+ * One saved database. A database that runs here although its record is gone (deleted on another device) is shown by its name and Stop
+ * alone: there is nothing to change in it, no grant to read for it, and stopping it is what removes it from the list.
+ */
+function DatabaseRow({ row, busy, toggle, requestGrant, ask }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void }) {
+  const { database, live } = row;
+  const name = revealHidden(database.name);
+  const route = revealHidden(databaseRoute(database));
+  const address = localAddress(row);
+  const active = databaseBusy(row);
+  const changing = live.phase === "starting" || live.phase === "stopping";
+  const note = live.phase === "running" ? connectionsLine(live.connections) : row.blocked && !row.removed ? "Sync review needed" : "\u00a0";
+  return <tr className="border-b last:border-0 hover:bg-muted/20">
+    <td className="max-w-72 px-4 py-3">
+      <div className="flex min-w-0 items-center gap-2"><span className="truncate font-medium" title={name}>{name}</span>{!row.removed && <EnvironmentBadge environment={database.environment} />}</div>
+      {row.removed ? <span className="mt-1 block text-xs text-warning">Deleted on another device. Stop this running database to remove it here.</span> : <>
+        <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
+        {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
+      </>}
+      <span className="database-address-compact mt-1 truncate font-mono text-xs text-muted-foreground" title={address}>{address}</span>
+    </td>
+    <td className="database-address-column max-w-60 px-4 py-3">
+      <span className="block truncate font-mono text-xs" title={address}>{address}</span>
+      <span className="mt-1 block text-xs text-muted-foreground">{row.removed ? "Removed elsewhere" : row.synced ? "Synced database" : "On this computer"}</span>
+    </td>
+    <td className="whitespace-nowrap px-4 py-3">
+      <span className="inline-flex items-center gap-1.5">
+        {changing ? <LoaderCircle className="size-3 animate-spin" /> : <span className={`size-1.5 rounded-full ${live.phase === "running" ? "bg-success" : live.phase === "error" ? "bg-destructive" : "bg-muted-foreground/50"}`} />}
+        {databasePhases[live.phase]}
+      </span>
+      {live.phase === "error" && live.error ? <span className="mt-1 block max-w-64 whitespace-normal text-xs text-destructive">{revealHidden(live.error)}</span> : <span className="mt-1 block text-xs text-muted-foreground">{note}</span>}
+    </td>
+    <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
+      {(row.removed || database.local_port !== null) && <Button size="sm" variant={active ? "outline" : "secondary"} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{active ? "Stop" : live.phase === "error" ? "Retry" : "Start"}</Button>}
+      {!row.removed && <>
+        <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked}><PencilLine className="size-3.5" /></Button>
+        <Button size="icon-sm" variant="ghost" aria-label={`Delete ${name}`} disabled={active || busy || row.blocked} onClick={ask}><Trash2 className="size-3.5" /></Button>
+      </>}
+    </div></td>
+  </tr>;
+}
+
+export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
+  const query = useQuery(databasesQuery);
+  const client = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [busy, setBusy] = useState(false);
+  const flight = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<DatabaseView | null>(null);
+  const rows = query.data ?? [];
+  const needle = search.trim().toLowerCase();
+  const visible = rows.filter((r) => `${r.database.name} ${r.database.project} ${r.database.region} ${r.database.instance}`.toLowerCase().includes(needle));
+  // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown.
+  const action = async (run: () => Promise<void>) => {
+    if (flight.current) return;
+    flight.current = true; setBusy(true); setError(null);
+    setError(await runDatabaseAction(client, run));
+    flight.current = false; setBusy(false);
+  };
+  // The grant is read again too, so that the row shows what was requested.
+  const requestGrant = (id: string) => void action(async () => {
+    try { await requestDatabaseGrant(id); }
+    finally { await client.invalidateQueries({ queryKey: databasePamStatusKey(id) }); }
+  });
+  // A delete can fail once the record is gone, and a dialog that stayed open would offer to delete it again: it closes either way, and
+  // the failure is shown on the page beside the list that was read again.
+  const remove = (row: DatabaseView) => void action(async () => {
+    try { await deleteDatabase(row.database); }
+    finally { setDeleting(null); }
+  });
+  return <div className="databases-panel space-y-5">
+    <PageHeader title="Databases" count={rows.length} description="Cloud SQL connections that Lunport signs in to for your other apps."
+      actions={<Button id="new-database-button" disabled={busy || !!overview.account && overview.shared_writes_blocked}><Plus className="size-4" />New database</Button>} />
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="relative min-w-48 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="databases-search" aria-label="Search databases" placeholder="Search databases or projects…" className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+      <span className="text-xs text-muted-foreground">{overview.account ? "Databases sync · Start separately on each device" : "Databases sync when you connect an account"}</span>
+    </div>
+    {(error || query.error) && <p role="alert" className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error ?? revealHidden(String(query.error))}<Button variant="ghost" size="sm" onClick={() => void query.refetch()}>Refresh</Button></p>}
+    {query.isPending ? <p role="status" className="py-12 text-center text-sm text-muted-foreground">Loading databases…</p> : rows.length === 0 ?
+      <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-14 text-center">
+        <Database className="size-7 text-muted-foreground" /><h2 className="font-medium">Your Cloud SQL databases, within reach</h2>
+        <p className="max-w-sm text-sm text-muted-foreground">Save a PostgreSQL instance and Lunport offers it to your other apps on a local port, signed in with your Google account.</p>
+      </div> : <div className="overflow-x-auto rounded-lg border">
+      <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Local address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
+        <tbody>{visible.map((row) => <DatabaseRow key={row.database.id} row={row} busy={busy}
+          toggle={() => void action(() => databaseBusy(row) ? stopDatabase(row.database.id) : startDatabase(row.database.id))}
+          requestGrant={() => requestGrant(row.database.id)} ask={() => setDeleting(row)} />)}</tbody></table>
+      {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
+    </div>}
+    <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleting && revealHidden(deleting.database.name)}?</AlertDialogTitle><AlertDialogDescription>{deleting?.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  </div>;
+}

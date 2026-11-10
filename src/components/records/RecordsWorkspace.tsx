@@ -78,6 +78,7 @@ import { connectSavedHost } from "./operations";
 import { TerminalWorkspace } from "./TerminalWorkspace";
 import { useTerminalStore } from "@/stores/terminals";
 import { TunnelsPanel } from "./TunnelsPanel";
+import { DatabasesPanel } from "./DatabasesPanel";
 import { GoogleCloudPanel } from "./GoogleCloudPanel";
 
 export function RecordsWorkspace({
@@ -241,19 +242,20 @@ export function RecordsWorkspace({
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
       if (
         isTypingContext(event.target) &&
-        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID, "tunnels-search"].includes((event.target as HTMLElement).id)
+        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID, "tunnels-search", "databases-search"].includes((event.target as HTMLElement).id)
       )
         return;
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
         if (panel === "tunnels") document.getElementById("new-tunnel-button")?.click();
+        else if (panel === "databases") document.getElementById("new-database-button")?.click();
         else if (panel === "transports") createIapHost();
         else if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
         else createHost();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
-        const searchId = panel === "tunnels" ? "tunnels-search" : panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
-        if (panel !== "keys" && panel !== "tunnels") setPanel("hosts");
+        const searchId = panel === "tunnels" ? "tunnels-search" : panel === "databases" ? "databases-search" : panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
+        if (panel !== "keys" && panel !== "tunnels" && panel !== "databases") setPanel("hosts");
         window.requestAnimationFrame(() => {
           const input = document.getElementById(searchId);
           if (input instanceof HTMLInputElement) {
@@ -515,6 +517,7 @@ export function RecordsWorkspace({
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
+              {panel === "databases" && <DatabasesPanel overview={overview} />}
               {panel === "transports" && <GoogleCloudPanel overview={overview} accept={accept} createIapHost={createIapHost} editHost={editHost} />}
               {panel === "account" && (
                 <RecordsAccountPanel
