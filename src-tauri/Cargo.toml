@@ -109,13 +109,14 @@ tauri-plugin-autostart = "2.5.1"
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-single-instance = "~2.4.5"
 
-# 金鑰插槽:Windows 上把插槽目錄與私鑰設成只有目前使用者能存取(src/sync/slot_files_windows.rs)。
-# 0.61 已在 Cargo.lock(tempfile 等的相依),不需下載。Win32_Storage_FileSystem 與 Win32_System_SystemServices 只為了
-# FILE_ALL_ACCESS 與 SECURITY_DESCRIPTOR_REVISION 兩個常數。
-# 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):Win32_System_Diagnostics_ToolHelp 給程序快照(找父程序),
-# 程序的執行檔路徑用 Win32_System_Threading 的 QueryFullProcessImageNameW。
-# agent 的 named pipe(src/agent/pipe_windows.rs):Win32_System_Pipes 給 CreateNamedPipeW、ConnectNamedPipe 與 GetNamedPipeClientProcessId,
-# ConnectNamedPipe 的參數含 OVERLAPPED 指標,windows-sys 把它放在 Win32_System_IO 後面。
+# Key slots: on Windows the slot directory and private keys are made accessible to the current user only
+# (src/sync/slot_files_windows.rs). Version 0.61 is already in Cargo.lock (tempfile and others depend on it), so nothing is downloaded.
+# The key slots need Win32_Storage_FileSystem and Win32_System_SystemServices only for the FILE_ALL_ACCESS and
+# SECURITY_DESCRIPTOR_REVISION constants.
+# The local IPC server tells which program connected (src/ipc/peer.rs): Win32_System_Diagnostics_ToolHelp for the process snapshot that
+# finds the parent process, and Win32_System_Threading's QueryFullProcessImageNameW for a process's executable path.
+# Its named pipes (src/ipc/pipe_windows.rs): Win32_System_Pipes for CreateNamedPipeW, ConnectNamedPipe and GetNamedPipeClientProcessId;
+# ConnectNamedPipe takes an OVERLAPPED pointer, which windows-sys puts behind Win32_System_IO.
 # `lunport connect`'s console (src/cli/terminal_windows.rs): Win32_System_Console for the console's modes, code pages, window size and
 # input buffer.
 [target.'cfg(windows)'.dependencies]
@@ -125,8 +126,9 @@ windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_F
 # already in Cargo.lock through auto-launch.
 winreg = "=0.10.1"
 
-# 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):macOS 用 libc 的 proc_pidinfo、proc_pidpath 與 sysctl(KERN_PROCARGS2);
-# Linux 只讀 /proc。libc 已在 Cargo.lock(其他套件的相依),不需下載。
+# libc for Unix system calls, among them how the local IPC server tells which program connected (src/ipc/peer.rs): proc_pidinfo,
+# proc_pidpath and sysctl (KERN_PROCARGS2) on macOS, while Linux only reads /proc. libc is already in Cargo.lock (other crates depend on
+# it), so nothing is downloaded.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

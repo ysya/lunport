@@ -1,7 +1,7 @@
 // Finds names the app had before it became Lunport where only the current names belong. An old name is written once, in `legacy_identity`
 // (Rust) or `legacy-identity` (TypeScript); the few other places that may hold one are listed in ALLOWLIST, each with its reason.
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { globToRegExp, readText } from "./tracked-files.mjs";
 
 // A bracketed letter in each name keeps this file from matching its own pattern, so it needs no allowlist entry of its own.
 const OLD_NAME = /ssh[e]lter|org\.hom[e]lab|hom[e]lab/i;
@@ -31,25 +31,7 @@ export const ALLOWLIST = [
   { glob: "relay/wrangler.private-core.example.jsonc", reason: "the same Worker name, in the example configuration" },
 ];
 
-function globToRegExp(glob) {
-  const source = glob.split("**").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
-  return new RegExp(`^${source}$`);
-}
-
 const allowed = ALLOWLIST.map(({ glob }) => globToRegExp(glob));
-
-// The text of a file, or undefined for a binary file (it holds a NUL byte, which is also how git tells) and for a path that git still
-// lists but that is gone from the working tree.
-function readText(path) {
-  let bytes;
-  try {
-    bytes = readFileSync(path);
-  } catch (error) {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  }
-  return bytes.includes(0) ? undefined : bytes.toString("utf8");
-}
 
 // The lines of `files` (paths from `root`) that hold an old name, as { file, line, text } with `line` counted from 1. Allowlisted
 // files, binary files and lines marked frozen are left out, and a line with several names is one finding.
