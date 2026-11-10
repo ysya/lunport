@@ -592,3 +592,50 @@ fn a_database_without_a_grant_check_is_refused_before_the_person_is_asked() {
     assert!(cloud.owner.asked().is_empty());
     assert_eq!(cloud.looked(), 0);
 }
+
+/// The person at the Request-a-grant window, who answers once `followers` more requests wait behind the question.
+struct Patient {
+    inner: Arc<FakeOwner>,
+    gates: Arc<GrantGates>,
+    followers: usize,
+}
+
+impl Owner for Patient {
+    fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
+        let end = Instant::now() + Duration::from_secs(5);
+        while self.gates.waiting() < self.followers && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.inner.ask(kind, text, echo, deadline)
+    }
+
+    fn host_key_notice(&self, text: &str) {
+        self.inner.host_key_notice(text);
+    }
+
+    fn banner(&self, text: &str) {
+        self.inner.banner(text);
+    }
+}
+
+#[test]
+fn a_grant_asked_for_on_the_page_and_by_a_connection_at_once_is_asked_for_once() {
+    let cloud = Cloud::new(FakeOwner::typing(&[ANSWER]));
+    let mut upstream = cloud.upstream();
+    let (gates, owner) = (Arc::clone(&upstream.gates), Arc::clone(&cloud.owner));
+    // Whoever leads is answered only once the other waits behind the question.
+    upstream.make_owner = Arc::new(move |_: &CancelToken| -> Box<dyn Owner + Send> {
+        Box::new(Patient { inner: Arc::clone(&owner), gates: Arc::clone(&gates), followers: 1 })
+    });
+    let cancel = CancelToken::default();
+    let (page, connection) = std::thread::scope(|scope| {
+        let page = scope.spawn(|| upstream.request_grant(&guarded(), &cancel));
+        let connection = scope.spawn(|| upstream.prepare(&guarded(), &cancel));
+        (page.join().unwrap(), connection.join().unwrap())
+    });
+    assert_eq!(page, Ok(()));
+    assert_eq!(user(connection), Ok(IAM_USER.to_string()));
+    assert_eq!(cloud.owner.asked().len(), 1, "one question for both");
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 1, "one request for both");
+    assert_eq!(cloud.remembered.lock().unwrap().len(), 1, "one memory for both");
+}

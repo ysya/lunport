@@ -682,7 +682,7 @@ fn a_database_with_no_grant_check_reads_no_grant() {
 }
 
 #[test]
-fn a_database_that_is_not_saved_has_no_grant_read_or_requested() {
+fn a_grant_is_neither_read_nor_requested_for_a_database_that_is_not_saved() {
     let gcp = Pam::default();
     assert_eq!(grant_status(&gcp, &state(), ORDERS), Err(GONE.to_string()));
     assert_eq!(saved(&state(), ORDERS), Err(GONE.to_string()));
