@@ -9,7 +9,7 @@ import { buttonsIn, buttonTag, DISABLED, elementsOf, text, textIn } from "@/comp
 import { tauriInvoke } from "@/lib/ipc";
 import { renderHook } from "@/lib/test-ipc";
 import { databaseInstancesQuery, newDatabase, suggestPort, type InstanceSummary, type SavedDatabase } from "@/lib/databases";
-import { gcloudAccountsKey, newPamCheck, pamSuggestionsQuery, type GcloudAccountsView } from "@/lib/transports";
+import { gcloudAccountsKey, newPamCheck, pamSuggestionsQuery, type GcloudAccountsView, type TransportKind } from "@/lib/transports";
 import {
   changed,
   DatabaseEditor,
@@ -25,7 +25,7 @@ import {
   type Mode,
 } from "./DatabaseEditor";
 import { RecordField } from "./form";
-import { EntitlementsInput, EntitlementSuggestions, EntitlementSuggestionsView, GoogleAccountField, segmented } from "./IapRouteFields";
+import { EntitlementsInput, EntitlementSuggestions, EntitlementSuggestionsView, GoogleAccountField, IapRouteFields, segmented } from "./IapRouteFields";
 
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
 beforeEach(() => vi.mocked(tauriInvoke).mockReset());
@@ -855,5 +855,48 @@ describe("the parts both editors share", () => {
     const html = draw(withSuggestions(), <EntitlementSuggestions account="frank@example.com" project={PROD} pam={check} disabled onAdd={vi.fn()} />);
     const tag = [...html.matchAll(/<button\b[^>]*>/g)].map((match) => match[0]).find((markup) => markup.includes('aria-label="Add prod-admin"'));
     expect(tag).toContain(DISABLED);
+  });
+});
+
+/** The host editor's route fields are the other user of those two parts: what they are handed, and what a choice does to the route. */
+describe("the host editor's route fields use the shared parts", () => {
+  const route = (patch: Partial<TransportKind> = {}): TransportKind => ({
+    type: "gcp_iap",
+    project: PROD,
+    zone: "asia-east1-b",
+    instance: "jumpbox",
+    interface: "nic0",
+    account: "frank@example.com",
+    os_login: true,
+    pam: null,
+    ...patch,
+  });
+  const fields = (kind: TransportKind, onChange = vi.fn(), disabled = false) => IapRouteFields({ kind, onChange, disabled, port: null });
+  const check = { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null };
+
+  it("hands_the_account_field_the_routes_account_and_takes_its_choice_back_into_the_route", () => {
+    const onChange = vi.fn();
+    const field = (tree: ReactNode) => propsOf<{ account: string | null; disabled: boolean; onChange: (next: string | null) => void }>(elementsOf(tree, GoogleAccountField)[0]);
+    expect(elementsOf(fields(route()), GoogleAccountField)).toHaveLength(1);
+    expect(field(fields(route()))).toMatchObject({ account: "frank@example.com", disabled: false });
+    field(fields(route(), onChange)).onChange("old@example.com");
+    expect(onChange).toHaveBeenLastCalledWith(route({ account: "old@example.com" }));
+    // gcloud's active account is no account: the route keeps null, not an empty text.
+    field(fields(route(), onChange)).onChange(null);
+    expect(onChange).toHaveBeenLastCalledWith(route({ account: null }));
+    expect(field(fields(route({ account: null }))).account).toBeNull();
+    expect(field(fields(route(), onChange, true)).disabled).toBe(true);
+  });
+
+  it("hands_the_suggestions_the_routes_account_project_and_check_and_adds_the_one_pressed", () => {
+    const onChange = vi.fn();
+    const suggestions = elementsOf(fields(route({ pam: check }), onChange), EntitlementSuggestions);
+    expect(suggestions).toHaveLength(1);
+    expect(propsOf(suggestions[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check, disabled: false });
+    propsOf<{ onAdd: (id: string) => void }>(suggestions[0]).onAdd("prod-admin");
+    expect(onChange).toHaveBeenLastCalledWith(route({ pam: { ...check, entitlements: ["prod-operate", "prod-admin"] } }));
+    // No grant check, nothing to suggest for; a disabled route offers nothing to press.
+    expect(elementsOf(fields(route()), EntitlementSuggestions)).toHaveLength(0);
+    expect(propsOf(elementsOf(fields(route({ pam: check }), onChange, true), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
   });
 });
