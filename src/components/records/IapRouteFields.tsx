@@ -31,7 +31,8 @@ import { routeChange, type RouteDraft, type RouteState, type Via } from "./route
 
 /** Two thirds for the address or the instance, one for the port beside it, so switching keeps both where they were. */
 const besidePort = "grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]";
-const choice =
+/** One choice of a segmented control, a radio group drawn as a row of buttons; the New database dialog's choices are drawn the same way. */
+export const choice =
   "inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-2 text-sm font-medium whitespace-nowrap text-foreground/60 transition-all outline-none hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 data-[state=checked]:bg-background data-[state=checked]:text-foreground data-[state=checked]:shadow-sm dark:text-muted-foreground dark:data-[state=checked]:border-input dark:data-[state=checked]:bg-input/30 [&_svg]:size-4 [&_svg]:shrink-0";
 
 /**
@@ -115,7 +116,8 @@ export function connectViaDescription(route: RouteState, overview: RecordOvervie
   return synced ? "Saved with the host, so it syncs wherever the host does." : "Saved on this computer only.";
 }
 
-const accountLabel = (entry: GcloudAccountView) => `${entry.account}${entry.state === "expired" ? " · sign-in expired" : ""}`;
+/** A Google account in the account picker: its address, and that its sign-in has expired when it has. */
+export const accountLabel = (entry: GcloudAccountView) => `${entry.account}${entry.state === "expired" ? " · sign-in expired" : ""}`;
 
 /**
  * The Google Cloud IAP side of Connect via: the instance beside the host's own `port`, the project and zone under them, and the rest
@@ -249,7 +251,7 @@ export function IapRouteFields({
  * The entitlements, typed as a comma-separated list. The text stays as typed while it reads as the list the route has (a value rebuilt
  * from the list would eat a comma as it is typed); a list changed from outside, as Discard changes does, shows as that list.
  */
-function EntitlementsInput({ id, value, onChange, disabled }: { id?: string; value: string[]; onChange: (next: string[]) => void; disabled: boolean }) {
+export function EntitlementsInput({ id, value, onChange, disabled }: { id?: string; value: string[]; onChange: (next: string[]) => void; disabled: boolean }) {
   const [typed, setTyped] = useState(() => value.join(", "));
   const parsed = parseEntitlements(typed);
   const shown = parsed.length === value.length && parsed.every((entry, index) => entry === value[index]) ? typed : value.join(", ");

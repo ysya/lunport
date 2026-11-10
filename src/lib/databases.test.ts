@@ -8,6 +8,7 @@ import {
   connectionsLine,
   databaseBusy,
   databaseGrantLine,
+  databaseInstancesQuery,
   databasePamStatusQuery,
   databasePassword,
   databaseRoute,
@@ -18,6 +19,7 @@ import {
   localAddress,
   lockDatabaseWrites,
   newDatabase,
+  otherDatabases,
   parseConnectionName,
   reconnectLockedConnections,
   requestDatabaseGrant,
@@ -30,6 +32,7 @@ import {
   unlockMethod,
   type DatabasePhase,
   type DatabaseView,
+  type InstanceSummary,
   type SavedDatabase,
 } from "./databases";
 
@@ -224,6 +227,53 @@ describe("the Databases page's reads and actions", () => {
     expect(localAddress(view({ live: { phase: "running", port: 6544, connections: 0, writable_until_ms: null, error: null } }))).toBe("127.0.0.1:6544");
     expect(localAddress(view({ live: { phase: "error", port: null, connections: 0, writable_until_ms: null, error: "Port 6543 is already in use on this computer." } }))).toBe("127.0.0.1:6543");
     expect([0, 1, 2].map(connectionsLine)).toEqual(["0 active connections", "1 active connection", "2 active connections"]);
+  });
+});
+
+describe("the New database dialog's reads", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("lists the instances of a project for an account, kept for a minute and not asked again on a failure", async () => {
+    const found: InstanceSummary[] = [{ name: "orders-pg", region: "asia-east1", database_version: "POSTGRES_16", public_ip: true, private_ip: true, iam_authentication: true }];
+    const query = databaseInstancesQuery("frank@example.com", "acme-prod-123456");
+    expect(query.queryKey).toEqual(["gcp", "sql-instances", "frank@example.com", "acme-prod-123456"]);
+    expect(query.staleTime).toBe(60_000);
+    expect(query.retry).toBe(false);
+    // The answer comes from this app's backend, which says in its own sentence when Google cannot be reached, so it is read when the webview thinks it is offline too.
+    expect(query.networkMode).toBe("always");
+    const calls = stubBackend(async () => found);
+    expect(await new QueryClient().fetchQuery(query)).toEqual(found);
+    // No account asks for gcloud's active one.
+    expect(await new QueryClient().fetchQuery(databaseInstancesQuery(null, "acme-dev-654321"))).toEqual(found);
+    expect(calls).toEqual([
+      ["databases_list_instances", { account: "frank@example.com", project: "acme-prod-123456" }],
+      ["databases_list_instances", { account: null, project: "acme-dev-654321" }],
+    ]);
+    // Each account and each project is read, and kept, on its own.
+    expect(databaseInstancesQuery("ops@example.com", "acme-prod-123456").queryKey).not.toEqual(query.queryKey);
+    expect(databaseInstancesQuery("frank@example.com", "acme-dev-654321").queryKey).not.toEqual(query.queryKey);
+    expect(databaseInstancesQuery(null, "acme-prod-123456").queryKey).toEqual(["gcp", "sql-instances", null, "acme-prod-123456"]);
+  });
+
+  it("is read only once the project reads as one", () => {
+    for (const project of ["", "acme", "ACME-PROD-123456", "acme-prod-", "-acme-prod", "acme prod 123456", "acme:prod"]) {
+      expect(databaseInstancesQuery(null, project).enabled, project).toBe(false);
+    }
+    for (const project of ["acme-prod-123456", "acme-dev-654321", "123456"]) {
+      expect(databaseInstancesQuery(null, project).enabled, project).toBe(true);
+    }
+  });
+
+  it("leaves out the database being edited, and no other, from the ones whose ports are skipped", () => {
+    const second = { ...ORDERS, id: "00000000000000a2", name: "Analytics", local_port: 6544 };
+    const gone = { ...ORDERS, id: "00000000000000a3", name: "Old", local_port: null };
+    const rows = [view(), view({ database: second }), view({ database: gone, removed: true, blocked: true })];
+    // A database that is only listed to be stopped still holds the port it runs on.
+    expect(otherDatabases(rows, ORDERS.id)).toEqual([second, gone]);
+    expect(otherDatabases(rows, second.id)).toEqual([ORDERS, gone]);
+    // A new database has no row of its own.
+    expect(otherDatabases(rows, "")).toEqual([ORDERS, second, gone]);
+    expect(otherDatabases([], ORDERS.id)).toEqual([]);
   });
 });
 

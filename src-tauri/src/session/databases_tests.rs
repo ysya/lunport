@@ -2,6 +2,8 @@
 //! unlocking writes to a prod database.
 
 use super::*;
+use crate::gcp::auth::AuthError;
+use crate::gcp::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey, InstanceRef};
 use crate::gcp::oslogin::LoginProfile;
 use crate::gcp::pam::{duration_text, rfc3339, Grant};
 use crate::gcp::rest::GcpError;
@@ -690,4 +692,95 @@ fn a_grant_is_neither_read_nor_requested_for_a_database_that_is_not_saved() {
     // Another database's identity finds nothing either.
     assert_eq!(saved(&library_of(guarded()), ANALYTICS), Err(GONE.to_string()));
     assert_eq!(saved(&library_of(guarded()), ORDERS), Ok(guarded()));
+}
+
+// ---- Listing instances ----
+
+/// The Cloud SQL Admin API as the New database dialog asks it: what it answers for any project, and every list asked.
+struct Instances {
+    answer: Result<Vec<InstanceSummary>, GcpError>,
+    asked: Mutex<Vec<(Option<String>, String)>>,
+}
+
+impl Instances {
+    fn answering(answer: Result<Vec<InstanceSummary>, GcpError>) -> Instances {
+        Instances { answer, asked: Mutex::default() }
+    }
+
+    fn asked(&self) -> Vec<(Option<String>, String)> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl SqlAdmin for Instances {
+    fn connect_settings(&self, _: Option<&str>, _: &InstanceRef) -> Result<ConnectSettings, GcpError> {
+        panic!("listing instances never reads connect settings")
+    }
+
+    fn ephemeral_cert(&self, _: Option<&str>, _: &InstanceRef, _: &EphemeralKey) -> Result<EphemeralCert, GcpError> {
+        panic!("listing instances never asks for a certificate")
+    }
+
+    fn list_instances(&self, account: Option<&str>, project: &str) -> Result<Vec<InstanceSummary>, GcpError> {
+        self.asked.lock().unwrap().push((account.map(str::to_string), project.to_string()));
+        self.answer.clone()
+    }
+}
+
+fn instance(name: &str, iam_authentication: bool) -> InstanceSummary {
+    InstanceSummary { name: name.into(), region: "asia-east1".into(), database_version: "POSTGRES_16".into(), public_ip: true, private_ip: false, iam_authentication }
+}
+
+#[test]
+fn the_instance_picker_lists_what_the_api_lists_for_the_account_and_project() {
+    let found = vec![instance("orders-pg", true), instance("reports-pg", false)];
+    let sql = Instances::answering(Ok(found.clone()));
+    assert_eq!(list_instances(&sql, Some("frank@example.com"), "acme-prod-123456"), Ok(found.clone()));
+    // No account asks for gcloud's active one.
+    assert_eq!(list_instances(&sql, None, "acme-dev-654321"), Ok(found));
+    assert_eq!(sql.asked(), vec![(Some("frank@example.com".to_string()), "acme-prod-123456".to_string()), (None, "acme-dev-654321".to_string())]);
+    // A project with no PostgreSQL instance lists none.
+    assert_eq!(list_instances(&Instances::answering(Ok(Vec::new())), None, "acme-dev-654321"), Ok(Vec::new()));
+}
+
+#[test]
+fn a_project_that_is_not_one_lists_none_and_asks_google_nothing() {
+    let sql = Instances::answering(Ok(vec![instance("orders-pg", true)]));
+    for project in ["", "acme", "ACME-PROD-123456", "acme-prod-", "acme prod 123456", "../acme-prod-123456", "acme-prod-123456/instances", "projects/acme-prod-123456", "acme-prod-123456?x=1"] {
+        assert_eq!(list_instances(&sql, Some("frank@example.com"), project), Ok(Vec::new()), "{project:?}");
+    }
+    assert!(sql.asked().is_empty());
+}
+
+#[test]
+fn an_account_that_is_not_an_address_is_refused_before_google_is_asked() {
+    let sql = Instances::answering(Ok(vec![instance("orders-pg", true)]));
+    let refusal = Err("Enter the Google account as an email address.".to_string());
+    // The account names a directory under gcloud's config, so only an address can be one.
+    for account in ["", "frank", "frank@example", "../frank@example.com", " frank@example.com", "frank/ops@example.com"] {
+        assert_eq!(list_instances(&sql, Some(account), "acme-prod-123456"), refusal, "{account:?}");
+    }
+    // The account is judged first, as for the entitlement suggestions.
+    assert_eq!(list_instances(&sql, Some("frank"), "acme"), refusal);
+    assert!(sql.asked().is_empty());
+}
+
+#[test]
+fn a_listing_that_fails_reads_as_the_sentence_that_says_why_the_list_is_empty() {
+    let failing = |error: GcpError| list_instances(&Instances::answering(Err(error)), Some("frank@example.com"), "acme-dev-654321");
+    let disabled = "The Cloud SQL Admin API is not enabled in acme-dev-654321. Enable it in the Google Cloud console, then try again.";
+    assert_eq!(
+        failing(GcpError::Refused { api: "Cloud SQL Admin", message: disabled.into() }),
+        Err(format!("Cloud SQL Admin refused the request: {disabled}"))
+    );
+    assert_eq!(
+        failing(GcpError::Denied { api: "Cloud SQL Admin", status: 403, account: "frank@example.com".into() }),
+        Err("frank@example.com may not call the Cloud SQL Admin API (HTTP 403).".to_string())
+    );
+    assert_eq!(failing(GcpError::Network("operation timed out".into())), Err("Google's API could not be reached: operation timed out.".to_string()));
+    // A sign-in that expired says which account signs in again.
+    assert_eq!(
+        failing(GcpError::Auth(AuthError::SignInExpired { account: "frank@example.com".into() })),
+        Err("Google sign-in for frank@example.com has expired or was revoked; run `gcloud auth login frank@example.com` and connect again.".to_string())
+    );
 }

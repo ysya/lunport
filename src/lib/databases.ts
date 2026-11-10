@@ -1,6 +1,6 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import { tauriInvoke } from "./ipc";
-import { grantHeld, pamStatusOptions, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
+import { grantHeld, isProjectId, pamStatusOptions, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
 import { revealHidden } from "./reveal-hidden";
 import { errorMessage } from "./utils";
 import type { SavedDatabase } from "@/bindings/SavedDatabase";
@@ -9,8 +9,9 @@ import type { DatabaseLive } from "@/bindings/DatabaseLive";
 import type { DatabasePhase } from "@/bindings/DatabasePhase";
 import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
 import type { DatabaseEngine } from "@/bindings/DatabaseEngine";
+import type { InstanceSummary } from "@/bindings/InstanceSummary";
 import type { UnlockMethod } from "@/bindings/UnlockMethod";
-export type { SavedDatabase, DatabaseView, DatabaseLive, DatabasePhase, DatabaseEnvironment, UnlockMethod };
+export type { SavedDatabase, DatabaseView, DatabaseLive, DatabasePhase, DatabaseEnvironment, InstanceSummary, UnlockMethod };
 
 export const databasesKey = ["databases"] as const;
 export const listDatabases = () => tauriInvoke<DatabaseView[]>("databases_list");
@@ -68,6 +69,33 @@ export function parseConnectionName(text: string): { project: string; region: st
   const [project, region, instance] = parts;
   return { project, region, instance };
 }
+
+/**
+ * The PostgreSQL instances `account` (none: gcloud's active account) can list in `project`, for the New database dialog's picker. Read
+ * once the project reads as one, and kept for a minute. Not retried, and read even when the webview thinks it is offline, as the
+ * accounts are: the answer comes from this app's backend, which says in its own sentence when Google cannot be reached or the Cloud SQL
+ * Admin API is not enabled in the project.
+ */
+export const databaseInstancesQuery = (account: string | null, project: string) =>
+  queryOptions({
+    queryKey: ["gcp", "sql-instances", account, project],
+    queryFn: () => tauriInvoke<InstanceSummary[]>("databases_list_instances", { account, project }),
+    enabled: isProjectId(project),
+    staleTime: 60_000,
+    retry: false,
+    networkMode: "always",
+  });
+
+/** The first local port from 6543 up that none of `used` holds: what the editor proposes when a database is offered to other apps. */
+export function suggestPort(used: number[]): number {
+  const taken = new Set(used);
+  let port = 6543;
+  while (taken.has(port)) port += 1;
+  return port;
+}
+
+/** The databases of `rows` other than the one with identity `id`, which hold the ports its editor must not propose. A new database has no row of its own. */
+export const otherDatabases = (rows: DatabaseView[], id: string): SavedDatabase[] => rows.filter((row) => row.database.id !== id).map((row) => row.database);
 
 /** The query key of the grant a database needs, under the keys of the hosts' grants. */
 export const databasePamStatusKey = (id: string) => ["gcp", "pam-status", "database", id] as const;

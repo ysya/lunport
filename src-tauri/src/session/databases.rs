@@ -1,12 +1,14 @@
 //! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them,
-//! show, replace and remove the password of a database's local port, unlock and lock writes to a prod database through that port, and
-//! show and request the Privileged Access Manager grant a database needs.
+//! show, replace and remove the password of a database's local port, unlock and lock writes to a prod database through that port,
+//! show and request the Privileged Access Manager grant a database needs, and list the instances of a project for the New database dialog.
 use super::broker::Broker;
 use super::connect::CancelToken;
 use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
+use super::pam::checked_account;
 use super::transports::{pam_status_for, PamStatusView};
 use super::tunnels::{main_only, snapshot};
+use crate::gcp::cloudsql::{InstanceSummary, SqlAdmin};
 use crate::gcp::rest::GcpClient;
 use crate::os_auth::{self, UnlockMethod};
 use crate::{
@@ -166,6 +168,19 @@ fn saved(state: &SyncStateV3, id: &str) -> Result<SavedDatabase, String> {
 fn grant_status(gcp: &dyn GcpClient, state: &SyncStateV3, id: &str) -> Result<PamStatusView, String> {
     let database = saved(state, id)?;
     Ok(pam_status_for(gcp, database.account.as_deref(), &database.project, database.pam.as_ref()))
+}
+
+/// The PostgreSQL instances of `project` that `account` (none: gcloud's active account) can list, for the New database dialog's picker. The
+/// dialog asks as the person types a project, so text that is not a project id lists none and asks Google nothing, and an account that is
+/// not an address is refused as the entitlement suggestions refuse it. Any other failure is its sentence, so that the dialog can say why
+/// the list is empty (the Cloud SQL Admin API not enabled in the project, a sign-in that expired). Blocks on the Admin API, so it runs on
+/// a blocking thread.
+fn list_instances(sql: &dyn SqlAdmin, account: Option<&str>, project: &str) -> Result<Vec<InstanceSummary>, String> {
+    checked_account(account)?;
+    if !transports::is_project(project) {
+        return Ok(Vec::new());
+    }
+    sql.list_instances(account, project).map_err(|error| error.to_string())
 }
 
 /// A password as the page receives it: the command answers with a plain string, so this is where it leaves its `Zeroizing` wrapper.
@@ -360,6 +375,19 @@ pub async fn databases_request_grant(app: tauri::AppHandle, window: tauri::Webvi
         let broker = started_broker(&app)?;
         let database = saved(&snapshot(&app)?, &id)?;
         CloudSqlUpstream::for_app(&app, &broker).request_grant(&database, &CancelToken::default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The PostgreSQL instances `account` can list in `project`, for the New database dialog's picker: what the Cloud SQL Admin API lists, none
+/// for text that is not a project id, or the sentence of why the list could not be had.
+#[tauri::command]
+pub async fn databases_list_instances(app: tauri::AppHandle, window: tauri::WebviewWindow, account: Option<String>, project: String) -> Result<Vec<InstanceSummary>, String> {
+    main_only(&window, "Database")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let sql = app.state::<AppState>().sqladmin.clone();
+        list_instances(&*sql, account.as_deref(), &project)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -1,11 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabasesPanel } from "./DatabasesPanel";
+import { DatabaseRow, DatabasesPanel } from "./DatabasesPanel";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
 import { recordOverview } from "./fixtures";
-import { DISABLED, buttonTag, text } from "@/components/keychain/test-markup";
+import { DISABLED, buttonTag, buttonsIn, elementsOf, text, textIn } from "@/components/keychain/test-markup";
+import { Dialog } from "@/components/ui/dialog";
+import { PageHeader } from "@/components/app/PageHeader";
+import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
 import { databasesKey, type DatabasePhase, type DatabaseView, type SavedDatabase } from "@/lib/databases";
 import type { PamStatusView } from "@/lib/transports";
@@ -351,6 +355,45 @@ describe("the Databases page", () => {
     expect(invoke.mock.calls.map(([command]) => command).filter((command) => /password/.test(command))).toEqual([]);
     const cached = JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data));
     expect(cached).not.toMatch(/password/i);
+  });
+});
+
+describe("opening the editor from the page", () => {
+  const labelOf = (button: { props: unknown }) => (button.props as { "aria-label"?: string })["aria-label"];
+
+  it("a_rows_name_and_edit_button_both_open_the_editor_for_that_row", () => {
+    const [toggle, requestGrant, ask, edit] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), busy: false, toggle, requestGrant, ask, edit }));
+    buttons.find((button) => textIn(button) === "Orders")!.props.onClick!();
+    expect(edit).toHaveBeenCalledTimes(1);
+    buttons.find((button) => labelOf(button) === "Edit Orders")!.props.onClick!();
+    expect(edit).toHaveBeenCalledTimes(2);
+    // Neither starts, stops, deletes or asks for a grant.
+    expect([toggle, ask, requestGrant].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0]);
+  });
+
+  it("the_name_is_a_button_that_is_held_back_when_the_edit_button_is", () => {
+    const stopped = render([row({}, { pam: null })]);
+    expect(buttonTag(stopped, "Orders")).not.toContain(DISABLED);
+    for (const phase of ["starting", "running", "stopping"] as const) expect(buttonTag(render([row({ live: live(phase) }, { pam: null })]), "Orders"), phase).toContain(DISABLED);
+    expect(buttonTag(render([row({ blocked: true }, { pam: null })]), "Orders")).toContain(DISABLED);
+    // A row that is only listed to be stopped has nothing to edit: its name is words, not a button.
+    const gone = render([row({ live: live("running"), removed: true, blocked: true })]);
+    expect(() => buttonTag(gone, "Orders")).toThrow("no Orders button");
+    expect(text(gone)).toContain("Orders");
+    // The name keeps its tooltip and its hidden characters as codes.
+    expect(render([row({}, { name: "Ord\u202eers", pam: null })])).toContain("Ord⟨U+202E⟩ers");
+  });
+
+  it("the_header_opens_the_editor_and_nothing_is_open_until_it_is_asked", () => {
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, [row()]);
+    const tree = renderHook(client, () => DatabasesPanel({ overview: recordOverview() }));
+    const header = elementsOf(tree, PageHeader)[0].props as unknown as { actions: ReactNode };
+    expect(buttonsIn(header.actions).find((button) => textIn(button) === "New database")?.props.onClick).toBeTypeOf("function");
+    expect((elementsOf(tree, Dialog)[0].props as unknown as { open: boolean }).open).toBe(false);
+    expect(elementsOf(tree, DatabaseRow)).toHaveLength(1);
+    expect(typeof (elementsOf(tree, DatabaseRow)[0].props as unknown as { edit: unknown }).edit).toBe("function");
   });
 });
 

@@ -272,7 +272,8 @@ fn saved(app: &tauri::AppHandle) -> Result<(Vec<HostTransport>, Vec<PamScope>, V
     Ok((commands::live_routes(records)?, pam_records::scopes(records), pam_records::memories(records)))
 }
 
-fn checked_account(account: Option<&str>) -> Result<(), String> {
+/// Refuses an account that is not an email address: it names a directory under gcloud's config, so it is checked before any call is made.
+pub(super) fn checked_account(account: Option<&str>) -> Result<(), String> {
     if account.is_some_and(|account| !transports::is_email(account)) {
         return Err("Enter the Google account as an email address.".into());
     }

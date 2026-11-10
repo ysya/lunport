@@ -6,9 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel } from "@/components/ui/alert-dialog";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { TaskDialogContent } from "@/components/app/TaskDialog";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { errorMessage } from "@/lib/utils";
 import type { RecordOverview } from "@/lib/records";
+import { useLastNonNull } from "@/lib/use-last-non-null";
 import { useNow } from "@/lib/use-now";
 import type { PamCheck } from "@/lib/transports";
 import {
@@ -22,13 +25,18 @@ import {
   databasesQuery,
   deleteDatabase,
   localAddress,
+  newDatabase,
+  otherDatabases,
   requestDatabaseGrant,
   runDatabaseAction,
+  saveDatabase,
   startDatabase,
   stopDatabase,
   type DatabaseView,
+  type SavedDatabase,
 } from "@/lib/databases";
 import { EnvironmentBadge } from "./DatabaseBadges";
+import { DatabaseEditor } from "./DatabaseEditor";
 
 /**
  * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
@@ -53,10 +61,12 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
 }
 
 /**
- * One saved database. A database that runs here although its record is gone (deleted on another device) is shown by its name and Stop
- * alone: there is nothing to change in it, no grant to read for it, and stopping it is what removes it from the list.
+ * One saved database. Its name and its Edit button open the editor, and both are held back while its port starts, runs or stops, while a
+ * change is under way, and while its library's writes are blocked. A database that runs here although its record is gone (deleted on
+ * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
+ * removes it from the list. No hooks: exported for the tests.
  */
-function DatabaseRow({ row, busy, toggle, requestGrant, ask }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void }) {
+export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
   const route = revealHidden(databaseRoute(database));
@@ -69,7 +79,10 @@ function DatabaseRow({ row, busy, toggle, requestGrant, ask }: { row: DatabaseVi
   const note = live.phase === "running" ? connectionsLine(live.connections) : row.blocked && !row.removed ? "Sync review needed" : "\u00a0";
   return <tr className="border-b last:border-0 hover:bg-muted/20">
     <td className="max-w-72 px-4 py-3">
-      <div className="flex min-w-0 items-center gap-2"><span className="truncate font-medium" title={name}>{name}</span>{!row.removed && <EnvironmentBadge environment={database.environment} />}</div>
+      <div className="flex min-w-0 items-center gap-2">
+        {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button className="min-w-0 truncate text-left font-medium hover:text-primary disabled:cursor-default" title={name} disabled={active || busy || row.blocked} onClick={edit}>{name}</button>}
+        {!row.removed && <EnvironmentBadge environment={database.environment} />}
+      </div>
       {row.removed ? <span className="mt-1 block text-xs text-warning">Deleted on another device. Stop this running database to remove it here.</span> : <>
         <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
         {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
@@ -90,7 +103,7 @@ function DatabaseRow({ row, busy, toggle, requestGrant, ask }: { row: DatabaseVi
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
       {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} aria-label={`${verb} ${name}`} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{verb}</Button>}
       {!row.removed && <>
-        <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked}><PencilLine className="size-3.5" /></Button>
+        <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked} onClick={edit}><PencilLine className="size-3.5" /></Button>
         <Button size="icon-sm" variant="ghost" aria-label={`Delete ${name}`} disabled={active || busy || row.blocked} onClick={ask}><Trash2 className="size-3.5" /></Button>
       </>}
     </div></td>
@@ -105,16 +118,32 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   const flight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<DatabaseView | null>(null);
+  // The database in the editor and the one it is compared against when saved (none for a new one), while the dialog is open.
+  const [editing, setEditing] = useState<{ initial: SavedDatabase; expected: SavedDatabase | null } | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
+  // The dialog takes a moment to animate out once `editing` is null; its title and body keep what they showed until then.
+  const shown = useLastNonNull(editing);
   const rows = query.data ?? [];
   const needle = search.trim().toLowerCase();
   const visible = rows.filter((r) => `${r.database.name} ${r.database.project} ${r.database.region} ${r.database.instance}`.toLowerCase().includes(needle));
-  // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown.
-  const action = async (run: () => Promise<void>) => {
+  // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown: in the dialog for a
+  // save, which stays open with what was typed, and on the page for the rest. A save that worked closes the dialog.
+  const action = async (run: () => Promise<void>, inEditor = false) => {
     if (flight.current) return;
-    flight.current = true; setBusy(true); setError(null);
-    setError(await runDatabaseAction(client, run));
+    flight.current = true; setBusy(true); setError(null); setEditorError(null);
+    const failure = await runDatabaseAction(client, run);
+    if (!inEditor) setError(failure);
+    else if (failure === null) setEditing(null);
+    else setEditorError(failure);
     flight.current = false; setBusy(false);
   };
+  // A new database, or a saved one, which is also what its save is compared against: nothing is saved over a version the list does not show.
+  const edit = (row: DatabaseView | null) => {
+    setEditorError(null);
+    setEditing(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null });
+  };
+  const closeEditor = () => { if (!flight.current) setEditing(null); };
+  const save = (next: SavedDatabase) => { if (editing) void action(async () => { await saveDatabase(next, editing.expected); }, true); };
   // The grant is read again too, so that the row shows what was requested.
   const requestGrant = (id: string) => void action(async () => {
     try { await requestDatabaseGrant(id); }
@@ -128,7 +157,7 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   });
   return <div className="databases-panel space-y-5">
     <PageHeader title="Databases" count={rows.length} description="Cloud SQL connections that Lunport signs in to for your other apps."
-      actions={<Button id="new-database-button" disabled={busy || !!overview.account && overview.shared_writes_blocked}><Plus className="size-4" />New database</Button>} />
+      actions={<Button id="new-database-button" onClick={() => edit(null)} disabled={busy || !!overview.account && overview.shared_writes_blocked}><Plus className="size-4" />New database</Button>} />
     <div className="flex flex-wrap items-center gap-3">
       <div className="relative min-w-48 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="databases-search" aria-label="Search databases" placeholder="Search databases or projects…" className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
       <span className="text-xs text-muted-foreground">{overview.account ? "Databases sync · Start separately on each device" : "Databases sync when you connect an account"}</span>
@@ -142,9 +171,13 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
       <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Local address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{visible.map((row) => <DatabaseRow key={row.database.id} row={row} busy={busy}
           toggle={() => void action(() => databaseBusy(row) ? stopDatabase(row.database.id) : startDatabase(row.database.id))}
-          requestGrant={() => requestGrant(row.database.id)} ask={() => setDeleting(row)} />)}</tbody></table>
+          requestGrant={() => requestGrant(row.database.id)} ask={() => setDeleting(row)} edit={() => edit(row)} />)}</tbody></table>
       {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
     </div>}
+    <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">
+      <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
+      {shown && <DatabaseEditor initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} />}
+    </TaskDialogContent></Dialog>
     <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleting && revealHidden(deleting.database.name)}?</AlertDialogTitle><AlertDialogDescription>{deleting?.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>;
 }
