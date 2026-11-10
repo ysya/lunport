@@ -201,13 +201,21 @@ impl CloudSqlUpstream {
                     kept.grant = None;
                     kept.dial = None;
                 }
-                let library = (self.library)()?;
-                let owner = (self.make_owner)(cancel);
-                let remember = |name: &str, justification: &str, duration_secs: u32| (self.remember)(name, justification, duration_secs);
-                obtain_grant(&self.gates, self.gcp.as_ref(), owner.as_ref(), &library, db, &remember, cancel)?;
+                self.request_grant(db, cancel)?;
                 Ok(true)
             }
         }
+    }
+
+    /// Asks the person for the grant `db` needs and requests it, as a connection does when none is held: through the app's gates, in
+    /// Lunport's Request-a-grant window, remembering on this device what they answered. Answers when the grant is active, or with the
+    /// sentence of why not. Blocks until then (for as long as the person takes to answer, and then for the request), so it runs on a
+    /// blocking thread.
+    pub(crate) fn request_grant(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<(), String> {
+        let library = (self.library)()?;
+        let owner = (self.make_owner)(cancel);
+        let remember = |name: &str, justification: &str, duration_secs: u32| (self.remember)(name, justification, duration_secs);
+        obtain_grant(&self.gates, self.gcp.as_ref(), owner.as_ref(), &library, db, &remember, cancel)
     }
 
     /// The database user of `db`'s connections as `account`, and the number of the material to dial it with, kept until `REFRESH_AHEAD`

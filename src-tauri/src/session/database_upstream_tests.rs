@@ -554,3 +554,41 @@ fn a_stopped_or_deleted_database_keeps_no_password_or_certificate() {
     ports.release(ID);
     assert!(!locked(&upstream.routes).contains_key(ID));
 }
+
+#[test]
+fn a_grant_the_person_requests_is_asked_for_once_remembered_and_then_held_for_the_connections() {
+    let cloud = Cloud::new(FakeOwner::typing(&[ANSWER]));
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    assert_eq!(upstream.request_grant(&guarded(), &cancel), Ok(()));
+    let asked = cloud.owner.asked();
+    assert_eq!(asked.len(), 1, "the person was asked once");
+    assert_eq!(asked[0].kind, QuestionKind::Grant);
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 1, "and one grant was requested with the answer");
+    assert_eq!(*cloud.remembered.lock().unwrap(), vec![(OPERATE.to_string(), "Check unpaid orders".to_string(), 1800)], "what they answered is remembered on this device");
+    // The grant is held now: the next connection to the database asks nothing more and requests nothing.
+    assert!(user(upstream.prepare(&guarded(), &cancel)).is_ok());
+    assert_eq!(cloud.owner.asked().len(), 1);
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_grant_request_that_gets_no_answer_requests_nothing_and_says_how_to_by_hand() {
+    // The person is not at the window: the question ends without an answer.
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let error = upstream.request_grant(&guarded(), &CancelToken::default()).unwrap_err();
+    assert!(error.starts_with("No active Privileged Access Manager grant for prod-operate on acme-prod-123456. Request one (for example gcloud pam grants create"), "{error}");
+    assert_eq!(cloud.owner.asked().len(), 1);
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 0);
+    assert!(cloud.remembered.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_database_without_a_grant_check_is_refused_before_the_person_is_asked() {
+    let cloud = Cloud::new(FakeOwner::typing(&[ANSWER]));
+    let upstream = cloud.upstream();
+    assert_eq!(upstream.request_grant(&orders(), &CancelToken::default()), Err("This database requires no grant.".to_string()));
+    assert!(cloud.owner.asked().is_empty());
+    assert_eq!(cloud.looked(), 0);
+}
