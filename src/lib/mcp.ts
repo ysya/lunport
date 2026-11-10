@@ -1,12 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import type { ApprovalMode } from "@/bindings/ApprovalMode";
 import type { HostScope } from "@/lib/records";
+import type { McpActivityLog } from "@/bindings/McpActivityLog";
+import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import type { McpStatus } from "@/bindings/McpStatus";
 import { tauriInvoke } from "@/lib/ipc";
 
 export const mcpStatusKey = ["mcp", "status"] as const;
+export const mcpActivityKey = ["mcp", "activity"] as const;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -16,6 +19,36 @@ export function useMcpStatus(refetchInterval: number | false = false) {
   return useQuery<McpStatus>({
     queryKey: mcpStatusKey,
     queryFn: () => tauriInvoke<McpStatus>("mcp_status"),
+    refetchInterval,
+  });
+}
+
+/** The AI entries, newest first, as of `revision` of the log. */
+export interface McpActivityData {
+  revision: number;
+  entries: McpAuditEntry[];
+  audit_error: string | null;
+}
+
+/** The entries after an answer of `mcp_activity`: the same object when nothing changed, so that nothing renders again. */
+export function mergeActivity(previous: McpActivityData | undefined, next: McpActivityLog): McpActivityData {
+  if (next.entries !== null) return { revision: next.revision, entries: next.entries, audit_error: next.audit_error };
+  if (previous && previous.audit_error === next.audit_error) return previous;
+  return { revision: next.revision, entries: previous?.entries ?? [], audit_error: next.audit_error };
+}
+
+/** The AI entries, asked for only when the log has changed since the revision the cache holds. */
+export async function fetchMcpActivity(queryClient: QueryClient): Promise<McpActivityData> {
+  const previous = queryClient.getQueryData<McpActivityData>(mcpActivityKey);
+  const answer = await tauriInvoke<McpActivityLog>("mcp_activity", { since: previous?.revision ?? null });
+  return mergeActivity(previous, answer);
+}
+
+export function useMcpActivity(refetchInterval: number | false = 2_000) {
+  const queryClient = useQueryClient();
+  return useQuery<McpActivityData>({
+    queryKey: mcpActivityKey,
+    queryFn: () => fetchMcpActivity(queryClient),
     refetchInterval,
   });
 }
