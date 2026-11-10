@@ -31,7 +31,9 @@ import { routeChange, type RouteDraft, type RouteState, type Via } from "./route
 
 /** Two thirds for the address or the instance, one for the port beside it, so switching keeps both where they were. */
 const besidePort = "grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]";
-/** One choice of a segmented control, a radio group drawn as a row of buttons; the New database dialog's choices are drawn the same way. */
+/** A segmented control, a radio group drawn as a row of buttons; the New database dialog's are drawn the same way. */
+export const segmented = "flex w-full gap-0.5 rounded-lg bg-muted p-[3px]";
+/** One choice of a segmented control. */
 export const choice =
   "inline-flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-2 text-sm font-medium whitespace-nowrap text-foreground/60 transition-all outline-none hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 data-[state=checked]:bg-background data-[state=checked]:text-foreground data-[state=checked]:shadow-sm dark:text-muted-foreground dark:data-[state=checked]:border-input dark:data-[state=checked]:bg-input/30 [&_svg]:size-4 [&_svg]:shrink-0";
 
@@ -72,7 +74,7 @@ export function ConnectVia({
           value={draft.via}
           disabled={disabled || locked}
           onValueChange={(via) => onDraft({ ...draft, via: via as Via })}
-          className="flex w-full gap-0.5 rounded-lg bg-muted p-[3px]"
+          className={segmented}
         >
           <RadioGroup.Item value="address" className={choice}>
             Address
@@ -117,7 +119,34 @@ export function connectViaDescription(route: RouteState, overview: RecordOvervie
 }
 
 /** A Google account in the account picker: its address, and that its sign-in has expired when it has. */
-export const accountLabel = (entry: GcloudAccountView) => `${entry.account}${entry.state === "expired" ? " · sign-in expired" : ""}`;
+const accountLabel = (entry: GcloudAccountView) => `${entry.account}${entry.state === "expired" ? " · sign-in expired" : ""}`;
+
+/**
+ * The Google account a route or a database signs in as: one of gcloud's accounts on this computer, or gcloud's active account when none
+ * is chosen (`null`). Where gcloud's accounts cannot be read, or gcloud has no folder on this computer, the account is typed instead.
+ */
+export function GoogleAccountField({ account, onChange, disabled }: { account: string | null; onChange: (next: string | null) => void; disabled: boolean }) {
+  // The Google Cloud page reads the same cache entry.
+  const accounts = useQuery(gcloudAccountsQuery).data;
+  return (
+    <RecordField label="Google account">
+      {accounts?.config_found ? (
+        <select className={selectClass} value={account ?? ""} disabled={disabled} onChange={(e) => onChange(e.target.value || null)}>
+          <option value="">{accounts.active ? `gcloud's active account (${accounts.active})` : "gcloud's active account"}</option>
+          {accounts.accounts.map((entry) => (
+            <option key={entry.account} value={entry.account}>
+              {accountLabel(entry)}
+            </option>
+          ))}
+          {account && !accounts.accounts.some((entry) => entry.account === account) && <option value={account}>{`${account} · not signed in on this computer`}</option>}
+        </select>
+      ) : (
+        <Input value={account ?? ""} placeholder="gcloud's active account" disabled={disabled} onChange={(e) => onChange(e.target.value.trim() || null)} />
+      )}
+      <p className="text-xs text-muted-foreground">Accounts come from gcloud on this computer; each computer signs in on its own.</p>
+    </RecordField>
+  );
+}
 
 /**
  * The Google Cloud IAP side of Connect via: the instance beside the host's own `port`, the project and zone under them, and the rest
@@ -136,8 +165,6 @@ export function IapRouteFields({
 }) {
   const patch = (changes: Partial<TransportKind>) => onChange({ ...kind, ...changes });
   const patchPam = (changes: Partial<PamCheck>) => patch({ pam: { ...(kind.pam ?? newPamCheck()), ...changes } });
-  // The Google Cloud page reads the same cache entry.
-  const accounts = useQuery(gcloudAccountsQuery).data;
   const summary = [
     kind.account ?? "gcloud's active account",
     kind.os_login ? "OS Login" : null,
@@ -167,30 +194,7 @@ export function IapRouteFields({
           <span className="ml-2 text-xs font-normal text-muted-foreground">{summary}</span>
         </summary>
         <div className="mt-4 space-y-4 pb-1">
-          <RecordField label="Google account">
-            {/* Where gcloud's accounts cannot be read, or gcloud has no folder on this computer, the account is typed instead. */}
-            {accounts?.config_found ? (
-              <select className={selectClass} value={kind.account ?? ""} disabled={disabled} onChange={(e) => patch({ account: e.target.value || null })}>
-                <option value="">{accounts.active ? `gcloud's active account (${accounts.active})` : "gcloud's active account"}</option>
-                {accounts.accounts.map((entry) => (
-                  <option key={entry.account} value={entry.account}>
-                    {accountLabel(entry)}
-                  </option>
-                ))}
-                {kind.account && !accounts.accounts.some((entry) => entry.account === kind.account) && (
-                  <option value={kind.account}>{`${kind.account} · not signed in on this computer`}</option>
-                )}
-              </select>
-            ) : (
-              <Input
-                value={kind.account ?? ""}
-                placeholder="gcloud's active account"
-                disabled={disabled}
-                onChange={(e) => patch({ account: e.target.value.trim() || null })}
-              />
-            )}
-            <p className="text-xs text-muted-foreground">Accounts come from gcloud on this computer; each computer signs in on its own.</p>
-          </RecordField>
+          <GoogleAccountField account={kind.account} onChange={(account) => patch({ account })} disabled={disabled} />
           <label className="flex items-start gap-3 text-sm">
             <Switch className="mt-0.5" checked={kind.os_login} disabled={disabled} onCheckedChange={(checked) => patch({ os_login: checked })} />
             <span>
@@ -217,7 +221,13 @@ export function IapRouteFields({
               <div className="sm:col-span-2">
                 <RecordField label="Entitlements">
                   <EntitlementsInput value={kind.pam.entitlements} disabled={disabled} onChange={(entitlements) => patchPam({ entitlements })} />
-                  <EntitlementSuggestions kind={kind} disabled={disabled} onAdd={(id) => patchPam({ entitlements: [...(kind.pam?.entitlements ?? []), id] })} />
+                  <EntitlementSuggestions
+                    account={kind.account}
+                    project={kind.project}
+                    pam={kind.pam}
+                    disabled={disabled}
+                    onAdd={(id) => patchPam({ entitlements: [...(kind.pam?.entitlements ?? []), id] })}
+                  />
                 </RecordField>
               </div>
               <RecordField label="Location">
@@ -270,14 +280,26 @@ export function EntitlementsInput({ id, value, onChange, disabled }: { id?: stri
 }
 
 /**
- * The entitlements the route's account may request in its project's PAM location, offered under the field: one
- * press adds one. Read once the project reads as one; nothing is shown while Google has none to offer or cannot say.
+ * The entitlements `account` may request in `project`'s PAM location, the one `pam` names, offered under the entitlements field of a
+ * grant check: one press adds one. Read once the project reads as one; nothing is shown while Google has none to offer or cannot say.
  */
-function EntitlementSuggestions({ kind, disabled, onAdd }: { kind: TransportKind; disabled: boolean; onAdd: (id: string) => void }) {
-  const location = kind.pam?.location ?? "";
-  const ready = kind.pam !== null && isProjectId(kind.project) && /^[a-z][a-z0-9-]*$/.test(location);
-  const found = useQuery({ ...pamSuggestionsQuery(kind.account, kind.project, location), enabled: ready }).data ?? [];
-  return <EntitlementSuggestionsView offered={suggestionsToOffer(found, kind.pam?.entitlements ?? [])} disabled={disabled} onAdd={onAdd} />;
+export function EntitlementSuggestions({
+  account,
+  project,
+  pam,
+  disabled,
+  onAdd,
+}: {
+  account: string | null;
+  project: string;
+  pam: PamCheck | null;
+  disabled: boolean;
+  onAdd: (id: string) => void;
+}) {
+  const location = pam?.location ?? "";
+  const ready = pam !== null && isProjectId(project) && /^[a-z][a-z0-9-]*$/.test(location);
+  const found = useQuery({ ...pamSuggestionsQuery(account, project, location), enabled: ready }).data ?? [];
+  return <EntitlementSuggestionsView offered={suggestionsToOffer(found, pam?.entitlements ?? [])} disabled={disabled} onAdd={onAdd} />;
 }
 
 /** The suggestions not already listed, while the route can list more (eight at most). */

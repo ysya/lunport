@@ -23,7 +23,7 @@ import {
   type Mode,
 } from "./DatabaseEditor";
 import { RecordField } from "./form";
-import { EntitlementsInput, EntitlementSuggestionsView } from "./IapRouteFields";
+import { EntitlementsInput, EntitlementSuggestions, EntitlementSuggestionsView, GoogleAccountField, segmented } from "./IapRouteFields";
 
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
 beforeEach(() => vi.mocked(tauriInvoke).mockReset());
@@ -85,11 +85,11 @@ type Options = {
   mode?: Mode;
   connection?: string;
   instances?: InstancesRead;
-  accounts?: GcloudAccountsView;
-  suggestions?: string[];
   used?: number[];
   busy?: boolean;
   error?: string | null;
+  /** What the account field and the suggestions read; by default a client that has read gcloud's accounts. */
+  client?: QueryClient;
 };
 
 /** The view of the dialog over `initial`, with the state the dialog keeps for it: pressing a control changes `kept` as the dialog's state setters do. */
@@ -101,9 +101,7 @@ function editor(initial: SavedDatabase, options: Options = {}) {
     draft: kept.draft,
     mode: kept.mode,
     connection: kept.connection,
-    accounts: options.accounts,
     instances: options.instances ?? { state: "waiting" },
-    suggestions: options.suggestions ?? [],
     used: options.used ?? [],
     busy: options.busy ?? false,
     error: options.error ?? null,
@@ -120,7 +118,8 @@ function editor(initial: SavedDatabase, options: Options = {}) {
     onCancel,
   });
   const tree = () => DatabaseEditorView(props());
-  return { kept, onSave, onCancel, tree, markup: () => renderToStaticMarkup(tree()) };
+  const markup = () => renderToStaticMarkup(<QueryClientProvider client={options.client ?? cache()}>{tree()}</QueryClientProvider>);
+  return { kept, onSave, onCancel, tree, markup };
 }
 
 const propsOf = <T,>(element: ReactElement) => element.props as unknown as T;
@@ -444,19 +443,17 @@ describe("the New database dialog", () => {
     expect(text(editor(SAVED).markup())).not.toMatch(/justification/i);
   });
 
-  it("offers_the_entitlements_the_account_may_request_and_adds_one_on_a_press", () => {
+  it("draws_the_entitlement_suggestions_for_the_drafts_account_project_and_check_and_adds_the_one_pressed", () => {
     const check = { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null };
-    const dialog = editor({ ...newDatabase(), pam: check }, { suggestions: ["prod-admin", "prod-operate", "prod-deploy"] });
-    const html = dialog.markup();
-    expect(text(html)).toContain("You may request:");
-    expect(html).toContain('aria-label="Add prod-admin"');
-    expect(html).toContain('aria-label="Add prod-deploy"');
-    // One already listed is not offered again.
-    expect(html).not.toContain('aria-label="Add prod-operate"');
-    propsOf<{ onAdd: (id: string) => void }>(elementsOf(dialog.tree(), EntitlementSuggestionsView)[0]).onAdd("prod-admin");
+    const dialog = editor({ ...newDatabase(), account: "frank@example.com", project: PROD, pam: check });
+    const suggestions = elementsOf(dialog.tree(), EntitlementSuggestions);
+    expect(suggestions).toHaveLength(1);
+    expect(propsOf(suggestions[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check, disabled: false });
+    propsOf<{ onAdd: (id: string) => void }>(suggestions[0]).onAdd("prod-admin");
     expect(dialog.kept.draft.pam).toEqual({ ...check, entitlements: ["prod-operate", "prod-admin"] });
-    // Nothing is offered while the check is off.
-    expect(editor(newDatabase(), { suggestions: ["prod-admin"] }).markup()).not.toContain("You may request");
+    // Nothing is drawn while the check is off, and nothing is pressed while a save is under way.
+    expect(elementsOf(editor(newDatabase()).tree(), EntitlementSuggestions)).toHaveLength(0);
+    expect(propsOf(elementsOf(editor({ ...newDatabase(), pam: check }, { busy: true }).tree(), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
   });
 
   it("sharing_proposes_the_first_free_port_and_off_offers_none", () => {
@@ -479,29 +476,26 @@ describe("the New database dialog", () => {
     expect(hasField(dialog.tree(), "Port on 127.0.0.1")).toBe(false);
   });
 
-  it("chooses_the_google_account_as_the_host_editor_does", () => {
-    const dialog = editor(newDatabase(), { accounts });
-    const html = dialog.markup();
-    expect(text(html)).toContain("gcloud's active account (frank@example.com)");
-    expect(text(html)).toContain("old@example.com · sign-in expired");
-    expect(html).toMatch(/<select/);
-    typeInto(dialog.tree(), "Google account", "old@example.com");
+  it("hands_the_google_account_field_the_drafts_account_and_takes_its_choice_back", () => {
+    const dialog = editor({ ...newDatabase(), account: "ops@example.com" });
+    const field = () => propsOf<{ account: string | null; disabled: boolean; onChange: (next: string | null) => void }>(elementsOf(dialog.tree(), GoogleAccountField)[0]);
+    expect(elementsOf(dialog.tree(), GoogleAccountField)).toHaveLength(1);
+    expect(field()).toMatchObject({ account: "ops@example.com", disabled: false });
+    field().onChange("old@example.com");
     expect(dialog.kept.draft.account).toBe("old@example.com");
-    typeInto(dialog.tree(), "Google account", "");
+    expect(field().account).toBe("old@example.com");
+    field().onChange(null);
     expect(dialog.kept.draft.account).toBeNull();
-    // An account the database keeps that this computer is not signed in to is still listed, as it is.
-    const away = editor({ ...newDatabase(), account: "ops@example.com" }, { accounts });
-    expect(text(away.markup())).toContain("ops@example.com · not signed in on this computer");
-    expect(propsOf<{ value: string }>(controlOf(away.tree(), "Google account")).value).toBe("ops@example.com");
-    // Where gcloud's accounts cannot be read, the account is typed.
-    for (const unread of [undefined, { ...accounts, config_found: false }]) {
-      const typed = editor({ ...newDatabase(), account: "ops@example.com" }, { accounts: unread });
-      expect(typed.markup()).not.toMatch(/<select/);
-      typeInto(typed.tree(), "Google account", " frank@example.com ");
-      expect(typed.kept.draft.account).toBe("frank@example.com");
-      typeInto(typed.tree(), "Google account", "  ");
-      expect(typed.kept.draft.account).toBeNull();
-    }
+    expect(propsOf<{ disabled: boolean }>(elementsOf(editor(SAVED, { busy: true }).tree(), GoogleAccountField)[0]).disabled).toBe(true);
+  });
+
+  it("draws_its_segmented_controls_like_connect_via", () => {
+    const groups = elementsOf(editor(newDatabase()).tree(), RadioGroup.Root).map((element) => propsOf<{ className: string; "aria-label": string }>(element));
+    expect(groups.map((group) => group["aria-label"])).toEqual(["How to choose the instance", "Environment"]);
+    expect(groups[1].className).toBe(segmented);
+    // The two long choices stack on a narrow screen.
+    expect(groups[0].className).toContain(segmented);
+    expect(groups[0].className).toContain("flex-col sm:flex-row");
   });
 
   it("fills_the_name_and_the_default_database_by_hand", () => {
@@ -593,14 +587,120 @@ describe("the dialog as the Databases page mounts it", () => {
       c.setQueryData(pamSuggestionsQuery("frank@example.com", PROD, "europe-west1").queryKey, ["eu-operate"]);
     });
     const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
-    expect(viewOf(client, { initial: { ...newInProd, pam: check } }).props.suggestions).toEqual(["prod-admin", "prod-operate"]);
+    const drawn = (initial: SavedDatabase) => renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial })} /></QueryClientProvider>);
+    const global = drawn({ ...newInProd, pam: check });
+    expect(text(global)).toContain("You may request:");
+    expect(global).toContain('aria-label="Add prod-admin"');
+    expect(global).toContain('aria-label="Add prod-operate"');
+    expect(global).not.toContain('aria-label="Add eu-operate"');
     // A check kept in another location asks for that location's.
-    expect(viewOf(client, { initial: { ...newInProd, pam: { ...check, location: "europe-west1" } } }).props.suggestions).toEqual(["eu-operate"]);
-    // Without a grant check, or without a project, there is nothing to ask for.
-    expect(viewOf(client, { initial: newInProd }).props.suggestions).toEqual([]);
-    expect(viewOf(client, { initial: { ...newDatabase(), pam: check } }).props.suggestions).toEqual([]);
-    const html = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial: { ...newInProd, pam: check } })} /></QueryClientProvider>);
+    const europe = drawn({ ...newInProd, pam: { ...check, location: "europe-west1" } });
+    expect(europe).toContain('aria-label="Add eu-operate"');
+    expect(europe).not.toContain('aria-label="Add prod-admin"');
+    // Without a grant check there is nothing to suggest, and without a project nothing to ask.
+    expect(drawn(newInProd)).not.toContain("You may request");
+    expect(drawn({ ...newDatabase(), pam: check })).not.toContain("You may request");
+  });
+});
+
+/** The two parts of the dialog that the host editor draws too: the Google account field and the suggestions under the entitlements. */
+describe("the parts both editors share", () => {
+  const draw = (client: QueryClient, element: ReactElement) => renderToStaticMarkup(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
+  type Typed = { onChange: (event: { target: { value: string } }) => void };
+
+  it("the_google_account_field_lists_gcloud_accounts_the_way_the_host_editor_does", () => {
+    const client = cache();
+    const html = draw(client, <GoogleAccountField account={null} onChange={vi.fn()} disabled={false} />);
+    expect(text(html)).toContain("Google account");
+    expect(text(html)).toContain("gcloud's active account (frank@example.com)");
+    expect(text(html)).toContain("old@example.com · sign-in expired");
+    expect(text(html)).toContain("Accounts come from gcloud on this computer; each computer signs in on its own.");
+    expect(html).toMatch(/<select/);
+    // With no account the active one is chosen.
+    expect(html).toMatch(/<option value="" selected/);
+    // An account that is kept but this computer is not signed in to is still listed, and chosen.
+    const away = draw(client, <GoogleAccountField account="ops@example.com" onChange={vi.fn()} disabled={false} />);
+    expect(text(away)).toContain("ops@example.com · not signed in on this computer");
+    expect(away).toMatch(/<option value="ops@example\.com" selected/);
+  });
+
+  it("the_google_account_field_hands_the_choice_up_and_none_for_the_active_account", () => {
+    const onChange = vi.fn();
+    const tree = renderHook(cache(), () => GoogleAccountField({ account: "frank@example.com", onChange, disabled: false }));
+    const select = propsOf<Typed & { value: string }>(elementsOf(tree, "select")[0]);
+    expect(select.value).toBe("frank@example.com");
+    select.onChange({ target: { value: "old@example.com" } });
+    expect(onChange).toHaveBeenLastCalledWith("old@example.com");
+    select.onChange({ target: { value: "" } });
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("the_google_account_field_is_typed_where_gcloud_accounts_cannot_be_read", () => {
+    for (const unread of [undefined, { ...accounts, config_found: false }]) {
+      const client = new QueryClient();
+      if (unread) client.setQueryData(gcloudAccountsKey, unread);
+      const html = draw(client, <GoogleAccountField account="ops@example.com" onChange={vi.fn()} disabled={false} />);
+      expect(html).not.toMatch(/<select/);
+      expect(html).toContain('value="ops@example.com"');
+      expect(html).toContain("placeholder=\"gcloud&#x27;s active account\"");
+      const onChange = vi.fn();
+      const field = propsOf<Typed>(elementsOf(renderHook(client, () => GoogleAccountField({ account: null, onChange, disabled: false })), Input)[0]);
+      field.onChange({ target: { value: " frank@example.com " } });
+      expect(onChange).toHaveBeenLastCalledWith("frank@example.com");
+      field.onChange({ target: { value: "  " } });
+      expect(onChange).toHaveBeenLastCalledWith(null);
+    }
+  });
+
+  it("the_google_account_field_is_off_while_disabled", () => {
+    expect(draw(cache(), <GoogleAccountField account={null} onChange={vi.fn()} disabled />)).toMatch(/<select[^>]*disabled=""/);
+    expect(draw(cache(), <GoogleAccountField account={null} onChange={vi.fn()} disabled={false} />)).not.toMatch(/<select[^>]*disabled=""/);
+    expect(draw(new QueryClient(), <GoogleAccountField account={null} onChange={vi.fn()} disabled />)).toMatch(/<input[^>]*disabled=""/);
+  });
+
+  const check = { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null };
+  const withSuggestions = () =>
+    cache((c) => {
+      c.setQueryData(pamSuggestionsQuery("frank@example.com", PROD, "global").queryKey, ["prod-admin", "prod-deploy", "prod-operate"]);
+      c.setQueryData(pamSuggestionsQuery(null, PROD, "global").queryKey, ["gcloud-active-only"]);
+    });
+  /** What the suggestions hand their view: the ids to offer, whether they are off, and what a press does. */
+  const suggested = (client: QueryClient, patch: Partial<Parameters<typeof EntitlementSuggestions>[0]> = {}) =>
+    renderHook(client, () => EntitlementSuggestions({ account: "frank@example.com", project: PROD, pam: check, disabled: false, onAdd: vi.fn(), ...patch })) as ReactElement<{
+      offered: string[];
+      disabled: boolean;
+      onAdd: (id: string) => void;
+    }>;
+
+  it("the_suggestions_offer_what_the_account_may_request_in_the_project_except_what_the_check_lists", () => {
+    const client = withSuggestions();
+    expect(suggested(client).props.offered).toEqual(["prod-admin", "prod-deploy"]);
+    // Asked for the account given, and for gcloud's active one when there is none.
+    expect(suggested(client, { account: null }).props.offered).toEqual(["gcloud-active-only"]);
+    const html = draw(client, <EntitlementSuggestions account="frank@example.com" project={PROD} pam={check} disabled={false} onAdd={vi.fn()} />);
     expect(text(html)).toContain("You may request:");
-    expect(html).toContain('aria-label="Add prod-operate"');
+    expect(html).toContain('aria-label="Add prod-admin"');
+    expect(html).not.toContain('aria-label="Add prod-operate"');
+    // A check lists eight entitlements at most, and nothing is offered past them.
+    const eight = Array.from({ length: 8 }, (_, index) => `prod-${index}a`);
+    expect(suggested(client, { pam: { ...check, entitlements: eight } }).props.offered).toEqual([]);
+  });
+
+  it("the_suggestions_cope_with_no_check_at_all", () => {
+    expect(suggested(withSuggestions(), { pam: null }).props.offered).toEqual([]);
+    expect(draw(withSuggestions(), <EntitlementSuggestions account="frank@example.com" project={PROD} pam={null} disabled={false} onAdd={vi.fn()} />)).toBe("");
+  });
+
+  it("the_suggestions_hand_the_one_pressed_up_and_go_off_with_the_dialog", () => {
+    const onAdd = vi.fn();
+    const view = suggested(withSuggestions(), { onAdd, disabled: true });
+    // The host editor draws the same view.
+    expect(view.type).toBe(EntitlementSuggestionsView);
+    expect(view.props.disabled).toBe(true);
+    view.props.onAdd("prod-admin");
+    expect(onAdd).toHaveBeenCalledWith("prod-admin");
+    const html = draw(withSuggestions(), <EntitlementSuggestions account="frank@example.com" project={PROD} pam={check} disabled onAdd={vi.fn()} />);
+    const tag = [...html.matchAll(/<button\b[^>]*>/g)].map((match) => match[0]).find((markup) => markup.includes('aria-label="Add prod-admin"'));
+    expect(tag).toContain(DISABLED);
   });
 });

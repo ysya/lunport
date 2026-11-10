@@ -19,9 +19,9 @@ import {
   type InstanceSummary,
   type SavedDatabase,
 } from "@/lib/databases";
-import { gcloudAccountsQuery, isProjectId, newPamCheck, pamSuggestionsQuery, type GcloudAccountsView } from "@/lib/transports";
-import { RecordField, selectClass } from "./form";
-import { accountLabel, choice, EntitlementsInput, EntitlementSuggestionsView, suggestionsToOffer } from "./IapRouteFields";
+import { isProjectId, newPamCheck } from "@/lib/transports";
+import { RecordField } from "./form";
+import { choice, EntitlementsInput, EntitlementSuggestions, GoogleAccountField, segmented } from "./IapRouteFields";
 
 /*
  * The dialog that adds a Cloud SQL database to the library or changes one: where the instance is (picked from the list Google gives
@@ -112,9 +112,7 @@ const versionName = (version: string) => {
 const addresses = (instance: InstanceSummary) =>
   instance.public_ip && instance.private_ip ? "Public IP and private IP" : instance.public_ip ? "Public IP" : instance.private_ip ? "Private IP only" : "No IP address";
 
-const accountHelp = "Accounts come from gcloud on this computer; each computer signs in on its own.";
 const environments: [DatabaseEnvironment, string][] = [["dev", "Dev"], ["staging", "Staging"], ["prod", "Prod"]];
-const segmented = "flex w-full gap-0.5 rounded-lg bg-muted p-[3px]";
 
 /*
  * The two drawings of the instance list below are plain functions rather than components: they hold no state and no hooks, and the
@@ -175,11 +173,7 @@ export type DatabaseEditorViewProps = {
   mode: Mode;
   /** The connection name as typed, which may not read as one yet. */
   connection: string;
-  /** gcloud's accounts on this computer, once they are read. */
-  accounts: GcloudAccountsView | undefined;
   instances: InstancesRead;
-  /** The entitlements the account may request in the project, for the grant check. */
-  suggestions: string[];
   /** The local ports the other databases hold. */
   used: number[];
   busy: boolean;
@@ -196,7 +190,7 @@ export type DatabaseEditorViewProps = {
  * The dialog's body and its buttons, drawn from the draft. No hooks: exported for the tests. Every control hands the whole next draft
  * to `onDraft`. Saving is held back while the database is nowhere, and while a save is under way every control is off.
  */
-export function DatabaseEditorView({ draft, mode, connection, accounts, instances, suggestions, used, busy, error, onDraft, onMode, onConnection, onSave, onCancel }: DatabaseEditorViewProps) {
+export function DatabaseEditorView({ draft, mode, connection, instances, used, busy, error, onDraft, onMode, onConnection, onSave, onCancel }: DatabaseEditorViewProps) {
   const patch = (changes: Partial<SavedDatabase>) => onDraft({ ...draft, ...changes });
   const ready = located(draft);
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
@@ -229,25 +223,7 @@ export function DatabaseEditorView({ draft, mode, connection, accounts, instance
                 </RadioGroup.Item>
               </RadioGroup.Root>
             </div>
-            <RecordField label="Google account">
-              {/* Where gcloud's accounts cannot be read, or gcloud has no folder on this computer, the account is typed instead. */}
-              {accounts?.config_found ? (
-                <select className={selectClass} value={draft.account ?? ""} onChange={(event) => patch({ account: event.target.value || null })}>
-                  <option value="">{accounts.active ? `gcloud's active account (${accounts.active})` : "gcloud's active account"}</option>
-                  {accounts.accounts.map((entry) => (
-                    <option key={entry.account} value={entry.account}>
-                      {accountLabel(entry)}
-                    </option>
-                  ))}
-                  {draft.account && !accounts.accounts.some((entry) => entry.account === draft.account) && (
-                    <option value={draft.account}>{`${draft.account} · not signed in on this computer`}</option>
-                  )}
-                </select>
-              ) : (
-                <Input value={draft.account ?? ""} placeholder="gcloud's active account" onChange={(event) => patch({ account: event.target.value.trim() || null })} />
-              )}
-              <p className="text-xs text-muted-foreground">{accountHelp}</p>
-            </RecordField>
+            <GoogleAccountField account={draft.account} onChange={(account) => patch({ account })} disabled={busy} />
             {mode === "pick" ? (
               <>
                 <RecordField label="Project">
@@ -306,8 +282,10 @@ export function DatabaseEditorView({ draft, mode, connection, accounts, instance
               {draft.pam && (
                 <RecordField label="Entitlements">
                   <EntitlementsInput value={draft.pam.entitlements} disabled={busy} onChange={(entitlements) => onDraft(withEntitlements(draft, entitlements))} />
-                  <EntitlementSuggestionsView
-                    offered={suggestionsToOffer(suggestions, draft.pam.entitlements)}
+                  <EntitlementSuggestions
+                    account={draft.account}
+                    project={draft.project}
+                    pam={draft.pam}
                     disabled={busy}
                     onAdd={(id) => onDraft(withEntitlements(draft, [...(draft.pam?.entitlements ?? []), id]))}
                   />
@@ -379,20 +357,13 @@ export function DatabaseEditor({ initial, existing, busy, error, onSave, onCance
   const [draft, setDraft] = useState(initial);
   const [mode, setMode] = useState<Mode>(() => (initial.instance === "" ? "pick" : "manual"));
   const [connection, setConnection] = useState(() => (located(initial) ? connectionName(initial) : ""));
-  // The host editor and the Google Cloud page read the same accounts.
-  const accounts = useQuery(gcloudAccountsQuery).data;
   const list = useQuery({ ...databaseInstancesQuery(draft.account, draft.project), enabled: mode === "pick" && isProjectId(draft.project) });
-  const location = draft.pam?.location ?? "";
-  const suggestions =
-    useQuery({ ...pamSuggestionsQuery(draft.account, draft.project, location), enabled: draft.pam !== null && isProjectId(draft.project) && /^[a-z][a-z0-9-]*$/.test(location) }).data ?? [];
   return (
     <DatabaseEditorView
       draft={draft}
       mode={mode}
       connection={connection}
-      accounts={accounts}
       instances={instancesRead(draft.project, list)}
-      suggestions={suggestions}
       used={usedPorts(existing)}
       busy={busy}
       error={error}
