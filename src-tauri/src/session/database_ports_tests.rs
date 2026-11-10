@@ -1004,10 +1004,15 @@ const MINUTE: Duration = Duration::from_secs(60);
 
 /// `Orders` running on ports over a fake Cloud SQL that answers queries, on a clock of the test's own; and the port it listens on.
 fn writable() -> (DatabasePorts, Arc<FakeUpstream>, Clock, u16) {
+    writable_ticking(TICKING)
+}
+
+/// `writable`, with ports that look at their windows every `tick`.
+fn writable_ticking(tick: Duration) -> (DatabasePorts, Arc<FakeUpstream>, Clock, u16) {
     let upstream = fake();
     *upstream.answer.lock().unwrap() = Answer::Queries;
     let clock = Clock::new();
-    let ports = DatabasePorts::new(upstream.clone()).timed_by(clock.clocks(), TICKING);
+    let ports = DatabasePorts::new(upstream.clone()).timed_by(clock.clocks(), tick);
     let port = running(&ports, &orders());
     (ports, upstream, clock, port)
 }
@@ -1036,7 +1041,9 @@ fn ticked(ports: &DatabasePorts) {
 #[test]
 fn unlocking_lets_new_prod_connections_write_for_fifteen_minutes() {
     assert_eq!(WRITABLE_WINDOW, Duration::from_secs(15 * 60));
-    let (ports, upstream, clock, port) = writable();
+    // The port looks at its window as it starts and then once an hour: here the window's end shows only in what each new connection
+    // reads from the clock as it signs in.
+    let (ports, upstream, clock, port) = writable_ticking(60 * MINUTE);
     let mut before = App::signed_in(port);
     assert_eq!(ports.live(ID).writable_until_ms, None, "prod is locked until it is unlocked");
     let until = ms(t0() + WRITABLE_WINDOW);
@@ -1048,11 +1055,12 @@ fn unlocking_lets_new_prod_connections_write_for_fifteen_minutes() {
     clock.at(WRITABLE_WINDOW - SECOND);
     App::signed_in(port);
     assert_eq!(ports.live(ID).writable_until_ms, Some(until));
-    // At the end the window is closed: a new connection is locked, whether or not the port has looked at its window yet.
+    // At the end the window is closed: a new connection is locked, although the port has not looked at its window since it started.
     clock.at(WRITABLE_WINDOW);
     App::signed_in(port);
     assert_eq!(ports.live(ID).writable_until_ms, None);
     assert_eq!(upstream.received(), vec![startup_for(true), startup_for(false), startup_for(false), startup_for(true)]);
+    assert!(ports.ticks(ID) <= 1, "the port looked at its window only as it started");
     // The connection that was open before the unlock kept its lock, and goes on.
     assert_eq!(before.query("select count(*) from orders"), b'I');
 }
