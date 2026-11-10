@@ -7,13 +7,13 @@ describe("persistent audit view identity", () => {
     expect(new Set(rows.map((row) => row.key)).size).toBe(3);
     expect(rows.map((row) => row.entry.command)).toEqual(["uptime", "uptime", "hostname"]);
   });
-  it("keeps existing event identity when a different event is prepended and caps at ten", () => {
-    const events = Array.from({ length: 12 }, (_, n) => ({ id: "mcp-session-1", command: String(n) }));
+  it("keeps every entry and existing keys when an entry is prepended", () => {
+    const events = Array.from({ length: 1200 }, (_, n) => ({ id: "mcp-session-1", command: String(n) }));
     const before = auditRows(events);
     const after = auditRows([{ id: "mcp-session-1", command: "new" }, ...events]);
-    expect(before).toHaveLength(10);
-    expect(after).toHaveLength(10);
-    expect(after[1].key).toBe(before[0].key);
+    expect(before).toHaveLength(1200);
+    expect(after).toHaveLength(1201);
+    before.forEach((row, i) => expect(after[i + 1].key).toBe(row.key));
     expect(after[0].key).not.toBe(before[0].key);
   });
 });

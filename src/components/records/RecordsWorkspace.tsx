@@ -78,6 +78,7 @@ import { connectSavedHost } from "./operations";
 import { TerminalWorkspace } from "./TerminalWorkspace";
 import { useTerminalStore } from "@/stores/terminals";
 import { TunnelsPanel } from "./TunnelsPanel";
+import { AiActivityPanel } from "./AiActivityPanel";
 import { GoogleCloudPanel } from "./GoogleCloudPanel";
 
 export function RecordsWorkspace({
@@ -210,6 +211,14 @@ export function RecordsWorkspace({
     setInspectedId(null);
     requestSelection({ kind: "host", id });
   };
+  // From the AI activity page: the host in the library, its details open.
+  const showHost = (id: string) => {
+    setActiveTerminal(null);
+    setFilter({ kind: "all" });
+    setPanel("hosts");
+    setSelectedHostId(id);
+    setInspectedId(id);
+  };
   const duplicateHost = (id: string) => {
     const source = selectHost(overview.hosts, id);
     if (!source || (source.scope.kind === "space" && overview.shared_writes_blocked)) return;
@@ -241,7 +250,7 @@ export function RecordsWorkspace({
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
       if (
         isTypingContext(event.target) &&
-        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID, "tunnels-search"].includes((event.target as HTMLElement).id)
+        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID, "tunnels-search", "activity-search"].includes((event.target as HTMLElement).id)
       )
         return;
       if (event.key.toLowerCase() === "n") {
@@ -252,8 +261,8 @@ export function RecordsWorkspace({
         else createHost();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
-        const searchId = panel === "tunnels" ? "tunnels-search" : panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
-        if (panel !== "keys" && panel !== "tunnels") setPanel("hosts");
+        const searchId = panel === "tunnels" ? "tunnels-search" : panel === "keys" ? KEYS_SEARCH_INPUT_ID : panel === "activity" ? "activity-search" : SEARCH_INPUT_ID;
+        if (panel !== "keys" && panel !== "tunnels" && panel !== "activity") setPanel("hosts");
         window.requestAnimationFrame(() => {
           const input = document.getElementById(searchId);
           if (input instanceof HTMLInputElement) {
@@ -515,6 +524,7 @@ export function RecordsWorkspace({
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
+              {panel === "activity" && <AiActivityPanel overview={overview} showHost={showHost} openAiSettings={() => openSettings("ai")} />}
               {panel === "transports" && <GoogleCloudPanel overview={overview} accept={accept} createIapHost={createIapHost} editHost={editHost} />}
               {panel === "account" && (
                 <RecordsAccountPanel

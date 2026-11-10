@@ -192,6 +192,12 @@ describe("AI activity times", () => {
     expect(took(NOW, NOW + 50)).toBe("took under 0.1 s");
   });
 
+  it("durations need two times that can be dates", () => {
+    const took = (at_ms: number, completed_at_ms: number) => durationLabel(entry({ at_ms, completed_at_ms }));
+    expect(took(NOW, Number.MAX_SAFE_INTEGER)).toBeNull();
+    expect(took(NOW, 8.64e15 + 1)).toBeNull();
+  });
+
   it("days read Today, Yesterday, then the date, and never invent a time", () => {
     expect(dayLabel(new Date(2026, 10, 10, 0, 5).getTime(), NOW)).toBe("Today");
     expect(dayLabel(new Date(2026, 10, 9, 23, 59).getTime(), NOW)).toBe("Yesterday");

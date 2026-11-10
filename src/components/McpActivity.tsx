@@ -73,7 +73,7 @@ function McpAuditTimes({ requested, completed }: { requested: number; completed:
 export function McpActivity({ entries }: { entries: McpAuditEntry[] }) {
   if (entries.length === 0) return <p className="px-3 py-3 text-sm text-muted-foreground">No AI activity yet.</p>;
   return <ol aria-label="Recent AI activity" className="divide-y">
-    {auditRows(entries).map(({ entry, key }) => {
+    {auditRows(entries.slice(0, 10)).map(({ entry, key }) => {
       const result = activityResult(entry);
       const Icon = result.icon;
       const completed = recordedDate(entry.completed_at_ms);

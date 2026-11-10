@@ -170,10 +170,10 @@ export function resultSentence(entry: McpAuditEntry, result: ActivityResult): st
   return `${result.label}.`;
 }
 
-/** How long the request took, from its request to its completion; `null` unless both times are known and in order. */
+/** How long the request took, from its request to its completion; `null` unless both times are known, can be dates and are in order. */
 export function durationLabel(entry: McpAuditEntry): string | null {
   const { at_ms: at, completed_at_ms: completed } = entry;
-  if (!(at > 0) || !(completed > at)) return null;
+  if (!(at > 0) || !(completed > at) || !Number.isFinite(new Date(completed).getTime())) return null;
   const ms = completed - at;
   if (ms < 100) return "took under 0.1 s";
   if (ms < 10_000) return `took ${(ms / 1000).toFixed(1)} s`;
