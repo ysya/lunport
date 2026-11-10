@@ -423,6 +423,8 @@ fn run_app(host: bool, start_hidden: bool) {
             session::databases::databases_unlock_writes,
             session::databases::databases_lock_writes,
             session::databases::databases_reconnect_locked,
+            session::databases::databases_pam_status,
+            session::databases::databases_request_grant,
             os_auth::os_unlock_method,
             session::transports::transports_oslogin_profile,
             session::transports::transports_pam_status,

@@ -1,9 +1,13 @@
 //! Saved Cloud SQL databases for the Databases page: the view it lists, and the commands that list, save, delete, start and stop them,
-//! show, replace and remove the password of a database's local port, and unlock and lock writes to a prod database through that port.
+//! show, replace and remove the password of a database's local port, unlock and lock writes to a prod database through that port, and
+//! show and request the Privileged Access Manager grant a database needs.
+use super::broker::Broker;
 use super::connect::CancelToken;
 use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
+use super::transports::{pam_status_for, PamStatusView};
 use super::tunnels::{main_only, snapshot};
+use crate::gcp::rest::GcpClient;
 use crate::os_auth::{self, UnlockMethod};
 use crate::{
     error::AppError,
@@ -151,6 +155,19 @@ fn saved_or_running(state: &SyncStateV3, ports: &DatabasePorts, id: &str) -> Res
     }
 }
 
+/// The saved database `id` as the library holds it, or the sentence that it is not there.
+fn saved(state: &SyncStateV3, id: &str) -> Result<SavedDatabase, String> {
+    databases::view(state).into_iter().map(|row| row.database).find(|database| database.id == id).ok_or_else(|| GONE.to_string())
+}
+
+/// The grant state of the saved database `id` as the page's grant line shows it, read the way a host's route is (`pam_status_for`): for
+/// the database's account, in its project, over every entitlement its grant check lists. A database with no grant check is `none`. Blocks
+/// on a PAM call for each entitlement, so it runs on a blocking thread.
+fn grant_status(gcp: &dyn GcpClient, state: &SyncStateV3, id: &str) -> Result<PamStatusView, String> {
+    let database = saved(state, id)?;
+    Ok(pam_status_for(gcp, database.account.as_deref(), &database.project, database.pam.as_ref()))
+}
+
 /// A password as the page receives it: the command answers with a plain string, so this is where it leaves its `Zeroizing` wrapper.
 fn revealed(mut password: Zeroizing<String>) -> String {
     std::mem::take(&mut *password)
@@ -195,17 +212,24 @@ fn unlock_writes(ports: &DatabasePorts, id: &str, method: UnlockMethod, confirme
     ports.unlock(&checked, ports.now())
 }
 
+/// The app's session broker, started when it is not yet: its gates are the ones hosts ask for a grant through, and a database's grant
+/// goes through them as well.
+fn broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, String> {
+    super::app::start(app);
+    let broker = app.state::<AppState>().session.broker.lock().unwrap().clone();
+    broker.ok_or_else(|| "Lunport's connection service is unavailable. Restart Lunport and try again.".to_string())
+}
+
 /// Starts the saved database `id` on its local port, with the password this device keeps for it. The port is registered with the broker,
 /// so that quitting the app stops it, and its grant questions go through the broker's gates, which hosts use as well.
 fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
-    super::app::start(app);
+    let broker = broker(app)?;
     let state = app.state::<AppState>();
-    let broker = state.session.broker.lock().unwrap().clone().ok_or("Lunport's connection service is unavailable. Restart Lunport and try again.")?;
     let ports = &state.session.databases;
     ports.use_upstream(|| Arc::new(CloudSqlUpstream::for_app(app, &broker)));
     // The database is read and started under the edit lock, so that no save comes in between.
     let _editing = ports.editing();
-    let database = databases::view(&snapshot(app)?).into_iter().map(|row| row.database).find(|database| database.id == id).ok_or(GONE)?;
+    let database = saved(&snapshot(app)?, id)?;
     if database.local_port.is_none() {
         return Err(NO_LOCAL_PORT.to_string());
     }
@@ -311,6 +335,34 @@ pub fn databases_lock_writes(app: tauri::AppHandle, window: tauri::WebviewWindow
 pub fn databases_reconnect_locked(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<u32, String> {
     main_only(&window, "Database")?;
     Ok(app.state::<AppState>().session.databases.reconnect_locked(&id))
+}
+
+/// The Privileged Access Manager grant the saved database needs, as the grant line of its row shows it: the entitlement that holds a grant
+/// and until when, one that is activating, none, or the API's sentence. Read the way a host's route is.
+#[tauri::command]
+pub async fn databases_pam_status(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<PamStatusView, String> {
+    main_only(&window, "Database")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let gcp = app.state::<AppState>().gcp.clone();
+        grant_status(&*gcp, &snapshot(&app)?, &id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Asks for the grant the saved database needs, as a connection to it does when none is held (the Request-a-grant window, through the
+/// gates hosts use), and answers when the grant is active, or with the sentence of why not. It blocks for as long as the person takes to
+/// answer, and then for the request, on a blocking thread.
+#[tauri::command]
+pub async fn databases_request_grant(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let broker = broker(&app)?;
+        let database = saved(&snapshot(&app)?, &id)?;
+        CloudSqlUpstream::for_app(&app, &broker).request_grant(&database, &CancelToken::default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

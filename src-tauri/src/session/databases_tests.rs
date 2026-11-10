@@ -2,8 +2,12 @@
 //! unlocking writes to a prod database.
 
 use super::*;
+use crate::gcp::oslogin::LoginProfile;
+use crate::gcp::pam::{duration_text, rfc3339, Grant};
+use crate::gcp::rest::GcpError;
 use crate::session::database_ports::tests::{t0, wait_until, App, Clock, FakeUpstream};
 use crate::session::database_ports::WRITABLE_WINDOW;
+use crate::session::transports::pam_status;
 use crate::sync::{
     databases::{
         tests::{database, state},
@@ -11,10 +15,12 @@ use crate::sync::{
     },
     record_runtime, records_v3,
     testkit::{MemKeychain, TestClock, TestDevice},
-    transports::{tests::in_central_mode, PamCheck},
+    transports::{tests::in_central_mode, HostTransport, PamCheck, TransportKind},
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
@@ -543,4 +549,145 @@ fn a_database_started_again_while_the_person_confirms_stays_locked() {
     // The port it was asked about, still running, is unlocked.
     start_again();
     assert!(unlock_writes(&ports, ORDERS, UnlockMethod::System, false, |_: &str| Ok(true)).is_ok());
+}
+
+// ---- Grants ----
+
+/// The prod database `Orders` with a grant check on `prod-operate` and `prod-admin`.
+fn guarded() -> SavedDatabase {
+    SavedDatabase {
+        pam: Some(PamCheck { entitlements: vec!["prod-operate".into(), "prod-admin".into()], location: "global".into(), duration_secs: 1800, justification: None }),
+        ..database(ORDERS)
+    }
+}
+
+/// A library that holds `database`.
+fn library_of(database: SavedDatabase) -> SyncStateV3 {
+    databases::set(&state(), &database.id.clone(), None, Some(database), 10).unwrap()
+}
+
+/// An active grant, given `ago` before `now` and requested for `secs` seconds.
+fn active_grant(name: &str, now: SystemTime, ago: u64, secs: u32) -> Grant {
+    Grant { name: name.into(), state: "ACTIVE".into(), requested_duration: Some(duration_text(secs)), access_grant_time: Some(rfc3339(now - Duration::from_secs(ago))), justification: None }
+}
+
+/// Google's PAM as the grant read sees it: the grants each entitlement holds (or PAM's refusal of the search), and every search made.
+#[derive(Default)]
+struct Pam {
+    answers: Mutex<BTreeMap<String, Result<Vec<Grant>, String>>>,
+    searched: Mutex<Vec<(Option<String>, String)>>,
+}
+
+impl Pam {
+    fn answering(&self, entitlement: &str, grants: Result<Vec<Grant>, &str>) {
+        self.answers.lock().unwrap().insert(entitlement.into(), grants.map_err(str::to_string));
+    }
+
+    fn searched(&self) -> Vec<(Option<String>, String)> {
+        self.searched.lock().unwrap().clone()
+    }
+}
+
+impl GcpClient for Pam {
+    fn login_profile(&self, _: Option<&str>, _: &str) -> Result<LoginProfile, GcpError> {
+        panic!("a grant read never reads OS Login")
+    }
+
+    fn import_ssh_public_key(&self, _: Option<&str>, _: &str, _: &str) -> Result<LoginProfile, GcpError> {
+        panic!("a grant read never imports a key")
+    }
+
+    fn grants(&self, account: Option<&str>, entitlement: &str) -> Result<Vec<Grant>, GcpError> {
+        self.searched.lock().unwrap().push((account.map(str::to_string), entitlement.to_string()));
+        let id = entitlement.rsplit('/').next().unwrap();
+        match self.answers.lock().unwrap().get(id) {
+            Some(Ok(grants)) => Ok(grants.clone()),
+            Some(Err(message)) => Err(GcpError::Refused { api: "Privileged Access Manager", message: message.clone() }),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn create_grant(&self, _: Option<&str>, _: &str, _: u32, _: &str) -> Result<Grant, GcpError> {
+        panic!("a grant read never requests a grant")
+    }
+
+    fn get_grant(&self, _: Option<&str>, _: &str) -> Result<Grant, GcpError> {
+        panic!("a grant read never reads a grant back")
+    }
+}
+
+const OPERATE: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
+const ADMIN: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-admin";
+
+#[test]
+fn a_databases_grant_is_read_the_way_a_hosts_is() {
+    let now = SystemTime::now();
+    let gcp = Pam::default();
+    gcp.answering("prod-operate", Ok(vec![active_grant("g-op", now, 600, 1800)]));
+    gcp.answering("prod-admin", Ok(vec![active_grant("g-ad", now, 300, 3600)]));
+    let database = guarded();
+    let view = grant_status(&gcp, &library_of(database.clone()), ORDERS).unwrap();
+    // The entitlement whose grant lasts longest, with its end.
+    assert_eq!((view.state.as_str(), view.entitlement.as_deref(), view.message.as_deref()), ("active", Some("prod-admin"), None));
+    assert!(view.active_until_ms.is_some());
+    // Asked as the database's account, in its project and PAM location, for each entitlement of its grant check.
+    let account = Some("frank@example.com".to_string());
+    assert_eq!(gcp.searched(), vec![(account.clone(), OPERATE.to_string()), (account.clone(), ADMIN.to_string())]);
+    // A host whose route asks for the same grant reads exactly the same.
+    let route = HostTransport {
+        host_id: "0000000000000001".into(),
+        kind: TransportKind::GcpIap {
+            project: database.project.clone(),
+            zone: "asia-east1-b".into(),
+            instance: "jumpbox".into(),
+            interface: "nic0".into(),
+            account: database.account.clone(),
+            os_login: false,
+            pam: database.pam.clone(),
+        },
+    };
+    assert_eq!(pam_status(&gcp, &route), view);
+}
+
+#[test]
+fn a_databases_grant_read_reports_none_activating_and_the_apis_sentence() {
+    let now = SystemTime::now();
+    let gcp = Pam::default();
+    let library = library_of(guarded());
+    let read = |gcp: &Pam| grant_status(gcp, &library, ORDERS).unwrap();
+    // No grant anywhere.
+    let none = read(&gcp);
+    assert_eq!((none.state.as_str(), none.entitlement, none.active_until_ms, none.message), ("none", None, None, None));
+    // One on its way.
+    let activating = Grant { state: "ACTIVATING".into(), access_grant_time: None, ..active_grant("g-op", now, 0, 1800) };
+    gcp.answering("prod-operate", Ok(vec![activating]));
+    let view = read(&gcp);
+    assert_eq!((view.state.as_str(), view.entitlement.as_deref(), view.active_until_ms), ("activating", Some("prod-operate"), None));
+    // An ACTIVE grant whose time is up counts for nothing, as for a host.
+    gcp.answering("prod-operate", Ok(vec![active_grant("g-stale", now, 7200, 1800)]));
+    assert_eq!(read(&gcp).state, "none");
+    // The API refused a search and nothing else answered with a grant: its sentence.
+    gcp.answering("prod-operate", Err("quota exceeded"));
+    let refused = read(&gcp);
+    assert_eq!((refused.state.as_str(), refused.entitlement), ("error", None));
+    assert_eq!(refused.message.as_deref(), Some("Privileged Access Manager refused the request: quota exceeded."));
+}
+
+#[test]
+fn a_database_with_no_grant_check_reads_no_grant() {
+    let gcp = Pam::default();
+    let view = grant_status(&gcp, &library_of(database(ORDERS)), ORDERS).unwrap();
+    assert_eq!((view.state.as_str(), view.entitlement, view.active_until_ms, view.message), ("none", None, None, None));
+    assert!(gcp.searched().is_empty(), "there is nothing to ask PAM");
+}
+
+#[test]
+fn a_database_that_is_not_saved_has_no_grant_read_or_requested() {
+    let gcp = Pam::default();
+    assert_eq!(grant_status(&gcp, &state(), ORDERS), Err(GONE.to_string()));
+    assert_eq!(saved(&state(), ORDERS), Err(GONE.to_string()));
+    assert!(gcp.searched().is_empty());
+    // Another database's identity finds nothing either.
+    assert_eq!(saved(&library_of(guarded()), ANALYTICS), Err(GONE.to_string()));
+    assert_eq!(saved(&library_of(guarded()), ORDERS), Ok(guarded()));
 }
