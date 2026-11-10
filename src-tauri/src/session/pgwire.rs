@@ -338,9 +338,9 @@ async fn read_server_message<R: AsyncRead + Unpin>(r: &mut R, raw: &mut Vec<u8>)
     Ok((kind, body))
 }
 
-/// Follows the messages a server sends a session, to tell when the session is idle: when the last ReadyForQuery said so and the server has
-/// begun no answer since. A notice, a setting that changed and a notification can come to a session that is idle and leave it so; any
-/// other message answers a query.
+/// Follows the messages a server sends a session, to tell when the session is idle: when the stream is between two messages, the last
+/// ReadyForQuery said so and the server has begun no answer since. A notice, a setting that changed and a notification can come to a
+/// session that is idle and leave it so once the message is whole; any other message answers a query.
 ///
 /// It is fed the stream from the start of a message (the server's first answer to the start-up message, or whatever follows it), as it
 /// comes, in reads of any size. It keeps a few bytes of state, never a message: it follows the framing (a type byte and a four-byte
@@ -403,10 +403,12 @@ impl ReadyTracker {
         }
     }
 
-    /// Whether the session is idle: the last ReadyForQuery had the status `I`, outside a transaction, and no answer to a query has begun
-    /// since. Before the first ReadyForQuery it is not.
+    /// Whether the session is idle: the stream is between two messages, the last ReadyForQuery had the status `I`, outside a transaction,
+    /// and no answer to a query has begun since. A notice, a changed setting or a notification that comes to an idle session does not end
+    /// that, but while one is half read the stream is not between messages and the session is not idle. Before the first ReadyForQuery it
+    /// is not.
     pub fn idle(&self) -> bool {
-        self.idle
+        self.idle && matches!(self.position, Position::Type)
     }
 
     /// Where the tracker is once the length of a message of type `kind` is in: `length` counts its own four bytes.
@@ -1056,15 +1058,17 @@ mod tests {
             })
             .collect();
 
-        // Each size of read, so that every split of every message happens, in its type, its length and its body.
+        // Each size of read, so that every split of every message happens, in its type, its length and its body. Between messages the
+        // session is idle as the stream says, and inside a message it never is.
         for size in 1..=wire.len() {
             let mut tracker = ReadyTracker::default();
             let mut fed = 0;
             for piece in wire.chunks(size) {
                 tracker.feed(piece);
                 fed += piece.len();
-                if let Some((_, idle)) = boundaries.iter().find(|(end, _)| *end == fed) {
-                    assert_eq!(tracker.idle(), *idle, "reads of {size} bytes, after {fed}");
+                match boundaries.iter().find(|(end, _)| *end == fed) {
+                    Some((_, idle)) => assert_eq!(tracker.idle(), *idle, "reads of {size} bytes, after {fed}"),
+                    None => assert!(!tracker.idle(), "reads of {size} bytes: {fed} is inside a message"),
                 }
             }
         }
@@ -1090,6 +1094,27 @@ mod tests {
         }
         tracker.feed(b"D");
         assert!(!tracker.idle());
+    }
+
+    #[test]
+    fn an_idle_session_is_idle_only_between_messages() {
+        // A notice, a setting or a notification that is half read leaves the stream inside a message, however it is cut.
+        for (what, quiet) in [
+            ("a notice", typed(b'N', b"SNOTICE\0Mhello\0\0")),
+            ("a setting that changed", typed(b'S', b"TimeZone\0UTC\0")),
+            ("a notification", typed(b'A', &[0, 0, 0, 1, b'c', 0, 0])),
+            ("a notice with no body", typed(b'N', b"")),
+        ] {
+            for cut in 1..quiet.len() {
+                let mut tracker = ReadyTracker::default();
+                tracker.feed(&ready(b'I'));
+                assert!(tracker.idle(), "{what}: before it");
+                tracker.feed(&quiet[..cut]);
+                assert!(!tracker.idle(), "{what}: cut after {cut} of {} bytes", quiet.len());
+                tracker.feed(&quiet[cut..]);
+                assert!(tracker.idle(), "{what}: whole, cut at {cut}");
+            }
+        }
     }
 
     #[test]
