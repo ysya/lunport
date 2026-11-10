@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use futures_util::future::BoxFuture;
@@ -74,8 +74,63 @@ const NOT_RUNNING: &str = "Start the database before you unlock writes.";
 /// How often a port looks whether its writable window ended and whether a connection that came without the lock is past its time.
 const TICK: Duration = Duration::from_secs(1);
 
-/// The clock of the ports: the time now.
-pub(crate) type Now = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+/// The clocks of the ports: the wall clock, which the page shows and which goes on while the computer sleeps, and a monotonic clock, which
+/// no change of the wall clock moves.
+#[derive(Clone)]
+pub(crate) struct Clocks {
+    wall: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+    monotonic: Arc<dyn Fn() -> Instant + Send + Sync>,
+}
+
+impl Default for Clocks {
+    fn default() -> Self {
+        Clocks { wall: Arc::new(SystemTime::now), monotonic: Arc::new(Instant::now) }
+    }
+}
+
+impl Clocks {
+    /// Clocks that the tests move themselves.
+    #[cfg(test)]
+    pub(crate) fn new(wall: impl Fn() -> SystemTime + Send + Sync + 'static, monotonic: impl Fn() -> Instant + Send + Sync + 'static) -> Clocks {
+        Clocks { wall: Arc::new(wall), monotonic: Arc::new(monotonic) }
+    }
+
+    /// Now, by both clocks.
+    fn now(&self) -> Moment {
+        Moment { wall: (self.wall)(), monotonic: (self.monotonic)() }
+    }
+}
+
+/// A moment by both clocks. A writable window, and the time a connection that came without the lock has after it, end when either clock
+/// reaches their end: a wall clock that is set back does not stretch them, and a computer that slept through them ends them as it wakes.
+#[derive(Clone, Copy)]
+struct Moment {
+    wall: SystemTime,
+    monotonic: Instant,
+}
+
+impl Moment {
+    /// `span` after this moment, by both clocks.
+    fn after(self, span: Duration) -> Moment {
+        Moment { wall: self.wall + span, monotonic: self.monotonic + span }
+    }
+
+    /// Whether `now` has reached this moment, by either clock.
+    fn reached_by(self, now: Moment) -> bool {
+        now.wall >= self.wall || now.monotonic >= self.monotonic
+    }
+
+    /// The earlier of this moment and `other`, by each clock.
+    fn earlier(self, other: Moment) -> Moment {
+        Moment { wall: self.wall.min(other.wall), monotonic: self.monotonic.min(other.monotonic) }
+    }
+
+    /// When this moment comes by the wall clock as it reads at `now`: at its wall time, or sooner where the monotonic clock gets there
+    /// first.
+    fn on_the_wall(self, now: Moment) -> SystemTime {
+        self.wall.min(now.wall + self.monotonic.saturating_duration_since(now.monotonic))
+    }
+}
 
 /// A byte stream both ways: the connection to Cloud SQL as the port relays it.
 pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -153,7 +208,7 @@ pub(crate) struct DatabasePorts {
     edits: Mutex<()>,
     ports: Mutex<BTreeMap<String, Arc<Port>>>,
     sign_in_within: Duration,
-    now: Now,
+    clocks: Clocks,
     tick: Duration,
 }
 
@@ -165,7 +220,7 @@ impl Default for DatabasePorts {
             edits: Mutex::new(()),
             ports: Mutex::default(),
             sign_in_within: SIGN_IN_WITHIN,
-            now: Arc::new(SystemTime::now),
+            clocks: Clocks::default(),
             tick: TICK,
         }
     }
@@ -215,11 +270,11 @@ impl DatabasePorts {
         self
     }
 
-    /// The ports on the clock `now`, looking at their writable windows every `tick` (the tests move a clock of their own, and do not wait a
-    /// second for each look).
+    /// The ports on `clocks`, looking at their writable windows every `tick` (the tests move clocks of their own, and do not wait a second
+    /// for each look).
     #[cfg(test)]
-    pub(crate) fn timed_by(mut self, now: Now, tick: Duration) -> Self {
-        self.now = now;
+    pub(crate) fn timed_by(mut self, clocks: Clocks, tick: Duration) -> Self {
+        self.clocks = clocks;
         self.tick = tick;
         self
     }
@@ -230,9 +285,9 @@ impl DatabasePorts {
         self.port(id).map_or(0, |port| port.ticks.load(std::sync::atomic::Ordering::SeqCst))
     }
 
-    /// The time now, by the ports' clock.
+    /// The time now, by the ports' wall clock.
     pub(crate) fn now(&self) -> SystemTime {
-        (self.now)()
+        (self.clocks.wall)()
     }
 
     /// The name of the database `id`, provided writes can be unlocked on it now: it is a prod database, and its port runs. The person is
@@ -248,14 +303,14 @@ impl DatabasePorts {
     /// that is open already starts again from `now`.
     pub fn unlock(&self, id: &str, now: SystemTime) -> Result<u64, String> {
         let port = self.port(id).ok_or(NOT_RUNNING)?;
-        port.unlock(now).map(millis)
+        port.unlock(Moment { wall: now, monotonic: (self.clocks.monotonic)() }).map(millis)
     }
 
     /// Ends the writable window of the database `id` now, when it is open: new connections are locked, and those that came without the lock
     /// close as soon as they are idle.
     pub fn lock(&self, id: &str) {
         if let Some(port) = self.port(id) {
-            port.lock((self.now)());
+            port.lock(self.clocks.now());
         }
     }
 
@@ -289,7 +344,7 @@ impl DatabasePorts {
             if ports.values().filter(|port| port.busy()).count() >= MAX_RUNNING_DATABASES {
                 return Err(format!("Lunport runs up to {MAX_RUNNING_DATABASES} databases at once."));
             }
-            let port = Arc::new(Port::new(db.clone(), password, quit, Arc::clone(&self.now)));
+            let port = Arc::new(Port::new(db.clone(), password, quit, self.clocks.clone()));
             ports.insert(db.id.clone(), Arc::clone(&port));
             port
         };
@@ -382,8 +437,8 @@ struct Port {
     state: Mutex<PortState>,
     /// How many of its `MAX_PORT_CONNECTIONS` slots are held.
     open: Mutex<usize>,
-    /// The clock its writable window goes by.
-    now: Now,
+    /// The clocks its writable window goes by.
+    clocks: Clocks,
     writes: Mutex<Writes>,
     /// How many times it looked at its window (`DatabasePorts::ticks`).
     #[cfg(test)]
@@ -397,7 +452,7 @@ struct PortState {
 }
 
 impl Port {
-    fn new(db: SavedDatabase, password: Zeroizing<String>, quit: CancelToken, now: Now) -> Port {
+    fn new(db: SavedDatabase, password: Zeroizing<String>, quit: CancelToken, clocks: Clocks) -> Port {
         Port {
             db,
             password: Mutex::new(password),
@@ -405,7 +460,7 @@ impl Port {
             woken: Notify::new(),
             state: Mutex::new(PortState { phase: DatabasePhase::Starting, port: None, error: None }),
             open: Mutex::new(0),
-            now,
+            clocks,
             writes: Mutex::default(),
             #[cfg(test)]
             ticks: std::sync::atomic::AtomicUsize::new(0),
@@ -415,7 +470,7 @@ impl Port {
     fn live(&self) -> DatabaseLive {
         let state = locked(&self.state);
         let connections = u32::try_from(*locked(&self.open)).unwrap_or(u32::MAX);
-        let writable_until_ms = locked(&self.writes).open_until((self.now)()).map(millis);
+        let writable_until_ms = locked(&self.writes).open_until(self.clocks.now()).map(millis);
         DatabaseLive { phase: state.phase, port: state.port, connections, writable_until_ms, error: state.error.clone() }
     }
 
@@ -513,31 +568,31 @@ impl Port {
 
     /// Opens its writable window from `now`, and answers when it ends. A connection that came without the lock and was to close since an
     /// earlier window ended goes on while this one is open. The phase is held meanwhile, so that a port that stops keeps no window.
-    fn unlock(&self, now: SystemTime) -> Result<SystemTime, String> {
+    fn unlock(&self, now: Moment) -> Result<SystemTime, String> {
         let state = locked(&self.state);
         self.unlockable(&state)?;
-        let until = now + WRITABLE_WINDOW;
+        let until = now.after(WRITABLE_WINDOW);
         let mut writes = locked(&self.writes);
         writes.until = Some(until);
         for connection in writes.connections.values().filter(|connection| !connection.locked) {
             connection.reprieve();
         }
-        Ok(until)
+        Ok(until.wall)
     }
 
     /// Ends its writable window at `now`, when it is open.
-    fn lock(&self, now: SystemTime) {
+    fn lock(&self, now: Moment) {
         let mut writes = locked(&self.writes);
         if let Some(until) = writes.until.take() {
-            writes.window_ended(now.min(until));
+            writes.window_ended(now.earlier(until));
         }
     }
 
     /// Looks at its window at `now`: when the window has ended, it ends it as `lock` does; and it closes the connections past their time.
-    fn tick(&self, now: SystemTime) {
+    fn tick(&self, now: Moment) {
         {
             let mut writes = locked(&self.writes);
-            if let Some(until) = writes.until.filter(|until| now >= *until) {
+            if let Some(until) = writes.until.filter(|until| until.reached_by(now)) {
                 writes.until = None;
                 writes.window_ended(until);
             }
@@ -561,7 +616,7 @@ impl Port {
     /// and miss the connection.
     fn register(self: &Arc<Port>) -> Registered {
         let mut writes = locked(&self.writes);
-        let lock = self.db.is_prod() && writes.open_until((self.now)()).is_none();
+        let lock = self.db.is_prod() && writes.open_until(self.clocks.now()).is_none();
         let connection = Arc::new(Connection::new(lock));
         let number = writes.next;
         writes.next += 1;
@@ -574,23 +629,23 @@ impl Port {
 #[derive(Default)]
 struct Writes {
     /// When the window ends, while it is open.
-    until: Option<SystemTime>,
+    until: Option<Moment>,
     /// The connections whose start-up message goes, or went, to Cloud SQL, by number.
     connections: BTreeMap<u64, Arc<Connection>>,
     next: u64,
 }
 
 impl Writes {
-    /// When the window ends, provided it is open at `now`.
-    fn open_until(&self, now: SystemTime) -> Option<SystemTime> {
-        self.until.filter(|until| now < *until)
+    /// When the window ends by the wall clock, provided it is open at `now`.
+    fn open_until(&self, now: Moment) -> Option<SystemTime> {
+        self.until.filter(|until| !until.reached_by(now)).map(|until| until.on_the_wall(now))
     }
 
     /// The window ended at `ended`: each connection that came without the lock closes as soon as it is idle, and `CLOSE_UNLOCKED_WITHIN`
     /// after `ended` at the latest.
-    fn window_ended(&self, ended: SystemTime) {
+    fn window_ended(&self, ended: Moment) {
         for connection in self.connections.values().filter(|connection| !connection.locked) {
-            connection.close_by(ended + CLOSE_UNLOCKED_WITHIN);
+            connection.close_by(ended.after(CLOSE_UNLOCKED_WITHIN));
         }
     }
 }
@@ -628,7 +683,7 @@ struct Flow {
     /// that no close cuts an answer off.
     delivering: bool,
     /// When it closes at the latest: the window it came in ended. It closes as soon as it is idle before then.
-    close_by: Option<SystemTime>,
+    close_by: Option<Moment>,
     closed: bool,
 }
 
@@ -686,7 +741,7 @@ impl Connection {
     }
 
     /// The window it came in ended: it closes as soon as it is idle, and at `by` at the latest.
-    fn close_by(&self, by: SystemTime) {
+    fn close_by(&self, by: Moment) {
         let mut flow = locked(&self.flow);
         flow.close_by = Some(by);
         if flow.idle() {
@@ -700,9 +755,9 @@ impl Connection {
     }
 
     /// Closes it when it is past its time at `now`.
-    fn close_if_due(&self, now: SystemTime) {
+    fn close_if_due(&self, now: Moment) {
         let mut flow = locked(&self.flow);
-        if flow.close_by.is_some_and(|by| now >= by) {
+        if flow.close_by.is_some_and(|by| by.reached_by(now)) {
             self.close(&mut flow);
         }
     }
@@ -765,7 +820,7 @@ async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstrea
         tokio::select! {
             () = port.woken.notified() => {}
             _ = poll.tick() => {}
-            _ = ticker.tick() => port.tick((port.now)()),
+            _ = ticker.tick() => port.tick(port.clocks.now()),
             accepted = listener.accept() => match accepted {
                 Ok((app, _)) => {
                     apps.spawn(serve_app(Arc::clone(&port), app, Arc::clone(&upstream), sign_in_within));

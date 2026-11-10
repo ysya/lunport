@@ -451,8 +451,7 @@ const STAY_LOCKED: &str = "Writes stay locked.";
 
 /// Ports on `clock` with `database` running on a port the system picks.
 fn running_on(clock: &Clock, database: SavedDatabase) -> DatabasePorts {
-    let now = clock.clone();
-    let ports = DatabasePorts::new(Arc::new(FakeUpstream::default())).timed_by(Arc::new(move || now.now()), Duration::from_millis(10));
+    let ports = DatabasePorts::new(Arc::new(FakeUpstream::default())).timed_by(clock.clocks(), Duration::from_millis(10));
     let started = SavedDatabase { local_port: Some(0), ..database };
     ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
     ports

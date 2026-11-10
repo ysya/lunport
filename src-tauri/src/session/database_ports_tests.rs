@@ -898,7 +898,7 @@ fn a_failed_port_is_not_given_a_password() {
 
 #[test]
 fn a_port_takes_a_new_password_while_it_starts_or_runs_only() {
-    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Arc::new(SystemTime::now));
+    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Clocks::default());
     assert_eq!(port.live().phase, DatabasePhase::Starting);
     port.set_password(Zeroizing::new("first".into()));
     assert_eq!(*port.password(), "first", "a port that starts takes it");
@@ -947,22 +947,51 @@ pub(crate) fn t0() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_800_000_000)
 }
 
-/// The test's own clock, which only the test moves.
+/// The test's own clocks, which only the test moves: a wall clock that starts at `t0`, and a monotonic clock that starts when it is made.
 #[derive(Clone)]
-pub(crate) struct Clock(Arc<Mutex<SystemTime>>);
+pub(crate) struct Clock {
+    started: Instant,
+    /// The wall clock's time, and how far the monotonic clock has gone.
+    times: Arc<Mutex<(SystemTime, Duration)>>,
+}
 
 impl Clock {
     pub(crate) fn new() -> Clock {
-        Clock(Arc::new(Mutex::new(t0())))
+        Clock { started: Instant::now(), times: Arc::new(Mutex::new((t0(), Duration::ZERO))) }
     }
 
+    /// The wall clock.
     pub(crate) fn now(&self) -> SystemTime {
-        *self.0.lock().unwrap()
+        self.times.lock().unwrap().0
     }
 
-    /// Moves the clock to `elapsed` after `t0`.
+    /// The monotonic clock.
+    fn instant(&self) -> Instant {
+        self.started + self.times.lock().unwrap().1
+    }
+
+    /// Moves both clocks to `elapsed` after they started.
     pub(crate) fn at(&self, elapsed: Duration) {
-        *self.0.lock().unwrap() = t0() + elapsed;
+        *self.times.lock().unwrap() = (t0() + elapsed, elapsed);
+    }
+
+    /// Lets `span` go by on both clocks.
+    fn pass(&self, span: Duration) {
+        let mut times = self.times.lock().unwrap();
+        times.0 += span;
+        times.1 += span;
+    }
+
+    /// Sets the wall clock to `wall`, as a person or a time server does; the monotonic clock does not move. (A computer that sleeps moves
+    /// the wall clock on and not the monotonic one too.)
+    fn set_wall(&self, wall: SystemTime) {
+        self.times.lock().unwrap().0 = wall;
+    }
+
+    /// The ports' clocks, as these tell the time.
+    pub(crate) fn clocks(&self) -> Clocks {
+        let (wall, monotonic) = (self.clone(), self.clone());
+        Clocks::new(move || wall.now(), move || monotonic.instant())
     }
 }
 
@@ -978,8 +1007,7 @@ fn writable() -> (DatabasePorts, Arc<FakeUpstream>, Clock, u16) {
     let upstream = fake();
     *upstream.answer.lock().unwrap() = Answer::Queries;
     let clock = Clock::new();
-    let now = clock.clone();
-    let ports = DatabasePorts::new(upstream.clone()).timed_by(Arc::new(move || now.now()), TICKING);
+    let ports = DatabasePorts::new(upstream.clone()).timed_by(clock.clocks(), TICKING);
     let port = running(&ports, &orders());
     (ports, upstream, clock, port)
 }
@@ -1240,7 +1268,7 @@ fn an_answer_on_its_way_to_the_app_reaches_it_whole_before_the_connection_closes
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         // The window ends meanwhile, and a reconnect is asked for: neither cuts the answer off.
-        connection.close_by(SystemTime::now());
+        connection.close_by(Moment { wall: SystemTime::now(), monotonic: std::time::Instant::now() });
         assert!(!connection.close_if_idle(), "a connection whose answer is on its way is not idle");
         // The app reads the answer whole; then the connection closes.
         let mut received = vec![0u8; answer.len()];
@@ -1250,4 +1278,50 @@ fn an_answer_on_its_way_to_the_app_reaches_it_whole_before_the_connection_closes
         assert!(locked(&connection.flow).closed, "closed by the window's end");
         assert_eq!(app.read(&mut [0u8; 1]).await.unwrap(), 0, "the app's side is closed");
     });
+}
+
+#[test]
+fn a_wall_clock_set_back_does_not_stretch_the_window() {
+    let (ports, upstream, clock, port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut idle = App::signed_in(port);
+    let mut endless = App::signed_in(port);
+    assert_eq!(endless.query("begin"), b'T');
+    // Ten minutes in, the wall clock is set back an hour: five minutes are left all the same, which the page reads on that clock.
+    clock.at(10 * MINUTE);
+    clock.set_wall(t0() - 50 * MINUTE);
+    assert_eq!(ports.live(ID).writable_until_ms, Some(ms(t0() - 45 * MINUTE)));
+    // Five minutes later the window ends, although the wall clock is still an hour before its end.
+    clock.pass(5 * MINUTE);
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+    App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(true)), "a new connection is locked");
+    assert!(idle.closed(), "an idle unlocked connection closes");
+    // The connection that never turns idle closes ten minutes after the window, by the same clock.
+    clock.pass(CLOSE_UNLOCKED_WITHIN - SECOND);
+    ticked(&ports);
+    assert!(endless.still_open());
+    clock.pass(SECOND);
+    assert!(endless.closed());
+}
+
+#[test]
+fn a_computer_that_slept_through_the_window_ends_it_as_it_wakes() {
+    // While the computer sleeps the wall clock goes on, and the monotonic clock does not.
+    let (ports, upstream, clock, port) = writable();
+    ports.unlock(ID, clock.now()).unwrap();
+    let mut idle = App::signed_in(port);
+    let mut endless = App::signed_in(port);
+    assert_eq!(endless.query("begin"), b'T');
+    clock.set_wall(t0() + WRITABLE_WINDOW + MINUTE);
+    assert!(idle.closed(), "the first look after waking ends the window");
+    assert_eq!(ports.live(ID).writable_until_ms, None);
+    App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(true)), "a new connection is locked");
+    // The connection that never turns idle has its ten minutes from the window's end on the wall clock.
+    clock.set_wall(t0() + WRITABLE_WINDOW + CLOSE_UNLOCKED_WITHIN - SECOND);
+    ticked(&ports);
+    assert!(endless.still_open());
+    clock.set_wall(t0() + WRITABLE_WINDOW + CLOSE_UNLOCKED_WITHIN);
+    assert!(endless.closed());
 }
