@@ -534,14 +534,19 @@ fn finish(entry: &Entry, result: Result<(), String>) {
         }
     }
 }
-fn main_only(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == "main" {
+/// Refuses a command that does not come from the main window, in a sentence about what it manages (`subject`, such as "Tunnel").
+pub(super) fn main_only(window: &tauri::WebviewWindow, subject: &str) -> Result<(), String> {
+    main_window_only(window.label(), subject)
+}
+fn main_window_only(label: &str, subject: &str) -> Result<(), String> {
+    if label == "main" {
         Ok(())
     } else {
-        Err("Tunnel management is available in the main window only.".into())
+        Err(format!("{subject} management is available in the main window only."))
     }
 }
-fn snapshot(app: &tauri::AppHandle) -> Result<crate::sync::records_v3::SyncStateV3, String> {
+/// The sync state as this device holds it now.
+pub(super) fn snapshot(app: &tauri::AppHandle) -> Result<crate::sync::records_v3::SyncStateV3, String> {
     crate::sync::engine::with_env(app, crate::sync::record_runtime::snapshot)
         .map_err(|e| e.to_string())?
         .map(|(state, _)| state)
@@ -552,7 +557,7 @@ pub async fn tunnels_list(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<Vec<TunnelView>, String> {
-    main_only(&window)?;
+    main_only(&window, "Tunnel")?;
     tauri::async_runtime::spawn_blocking(move || {
         Ok(app
             .state::<AppState>()
@@ -597,7 +602,7 @@ pub async fn tunnels_save(
     mut rule: TunnelRule,
     expected: Option<TunnelRule>,
 ) -> Result<(), String> {
-    main_only(&window)?;
+    main_only(&window, "Tunnel")?;
     if rule.id.is_empty() {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes)
@@ -614,7 +619,7 @@ pub async fn tunnels_delete(
     window: tauri::WebviewWindow,
     expected: TunnelRule,
 ) -> Result<(), String> {
-    main_only(&window)?;
+    main_only(&window, "Tunnel")?;
     tauri::async_runtime::spawn_blocking(move || {
         edit(&app, &expected.id.clone(), Some(expected), None)
     })
@@ -686,7 +691,7 @@ pub async fn tunnels_start(
     window: tauri::WebviewWindow,
     expected: TunnelRule,
 ) -> Result<(), String> {
-    main_only(&window)?;
+    main_only(&window, "Tunnel")?;
     tauri::async_runtime::spawn_blocking(move || {
         let work: Work = Box::new(|rule, entry, connector, owner, account, needs_grant| {
             run(rule, entry, connector, owner, &Watch::of_a_person(account, needs_grant))
@@ -702,7 +707,7 @@ pub fn tunnels_stop(
     window: tauri::WebviewWindow,
     id: String,
 ) -> Result<(), String> {
-    main_only(&window)?;
+    main_only(&window, "Tunnel")?;
     app.state::<AppState>().session.tunnels.stop(&id);
     Ok(())
 }
@@ -1430,5 +1435,14 @@ mod tests {
         finish(&ended, Ok(()));
         assert!(matches!(ended.live().phase, TunnelPhase::Error));
         assert_eq!(ended.live().forwarding.error.as_deref(), Some(AI_ACCESS_ENDED));
+    }
+
+    /// Tunnel commands keep their sentence for any window but the main one; the other commands that share the check name their own subject.
+    #[test]
+    fn a_window_other_than_the_main_one_is_refused_in_a_sentence_about_its_subject() {
+        assert_eq!(main_window_only("main", "Tunnel"), Ok(()));
+        assert_eq!(main_window_only("main", "Database"), Ok(()));
+        assert_eq!(main_window_only("auth", "Tunnel"), Err("Tunnel management is available in the main window only.".to_string()));
+        assert_eq!(main_window_only("hostkey", "Database"), Err("Database management is available in the main window only.".to_string()));
     }
 }

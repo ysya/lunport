@@ -43,6 +43,7 @@ pub mod gcloud;
 pub mod pam;
 pub mod transports;
 pub mod tunnels;
+pub mod databases;
 pub mod embedded;
 pub mod auth;
 pub(crate) mod credential_approval;
