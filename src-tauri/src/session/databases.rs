@@ -167,7 +167,10 @@ pub async fn databases_delete(app: tauri::AppHandle, window: tauri::WebviewWindo
     main_only(&window, "Database")?;
     tauri::async_runtime::spawn_blocking(move || {
         let id = expected.id.clone();
-        unless_running(&app, &id, |env| delete(env, expected))
+        unless_running(&app, &id, |env| delete(env, expected))?;
+        // Nothing that was had for a deleted database stays: its certificate goes with it.
+        app.state::<AppState>().session.databases.release(&id);
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?

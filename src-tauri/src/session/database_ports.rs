@@ -94,6 +94,8 @@ pub(crate) trait Upstream: Send + Sync {
     /// certificate shows only then): that material is not used again, and the next connection gets new material. Newer material that
     /// another connection got meanwhile stays.
     fn forget(&self, db_id: &str, material: u64);
+    /// The database `db_id` stopped, or was deleted: everything kept for it goes, its certificate and the key that was made for it too.
+    fn release(&self, db_id: &str);
 }
 
 /// A connection to an instance under way.
@@ -353,6 +355,11 @@ impl Upstream for CloudSqlUpstream {
             }
         }
     }
+
+    fn release(&self, db_id: &str) {
+        // A connection still on its way keeps the route it started with; what it gets goes with it.
+        locked(&self.routes).remove(db_id);
+    }
 }
 
 // ---- Passwords ----
@@ -491,6 +498,14 @@ impl DatabasePorts {
         locked(&self.ports).get(id).is_some_and(|port| port.busy())
     }
 
+    /// The database `id` was deleted: what its connections had goes with it. A database that runs is not deleted, so its port stopped
+    /// before and keeps nothing else.
+    pub(crate) fn release(&self, id: &str) {
+        if let Some(upstream) = self.upstream.get() {
+            upstream.release(id);
+        }
+    }
+
     /// The password the database `id`'s port asks of the connections that come from now on; those that are open go on.
     pub fn set_password(&self, id: &str, password: Zeroizing<String>) {
         if let Some(port) = locked(&self.ports).get(id) {
@@ -586,6 +601,12 @@ impl Port {
 
     fn failed(&self, error: &str) {
         *locked(&self.state) = PortState { phase: DatabasePhase::Error, port: None, error: Some(cut(error)) };
+        self.forget_password();
+    }
+
+    /// Lets go of its password, wiped as it goes: a port that does not run asks nobody for it.
+    fn forget_password(&self) {
+        *locked(&self.password) = Zeroizing::new(String::new());
     }
 
     fn stop(&self) {
@@ -644,8 +665,8 @@ fn listen(number: u16, runtime: &tokio::runtime::Runtime) -> Result<TcpListener,
     TcpListener::from_std(listener).map_err(could_not)
 }
 
-/// Runs a port: takes the apps that connect until the port stops or the app quits, then lets go of the address, closes every connection
-/// and lets go of `hold`.
+/// Runs a port: takes the apps that connect until the port stops or the app quits, then lets go of the address, closes every connection,
+/// lets go of what was kept for the database (its password, its certificate) and of `hold`.
 async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstream>, sign_in_within: Duration, hold: Box<dyn Send>) {
     let mut apps = JoinSet::new();
     let mut poll = tokio::time::interval(QUIT_POLL);
@@ -666,6 +687,8 @@ async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstrea
     port.stopping();
     drop(listener);
     apps.shutdown().await;
+    upstream.release(&port.db.id);
+    port.forget_password();
     port.stopped();
     drop(hold);
 }

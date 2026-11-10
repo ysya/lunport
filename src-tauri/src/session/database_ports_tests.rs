@@ -156,6 +156,7 @@ pub(crate) struct FakeUpstream {
     pub cancelled: AtomicUsize,
     pub dialled: AtomicUsize,
     pub forgotten: AtomicUsize,
+    pub released: AtomicUsize,
     /// The first message each connection to the fake Cloud SQL carried, as it came.
     pub received: Arc<Mutex<Vec<Vec<u8>>>>,
 }
@@ -201,6 +202,10 @@ impl Upstream for FakeUpstream {
 
     fn forget(&self, _db_id: &str, _material: u64) {
         self.forgotten.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn release(&self, _db_id: &str) {
+        self.released.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -541,6 +546,7 @@ fn a_port_in_use_fails_with_a_sentence() {
     assert_eq!(started, Err(sentence.clone()));
     assert_eq!(ports.live(ID), DatabaseLive { phase: DatabasePhase::Error, port: None, connections: 0, writable_until_ms: None, error: Some(sentence) });
     assert!(!ports.running(ID));
+    assert!(locked(&ports.ports)[ID].password().is_empty(), "a port that failed keeps no password");
     // Nothing else breaks: another database starts, and this one does once the port is free.
     let other = SavedDatabase { id: OTHER.into(), ..orders() };
     App::signed_in(running(&ports, &other)).round_trip(b"select 1");
@@ -1229,4 +1235,24 @@ fn a_prepare_that_finishes_after_the_database_changed_leaves_nothing_for_it() {
     cloud.dialled.lock().unwrap().clear();
     let _dialling = upstream.connect(ID);
     assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
+}
+
+#[test]
+fn a_stopped_or_deleted_database_keeps_no_password_or_certificate() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = Arc::new(cloud.upstream());
+    let ports = DatabasePorts::new(upstream.clone());
+    let port = running(&ports, &orders());
+    App::signed_in(port).round_trip(b"select 1");
+    assert_eq!(*locked(&ports.ports)[ID].password(), PASSWORD);
+    assert!(locked(&upstream.routes)[ID].kept.lock().unwrap().dial.is_some(), "the certificate is kept while the port runs");
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    assert!(locked(&ports.ports)[ID].password().is_empty(), "the stopped port keeps no password");
+    assert!(!locked(&upstream.routes).contains_key(ID), "nor what its connections had: the certificate and its key");
+    // A database that does not run is deleted: what was had for it goes too.
+    upstream.prepare(&orders(), &CancelToken::default()).unwrap();
+    assert!(locked(&upstream.routes).contains_key(ID));
+    ports.release(ID);
+    assert!(!locked(&upstream.routes).contains_key(ID));
 }
