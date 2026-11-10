@@ -105,28 +105,33 @@ export function localAddress(row: DatabaseView): string {
 /** The connections open through the port, as the Status column counts them. */
 export const connectionsLine = (count: number) => `${count} active connection${count === 1 ? "" : "s"}`;
 
-/** How long before a grant ends a database's row offers to request it again. */
-export const GRANT_RENEWAL_MS = 5 * 60_000;
+/** How long before a grant ends a database's row starts to warn that it is ending. */
+export const GRANT_ENDING_SOON_MS = 5 * 60_000;
 
-/** What a database's row says of its grant, how it is drawn and whether it offers Request grant. */
+/** What a database's row says of its grant, how it is drawn, whether it offers Request grant and what else it says under the line. */
 export type DatabaseGrantLine = {
   text: string;
   /** `held`: in force; `warning`: missing or about to end; `plain`: nothing to act on (waiting for an approver, could not be checked). */
   tone: "held" | "warning" | "plain";
   request: boolean;
+  note?: string;
 };
 
 /**
  * The grant line of a database whose grant check is `pam`, from the grant that was read. A held grant reads as a tunnel's row says it
- * (`tunnelGrantLine`) until it has `GRANT_RENEWAL_MS` left, then as how many minutes are left, rounded up; both a grant that is missing
- * (none, or one whose end has passed) and one about to end are in the warning color and offer a request. A grant that waits for its
- * approver, or could not be checked, offers none: PAM refuses a second request while one waits, and a read that failed says why.
+ * (`tunnelGrantLine`) until it has `GRANT_ENDING_SOON_MS` left, then as how many minutes are left, rounded up, in the warning color.
+ * PAM takes no request with the scope of a grant that is still active, so a grant that is held offers no request, however little
+ * time it has left: the line says that a new one can be requested when it ends. A grant that is missing, or whose end has passed (so it
+ * is no longer held), is in the warning color and offers the request. One that waits for its approver, or could not be read, offers
+ * none: PAM refuses a second request while one waits, and a read that failed says why.
  */
 export function databaseGrantLine(status: PamStatusView, pam: PamCheck, now = Date.now()): DatabaseGrantLine {
   const text = tunnelGrantLine(status, pam, now);
   if (grantHeld(status, now)) {
     const left = status.state === "active" && status.active_until_ms != null ? status.active_until_ms - now : null;
-    if (left !== null && left <= GRANT_RENEWAL_MS) return { text: `Grant ends in ${Math.ceil(left / 60_000)} min`, tone: "warning", request: true };
+    if (left !== null && left <= GRANT_ENDING_SOON_MS) {
+      return { text: `Grant ends in ${Math.ceil(left / 60_000)} min`, tone: "warning", request: false, note: "You can request a new grant when this one ends." };
+    }
     return { text, tone: "held", request: false };
   }
   const missing = status.state !== "approval_awaited" && status.state !== "error";

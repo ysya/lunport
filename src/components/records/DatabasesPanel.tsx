@@ -32,8 +32,9 @@ import { EnvironmentBadge } from "./DatabaseBadges";
 
 /**
  * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
- * Drawn only for a database with a grant check. A grant that is missing or ends within five minutes is in the warning color and comes
- * with Request grant; a read that fails shows its error in place of whatever an earlier read found, as a host's details pane does.
+ * Drawn only for a database with a grant check. A grant that is missing is in the warning color and comes with Request grant; one that
+ * ends within five minutes is in the warning color too, and says that a new one can be requested when it ends, since PAM takes no request
+ * while a grant is active. A read that fails shows its error in place of whatever an earlier read found, as a host's details pane does.
  */
 function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: string; pam: PamCheck; busy: boolean; request: () => void }) {
   const now = useNow(1000);
@@ -42,10 +43,13 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
   const grant = status ? databaseGrantLine(status, pam, now) : null;
   const line = revealHidden(grant ? grant.text : read.isError ? errorMessage(read.error) : "Checking the grant…");
   const tone = grant?.tone === "held" ? "text-primary" : grant?.tone === "warning" ? "text-warning" : "text-muted-foreground";
-  return <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${tone}`}>
-    <LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate" title={line}>{line}</span>
-    {grant?.request && <Button size="xs" variant="outline" className="ml-1 shrink-0 text-foreground" aria-label={`Request grant for ${revealHidden(name)}`} disabled={busy} onClick={request}>Request grant</Button>}
-  </span>;
+  return <>
+    <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${tone}`}>
+      <LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate" title={line}>{line}</span>
+      {grant?.request && <Button size="xs" variant="outline" className="ml-1 shrink-0 text-foreground" aria-label={`Request grant for ${revealHidden(name)}`} disabled={busy} onClick={request}>Request grant</Button>}
+    </span>
+    {grant?.note && <span className="mt-0.5 block text-xs text-muted-foreground">{grant.note}</span>}
+  </>;
 }
 
 /**

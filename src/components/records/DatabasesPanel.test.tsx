@@ -81,6 +81,9 @@ function iconButton(html: string, label: string): string {
   return tag[0];
 }
 
+/** The opening tag of the grant line of the first row that has one. */
+const grantLineTag = (html: string) => html.match(/<span class="mt-1 flex[^"]*"[^>]*>/)?.[0] ?? "";
+
 /** The class names of the first element in `html`. */
 const classesOf = (html: string) => new Set((html.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/));
 
@@ -201,25 +204,42 @@ describe("the Databases page", () => {
     expect(navigation("databases")).not.toContain('aria-current="page" aria-label="Tunnels"');
   });
 
-  it("a_grant_ending_within_five_minutes_offers_request_grant", async () => {
-    const warning = (html: string) => html.match(/<span class="mt-1 flex[^"]*"[^>]*>/)?.[0] ?? "";
-    // Four minutes left: the minutes, in the warning color, and a request.
+  it("a_grant_ending_within_five_minutes_warns_without_a_request_button", async () => {
+    // Four minutes left: the minutes, in the warning color, and when a new grant can be requested. PAM takes no second request while
+    // one is active, so there is no button.
     const ending = await renderWithGrants([row()], status({ active_until_ms: AT + 4 * MINUTE }));
     expect(text(ending.html)).toContain("Grant ends in 4 min");
+    expect(text(ending.html)).toContain("You can request a new grant when this one ends.");
     expect(text(ending.html)).not.toContain("Active until");
-    expect(warning(ending.html)).toContain("text-warning");
-    expect(buttonTag(ending.html, "Request grant")).toContain('aria-label="Request grant for Orders"');
-    expect(buttonTag(ending.html, "Request grant")).not.toContain(DISABLED);
-    // More than five minutes left: held, in the primary color, and nothing to request.
+    expect(grantLineTag(ending.html)).toContain("text-warning");
+    expect(ending.html).not.toContain("Request grant");
+    // Five minutes exactly still warns.
+    const edge = await renderWithGrants([row()], status({ active_until_ms: AT + 5 * MINUTE }));
+    expect(text(edge.html)).toContain("Grant ends in 5 min");
+    expect(edge.html).not.toContain("Request grant");
+    // More than five minutes left: held, in the primary color, with nothing to add and nothing to request.
     const held = await renderWithGrants([row()], status({ active_until_ms: AT + 5 * MINUTE + 1 }));
     expect(text(held.html)).toContain("prod-operate · Active until 10:05");
-    expect(warning(held.html)).toContain("text-primary");
+    expect(text(held.html)).not.toContain("You can request a new grant");
+    expect(grantLineTag(held.html)).toContain("text-primary");
     expect(held.html).not.toContain("Request grant");
-    // No grant at all: the line that says so, in the warning color, and a request.
-    const missing = await renderWithGrants([row()], status({ state: "none", entitlement: null, active_until_ms: null }));
-    expect(text(missing.html)).toContain("Needs a grant: prod-operate, prod-admin");
-    expect(warning(missing.html)).toContain("text-warning");
-    expect(missing.html).toContain(">Request grant</button>");
+  });
+
+  it("a_missing_or_ended_grant_offers_request_grant", async () => {
+    const none = status({ state: "none", entitlement: null, active_until_ms: null });
+    // An end that is now, or has passed some time ago, is an ended grant.
+    for (const [what, answer] of [["none", none], ["ended just now", status({ active_until_ms: AT })], ["ended earlier", status({ active_until_ms: AT - 3 * MINUTE })]] as const) {
+      const { html } = await renderWithGrants([row()], answer);
+      expect(text(html), what).toContain("Needs a grant: prod-operate, prod-admin");
+      expect(grantLineTag(html), what).toContain("text-warning");
+      expect(buttonTag(html, "Request grant"), what).toContain('aria-label="Request grant for Orders"');
+      expect(buttonTag(html, "Request grant"), what).not.toContain(DISABLED);
+      expect(text(html), what).not.toContain("You can request a new grant");
+    }
+    // Each database that lacks a grant offers a button of its own, named for it.
+    const two = await renderWithGrants([row(), row({}, { id: "00000000000000a2", name: "Analytics" })], none);
+    expect(two.html.match(/>Request grant<\/button>/g)).toHaveLength(2);
+    expect(two.html).toContain('aria-label="Request grant for Analytics"');
   });
 
   it("a_grant_whose_end_has_passed_reads_as_missing_not_as_a_negative_number", async () => {

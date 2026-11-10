@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "./test-ipc";
 import type { PamStatusView } from "./transports";
 import {
-  GRANT_RENEWAL_MS,
+  GRANT_ENDING_SOON_MS,
   connectionName,
   connectionsLine,
   databaseBusy,
@@ -225,14 +225,16 @@ describe("the grant line of a database", () => {
   const status = (patch: Partial<PamStatusView>): PamStatusView => ({ entitlement: "prod-operate", state: "active", active_until_ms: null, message: null, ...patch });
   const line = (patch: Partial<PamStatusView>, now = NOW) => databaseGrantLine(status(patch), PAM, now);
 
-  it("offers a request when the grant ends within five minutes, saying how soon", () => {
-    expect(GRANT_RENEWAL_MS).toBe(5 * MINUTE);
-    expect(line({ active_until_ms: NOW + 4 * MINUTE })).toEqual({ text: "Grant ends in 4 min", tone: "warning", request: true });
+  it("warns without a request when the grant ends within five minutes, and says when a new one can be requested", () => {
+    // PAM takes no second request with the scope of a grant that is still active, so there is nothing to ask for before it ends.
+    const note = "You can request a new grant when this one ends.";
+    expect(GRANT_ENDING_SOON_MS).toBe(5 * MINUTE);
+    expect(line({ active_until_ms: NOW + 4 * MINUTE })).toEqual({ text: "Grant ends in 4 min", tone: "warning", request: false, note });
     // Rounded up: the last seconds still read as a minute.
-    expect(line({ active_until_ms: NOW + 1 })).toEqual({ text: "Grant ends in 1 min", tone: "warning", request: true });
+    expect(line({ active_until_ms: NOW + 1 })).toEqual({ text: "Grant ends in 1 min", tone: "warning", request: false, note });
     expect(line({ active_until_ms: NOW + MINUTE + 1 }).text).toBe("Grant ends in 2 min");
     // Five minutes exactly is within five minutes; a moment more is not.
-    expect(line({ active_until_ms: NOW + 5 * MINUTE })).toEqual({ text: "Grant ends in 5 min", tone: "warning", request: true });
+    expect(line({ active_until_ms: NOW + 5 * MINUTE })).toEqual({ text: "Grant ends in 5 min", tone: "warning", request: false, note });
     expect(line({ active_until_ms: NOW + 5 * MINUTE + 1 })).toEqual({ text: "prod-operate · Active until 10:05", tone: "held", request: false });
   });
 
