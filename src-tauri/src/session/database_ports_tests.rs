@@ -1211,3 +1211,43 @@ fn unlocking_again_lets_the_unlocked_connections_go_on() {
     clock.at(2 * WRITABLE_WINDOW);
     assert!(writer.closed());
 }
+
+#[test]
+fn an_answer_on_its_way_to_the_app_reaches_it_whole_before_the_connection_closes() {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        // An unlocked connection, signed in: Cloud SQL's AuthenticationOk and ReadyForQuery were passed on already.
+        let connection = Arc::new(Connection::new(false));
+        let signed_in = [typed(b'R', &0u32.to_be_bytes()), typed(b'Z', b"I")].concat();
+        // The app's side holds four bytes at a time: what Cloud SQL sends waits in the relay until the app reads it.
+        let (mut app, port_side) = tokio::io::duplex(4);
+        let (server, mut cloud_sql) = tokio::io::duplex(64 * 1024);
+        let (from_app, to_app) = tokio::io::split(port_side);
+        let relaying = tokio::spawn({
+            let connection = Arc::clone(&connection);
+            async move { relay(from_app, to_app, Box::new(server), &signed_in, &connection).await }
+        });
+        // The app commits, and Cloud SQL answers.
+        let commit = typed(b'Q', b"commit\0");
+        app.write_all(&commit).await.unwrap();
+        cloud_sql.read_exact(&mut vec![0u8; commit.len()]).await.unwrap();
+        let answer = [typed(b'C', b"COMMIT\0"), typed(b'Z', b"I")].concat();
+        cloud_sql.write_all(&answer).await.unwrap();
+        // The relay has followed the whole answer, which leaves the session idle, and holds most of it until the app reads.
+        let end = Instant::now() + LIMIT;
+        while !locked(&connection.flow).server.idle() || locked(&connection.flow).server.idle_readies() < 2 {
+            assert!(Instant::now() < end, "timed out waiting for the relay to follow the answer");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        // The window ends meanwhile, and a reconnect is asked for: neither cuts the answer off.
+        connection.close_by(SystemTime::now());
+        assert!(!connection.close_if_idle(), "a connection whose answer is on its way is not idle");
+        // The app reads the answer whole; then the connection closes.
+        let mut received = vec![0u8; answer.len()];
+        app.read_exact(&mut received).await.expect("the whole answer reaches the app");
+        assert_eq!(received, answer);
+        tokio::time::timeout(LIMIT, relaying).await.expect("the relay ends").unwrap();
+        assert!(locked(&connection.flow).closed, "closed by the window's end");
+        assert_eq!(app.read(&mut [0u8; 1]).await.unwrap(), 0, "the app's side is closed");
+    });
+}

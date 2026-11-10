@@ -624,16 +624,19 @@ struct Flow {
     server: ReadyTracker,
     /// How many times Cloud SQL had said the session is idle (`ReadyTracker::idle_readies`) when the app last sent something.
     sent_after: Option<u64>,
+    /// What Cloud SQL sent last is followed already and still on its way to the app: the session is not idle until the app has it, so
+    /// that no close cuts an answer off.
+    delivering: bool,
     /// When it closes at the latest: the window it came in ended. It closes as soon as it is idle before then.
     close_by: Option<SystemTime>,
     closed: bool,
 }
 
 impl Flow {
-    /// Whether the session is idle: Cloud SQL's side is between messages after a ReadyForQuery that said so, and the app has sent nothing
-    /// since. Cloud SQL's side alone does not show a query that was sent and is not answered yet.
+    /// Whether the session is idle: Cloud SQL's side is between messages after a ReadyForQuery that said so, the app has all of it, and the
+    /// app has sent nothing since. Cloud SQL's side alone does not show a query that was sent and is not answered yet.
     fn idle(&self) -> bool {
-        self.server.idle() && self.sent_after != Some(self.server.idle_readies())
+        !self.delivering && self.server.idle() && self.sent_after != Some(self.server.idle_readies())
     }
 }
 
@@ -650,15 +653,19 @@ impl Connection {
         }
     }
 
-    /// Cloud SQL sent `bytes`. They are followed before the app gets them, so that what the app sends after them counts as sent after
-    /// them.
+    /// Cloud SQL sent `bytes`, which go on to the app now. They are followed before the app gets them, so that what the app sends after
+    /// them counts as sent after them.
     fn from_server(&self, bytes: &[u8]) {
-        locked(&self.flow).server.feed(bytes);
+        let mut flow = locked(&self.flow);
+        flow.server.feed(bytes);
+        flow.delivering = true;
     }
 
-    /// The app got what Cloud SQL sent. Once its window ended, a connection closes as soon as that leaves it idle.
+    /// The app got what Cloud SQL sent. Once its window ended, a connection closes as soon as that leaves it idle: a close that came while
+    /// the bytes were on their way happens here.
     fn passed_on(&self) {
         let mut flow = locked(&self.flow);
+        flow.delivering = false;
         if flow.close_by.is_some() && flow.idle() {
             self.close(&mut flow);
         }
@@ -891,7 +898,8 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
     match auth {
         ServerAuth::Ok => {
             if app.write_all(&first).await.is_ok() {
-                relay(app, server, &first, &registered.connection).await;
+                let (from_app, to_app) = app.into_split();
+                relay(from_app, to_app, server, &first, &registered.connection).await;
             }
         }
         ServerAuth::NeedsPassword => {
@@ -933,12 +941,12 @@ async fn pass_on_cancel(upstream: &dyn Upstream, db_id: &str, request: &[u8]) {
     let _ = tokio::time::timeout(CANCEL_WITHIN, passed).await;
 }
 
-/// Relays a signed-in session both ways until either side ends it or the port closes `connection`. Both sides are followed for whether
-/// the session is idle: Cloud SQL's from its first answer (`first`, passed on already) on, before the app gets what it sends, and the
-/// app's before what it sends goes on.
-async fn relay(app: TcpStream, server: BoxStream, first: &[u8], connection: &Connection) {
+/// Relays a signed-in session between the app's two halves and Cloud SQL until either side ends it or the port closes `connection`. Both
+/// sides are followed for whether the session is idle: Cloud SQL's from its first answer (`first`, passed on already) on, before the app
+/// gets what it sends, and the app's before what it sends goes on. A close for idleness waits until the app has what Cloud SQL sent.
+async fn relay(mut from_app: impl AsyncRead + Unpin, mut to_app: impl AsyncWrite + Unpin, server: BoxStream, first: &[u8], connection: &Connection) {
     connection.from_server(first);
-    let (mut from_app, mut to_app) = app.into_split();
+    connection.passed_on();
     let (mut from_server, mut to_server) = tokio::io::split(server);
     let upward = async {
         let mut buffer = vec![0u8; RELAY_BUFFER_BYTES];
