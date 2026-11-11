@@ -581,18 +581,33 @@ const TRANSPORT_CHANGED: &str = "The transport changed while the request was ope
 const TRANSPORT_ONLY: &str = "Provide the transport's settings only: project, zone, instance, interface, account, os_login and pam.";
 
 /// `null` and an absent field apart: `None` absent, `Some(None)` given as null.
-fn given<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+pub(super) fn given<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
 }
 
+/// A Privileged Access Manager check as a client sends it, for a host's transport or a saved database.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PamInput {
+pub(super) struct PamInput {
     entitlements: Vec<String>,
     #[serde(default)]
     location: Option<String>,
     #[serde(default)]
     duration_minutes: Option<u32>,
+}
+
+impl PamInput {
+    /// The check as it would be saved in place of `stored`: the entitlements given, the location given or `global`, and the grant length
+    /// given, else `stored`'s, else 30 minutes.
+    pub(super) fn merged(&self, stored: Option<crate::sync::transports::PamCheck>) -> crate::sync::transports::PamCheck {
+        crate::sync::transports::PamCheck {
+            entitlements: self.entitlements.clone(),
+            location: self.location.clone().unwrap_or_else(|| "global".into()),
+            duration_secs: self.duration_minutes.map(|minutes| minutes.saturating_mul(60)).or(stored.as_ref().map(|s| s.duration_secs)).unwrap_or(30 * 60),
+            // The justification is the person's: what they last sent stays theirs.
+            justification: stored.and_then(|s| s.justification),
+        }
+    }
 }
 
 /// What `set_transport` may change: a field given replaces that field only.
@@ -620,7 +635,7 @@ impl TransportInput {
     /// The transport as it would be saved: the current one (or a new one from project, zone and instance) with the fields given
     /// replaced, validated as the panel validates it.
     fn merged(&self, host_id: &str, current: Option<&crate::sync::transports::HostTransport>) -> Result<crate::sync::transports::HostTransport, String> {
-        use crate::sync::transports::{HostTransport, PamCheck, TransportKind};
+        use crate::sync::transports::{HostTransport, TransportKind};
         let mut kind = match current {
             Some(current) => current.kind.clone(),
             None => match (&self.project, &self.zone, &self.instance) {
@@ -658,16 +673,7 @@ impl TransportInput {
         match &self.pam {
             None => {}
             Some(None) => *pam = None,
-            Some(Some(input)) => {
-                let stored = pam.take();
-                *pam = Some(PamCheck {
-                    entitlements: input.entitlements.clone(),
-                    location: input.location.clone().unwrap_or_else(|| "global".into()),
-                    duration_secs: input.duration_minutes.map(|minutes| minutes.saturating_mul(60)).or(stored.as_ref().map(|s| s.duration_secs)).unwrap_or(30 * 60),
-                    // The justification is the person's: what they last sent stays theirs.
-                    justification: stored.and_then(|s| s.justification),
-                });
-            }
+            Some(Some(input)) => *pam = Some(input.merged(pam.take())),
         }
         let transport = HostTransport { host_id: host_id.into(), kind };
         transport.validate()?;

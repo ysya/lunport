@@ -3,4 +3,4 @@
 /**
  * What an Auto-log request does without per-command review once the person has agreed in a window.
  */
-export type Unreviewed = "command" | "tunnel" | "transfer";
+export type Unreviewed = "command" | "tunnel" | "transfer" | "database";

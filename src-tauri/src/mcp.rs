@@ -23,6 +23,7 @@ use crate::state::AppState;
 pub(crate) mod activity;
 pub(crate) mod records;
 mod adapter;
+mod databases;
 mod management;
 mod permissions;
 mod tunnels;
@@ -124,6 +125,10 @@ pub struct McpAuditEntry {
     #[serde(default)] pub stop: Option<McpStop>,
     /// The tunnel's name, for a tunnel request (`alias` is its host's).
     #[serde(default)] pub tunnel: Option<String>,
+    /// The database's name, for a database request (`alias` is the host it is reached through, empty for one on its public IP).
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub database: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +168,11 @@ pub mod proposal_kinds {
     pub const UPDATE_TUNNEL: &str = "update_tunnel";
     pub const DELETE_TUNNEL: &str = "delete_tunnel";
     pub const START_TUNNEL: &str = "start_tunnel";
+    /// Databases: saving or deleting one always asks; starting one asks in Ask mode.
+    pub const CREATE_DATABASE: &str = "create_database";
+    pub const UPDATE_DATABASE: &str = "update_database";
+    pub const DELETE_DATABASE: &str = "delete_database";
+    pub const START_DATABASE: &str = "start_database";
 }
 
 fn create_host_kind() -> String {
@@ -711,7 +721,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments. Databases on a public IP, and databases reached through permitted hosts, can be listed; create_database, update_database and delete_database always need native human approval; start_database follows Ask or Auto-log like start_tunnel, and stop_database never asks. No tool returns or accepts a database port password."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -774,6 +784,7 @@ fn tool_definitions() -> Value {
     tools.as_array_mut().unwrap().extend(management::tool_definitions());
     tools.as_array_mut().unwrap().extend(tunnels::tool_definitions());
     tools.as_array_mut().unwrap().extend(transfers::tool_definitions());
+    tools.as_array_mut().unwrap().extend(databases::tool_definitions());
     tools
 }
 

@@ -31,8 +31,8 @@ use zeroize::Zeroizing;
 
 /// What a command is refused with when the database it names is not there.
 const GONE: &str = "The saved database no longer exists.";
-/// What a start is refused with when the database is no longer saved as the request that starts it read it.
-const CHANGED: &str = "The database changed while the request was open; read it again and retry.";
+/// What a start, or an AI client's change, is refused with when the database is no longer saved as the request read it.
+pub(crate) const CHANGED: &str = "The database changed while the request was open; read it again and retry.";
 /// What a request for the grant of a database's host is refused with when the database does not connect through one.
 const NO_ROUTE_HOST: &str = "This database does not connect through a host.";
 
@@ -124,7 +124,7 @@ fn changed_for_port(running: &SavedDatabase, saved: &SavedDatabase) -> bool {
 
 /// Every saved database with what this device runs for it (`ports`), by name and then by identity. A database that runs here although its
 /// record is gone is listed too, so that it can be stopped.
-fn views(state: &SyncStateV3, ports: &DatabasePorts) -> Vec<DatabaseView> {
+pub(crate) fn views(state: &SyncStateV3, ports: &DatabasePorts) -> Vec<DatabaseView> {
     let mut views: Vec<DatabaseView> = databases::view(state)
         .into_iter()
         .map(|row| {
@@ -197,7 +197,7 @@ fn unless_running<T>(app: &tauri::AppHandle, id: &str, change: impl FnOnce(&Sync
 /// Deletes a database through `delete_record`, unless it runs here, and then lets go of what this device had for it: its certificate and
 /// the password of its port (a database that never had one is deleted just the same). A delete that is refused changes nothing. The edit
 /// lock is held to the end, so that no password is made for the database in between.
-fn delete_database(ports: &DatabasePorts, keychain: &dyn Keychain, id: &str, delete_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+pub(crate) fn delete_database(ports: &DatabasePorts, keychain: &dyn Keychain, id: &str, delete_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     ports.edit(id, || {
         delete_record()?;
         ports.release(id);

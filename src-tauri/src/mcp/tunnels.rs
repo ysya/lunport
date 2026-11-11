@@ -88,15 +88,15 @@ fn tunnel_ref(input: &Value) -> Result<String, String> {
 }
 
 /// Text from the library as the client reads it.
-fn safe(s: &str) -> String {
+pub(super) fn safe(s: &str) -> String {
     crate::session::auth::printable(s).replace(['\n', '\t'], "?")
 }
 
 /// The hosts this client may use, as `get_host` permits them, by id with their aliases: read once per request, so that listing many
 /// tunnels does not read the library once per tunnel.
-struct Usable(std::collections::BTreeMap<String, String>);
+pub(super) struct Usable(std::collections::BTreeMap<String, String>);
 impl Usable {
-    fn of(policy: &McpPolicy, state: &SyncStateV3) -> Result<Usable, String> {
+    pub(super) fn of(policy: &McpPolicy, state: &SyncStateV3) -> Result<Usable, String> {
         let hosts = repo::list_hosts(state).map_err(|e| e.to_string())?;
         Ok(Usable(
             hosts
@@ -107,10 +107,10 @@ impl Usable {
         ))
     }
     /// Whether a tunnel through `host_id` is the client's.
-    fn has(&self, host_id: &str) -> bool {
+    pub(super) fn has(&self, host_id: &str) -> bool {
         self.0.contains_key(host_id)
     }
-    fn alias(&self, host_id: &str) -> Option<&str> {
+    pub(super) fn alias(&self, host_id: &str) -> Option<&str> {
         self.0.get(host_id).map(String::as_str)
     }
 }
@@ -247,7 +247,7 @@ fn fields(state: &SyncStateV3, rule: &TunnelRule) -> Vec<(&'static str, String)>
     ]
 }
 
-fn rows(fields: Vec<(&'static str, String)>) -> Vec<(String, String)> {
+pub(super) fn rows(fields: Vec<(&'static str, String)>) -> Vec<(String, String)> {
     fields.into_iter().map(|(label, value)| (label.to_string(), value)).collect()
 }
 
@@ -268,12 +268,12 @@ fn changed_rows(state: &SyncStateV3, before: &TunnelRule, after: &TunnelRule) ->
 }
 
 /// Where a new rule is saved, as the window names it: with the library's account it syncs.
-fn storage(state: &SyncStateV3) -> String {
+pub(super) fn storage(state: &SyncStateV3) -> String {
     if state.account.is_some() { "Synced library" } else { "This device's library" }.into()
 }
 
 /// The host a tunnel may go through: one the client may use, whose Group inheritance is sound.
-fn usable_host(policy: &McpPolicy, state: &SyncStateV3, name: &str) -> Result<repo::HostView, String> {
+pub(super) fn usable_host(policy: &McpPolicy, state: &SyncStateV3, name: &str) -> Result<repo::HostView, String> {
     let host = find_host(state, name)?;
     permissions::ensure_record(policy, state, &host.host.id)?;
     if host.group_error.is_some() {
@@ -344,13 +344,13 @@ impl UpdateInput {
 }
 
 /// The words of a save: what the client is told when the person does not allow it or when it is done, and what the audit calls it.
-struct Words {
-    timed_out: &'static str,
-    canceled: &'static str,
-    denied: &'static str,
-    done: &'static str,
-    saved: &'static str,
-    not_saved: &'static str,
+pub(super) struct Words {
+    pub(super) timed_out: &'static str,
+    pub(super) canceled: &'static str,
+    pub(super) denied: &'static str,
+    pub(super) done: &'static str,
+    pub(super) saved: &'static str,
+    pub(super) not_saved: &'static str,
 }
 
 const CREATE_WORDS: Words = Words {
@@ -484,7 +484,7 @@ fn save(
     result
 }
 
-fn enabled_policy(runtime: &McpRuntime) -> Result<McpPolicy, String> {
+pub(super) fn enabled_policy(runtime: &McpRuntime) -> Result<McpPolicy, String> {
     let policy = runtime.policy.lock().unwrap().clone();
     if !policy.enabled {
         return Err("MCP access is disabled.".into());
