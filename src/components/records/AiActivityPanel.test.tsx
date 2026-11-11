@@ -178,3 +178,66 @@ describe("AI activity page", () => {
     expect(html).not.toContain("<time");
   });
 });
+
+describe("AI activity page for databases", () => {
+  const database = (patch: Partial<McpAuditEntry>) => entry({ command: "", database: "orders-dev", ...patch });
+  const entries = [
+    database({ id: "started", outcome: "database_started" }),
+    database({ id: "created", outcome: "database_created", host_id: null, alias: "", database: "billing-dev", mode: "ask", review: "approved" }),
+    database({ id: "starting", outcome: "database_starting", database: "ledger-dev" }),
+    database({
+      id: "kept", outcome: "database_not_deleted", database: "audit-dev", mode: "ask", review: "refused",
+      stop: { kind: "refused", window: "approval", reason: "MCP request was denied" },
+    }),
+    entry({ id: "ran" }),
+  ];
+
+  it("offers Databases as an action, after Tunnels", () => {
+    const html = render(entries);
+    expect(html).toMatch(/<option value="database"[^>]*>Databases<\/option>/);
+    expect(html.indexOf(">Tunnels</option>")).toBeGreaterThan(0);
+    expect(html.indexOf(">Databases</option>")).toBeGreaterThan(html.indexOf(">Tunnels</option>"));
+    expect(html.indexOf(">Databases</option>")).toBeLessThan(html.indexOf(">Host and route changes</option>"));
+  });
+
+  it("titles each request by the database and the host it went through, and says how it went", () => {
+    const page = text(render(entries));
+    expect(page).toContain("Started database orders-dev through web-1");
+    expect(page).toContain("Database started");
+    expect(page).toContain("Created database billing-dev");
+    expect(page).not.toContain("Created database billing-dev through");
+    expect(page).toContain("Database created");
+    expect(page).toContain("Starting database ledger-dev through web-1");
+    expect(page).toContain("Still connecting");
+    expect(page).toContain("Proposed deleting database audit-dev through web-1");
+    expect(page).toContain("Refused by you");
+    // The command among them keeps its own title.
+    expect(page).toContain("Ran a command on web-1");
+    for (const chip of ["All 5", "Succeeded 3", "Not run 1"]) expect(page).toContain(chip);
+  });
+
+  it("shows how a database request was reviewed and where to look when it was still connecting", () => {
+    const page = text(render(entries, { expanded: expandedAll(entries) }));
+    expect(page).toContain("Auto-log: started without per-database review.");
+    expect(page).toContain("You approved it in Lunport’s window.");
+    expect(page).toContain("Still connecting when Lunport answered; the Databases page shows how it went.");
+    expect(page).toContain("database_started");
+  });
+
+  it("lists only database requests under the Databases action", () => {
+    const page = text(render(entries, { filters: { ...NO_FILTERS, action: "database" } }));
+    expect(page).toContain("Started database orders-dev through web-1");
+    expect(page).toContain("Created database billing-dev");
+    expect(page).not.toContain("Ran a command on web-1");
+    expect(render(entries, { filters: { ...NO_FILTERS, action: "database" } })).toMatch(/<option value="database" selected="">Databases<\/option>/);
+    expect(text(render(entries, { filters: { ...NO_FILTERS, action: "tunnel" } }))).toContain("No activity matches these filters");
+  });
+
+  it("reveals hidden characters in a database's name", () => {
+    const hidden = String.fromCharCode(0x202e);
+    const named = [database({ id: "hidden", outcome: "database_started", database: `orders${hidden}-dev` })];
+    const html = render(named, { expanded: expandedAll(named) });
+    expect(html).not.toContain(hidden);
+    expect(html).toContain("Started database orders\u27e8U+202E\u27e9-dev through ");
+  });
+});

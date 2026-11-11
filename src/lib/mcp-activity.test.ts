@@ -58,12 +58,20 @@ describe("AI activity results", () => {
     [{ outcome: "tunnel_started", command: "" }, "succeeded", "Tunnel started"],
     [{ outcome: "tunnel_starting", command: "" }, "unknown", "Still connecting"],
     [{ outcome: "tunnel_stopped", command: "" }, "succeeded", "Tunnel stopped"],
+    [{ outcome: "database_created", command: "" }, "succeeded", "Database created"],
+    [{ outcome: "database_updated", command: "" }, "succeeded", "Database updated"],
+    [{ outcome: "database_deleted", command: "" }, "succeeded", "Database deleted"],
+    [{ outcome: "database_started", command: "" }, "succeeded", "Database started"],
+    [{ outcome: "database_starting", command: "" }, "unknown", "Still connecting"],
+    [{ outcome: "database_stopped", command: "" }, "succeeded", "Database stopped"],
+    [{ outcome: "database_not_started", command: "", stop: stop("refused", "approval") }, "not_run", "Refused by you"],
     [{ outcome: "scp_uploaded", command: "Upload /tmp/report.txt → /srv/report.txt", ended: null, exit_code: null }, "succeeded", "Uploaded"],
     [{ outcome: "scp_downloaded", command: "Download /tmp/report.txt ← /srv/report.txt", ended: null, exit_code: null }, "succeeded", "Downloaded"],
     [{ outcome: "scp_not_uploaded", command: "Upload /tmp/report.txt → /srv/report.txt", stop: stop("refused", "approval") }, "not_run", "Refused by you"],
     ...[
       "host_creation_not_completed", "host_update_not_completed", "host_key_not_verified", "transport_not_set", "transport_not_removed",
       "tunnel_not_created", "tunnel_not_updated", "tunnel_not_deleted", "tunnel_not_started",
+      "database_not_created", "database_not_updated", "database_not_deleted", "database_not_started",
     ].map(outcome => [older({ outcome, command: "" }), "not_run", "Not completed"] as const),
     [{ ended: "canceled", exit_code: null }, "failed", "Canceled while running"],
     [{ outcome: "canceled", ended: "canceled", exit_code: null }, "failed", "Canceled while running"],
@@ -92,6 +100,9 @@ describe("AI activity results", () => {
   it.each([
     ["allowed", "command"], ["error", "command"], ["a_future_outcome", "command"],
     ["tunnel_started", "tunnel"], ["tunnel_starting", "tunnel"], ["tunnel_not_deleted", "tunnel"], ["tunnel_stopped", "tunnel"],
+    ["database_created", "database"], ["database_not_created", "database"], ["database_updated", "database"], ["database_not_updated", "database"],
+    ["database_deleted", "database"], ["database_not_deleted", "database"], ["database_started", "database"], ["database_starting", "database"],
+    ["database_not_started", "database"], ["database_stopped", "database"],
     ["scp_uploaded", "transfer"], ["scp_not_downloaded", "transfer"],
     ["host_key_verified", "server_key"], ["host_key_not_verified", "server_key"],
     ["host_created", "change"], ["host_creation_not_completed", "change"], ["host_updated", "change"], ["host_update_not_completed", "change"],
@@ -117,6 +128,12 @@ describe("AI activity titles", () => {
     expect(titleText(activityTitle(starting, activityResult(starting).kind))).toBe("Starting tunnel Database through web-1");
     const beforeTunnelNames = entry({ outcome: "tunnel_started", command: "", alias: "web-1 · Database", tunnel: null });
     expect(activityTitle(beforeTunnelNames, "succeeded")).toEqual({ before: "Started tunnel ", host: "web-1 · Database", after: "" });
+    const database = entry({ outcome: "database_started", command: "", database: "orders-dev" });
+    expect(activityTitle(database, "succeeded")).toEqual({ before: "Started database orders-dev through ", host: "web-1", after: "" });
+    const onPublicIp = entry({ outcome: "database_started", command: "", host_id: null, alias: "", database: "orders-dev" });
+    expect(activityTitle(onPublicIp, "succeeded")).toEqual({ before: "Started database orders-dev", host: "", after: "" });
+    const connecting = entry({ outcome: "database_starting", command: "", host_id: null, alias: "", database: "orders-dev" });
+    expect(titleText(activityTitle(connecting, activityResult(connecting).kind))).toBe("Starting database orders-dev");
     const proposed = entry({ outcome: "host_creation_not_completed", alias: "db-replica", command: "", review: null, stop: stop("refused", "approval") });
     const title = activityTitle(proposed, activityResult(proposed).kind);
     expect(title).toEqual({ before: "Proposed a new host ", host: "db-replica", after: "" });
@@ -142,6 +159,35 @@ describe("AI activity titles", () => {
     expect(titleText(activityTitle(row, "not_run"))).toBe(notRun);
     expect(titleText(activityTitle(row, "error"))).toBe(error);
   });
+
+  it.each([
+    ["database_created", "Created database orders-dev", "Proposed database orders-dev", "Could not create database orders-dev"],
+    ["database_not_created", "Created database orders-dev", "Proposed database orders-dev", "Could not create database orders-dev"],
+    ["database_updated", "Updated database orders-dev", "Proposed changes to database orders-dev", "Could not update database orders-dev"],
+    ["database_not_updated", "Updated database orders-dev", "Proposed changes to database orders-dev", "Could not update database orders-dev"],
+    ["database_deleted", "Deleted database orders-dev", "Proposed deleting database orders-dev", "Could not delete database orders-dev"],
+    ["database_not_deleted", "Deleted database orders-dev", "Proposed deleting database orders-dev", "Could not delete database orders-dev"],
+    ["database_started", "Started database orders-dev", "Asked to start database orders-dev", "Could not start database orders-dev"],
+    ["database_not_started", "Started database orders-dev", "Asked to start database orders-dev", "Could not start database orders-dev"],
+    ["database_starting", "Starting database orders-dev", "Asked to start database orders-dev", "Could not start database orders-dev"],
+    ["database_stopped", "Stopped database orders-dev", "Stopped database orders-dev", "Stopped database orders-dev"],
+  ])("titles %s by its result, through its host only when it has one", (outcome, done, notRun, error) => {
+    const through = entry({ outcome, command: "", database: "orders-dev" });
+    expect(titleText(activityTitle(through, "succeeded"))).toBe(`${done} through web-1`);
+    expect(titleText(activityTitle(through, "not_run"))).toBe(`${notRun} through web-1`);
+    expect(titleText(activityTitle(through, "error"))).toBe(`${error} through web-1`);
+    const onPublicIp = entry({ outcome, command: "", host_id: null, alias: "", database: "orders-dev" });
+    expect(titleText(activityTitle(onPublicIp, "succeeded"))).toBe(done);
+    expect(titleText(activityTitle(onPublicIp, "not_run"))).toBe(notRun);
+    expect(titleText(activityTitle(onPublicIp, "error"))).toBe(error);
+  });
+
+  it("a database request without a recorded name still reads as one about a database", () => {
+    const unnamed = entry({ outcome: "database_started", command: "", database: null });
+    expect(titleText(activityTitle(unnamed, "succeeded"))).toBe("Started database through web-1");
+    const unnamedOnPublicIp = entry({ outcome: "database_started", command: "", host_id: null, alias: "" });
+    expect(titleText(activityTitle(unnamedOnPublicIp, "succeeded"))).toBe("Started database");
+  });
 });
 
 describe("AI activity review and result sentences", () => {
@@ -163,6 +209,8 @@ describe("AI activity review and result sentences", () => {
     expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log" }))).toBe("Auto-log: ran without per-command review.");
     expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log", outcome: "tunnel_started", tunnel: "Database" }))).toBe("Auto-log: started without per-tunnel review.");
     expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log", outcome: "scp_uploaded" }))).toBe("Auto-log: transferred without per-transfer review.");
+    expect(reviewSentence(entry({ review: "auto_log", mode: "auto_log", outcome: "database_started", database: "orders-dev" }))).toBe("Auto-log: started without per-database review.");
+    expect(reviewSentence(entry({ review: "not_asked", outcome: "database_stopped", database: "orders-dev" }))).toBe("This action has no approval step.");
     expect(reviewSentence(entry({ review: "not_asked", outcome: "tunnel_stopped" }))).toBe("This action has no approval step.");
     expect(reviewSentence(entry({ review: null, stop: stop("canceled", "approval") }))).toBe("It stopped before its review.");
     expect(reviewSentence(older({ mode: "ask" }))).toBe("Recorded in Ask mode.");
@@ -190,6 +238,9 @@ describe("AI activity review and result sentences", () => {
     [{ outcome: "tunnel_started", command: "", tunnel: "Database" }, "Tunnel started."],
     [{ outcome: "tunnel_starting", command: "", tunnel: "Database" }, "Still connecting when Lunport answered; the Tunnels page shows how it went."],
     [older({ outcome: "tunnel_not_started", command: "" }), "Not completed."],
+    [{ outcome: "database_started", command: "", database: "orders-dev" }, "Database started."],
+    [{ outcome: "database_starting", command: "", database: "orders-dev" }, "Still connecting when Lunport answered; the Databases page shows how it went."],
+    [older({ outcome: "database_not_started", command: "" }), "Not completed."],
     [older({ outcome: "denied" }), "Denied."],
   ] satisfies [Partial<McpAuditEntry>, string][])("result sentence for %j", (patch, sentence) => {
     const row = entry(patch);
@@ -265,6 +316,28 @@ describe("AI activity filters", () => {
     expect(ids({ search: "db-replica", kind: "error" })).toEqual(["d"]);
     expect(kindCounts(rows, { ...NO_FILTERS, host: "0000000000000002", kind: "failed" }))
       .toEqual({ all: 3, succeeded: 2, failed: 0, not_run: 0, error: 1, unknown: 0 });
+  });
+
+  it("filters database requests by action, and finds one by its name or its host", () => {
+    const databases = [
+      entry({ id: "p", host_id: null, alias: "", outcome: "database_started", command: "", database: "orders-dev" }),
+      entry({ id: "q", outcome: "database_not_started", command: "", database: "billing-prod", stop: stop("refused", "approval"), review: "refused" }),
+      entry({ id: "r", outcome: "database_future_outcome", command: "", database: "ledger-dev" }),
+      entry({ id: "s", outcome: "tunnel_started", command: "", tunnel: "Database" }),
+      entry({ id: "t" }),
+    ];
+    const found = (filters: Partial<ActivityFilters>) => databases.filter(row => matchesFilters(row, { ...NO_FILTERS, ...filters })).map(row => row.id);
+    expect(found({ action: "database" })).toEqual(["p", "q", "r"]);
+    expect(found({ action: "tunnel" })).toEqual(["s"]);
+    expect(found({ action: "command" })).toEqual(["t"]);
+    expect(found({ action: "database", kind: "not_run" })).toEqual(["q"]);
+    expect(found({ search: "orders-dev" })).toEqual(["p"]);
+    expect(found({ search: "BILLING" })).toEqual(["q"]);
+    // An outcome this version cannot title is still found by the database it names.
+    expect(found({ search: "ledger-dev" })).toEqual(["r"]);
+    expect(found({ host: "0000000000000001", action: "database" })).toEqual(["q", "r"]);
+    expect(kindCounts(databases, { ...NO_FILTERS, action: "database" }))
+      .toEqual({ all: 3, succeeded: 1, failed: 0, not_run: 1, error: 0, unknown: 1 });
   });
 
   it("names the client as Lunport observed it and the host by its id", () => {

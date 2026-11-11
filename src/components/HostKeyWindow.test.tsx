@@ -53,6 +53,11 @@ describe("HostKeyCardView for an AI client's request", () => {
       "Auto-log is on: once you trust this key, the tunnel the AI client asked for starts right away, without review.",
     );
   });
+  it("says a database then starts without review", () => {
+    expect(render(request({ ai: { client: "claude", unreviewed: "database" } }))).toContain(
+      "Auto-log is on: once you trust this key, the database the AI client asked for starts right away, without review.",
+    );
+  });
   it("names the client without an Auto-log note in Ask mode, and on a changed key's warning too", () => {
     const html = render(
       request({

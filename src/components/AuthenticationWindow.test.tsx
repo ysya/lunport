@@ -73,6 +73,16 @@ describe("a question an AI client's request asks", () => {
       "Auto-log is on: once the grant is active, the tunnel the AI client asked for starts right away, without review.",
     );
   });
+  it("says a database starts once the grant is active", () => {
+    expect(render({ request: { ...grant, ai: { client: "claude", unreviewed: "database" } } })).toContain(
+      "Auto-log is on: once the grant is active, the database the AI client asked for starts right away, without review.",
+    );
+  });
+  it("says a database starts once a server's question is answered", () => {
+    expect(render({ request: { ...password, ai: { client: "claude", unreviewed: "database" } }, answer: "" })).toContain(
+      "Auto-log is on: once you answer, the database the AI client asked for starts right away, without review.",
+    );
+  });
   it("names the AI client on a server's question too, with its Auto-log note", () => {
     const html = render({ request: { ...password, ai: { client: "claude", unreviewed: "command" } }, answer: "" });
     expect(html).toContain("Asked by claude, an AI client using Lunport AI access.");

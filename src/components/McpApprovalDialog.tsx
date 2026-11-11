@@ -24,13 +24,27 @@ export type McpApprovalCardViewProps = {
 
 /**
  * The window's words for each kind of proposal: a new host, a changed host, a transport set or removed;
- * and a tunnel saved, changed, deleted or started. `note` replaces the line under the rows.
+ * and a tunnel or a database saved, changed, deleted or started. `note` replaces the line under the rows.
+ * A proposal about a host names it with `hostLine` and the address it resolves to; one about something that is not a host gives
+ * `targetLine`, the one line that names it in their place.
  */
+type ProposalWords = {
+  title: string;
+  description: string;
+  button: string;
+  note?: string;
+} & (
+  | { hostLine: (request: McpPendingRequest) => string; targetLine?: undefined }
+  | { targetLine: (request: McpPendingRequest) => string; hostLine?: undefined }
+);
 const EDIT_DESCRIPTION = "Review what would change before saving. Saving does not connect, trust a server key or change AI access. The MCP client cannot approve this request.";
 const SAVE_NOTE = "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval.";
 const TUNNEL_SAVE_NOTE = "Tunnel rules hold no passwords or keys. Requests expire after 120 seconds; changed settings require fresh approval.";
+const DATABASE_SAVE_NOTE = "Saved databases hold no passwords: the port password stays in this computer's keychain. Requests expire after 120 seconds; changed settings require fresh approval.";
 const hostId = (request: McpPendingRequest) => `ID: ${request.host_id ?? "Legacy alias"}`;
-const PROPOSAL_WORDS: Record<string, { title: string; description: string; button: string; hostLine: (request: McpPendingRequest) => string; note?: string }> = {
+/** A database request carries the database's name as its alias; the host it goes through, if any, is a row among the settings. */
+const databaseLine = (request: McpPendingRequest) => `Database: ${revealHidden(request.alias)}`;
+const PROPOSAL_WORDS: Record<string, ProposalWords> = {
   create_host: {
     title: "Add this SSH host?",
     description: "Review these connection settings before saving. A host in an already allowed Group inherits AI access. Saving does not connect or trust a server key. The MCP client cannot approve this request.",
@@ -61,6 +75,28 @@ const PROPOSAL_WORDS: Record<string, { title: string; description: string; butto
     description: "Lunport will open this port forward through the host below. It keeps running until you or the client stop it, or AI access to the host ends. The MCP client cannot approve this request.",
     button: "Start tunnel", hostLine: hostId,
     note: "Check who can reach the listener before starting. Requests expire after 120 seconds; a changed route requires fresh approval.",
+  },
+  create_database: {
+    title: "Add this database?",
+    description: "Review this database before saving. Saving does not start it, request a grant or connect. The MCP client cannot approve this request.",
+    button: "Add database", targetLine: databaseLine, note: DATABASE_SAVE_NOTE,
+  },
+  update_database: {
+    title: "Change this database?",
+    description: "Review what would change before saving. Saving does not start the database or connect. The MCP client cannot approve this request.",
+    button: "Save database", targetLine: databaseLine, note: DATABASE_SAVE_NOTE,
+  },
+  delete_database: {
+    title: "Delete this database?",
+    description: "The saved database is removed from this library, with its port password on this computer. The MCP client cannot approve this request.",
+    button: "Delete database", targetLine: databaseLine,
+    note: "Devices that run this database keep it running until it is stopped there. Requests expire after 120 seconds.",
+  },
+  start_database: {
+    title: "Start this database?",
+    description: "Lunport will open this database's local port, requesting the grants it needs and connecting through its host. Apps still need the port password, which the MCP client never gets. The MCP client cannot approve this request.",
+    button: "Start database", targetLine: databaseLine,
+    note: "Requests expire after 120 seconds; a changed database requires fresh approval.",
   },
   scp_upload: {
     title: "Upload this file?",
@@ -97,8 +133,12 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
       </DialogHeader>
       <TaskDialogBody className="break-all">
         <div className="space-y-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
-          <p>Host: {revealHidden(request.alias)} · {words ? words.hostLine(request) : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
-          <p>Resolved: {endpoint}</p>
+          {words?.targetLine
+            ? <p>{words.targetLine(request)}</p>
+            : <>
+              <p>Host: {revealHidden(request.alias)} · {words ? words.hostLine(request) : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
+              <p>Resolved: {endpoint}</p>
+            </>}
           {(!proposal || transfer) && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
           <McpAttribution requestedBy={request.requested_by} requesterId={request.requester_id} clientInfo={request.client_info} />
         </div>

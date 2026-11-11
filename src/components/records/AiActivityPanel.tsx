@@ -34,6 +34,7 @@ const ACTIONS: { action: ActionKind; label: string }[] = [
   { action: "command", label: "Commands" },
   { action: "transfer", label: "File transfers" },
   { action: "tunnel", label: "Tunnels" },
+  { action: "database", label: "Databases" },
   { action: "change", label: "Host and route changes" },
   { action: "server_key", label: "Server keys" },
 ];
