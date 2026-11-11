@@ -425,17 +425,23 @@ fn failing(kind: io::ErrorKind, sentence: &'static str) -> Dialling {
 }
 
 /// A dial through the host `alias` to the instance at `ip` that failed, as the person is told it. The dial itself saw only the loopback end
-/// of the forward, so:
-/// - when the forward reports a latest error, that is why the host could not reach the instance: "{alias} could not reach {ip}:3307:
+/// of the forward, so a dial that ended in a transport error (`transport_error`) is said:
+/// - when the forward reports a latest error, as why the host could not reach the instance: "{alias} could not reach {ip}:3307:
 ///   {forward error}";
-/// - else a timeout of the dial, whose words name the loopback end, or an end of file, which is how the forward ends a connection it could
-///   not carry, reads "Cloud SQL at {ip}:3307 did not answer through {alias}.";
-/// - else the error stays as it is, words and kind: a TLS reason, such as a certificate made out to another name, or a refused connection
-///   names no address, and it is what the person needs to see.
+/// - else, for a timeout, whose words name the loopback end, or an end of file, which is how the forward ends a connection it could not
+///   carry: "Cloud SQL at {ip}:3307 did not answer through {alias}.";
+/// - else as it is.
+///
+/// Any other error stays as it is, words and kind, whatever the forward reports: a TLS reason, such as a certificate made out to another
+/// name, or a refused connection names no address, and it is what the person needs to see. The forward keeps its latest error until
+/// another one comes, so what it reports may be an earlier connection's.
 ///
 /// The first two keep the dial error's kind, but for an end of file, which becomes `ConnectionAborted`: the port would tell the app that
 /// Cloud SQL closed the connection.
 fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io::Error {
+    if !transport_error(error.kind()) {
+        return error;
+    }
     let instance = SocketAddr::new(ip, cloudsql_tls::PORT);
     let kind = match error.kind() {
         io::ErrorKind::UnexpectedEof => io::ErrorKind::ConnectionAborted,
@@ -449,6 +455,12 @@ fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io:
         }
         None => error,
     }
+}
+
+/// Whether a dial that failed with `kind` ended in a transport error: the connection ended, was reset or aborted, broke, or timed out.
+/// Such an error says only that the connection to the forward's loopback end did not go on, and the forward's error may say why.
+fn transport_error(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::UnexpectedEof | io::ErrorKind::TimedOut | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe)
 }
 
 impl Upstream for CloudSqlUpstream {

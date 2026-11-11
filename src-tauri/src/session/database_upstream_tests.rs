@@ -915,6 +915,24 @@ fn a_tls_failure_through_a_host_keeps_its_reason() {
 }
 
 #[test]
+fn a_tls_failure_through_a_host_keeps_its_reason_over_an_earlier_forward_error() {
+    // An earlier connection the forward carried was reset, and the forward still reports it: it keeps its latest error. The dial now fails
+    // on the instance's certificate, which is this connection's reason.
+    let error = dial_error_through_the_host(io::ErrorKind::InvalidData, "invalid peer certificate: NotValidForName", Some("Connection reset by peer (os error 54)"));
+    assert_eq!(error.to_string(), "invalid peer certificate: NotValidForName");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_transport_error_through_a_host_is_said_with_the_forwards_error() {
+    // The dial ended without an answer of its own: the forward's error says why the host could not carry it.
+    for kind in [io::ErrorKind::UnexpectedEof, io::ErrorKind::TimedOut, io::ErrorKind::ConnectionReset, io::ErrorKind::ConnectionAborted, io::ErrorKind::BrokenPipe] {
+        let error = dial_error_through_the_host(kind, "the dial's own words", Some("Channel open failure: connect failed"));
+        assert_eq!(error.to_string(), format!("web-1 could not reach {PRIVATE_IP}:3307: Channel open failure: connect failed"), "{kind:?}");
+    }
+}
+
+#[test]
 fn a_refused_dial_through_a_host_keeps_its_reason() {
     // The forward's listener went away after the connection looked it up.
     let error = dial_error_through_the_host(io::ErrorKind::ConnectionRefused, "Connection refused (os error 61)", None);
