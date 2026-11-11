@@ -6,6 +6,7 @@
 //! Every call here blocks (PAM and the Cloud SQL Admin API are network round trips, and a grant request waits for the person), so they run
 //! on a blocking thread, as `SqlAdmin` and `TokenSource` do, never on an async task's own thread.
 
+use std::net::IpAddr;
 use std::time::{Instant, SystemTime};
 
 use super::auth::Owner;
@@ -101,6 +102,8 @@ fn gate_key(db: &SavedDatabase, pam: &PamCheck, entitlement: &str) -> GateKey {
 #[derive(Debug)]
 pub(crate) struct Material {
     pub settings: ConnectSettings,
+    /// The instance's public address, which the connection dials (`settings.public_ip`, which an instance Lunport connects to has).
+    pub ip: IpAddr,
     /// The client certificate Cloud SQL signed for `key`, with the account's access token inside it.
     pub cert: EphemeralCert,
     pub key: EphemeralKey,
@@ -154,13 +157,13 @@ pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_gran
     let account = db.account.as_deref();
     let mut attempts = Attempts { recent_grant, grace, refused_since: None, cancel };
     let settings = attempts.run(|| sql.connect_settings(account, &at))?;
-    if settings.public_ip.is_none() {
+    let Some(ip) = settings.public_ip else {
         return Err(format!("{} has no public IP. Lunport connects over public IP in this release.", db.connection_name()));
-    }
+    };
     let key = EphemeralKey::generate()?;
     let cert = attempts.run(|| sql.ephemeral_cert(account, &at, &key))?;
     let user = iam_user(&cert.account);
-    Ok(Material { settings, cert, key, iam_user: user })
+    Ok(Material { settings, ip, cert, key, iam_user: user })
 }
 
 /// The database user an IAM account signs in as: its email, and for a service account the email without `.gserviceaccount.com`.
@@ -660,6 +663,7 @@ mod tests {
         let admin = Admin::working();
         let material = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).expect("the material is had");
         assert_eq!(material.settings, settings());
+        assert_eq!(Some(material.ip), settings().public_ip, "the address it dials");
         assert_eq!(material.cert, certificate(ACCOUNT));
         assert_eq!(material.iam_user, ACCOUNT);
         assert_eq!(admin.calls(), vec![format!("settings {ACCOUNT} {CONNECTION}"), format!("cert {ACCOUNT} {CONNECTION}")]);

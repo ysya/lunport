@@ -231,7 +231,6 @@ impl CloudSqlUpstream {
         let material = fetch_material(self.sql.as_ref(), db, recent_grant, Grace::default(), cancel)?;
         let identity = ServerIdentity { dns_name: material.settings.dns_name.clone(), project: db.project.clone(), instance: db.instance.clone() };
         let config = client_config(&material.settings, &material.cert, &material.key, &identity)?;
-        let ip = material.settings.public_ip.ok_or_else(|| format!("{} has no public IP.", db.connection_name()))?;
         let mut kept = locked(&route.kept);
         let other_account = kept.account.as_ref().is_some_and(|before| *before != material.cert.account);
         if other_account {
@@ -244,7 +243,7 @@ impl CloudSqlUpstream {
             for_account: account.clone(),
             iam_user: material.iam_user.clone(),
             expires_at: material.cert.expires_at,
-            ip,
+            ip: material.ip,
             config,
             name: server_name(&identity),
         });
