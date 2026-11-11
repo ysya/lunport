@@ -35,6 +35,7 @@ import {
   saveDatabase,
   startDatabase,
   stopDatabase,
+  type DatabaseDraft,
   type DatabaseView,
   type SavedDatabase,
 } from "@/lib/databases";
@@ -157,7 +158,7 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
   // while the dialog is open. The opening keys the editor, so that one that is still mounted never shows the draft of an earlier opening.
-  const [editing, setEditing] = useState<{ key: number; initial: SavedDatabase; expected: SavedDatabase | null } | null>(null);
+  const [editing, setEditing] = useState<{ key: number; initial: DatabaseDraft; expected: SavedDatabase | null } | null>(null);
   const openings = useRef(0);
   const [editorError, setEditorError] = useState<string | null>(null);
   // Whether what is in the editor differs from what it opened with, and whether closing it is being asked about.

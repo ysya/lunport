@@ -39,8 +39,14 @@ export const lockDatabaseWrites = (id: string) => tauriInvoke<void>("databases_l
 /** Closes the database's idle locked connections, so that their apps connect again (unlocked while writes are), and answers how many it closed. */
 export const reconnectLockedConnections = (id: string) => tauriInvoke<number>("databases_reconnect_locked", { id });
 
-/** A database to fill in: PostgreSQL over the public address, labelled dev, offered on no local port. */
-export function newDatabase(): SavedDatabase {
+/**
+ * A database as the New database and Edit database dialog holds it while it is filled in. A new one has no environment until the person
+ * chooses one, since nothing tells Lunport whether it is prod; a saved one always has its own.
+ */
+export type DatabaseDraft = Omit<SavedDatabase, "environment"> & { environment: DatabaseEnvironment | null };
+
+/** A database to fill in: PostgreSQL over the public address, with no environment chosen yet, offered on no local port. */
+export function newDatabase(): DatabaseDraft {
   return {
     id: "",
     name: "",
@@ -48,7 +54,7 @@ export function newDatabase(): SavedDatabase {
     project: "",
     region: "",
     instance: "",
-    environment: "dev",
+    environment: null,
     network: "public",
     account: null,
     default_database: "postgres",
@@ -58,7 +64,7 @@ export function newDatabase(): SavedDatabase {
 }
 
 /** What Cloud SQL calls the instance: `project:region:instance`. */
-export function connectionName(d: SavedDatabase): string {
+export function connectionName(d: Pick<SavedDatabase, "project" | "region" | "instance">): string {
   return `${d.project}:${d.region}:${d.instance}`;
 }
 

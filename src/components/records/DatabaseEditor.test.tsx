@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { buttonsIn, buttonTag, DISABLED, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { tauriInvoke } from "@/lib/ipc";
 import { renderHook } from "@/lib/test-ipc";
-import { databaseInstancesQuery, newDatabase, suggestPort, type InstanceSummary, type SavedDatabase } from "@/lib/databases";
+import { databaseInstancesQuery, newDatabase, suggestPort, type DatabaseDraft, type InstanceSummary, type SavedDatabase } from "@/lib/databases";
 import { gcloudAccountsKey, newPamCheck, pamSuggestionsQuery, type GcloudAccountsView, type TransportKind } from "@/lib/transports";
 import {
   changed,
@@ -97,7 +97,7 @@ type Options = {
 };
 
 /** The view of the dialog over `initial`, with the state the dialog keeps for it: pressing a control changes `kept` as the dialog's state setters do. */
-function editor(initial: SavedDatabase, options: Options = {}) {
+function editor(initial: DatabaseDraft, options: Options = {}) {
   const kept = { draft: initial, mode: options.mode ?? (initial.instance === "" ? "pick" : "manual"), connection: options.connection ?? "" };
   const onSave = vi.fn();
   const onCancel = vi.fn();
@@ -234,7 +234,7 @@ describe("the New database dialog", () => {
   });
 
   it("manual_mode_parses_the_connection_name", () => {
-    const dialog = editor({ ...newDatabase(), account: "frank@example.com" }, { mode: "manual" });
+    const dialog = editor({ ...newDatabase(), account: "frank@example.com", environment: "dev" }, { mode: "manual" });
     expect(text(dialog.markup())).toContain("Connection name");
     expect(hasField(dialog.tree(), "Project")).toBe(false);
     // The three parts are read from the text, each trimmed, and the text stays as it was typed.
@@ -342,7 +342,7 @@ describe("the New database dialog", () => {
   });
 
   it("nothing_is_saved_until_an_instance_is_chosen", () => {
-    const empty = editor({ ...newDatabase(), project: PROD }, { instances: listed([ORDERS_PG]) });
+    const empty = editor({ ...newDatabase(), project: PROD, environment: "dev" }, { instances: listed([ORDERS_PG]) });
     expect(buttonTag(empty.markup(), "Save database")).toContain(DISABLED);
     submit(empty.tree());
     expect(empty.onSave).not.toHaveBeenCalled();
@@ -452,17 +452,36 @@ describe("the New database dialog", () => {
     expect(instancesRead("", { data: found, isError: false, error: null }, false)).toEqual({ state: "waiting" });
   });
 
-  it("offers_the_three_environments_as_one_choice", () => {
+  it("offers_the_three_environments_as_one_choice_with_none_chosen_for_a_new_database", () => {
     const dialog = editor(newDatabase());
     const html = dialog.markup();
     expect(text(html)).toMatch(/Environment\s+Dev\s+Staging\s+Prod/);
-    expect(groupOf(dialog.tree(), "Environment").value).toBe("dev");
+    expect(groupOf(dialog.tree(), "Environment").value).toBeNull();
+    expect(html).not.toMatch(/aria-checked="true"[^>]*>(Dev|Staging|Prod)</);
+    expect(text(html)).toContain("Choose Dev, Staging or Prod.");
     expect(html).toMatch(/aria-label="Environment"/);
     groupOf(dialog.tree(), "Environment").onValueChange("staging");
     expect(dialog.kept.draft.environment).toBe("staging");
+    expect(text(dialog.markup())).not.toContain("Choose Dev, Staging or Prod.");
     groupOf(dialog.tree(), "Environment").onValueChange("prod");
     expect(dialog.kept.draft.environment).toBe("prod");
     expect(text(html)).toContain("connections through the local port open read-only");
+    // A saved database opens with its own environment chosen.
+    expect(groupOf(editor(SAVED).tree(), "Environment").value).toBe("prod");
+    expect(text(editor(SAVED).markup())).not.toContain("Choose Dev, Staging or Prod.");
+  });
+
+  it("a_new_database_is_saved_only_once_its_environment_is_chosen", () => {
+    const dialog = editor({ ...newDatabase(), account: "frank@example.com", project: PROD }, { instances: listed([ORDERS_PG]) });
+    radioOf(dialog.tree(), "orders-pg").onChange();
+    // Everything else is there: only the environment holds Save back.
+    expect(buttonTag(dialog.markup(), "Save database")).toContain(DISABLED);
+    submit(dialog.tree());
+    expect(dialog.onSave).not.toHaveBeenCalled();
+    groupOf(dialog.tree(), "Environment").onValueChange("dev");
+    expect(buttonTag(dialog.markup(), "Save database")).not.toContain(DISABLED);
+    submit(dialog.tree());
+    expect(dialog.onSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ instance: "orders-pg", environment: "dev" }));
   });
 
   it("the_pam_switch_asks_for_thirty_minutes_in_the_global_location_and_off_forgets_the_check", () => {
@@ -510,7 +529,7 @@ describe("the New database dialog", () => {
   it("the_dialog_of_a_new_database_shows_sharing_on_with_the_port_proposed_and_a_saved_one_as_it_is", () => {
     const client = cache();
     const other = (id: string, local_port: number | null): SavedDatabase => ({ ...SAVED, id, local_port });
-    const shown = (initial: SavedDatabase, existing: SavedDatabase[] = []) => {
+    const shown = (initial: DatabaseDraft, existing: SavedDatabase[] = []) => {
       const tree = DatabaseEditorView(viewOf(client, { initial, existing }).props);
       return { sharing: switchOf(tree, "Let other apps connect").checked, port: hasField(tree, "Port on 127.0.0.1") ? valueOf(tree, "Port on 127.0.0.1") : null };
     };
@@ -740,7 +759,7 @@ describe("the dialog as the Databases page mounts it", () => {
       c.setQueryData(pamSuggestionsQuery("frank@example.com", PROD, "europe-west1").queryKey, ["eu-operate"]);
     });
     const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
-    const drawn = (initial: SavedDatabase) => renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial })} /></QueryClientProvider>);
+    const drawn = (initial: DatabaseDraft) => renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial })} /></QueryClientProvider>);
     const global = drawn({ ...newInProd, pam: check });
     expect(text(global)).toContain("You may request:");
     expect(global).toContain('aria-label="Add prod-admin"');

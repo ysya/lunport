@@ -54,7 +54,7 @@ const ORDERS: SavedDatabase = {
 describe("saved databases", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("starts a new database as a public PostgreSQL dev instance with nothing filled in", () => {
+  it("starts a new database as a public PostgreSQL instance with nothing filled in and no environment chosen", () => {
     expect(newDatabase()).toEqual({
       id: "",
       name: "",
@@ -62,7 +62,7 @@ describe("saved databases", () => {
       project: "",
       region: "",
       instance: "",
-      environment: "dev",
+      environment: null,
       network: "public",
       account: null,
       default_database: "postgres",

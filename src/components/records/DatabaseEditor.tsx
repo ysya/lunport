@@ -16,6 +16,7 @@ import {
   databaseInstancesQuery,
   parseConnectionName,
   suggestPort,
+  type DatabaseDraft,
   type DatabaseEnvironment,
   type InstanceSummary,
   type SavedDatabase,
@@ -70,43 +71,44 @@ type Place = { project: string; region: string; instance: string };
 const nowhere = (project = ""): Place => ({ project, region: "", instance: "" });
 
 /** Whether the database is somewhere: it has a project, a region and an instance. */
-const located = (draft: SavedDatabase) => draft.project !== "" && draft.region !== "" && draft.instance !== "";
+const located = (draft: DatabaseDraft) => draft.project !== "" && draft.region !== "" && draft.instance !== "";
 
 /**
  * `draft` moved to `place`. Its name follows the instance for as long as it is empty or still the name of the instance it was at, so
  * that picking or typing another instance renames it, and a name that was typed over it stays.
  */
-function placed(draft: SavedDatabase, place: Place): SavedDatabase {
+function placed(draft: DatabaseDraft, place: Place): DatabaseDraft {
   const follows = draft.name.trim() === "" || draft.name === draft.instance;
   return { ...draft, ...place, name: follows ? place.instance : draft.name };
 }
 
 /** `draft` at the instance picked from the list, which starts again from the database `postgres`. */
-export function pickInstance(draft: SavedDatabase, instance: InstanceSummary): SavedDatabase {
+export function pickInstance(draft: DatabaseDraft, instance: InstanceSummary): DatabaseDraft {
   return { ...placed(draft, { project: draft.project, region: instance.region, instance: instance.name }), default_database: "postgres" };
 }
 
 /** `draft` with the project typed in the list's project field: an instance picked in another project is no longer picked. */
-export function withProject(draft: SavedDatabase, project: string): SavedDatabase {
+export function withProject(draft: DatabaseDraft, project: string): DatabaseDraft {
   return project === draft.project ? draft : placed(draft, nowhere(project));
 }
 
 /** `draft` at the connection name as typed, or nowhere while the text is not a project, a region and an instance. */
-export function withConnectionName(draft: SavedDatabase, text: string): SavedDatabase {
+export function withConnectionName(draft: DatabaseDraft, text: string): DatabaseDraft {
   return placed(draft, parseConnectionName(text) ?? nowhere());
 }
 
-const withPam = (draft: SavedDatabase, on: boolean): SavedDatabase => ({ ...draft, pam: on ? newPamCheck() : null });
-const withEntitlements = (draft: SavedDatabase, entitlements: string[]): SavedDatabase => ({ ...draft, pam: draft.pam && { ...draft.pam, entitlements } });
-const withSharing = (draft: SavedDatabase, on: boolean, used: number[]): SavedDatabase => ({ ...draft, local_port: on ? suggestPort(used) : null });
+const withPam = (draft: DatabaseDraft, on: boolean): DatabaseDraft => ({ ...draft, pam: on ? newPamCheck() : null });
+const withEntitlements = (draft: DatabaseDraft, entitlements: string[]): DatabaseDraft => ({ ...draft, pam: draft.pam && { ...draft.pam, entitlements } });
+const withSharing = (draft: DatabaseDraft, on: boolean, used: number[]): DatabaseDraft => ({ ...draft, local_port: on ? suggestPort(used) : null });
 
 /** Whether the draft is no longer the database the dialog opened with: any field that differs, typed and typed back counting as none. */
-export function changed(draft: SavedDatabase, opened: SavedDatabase): boolean {
+export function changed(draft: DatabaseDraft, opened: DatabaseDraft): boolean {
   return JSON.stringify(draft) !== JSON.stringify(opened);
 }
 
-/** The database as it is saved: its typed names without the spaces around them. */
-const finished = (draft: SavedDatabase): SavedDatabase => ({ ...draft, name: draft.name.trim(), default_database: draft.default_database.trim() });
+/** The database as it is saved: its typed names without the spaces around them. None while no environment is chosen, which a record needs. */
+const finished = (draft: DatabaseDraft): SavedDatabase | null =>
+  draft.environment === null ? null : { ...draft, environment: draft.environment, name: draft.name.trim(), default_database: draft.default_database.trim() };
 
 /** The local ports the other databases hold. */
 const usedPorts = (existing: SavedDatabase[]) => existing.flatMap((database) => database.local_port ?? []);
@@ -116,7 +118,7 @@ const usedPorts = (existing: SavedDatabase[]) => existing.flatMap((database) => 
  * the first free port from 6543, since the local port is the only way to use a saved database in this release. A saved database keeps
  * its own setting.
  */
-export function opening(initial: SavedDatabase, existing: SavedDatabase[]): SavedDatabase {
+export function opening(initial: DatabaseDraft, existing: SavedDatabase[]): DatabaseDraft {
   return initial.id === "" ? { ...initial, local_port: suggestPort(usedPorts(existing)) } : initial;
 }
 
@@ -155,7 +157,7 @@ function instanceRow(instance: InstanceSummary, chosen: boolean, onPick: () => v
 }
 
 /** The instances of the project, to choose from, or why there are none to show yet. */
-function instanceList(draft: SavedDatabase, instances: InstancesRead, onDraft: (next: SavedDatabase) => void) {
+function instanceList(draft: DatabaseDraft, instances: InstancesRead, onDraft: (next: DatabaseDraft) => void) {
   const rows = instances.state === "listed" ? instances.instances : [];
   return (
     <fieldset className="min-w-0 space-y-2">
@@ -186,7 +188,7 @@ function instanceList(draft: SavedDatabase, instances: InstancesRead, onDraft: (
 }
 
 export type DatabaseEditorViewProps = {
-  draft: SavedDatabase;
+  draft: DatabaseDraft;
   mode: Mode;
   /** The connection name as typed, which may not read as one yet. */
   connection: string;
@@ -198,7 +200,7 @@ export type DatabaseEditorViewProps = {
   busy: boolean;
   /** The sentence the last save failed with. */
   error: string | null;
-  onDraft: (next: SavedDatabase) => void;
+  onDraft: (next: DatabaseDraft) => void;
   onMode: (next: Mode) => void;
   onConnection: (text: string) => void;
   onSave: (next: SavedDatabase) => void;
@@ -207,16 +209,17 @@ export type DatabaseEditorViewProps = {
 
 /**
  * The dialog's body and its buttons, drawn from the draft. No hooks: exported for the tests. Every control hands the whole next draft
- * to `onDraft`. Saving is held back while the database is nowhere, and while a save is under way every control is off.
+ * to `onDraft`. Saving is held back while the database is nowhere and while no environment is chosen, which a new database starts
+ * without, and while a save is under way every control is off.
  */
 export function DatabaseEditorView({ draft, mode, connection, instances, lookup, used, busy, error, onDraft, onMode, onConnection, onSave, onCancel }: DatabaseEditorViewProps) {
-  const patch = (changes: Partial<SavedDatabase>) => onDraft({ ...draft, ...changes });
-  const ready = located(draft);
+  const patch = (changes: Partial<DatabaseDraft>) => onDraft({ ...draft, ...changes });
+  const ready = located(draft) && draft.environment !== null;
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
   const chooseMode = (next: Mode) => {
     onMode(next);
     // The field shows the connection name of the instance picked, or nothing: never a name typed before that pick was taken back.
-    if (next === "manual") onConnection(ready ? connectionName(draft) : "");
+    if (next === "manual") onConnection(located(draft) ? connectionName(draft) : "");
   };
   return (
     <>
@@ -225,7 +228,8 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
         className="contents"
         onSubmit={(event) => {
           event.preventDefault();
-          if (ready) onSave(finished(draft));
+          const saved = finished(draft);
+          if (located(draft) && saved) onSave(saved);
         }}
       >
         <TaskDialogBody>
@@ -288,6 +292,7 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
                   </RadioGroup.Item>
                 ))}
               </RadioGroup.Root>
+              {draft.environment === null && <p className="text-xs text-muted-foreground">Choose Dev, Staging or Prod.</p>}
               <p className="text-xs text-muted-foreground">Prod is marked in red, and connections through the local port open read-only.</p>
             </div>
             <div className="space-y-3 rounded-lg border p-3">
@@ -358,7 +363,7 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
 
 export type DatabaseEditorProps = {
   /** The database to start from: a new one, or the saved one that is being changed. */
-  initial: SavedDatabase;
+  initial: DatabaseDraft;
   /** The other saved databases, whose local ports a port proposed here skips. */
   existing: SavedDatabase[];
   busy: boolean;
@@ -388,7 +393,7 @@ export function DatabaseEditor({ initial, existing, busy, error, onSave, onCance
   const account = useDebounced(draft.account, LOOKUP_DELAY_MS);
   const settled = project === draft.project && account === draft.account;
   // Every change to the draft comes through here, and says whether the draft still is what the dialog opened with.
-  const change = (next: SavedDatabase) => {
+  const change = (next: DatabaseDraft) => {
     setDraft(next);
     onDirty?.(changed(next, opened));
   };
