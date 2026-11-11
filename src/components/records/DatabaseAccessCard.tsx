@@ -42,6 +42,8 @@ import {
 
 const COPY_FAILED = "Could not copy to the clipboard.";
 const ROTATED_NOT_COPIED = "The password was rotated, but it could not be copied. Use Copy password.";
+/** What the toasts of a copied password add to saying that it was copied, as the sync code's does: the clipboard keeps it until something else is copied. */
+const CLEAR_CLIPBOARD = "clear your clipboard when done";
 /**
  * What the card says under the lock while the database is stopped or has failed: the backend's own sentence for a lock that cannot be
  * opened yet. This is the only place the page words it. A database that is starting or stopping is on its way, and says nothing.
@@ -310,13 +312,13 @@ export function DatabaseAccessCard({ view, iamUser }: { view: DatabaseView; iamU
     copyPassword: () =>
       act("password", async () => {
         await copyPassword(id);
-        toast.success("Password copied.");
+        toast.success(`Password copied — ${CLEAR_CLIPBOARD}`);
       }),
     ask: setAsking,
     rotate: () =>
       act("rotate", async () => {
         await rotatePassword(id);
-        toast.success("New password copied.");
+        toast.success(`New password copied — ${CLEAR_CLIPBOARD}`);
       }),
     unlock: () => act("unlock", () => beginUnlock(id, () => setAsking("unlock"))),
     confirmUnlock: () =>

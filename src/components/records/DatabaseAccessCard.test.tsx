@@ -440,7 +440,8 @@ describe("what the controls do", () => {
     await props.actions.copyPassword();
     expect(copy).toHaveBeenCalledExactlyOnceWith(PASSWORD);
     expect(calls()).toEqual([["databases_port_password", { id: ID }]]);
-    expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("Password copied.");
+    // It says what the sync code's copy says: the clipboard keeps the password until something else is copied.
+    expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("Password copied — clear your clipboard when done");
     // Not in the query cache, not in a mutation (both keep their results), not in the card, and not in anything it said.
     expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toContain(PASSWORD);
     expect(client.getMutationCache().getAll()).toHaveLength(0);
@@ -498,6 +499,7 @@ describe("what the controls do", () => {
     const { props } = kept();
     await props.actions.copyUrl();
     expect(copy).toHaveBeenCalledExactlyOnceWith(ORDERS_URL);
+    // The address is no secret: it is not told to be cleared.
     expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("URL copied.");
     expect(calls()).toEqual([]);
     // An address with no account known still copies.
@@ -513,7 +515,7 @@ describe("what the controls do", () => {
     await props.actions.rotate();
     expect(calls()).toEqual([["databases_rotate_port_password", { id: ID }]]);
     expect(copy).toHaveBeenCalledExactlyOnceWith(NEW_PASSWORD);
-    expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("New password copied.");
+    expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("New password copied — clear your clipboard when done");
     expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toContain(NEW_PASSWORD);
     expect(client.getMutationCache().getAll()).toHaveLength(0);
     expect(JSON.stringify(vi.mocked(toast.success).mock.calls)).not.toContain(NEW_PASSWORD);
