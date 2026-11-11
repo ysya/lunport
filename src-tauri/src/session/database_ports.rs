@@ -40,6 +40,11 @@ use crate::sync::env::Keychain;
 pub const MAX_PORT_CONNECTIONS: usize = 64;
 /// The most databases that run at once on this device.
 pub const MAX_RUNNING_DATABASES: usize = 16;
+/// The soft limit of open files the app raises itself to as it starts (`raise_open_file_limit`): room for `MAX_RUNNING_DATABASES` ports
+/// of `MAX_PORT_CONNECTIONS` connections, each holding two sockets (the app's and Cloud SQL's), beside everything else the app keeps open.
+/// It is `OPEN_MAX` on macOS, the most a process may ask for there.
+#[cfg(any(unix, test))]
+const OPEN_FILES: u64 = 10_240;
 /// How long a prod database takes writes through its port once the person unlocks them.
 pub const WRITABLE_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// How long after its writable window ended a connection that came without the lock is closed at the latest, idle or not: a transaction
@@ -217,6 +222,50 @@ pub(crate) fn effective_environment(saved: &SavedDatabase, running: Option<&Save
     } else {
         saved.environment
     }
+}
+
+/// The soft open-file limit to raise to from `soft`: the lower of `OPEN_FILES`, the hard limit `hard` and, where the system has one, its
+/// limit for one process (`per_process`). `None` when `soft` is that high already, so that the limit is never lowered.
+#[cfg(any(unix, test))]
+fn open_file_target(soft: u64, hard: u64, per_process: Option<u64>) -> Option<u64> {
+    let target = OPEN_FILES.min(hard).min(per_process.unwrap_or(u64::MAX));
+    (target > soft).then_some(target)
+}
+
+/// Raises this process's soft open-file limit (`RLIMIT_NOFILE`) to `open_file_target` as the app starts: a Mac starts an app with 256,
+/// fewer than the database ports may hold. A limit that cannot be read or raised is written to the log and changes nothing else.
+#[cfg(unix)]
+pub(crate) fn raise_open_file_limit() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit only writes the limits into `limit`, which outlives the call.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        eprintln!("[databases] could not read the open-file limit: {}", io::Error::last_os_error());
+        return;
+    }
+    let (soft, hard) = (u64::from(limit.rlim_cur), u64::from(limit.rlim_max));
+    let Some(target) = open_file_target(soft, hard, max_files_per_process()) else { return };
+    let raised = libc::rlimit { rlim_cur: target, rlim_max: limit.rlim_max };
+    // SAFETY: setrlimit only reads `raised`, which outlives the call.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
+        eprintln!("[databases] could not raise the open-file limit from {soft} to {target}: {}", io::Error::last_os_error());
+    }
+}
+
+/// The most files one process may open on this Mac (`kern.maxfilesperproc`): macOS refuses a soft limit above it, as it refuses an
+/// unlimited one.
+#[cfg(target_os = "macos")]
+fn max_files_per_process() -> Option<u64> {
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name ends with a zero byte; sysctlbyname writes at most `size` bytes into `value`, and how many it wrote into `size`.
+    let read = unsafe { libc::sysctlbyname(c"kern.maxfilesperproc".as_ptr(), (&raw mut value).cast(), &mut size, std::ptr::null_mut(), 0) };
+    (read == 0 && size == std::mem::size_of::<libc::c_int>()).then(|| u64::try_from(value).ok()).flatten().filter(|&value| value > 0)
+}
+
+/// Linux has no limit for one process beside the hard limit.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn max_files_per_process() -> Option<u64> {
+    None
 }
 
 // ---- Passwords ----

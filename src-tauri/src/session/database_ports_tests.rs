@@ -696,6 +696,22 @@ fn an_app_that_does_not_sign_in_in_time_is_closed() {
 // ---- Starting and stopping ----
 
 #[test]
+fn the_open_file_limit_is_raised_to_10240_where_the_hard_limits_let_it() {
+    // Room for every port's connections, two sockets each.
+    assert!(OPEN_FILES >= (MAX_RUNNING_DATABASES * MAX_PORT_CONNECTIONS * 2) as u64);
+    let unlimited = u64::MAX;
+    // A Mac starts an app with 256 and no hard limit: 10240, or less where the system's limit for one process is lower.
+    assert_eq!(open_file_target(256, unlimited, Some(245_760)), Some(10_240));
+    assert_eq!(open_file_target(256, unlimited, Some(4_096)), Some(4_096));
+    // The hard limit caps it.
+    assert_eq!(open_file_target(1_024, 4_096, None), Some(4_096));
+    // A limit that is that high already, or cannot go higher, is left as it is: it is never lowered.
+    assert_eq!(open_file_target(10_240, unlimited, None), None);
+    assert_eq!(open_file_target(1_048_576, unlimited, None), None);
+    assert_eq!(open_file_target(1_024, 1_024, None), None);
+}
+
+#[test]
 fn a_port_in_use_fails_with_a_sentence() {
     let held = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let taken = held.local_addr().unwrap().port();

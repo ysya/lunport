@@ -185,6 +185,9 @@ fn embedded_context() -> tauri::Context {
 }
 
 fn run_app(host: bool, start_hidden: bool) {
+    // The database ports hold two sockets for every connection, more files than a Mac lets an app open at first.
+    #[cfg(unix)]
+    session::database_ports::raise_open_file_limit();
     // The data of the identity before the rename has not moved to this version's data root (main.rs ran the migration): an earlier
     // Lunport still runs, or both roots hold data. Nothing may start that creates or writes the data root, diagnostics included; the
     // app shows only its window, which says why and how to go on (`identity_migration_status`).
