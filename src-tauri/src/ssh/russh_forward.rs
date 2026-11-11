@@ -1,6 +1,6 @@
 //! The engine's bounded TCP listeners and SOCKS5 CONNECT relay. No shell is opened.
 use super::*;
-use crate::ssh::forward::{ForwardKind, ForwardSpec, ForwardStatus, Forwarder};
+use crate::ssh::forward::{ForwardKind, ForwardSpec, ForwardStatus, Forwarder, AT_LIMIT, SESSION_ENDED};
 use std::sync::{
     atomic::{AtomicU32, AtomicU64},
     Condvar,
@@ -171,7 +171,7 @@ pub(super) fn start(
                     biased;
                     _ = stopped.changed() => break,
                     _ = heartbeat.tick() => if !connection.is_open() {
-                        worker.error("The SSH connection ended. Start the tunnel again to reconnect.");
+                        worker.error(SESSION_ENDED);
                         break;
                     },
                     Some(_) = streams.join_next(), if !streams.is_empty() => {},
@@ -181,7 +181,7 @@ pub(super) fn start(
                                 let (connection, spec, state, stopped) = (Arc::clone(&connection), spec.clone(), Arc::clone(&worker), stopped.clone());
                                 streams.spawn(async move { serve_local(socket, connection, spec, state, stopped).await; });
                             }
-                            Ok(_) => worker.error("The tunnel has reached its concurrent connection limit."),
+                            Ok(_) => worker.error(AT_LIMIT),
                             Err(error) => { worker.error(error); break; }
                         }
                     },

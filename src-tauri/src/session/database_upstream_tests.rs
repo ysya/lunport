@@ -873,14 +873,45 @@ fn connect_without_an_open_path_asks_to_connect_again() {
 /// The error a connection through a host fails with when its dial fails with `kind` and `words`, while the path's forward reports
 /// `forward_error` as its latest.
 fn dial_error_through_the_host(kind: io::ErrorKind, words: &str, forward_error: Option<&str>) -> io::Error {
+    dial_error_through_the_host_after(kind, words, forward_error, |_| {})
+}
+
+/// `dial_error_through_the_host`, with `meanwhile` done to the session's far end after the connection looked up the forward and before its
+/// dial fails.
+fn dial_error_through_the_host_after(kind: io::ErrorKind, words: &str, forward_error: Option<&str>, meanwhile: impl FnOnce(&HostEnd)) -> io::Error {
     let cloud = Cloud::new(FakeOwner::default());
     let upstream = cloud.upstream();
     let prepared = upstream.prepare(&routed(), &CancelToken::default()).unwrap();
     *cloud.link.end(0).forward_error.lock().unwrap() = forward_error.map(str::to_string);
     *cloud.failing.lock().unwrap() = Some((kind, words.to_string()));
-    let error = upstream.connect(ID, Some(prepared.material)).stream.now_or_never().expect("it fails at once").err().expect("it fails");
+    let dialling = upstream.connect(ID, Some(prepared.material));
+    meanwhile(&cloud.link.end(0));
+    let error = dialling.stream.now_or_never().expect("it fails at once").err().expect("it fails");
     assert_eq!(*cloud.dialled.lock().unwrap(), vec![(loopback(FORWARD_PORT), the_instances_name())]);
     error
+}
+
+#[test]
+fn a_dial_through_a_host_whose_session_ended_says_the_connection_ended() {
+    // The session to the host is lost while the connection dials, and the forward says so in a tunnel's words.
+    let error = dial_error_through_the_host_after(io::ErrorKind::UnexpectedEof, "tls handshake eof", Some(crate::ssh::forward::SESSION_ENDED), HostEnd::lose);
+    assert_eq!(error.to_string(), "The connection through web-1 ended. Connect again.");
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    // The forward's listener stopped, and the dial timed out: the same.
+    let stopped = |end: &HostEnd| end.running.store(false, Ordering::SeqCst);
+    let error = dial_error_through_the_host_after(io::ErrorKind::TimedOut, "Cloud SQL did not answer within 10s.", None, stopped);
+    assert_eq!(error.to_string(), "The connection through web-1 ended. Connect again.");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_dial_through_a_host_is_never_given_the_forwards_tunnel_wording() {
+    // The forward turned a connection away at its limit once, and still reports it in a tunnel's words while it runs on.
+    let error = dial_error_through_the_host(io::ErrorKind::UnexpectedEof, "tls handshake eof", Some(crate::ssh::forward::AT_LIMIT));
+    assert_eq!(error.to_string(), format!("Cloud SQL at {PRIVATE_IP}:3307 did not answer through web-1."));
+    // Nor while the session still looks alive, a moment before the forward stops for its ended connection.
+    let error = dial_error_through_the_host(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 54)", Some(crate::ssh::forward::SESSION_ENDED));
+    assert_eq!(error.to_string(), "Connection reset by peer (os error 54)");
 }
 
 #[test]

@@ -30,6 +30,7 @@ use crate::error::AppError;
 use crate::gcp::cloudsql::SqlAdmin;
 use crate::gcp::cloudsql_tls::{self, client_config, server_name, ServerIdentity};
 use crate::gcp::rest::GcpClient;
+use crate::ssh::forward;
 use crate::ssh::HopRef;
 use crate::state::AppState;
 use crate::sync::databases::SavedDatabase;
@@ -426,8 +427,10 @@ fn failing(kind: io::ErrorKind, sentence: &'static str) -> Dialling {
 
 /// A dial through the host `alias` to the instance at `ip` that failed, as the person is told it. The dial itself saw only the loopback end
 /// of the forward, so a dial that ended in a transport error (`transport_error`) is said:
+/// - when the path no longer carries connections (`HostPath::alive`): "The connection through {alias} ended. Connect again.";
 /// - when the forward reports a latest error, as why the host could not reach the instance: "{alias} could not reach {ip}:3307:
-///   {forward error}";
+///   {forward error}". The errors the forward reports about itself, that its SSH connection ended (`forward::SESSION_ENDED`) or that it
+///   is at its limit (`forward::AT_LIMIT`), are worded for a tunnel and are no reason of a database's: they count as none;
 /// - else, for a timeout, whose words name the loopback end, or an end of file, which is how the forward ends a connection it could not
 ///   carry: "Cloud SQL at {ip}:3307 did not answer through {alias}.";
 /// - else as it is.
@@ -436,7 +439,7 @@ fn failing(kind: io::ErrorKind, sentence: &'static str) -> Dialling {
 /// name, or a refused connection names no address, and it is what the person needs to see. The forward keeps its latest error until
 /// another one comes, so what it reports may be an earlier connection's.
 ///
-/// The first two keep the dial error's kind, but for an end of file, which becomes `ConnectionAborted`: the port would tell the app that
+/// The first three keep the dial error's kind, but for an end of file, which becomes `ConnectionAborted`: the port would tell the app that
 /// Cloud SQL closed the connection.
 fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io::Error {
     if !transport_error(error.kind()) {
@@ -447,7 +450,11 @@ fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io:
         io::ErrorKind::UnexpectedEof => io::ErrorKind::ConnectionAborted,
         kind => kind,
     };
-    let reason = locked(&route.path).as_ref().and_then(|path| path.forward_error(ip));
+    let path = locked(&route.path);
+    let Some(path) = path.as_ref().filter(|path| path.alive()) else {
+        return io::Error::new(kind, format!("The connection through {} ended. Connect again.", label(alias)));
+    };
+    let reason = path.forward_error(ip).filter(|reason| ![forward::SESSION_ENDED, forward::AT_LIMIT].contains(&reason.as_str()));
     match reason {
         Some(reason) => io::Error::new(kind, format!("{} could not reach {instance}: {reason}", label(alias))),
         None if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::UnexpectedEof) => {
