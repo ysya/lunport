@@ -369,6 +369,21 @@ fn a_database_that_runs_after_its_record_is_gone_still_has_its_password() {
 }
 
 #[test]
+fn a_password_removed_from_the_keychain_outside_lunport_is_made_anew_for_the_running_port() {
+    let (ports, keychain) = (DatabasePorts::new(Arc::new(FakeUpstream::default())), MemKeychain::default());
+    let first = shown(&ports, &keychain).unwrap();
+    let port = started(&ports, &keychain);
+    // Someone removes it with the system's keychain app while the database runs: the page shows a new one, which the keychain keeps.
+    keychain.delete(&password_account(ORDERS)).unwrap();
+    let renewed = shown(&ports, &keychain).unwrap();
+    assert_ne!(renewed, first);
+    assert_eq!(keychain.entry(&password_account(ORDERS)).as_deref(), Some(renewed.as_str()));
+    // The port asks for the password the page shows.
+    signed_in(port, &renewed).round_trip(b"select 1");
+    refused(port, &first);
+}
+
+#[test]
 fn a_keychain_that_fails_is_reported_without_a_password() {
     let (ports, keychain) = (DatabasePorts::default(), MemKeychain::default());
     keychain.set(&password_account(ORDERS), STORED).unwrap();

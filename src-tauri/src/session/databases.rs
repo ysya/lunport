@@ -223,11 +223,14 @@ fn revealed(mut password: Zeroizing<String>) -> String {
 
 /// The password the apps sign in to the database `id`'s port with: the one this device keeps, else a new one, so that the person can copy
 /// it into an app before the database has ever started. It is read under the edit lock a start holds, so that the password shown is the
-/// one the port is started with.
+/// one the port is started with. A port that runs is handed it too: one whose password was removed from the keychain outside Lunport
+/// asks the new connections for the new one, as after a rotation, and one that holds it already is given the same one again.
 fn port_password(ports: &DatabasePorts, keychain: &dyn Keychain, id: &str, library: impl FnOnce() -> Result<SyncStateV3, String>) -> Result<String, String> {
     let _editing = ports.editing();
     saved_or_running(&library()?, ports, id)?;
-    ensure_password(keychain, id).map(revealed)
+    let password = ensure_password(keychain, id)?;
+    ports.set_password(id, password.clone());
+    Ok(revealed(password))
 }
 
 /// Makes a new password for the database `id`'s port. The keychain keeps it first: when it cannot, the port goes on with the old one,
