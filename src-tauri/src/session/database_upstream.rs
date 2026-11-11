@@ -313,7 +313,7 @@ impl CloudSqlUpstream {
         };
         let alias = view.host.payload.alias;
         let owner = (self.make_owner)(cancel, ai);
-        let opened = self.link.open(host, &Stepping { inner: owner.as_ref(), step }, cancel);
+        let opened = self.link.open(host, &Stepping { inner: owner.as_ref(), step }, cancel, ai);
         if cancel.is_cancelled() {
             // A session that opened anyway goes with a path of its own, which closes it.
             drop(opened.map(|session| HostPath::new(session, alias)));

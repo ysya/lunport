@@ -624,8 +624,8 @@ pub(super) fn start(
         }
         if let Some(route) = &route {
             route.approved.check(connector, &route.query)?;
-            // A server key of the route host that this device has not verified is decided here, in the trust window that names the client:
-            // the connection the start opens would ask in a window that does not.
+            // A server key of the route host that this device has not verified is decided here, in the trust window that names the client,
+            // before the connection the start opens logs in to the host, as `start_tunnel` decides it.
             let host_still_allowed = || -> Result<(), String> {
                 live(runtime, mode, cancel)?;
                 let current = snapshot(env)?;

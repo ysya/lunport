@@ -6,10 +6,11 @@
 use std::net::IpAddr;
 
 use super::auth::Owner;
-use super::connect::CancelToken;
-use super::protocol::HostQuery;
+use super::connect::{CancelToken, Connector};
+use super::protocol::{AiAsker, HostQuery};
 use crate::gcp::cloudsql_tls;
 use crate::identity::thread_name;
+use crate::mcp::records::ClientConfirmer;
 use crate::ssh::forward::{ForwardKind, ForwardSpec, Forwarder};
 use crate::ssh::{Session, SessionError};
 
@@ -19,9 +20,10 @@ const NO_PORT: &str = "No local port was opened for it.";
 /// Opens a session to a host of the library.
 pub(crate) trait HostLink: Send + Sync {
     /// Connects to the saved host `host_id` as connecting to that host does, asking `owner` what its login needs, until the session is
-    /// open, the connect fails or `cancel` is set. `Err` is the sentence of why no session was opened. It blocks (the network, the
-    /// person's answers), so it runs on a blocking thread, never in async code.
-    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken) -> Result<Box<dyn Session>, String>;
+    /// open, the connect fails or `cancel` is set; a server key it asks about names `ai`, the AI client whose request starts the database
+    /// (`None`: the person's start, and an app's connection). `Err` is the sentence of why no session was opened. It blocks (the network,
+    /// the person's answers), so it runs on a blocking thread, never in async code.
+    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<Box<dyn Session>, String>;
 }
 
 /// The app's way to its hosts: the broker's connector, which a connection to a host opens its session with.
@@ -30,11 +32,25 @@ pub(crate) struct BrokerLink {
 }
 
 impl HostLink for BrokerLink {
-    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken) -> Result<Box<dyn Session>, String> {
+    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<Box<dyn Session>, String> {
         let broker = super::databases::started_broker(&self.app)?;
-        let connected = broker.connector().connect(&HostQuery::Id(host_id.to_string()), owner, cancel).map_err(|failure| failure.text)?;
-        Ok(connected.session)
+        open_on(&broker.connector(), host_id, owner, cancel, ai)
     }
+}
+
+/// `HostLink::open` over `base`, the connector a connection to the host opens its session with. For an AI client's start the server key
+/// questions go to `base`'s window through `ClientConfirmer`, which names the client there as a tunnel the client starts does; otherwise
+/// they are asked as `base` asks them.
+pub(crate) fn open_on(base: &Connector<'_>, host_id: &str, owner: &dyn Owner, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<Box<dyn Session>, String> {
+    let query = HostQuery::Id(host_id.to_string());
+    let connected = match ai {
+        Some(ai) => {
+            let confirmer = ClientConfirmer::new(base.confirmer, ai.clone());
+            Connector { confirmer: &confirmer, ..*base }.connect(&query, owner, cancel)
+        }
+        None => base.connect(&query, owner, cancel),
+    };
+    connected.map(|connected| connected.session).map_err(|failure| failure.text)
 }
 
 /// A forward a path keeps, and the address it leads to.
@@ -127,4 +143,34 @@ fn close_later(forwarder: Option<Box<dyn Forwarder>>, session: Option<Box<dyn Se
         }
     };
     let _ = std::thread::Builder::new().name(thread_name("database-path")).spawn(closing);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::grants::GrantGates;
+    use crate::session::protocol::Unreviewed;
+    use crate::session::testing::{Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
+    use crate::ssh::fake::FakeEngine;
+    use crate::ssh::{AuthMethod, HostKey};
+    use crate::sync::slot_rules::test_keys;
+    use crate::sync::testkit::MemKeychain;
+
+    /// The server of web-1 presents another key than the one pinned for it. The window that asks about the changed key names the AI
+    /// client whose request starts the database, and nobody when the person starts it; once the new key is accepted the session opens.
+    #[test]
+    fn a_changed_server_key_is_asked_in_the_name_of_whoever_starts_the_database() {
+        let pinned = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
+        let claude = AiAsker { client: "Claude".into(), unreviewed: Some(Unreviewed::Database) };
+        for ai in [Some(claude), None] {
+            let directory = FakeDirectory::new().with_host("web-1", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web-1", pinned.clone());
+            let (engine, keys, keychain, grants) = (FakeEngine::new(), FakeKeys::new(), MemKeychain::default(), GrantGates::default());
+            let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+            let base = Connector { engine: &engine, directory: &directory, keys: &keys, keychain: &keychain, confirmer: &window, grants: &grants };
+            let opened = open_on(&base, "id-web-1", &FakeOwner::default(), &CancelToken::default(), ai.as_ref());
+            assert!(opened.is_ok(), "the session opens once the new key is accepted: {:?}", opened.err());
+            let asked: Vec<_> = window.asked().into_iter().map(|question| (question.changed.map(|pin| pin.fingerprint), question.ai)).collect();
+            assert_eq!(asked, [(Some(pinned.fingerprint.clone()), ai)]);
+        }
+    }
 }

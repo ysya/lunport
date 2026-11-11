@@ -282,6 +282,8 @@ impl Forwarder for ScriptedForward {
 /// failure scripted, else with a new scripted session that lives until it is closed or lost.
 struct FakeLink {
     opened: Mutex<Vec<String>>,
+    /// The AI client each open was asked in the name of, in order (`None`: the person's).
+    askers: Mutex<Vec<Option<AiAsker>>>,
     failures: Mutex<VecDeque<String>>,
     /// Whether an open cancels the connection it is for before it answers, as a port that stops meanwhile does.
     cancels: AtomicBool,
@@ -297,6 +299,7 @@ impl FakeLink {
     fn new() -> FakeLink {
         FakeLink {
             opened: Mutex::default(),
+            askers: Mutex::default(),
             failures: Mutex::default(),
             cancels: AtomicBool::new(false),
             asks: Mutex::default(),
@@ -317,8 +320,9 @@ impl FakeLink {
 }
 
 impl HostLink for FakeLink {
-    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken) -> Result<Box<dyn Session>, String> {
+    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<Box<dyn Session>, String> {
         self.opened.lock().unwrap().push(host_id.to_string());
+        self.askers.lock().unwrap().push(ai.cloned());
         let asks = *self.asks.lock().unwrap();
         if let Some(kind) = asks {
             owner.ask(kind, "web-1 asks", false, None);
@@ -1235,11 +1239,13 @@ fn the_warm_up_asks_in_the_ai_clients_name() {
     // The grant the database asks for: nobody answers, for the AI client's start or for an app's connection.
     assert!(upstream.warm(&guarded(), &cancel, Some(&claude), &|_| {}).is_err());
     assert!(upstream.prepare(&guarded(), &cancel).is_err());
-    // The session to the host: the start opens it, and an app's connection opens it again once it is lost.
+    // The session to the host: the start opens it, and an app's connection opens it again once it is lost. The link asks a server key in
+    // the same name as the owner asks the rest.
     upstream.warm(&routed(), &cancel, Some(&claude), &|_| {}).unwrap();
     cloud.link.end(0).lose();
     upstream.prepare(&routed(), &cancel).unwrap();
-    assert_eq!(*asked_for.lock().unwrap(), vec![Some(claude.clone()), None, Some(claude), None]);
+    assert_eq!(*asked_for.lock().unwrap(), vec![Some(claude.clone()), None, Some(claude.clone()), None]);
+    assert_eq!(*cloud.link.askers.lock().unwrap(), vec![Some(claude), None]);
 }
 
 #[test]
