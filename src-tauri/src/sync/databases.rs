@@ -322,11 +322,11 @@ pub(crate) fn publish_local(state: &SyncStateV3, now: u64) -> Result<Option<Sync
         if view(&next).len() >= MAX_DATABASES {
             continue;
         }
-        let moved = write(&next, &row.record.id, Some(payload_of(&database)), now).map_err(|error| error.to_string())?;
+        let moved = write(&next, &row.record.id, Some(payload_of(&database)), now).map_err(transports::refusal)?;
         match transports::ensure_room(&moved, "database", &database.id) {
             Ok(()) => next = moved,
             Err(RepositoryError::NoRoom) => {}
-            Err(other) => return Err(other.to_string()),
+            Err(other) => return Err(transports::refusal(other)),
         }
     }
     Ok((next != *state).then_some(next))
@@ -346,7 +346,7 @@ pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, now: u64)
     }
     next.local.databases.clear();
     for (id, payload) in kept {
-        let row = row_of(next, &id, Some(payload), now, None, false).map_err(|error| error.to_string())?;
+        let row = row_of(next, &id, Some(payload), now, None, false).map_err(transports::refusal)?;
         next.local.databases.insert(record_key(RecordKind::Meta, &id), row);
     }
     if !next.local.databases.is_empty() {

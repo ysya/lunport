@@ -498,6 +498,17 @@ fn the_publish_step_keeps_what_the_library_has_no_room_for() {
 }
 
 #[test]
+fn a_publish_the_catalog_refuses_reads_as_its_reason() {
+    // The library holds a row it cannot publish, and this device kept a database alone: the room check cannot build the Catalog.
+    let mut library = in_central_mode(state());
+    library_row(&mut library, &database(OTHER));
+    let row = library.account.as_mut().unwrap().records.get_mut(&record_key(RecordKind::Meta, &wire_id(OTHER))).unwrap();
+    row.record.payload["database"]["name"] = json!("");
+    let held = saved_on_this_device(&library, &database(ID));
+    assert_eq!(publish_local(&held, 2), Err("Invalid central sync protocol data.".to_string()), "the reason, not the error's debug form");
+}
+
+#[test]
 fn a_database_that_would_push_the_catalog_past_one_record_is_refused_though_it_fits_before() {
     let brink = filled_short_of(in_central_mode(state()), |catalog| catalog.databases.push(database(ID)));
     assert_eq!(set(&brink, ID, None, Some(database(ID)), 2).unwrap_err().to_string(), NO_ROOM, "the Catalog measured after the save, not before");
