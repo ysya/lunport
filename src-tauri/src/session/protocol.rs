@@ -238,6 +238,7 @@ pub enum QuestionKind {
     HostKeyNotice,
     Passphrase,
     Password,
+    Sudo,
     Interactive,
     /// Lunport's own question: `text` is a `GrantPrompt` as JSON, the answer a `GrantAnswer`
     /// as encoded. It is answered in the app's window, never typed at a terminal.

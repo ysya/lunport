@@ -148,6 +148,7 @@ impl NativeOwner {
         let (word, text, grant) = match kind {
             QuestionKind::Passphrase => ("passphrase", text.to_string(), None),
             QuestionKind::Password => ("password", text.to_string(), None),
+            QuestionKind::Sudo => ("sudo", text.to_string(), None),
             QuestionKind::Interactive => ("interactive", text.to_string(), None),
             QuestionKind::Grant => {
                 // The window shows the sentence and the form; the prompt itself is Lunport's own data.

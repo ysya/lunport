@@ -66,6 +66,8 @@ pub enum McpWindow {
     ServerKey,
     /// A password, key passphrase or two-factor answer.
     Credentials,
+    /// A one-time sudo password.
+    Sudo,
     /// Request a grant (Privileged Access Manager).
     Grant,
 }
@@ -173,6 +175,7 @@ impl NotingOwner<'_> {
     fn note(&self, kind: QuestionKind, reply: &Reply) {
         let window = match kind {
             QuestionKind::Passphrase | QuestionKind::Password | QuestionKind::Interactive => Some(McpWindow::Credentials),
+            QuestionKind::Sudo => Some(McpWindow::Sudo),
             QuestionKind::Grant => Some(McpWindow::Grant),
             QuestionKind::HostKeyNotice => None,
         };

@@ -3,4 +3,4 @@
 /**
  * The Lunport window a request stopped in.
  */
-export type McpWindow = "approval" | "server_key" | "credentials" | "grant";
+export type McpWindow = "approval" | "server_key" | "credentials" | "sudo" | "grant";
