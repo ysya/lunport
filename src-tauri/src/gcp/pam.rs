@@ -112,15 +112,13 @@ pub fn granted_at(grant: &Grant, now: SystemTime) -> Option<SystemTime> {
 
 /// When an active grant's access began and ends: from its own times, else from `now` and the length the grant was requested for (a grant
 /// still activating has no time yet, and another device or gcloud may have requested it for another length than the one `duration_secs`
-/// names), else from `now` and `duration_secs`, the length asked for by whoever looks.
+/// names), else from `now` and `duration_secs`, the length asked for by whoever looks. A length that takes the end past any time the clock
+/// can hold counts as `duration_secs` too.
 pub fn active_span(grant: &Grant, now: SystemTime, duration_secs: u32) -> (SystemTime, SystemTime) {
     let began = granted_at(grant, now).unwrap_or(now);
-    let length = grant
-        .until()
-        .and_then(|until| until.duration_since(began).ok())
-        .or_else(|| grant.requested_length())
-        .unwrap_or(Duration::from_secs(u64::from(duration_secs)));
-    (began, began + length)
+    let asked = Duration::from_secs(u64::from(duration_secs));
+    let length = grant.until().and_then(|until| until.duration_since(began).ok()).or_else(|| grant.requested_length()).unwrap_or(asked);
+    (began, began.checked_add(length).unwrap_or(began + asked))
 }
 
 /// Where a grant lives: the caller's account (or gcloud's active one) and the entitlement's full name
@@ -457,6 +455,15 @@ mod tests {
         // A grant with its own times keeps them, whatever length it was asked for.
         let dated = Grant { access_grant_time: Some("2027-01-15T07:50:00Z".into()), requested_duration: Some("900s".into()), ..grant("ACTIVE", None) };
         assert_eq!(active_span(&dated, now, 3600), (now - minutes(10), now + minutes(5)));
+    }
+
+    #[test]
+    fn a_requested_length_past_what_the_clock_holds_lasts_as_long_as_the_length_asked_for() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // A length a `Duration` holds, but that takes the end of access past any time the clock can hold.
+        let endless = Grant { requested_duration: Some("1e19s".into()), ..grant("ACTIVATING", None) };
+        assert!(endless.requested_length().is_some());
+        assert_eq!(active_span(&endless, now, 1800), (now, now + Duration::from_secs(1800)));
     }
 
     #[test]
