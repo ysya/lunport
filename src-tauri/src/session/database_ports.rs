@@ -1077,8 +1077,12 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
             let sentence = format!("Cloud SQL asked for a database password. Turn on IAM database authentication for {connection}.");
             refuse(&mut app, "28000", &sentence).await;
         }
-        // Cloud SQL refused the session and said why: the app gets its words.
-        ServerAuth::Error => {
+        // Cloud SQL refused the session and said why: the app gets its words. A refused sign-in (SQLSTATE class 28) can be the
+        // certificate's, whose token Cloud SQL no longer takes: the next connection gets new material.
+        ServerAuth::Error { sqlstate } => {
+            if sqlstate.is_some_and(|code| code.starts_with("28")) {
+                forget();
+            }
             let _ = app.write_all(&first).await;
             let _ = app.shutdown().await;
         }

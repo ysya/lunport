@@ -310,14 +310,14 @@ pub fn error_response(sqlstate: &str, message: &str) -> Vec<u8> {
 }
 
 /// What the server's first answer to a start-up message is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerAuth {
     /// The session is signed in.
     Ok,
     /// The server asks for a password: in clear text, as an MD5 hash or by SASL.
     NeedsPassword,
-    /// The server refuses the connection.
-    Error,
+    /// The server refuses the connection, with the SQLSTATE of its ErrorResponse (its `C` field), when it gave one.
+    Error { sqlstate: Option<String> },
 }
 
 /// Reads the server's first answer to a start-up message and returns what it is with all the bytes that were read, to be passed on to
@@ -334,7 +334,7 @@ pub async fn read_server_auth<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(Se
         let (kind, body) = read_server_message(r, &mut raw).await?;
         match kind {
             NEGOTIATE_PROTOCOL_VERSION if !negotiated => negotiated = true,
-            ERROR_RESPONSE => return Ok((ServerAuth::Error, raw)),
+            ERROR_RESPONSE => return Ok((ServerAuth::Error { sqlstate: error_code(&raw[body..]) }, raw)),
             AUTHENTICATION => {
                 let &[a, b, c, d, ..] = &raw[body..] else {
                     return Err(invalid("Cloud SQL sent a sign-in message with no code."));
@@ -349,6 +349,23 @@ pub async fn read_server_auth<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(Se
             _ => return Err(invalid("Cloud SQL answered with a message that Lunport does not expect.")),
         }
     }
+}
+
+/// The SQLSTATE of an ErrorResponse whose body is `body`: the text of its `C` field. A body that breaks off before the field is found has
+/// none.
+fn error_code(mut body: &[u8]) -> Option<String> {
+    while let Some((&field, rest)) = body.split_first() {
+        // A zero byte where a field's type would be ends the list of fields.
+        if field == 0 {
+            return None;
+        }
+        let end = rest.iter().position(|&byte| byte == 0)?;
+        if field == b'C' {
+            return Some(String::from_utf8_lossy(&rest[..end]).into_owned());
+        }
+        body = &rest[end + 1..];
+    }
+    None
 }
 
 /// Reads one message of the server into `raw`, as its bytes came, and returns its type and the place in `raw` where its body begins.
@@ -1039,7 +1056,13 @@ mod tests {
         assert_eq!(input, after, "the bytes after the answer are left for the copy that follows");
 
         let refused = error_response("28000", "Cloud SQL refused the connection.");
-        assert_eq!(server_auth(&refused).await.unwrap(), (ServerAuth::Error, refused));
+        assert_eq!(server_auth(&refused).await.unwrap(), (ServerAuth::Error { sqlstate: Some("28000".into()) }, refused));
+        // The SQLSTATE is read wherever its field is; an ErrorResponse without one, or cut off before it, has none.
+        let late = typed(b'E', b"SFATAL\0Mno\0C3D000\0\0");
+        assert_eq!(server_auth(&late).await.unwrap().0, ServerAuth::Error { sqlstate: Some("3D000".into()) });
+        for wire in [typed(b'E', b"SFATAL\0Mno\0\0"), typed(b'E', b"SFATAL\0MCut"), typed(b'E', b"")] {
+            assert_eq!(server_auth(&wire).await.unwrap().0, ServerAuth::Error { sqlstate: None });
+        }
     }
 
     #[tokio::test]
@@ -1047,9 +1070,11 @@ mod tests {
         // What a server answers to a start-up message that asks for a newer minor version or for protocol options it does not know.
         let negotiation = negotiate(PROTOCOL_3_2, &["_pq_.test_extension"]);
         let after = typed(b'K', &[0; 8]);
-        for (answer, request) in
-            [(ServerAuth::Ok, auth_message(0, b"")), (ServerAuth::NeedsPassword, auth_message(3, b"")), (ServerAuth::Error, error_response("28000", "no"))]
-        {
+        for (answer, request) in [
+            (ServerAuth::Ok, auth_message(0, b"")),
+            (ServerAuth::NeedsPassword, auth_message(3, b"")),
+            (ServerAuth::Error { sqlstate: Some("28000".into()) }, error_response("28000", "no")),
+        ] {
             let wire = [negotiation.clone(), request.clone(), after.clone()].concat();
             let mut input = &wire[..];
             let (got, raw) = read_server_auth(&mut input).await.unwrap();

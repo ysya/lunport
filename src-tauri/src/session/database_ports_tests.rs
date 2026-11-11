@@ -85,6 +85,14 @@ pub(crate) enum Answer {
     AsksForPassword,
     /// It closes the connection without a word, as an instance does when it refuses the client certificate.
     HangsUp,
+    /// A fatal ErrorResponse with this SQLSTATE and `cloud_sql_refusal`'s words, as an instance refuses a session, and then it closes the
+    /// connection.
+    Refuses(&'static str),
+}
+
+/// What the fake Cloud SQL of `Answer::Refuses` says when it refuses a session with `sqlstate`.
+pub(crate) fn cloud_sql_refusal(sqlstate: &str) -> String {
+    format!("The session was refused with SQLSTATE {sqlstate}.")
 }
 
 /// The simple queries the fake Cloud SQL of `Answer::Queries` was sent, and the answers it holds back. It answers a query with
@@ -166,6 +174,9 @@ pub(crate) async fn fake_cloud_sql(mut stream: DuplexStream, answer: Answer, rec
     }
     match answer {
         Answer::HangsUp => {}
+        Answer::Refuses(sqlstate) => {
+            let _ = stream.write_all(&error_response(sqlstate, &cloud_sql_refusal(sqlstate))).await;
+        }
         Answer::AsksForPassword => {
             if stream.write_all(&typed(b'R', &3u32.to_be_bytes())).await.is_ok() {
                 // The password never comes: Lunport refuses the app and hangs up.
@@ -595,6 +606,32 @@ fn a_failure_reaching_cloud_sql_drops_the_cached_certificate() {
     // Cloud SQL cannot be dialled at all.
     upstream.unreachable.store(true, Ordering::SeqCst);
     refused(&mut App::connect(port), "Cloud SQL refused the connection.");
+    assert_eq!(upstream.forgotten.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_sign_in_cloud_sql_refuses_reaches_the_app_and_drops_the_certificate() {
+    let upstream = fake();
+    let ports = DatabasePorts::new(upstream.clone());
+    let port = running(&ports, &orders());
+    let refused = |sqlstate: &'static str| {
+        *upstream.answer.lock().unwrap() = Answer::Refuses(sqlstate);
+        let mut app = App::connect(port);
+        app.startup(&[("user", "frank"), ("database", "orders")]);
+        app.asked_for_password();
+        app.password(PASSWORD);
+        let error = app.error();
+        assert!(app.closed());
+        error
+    };
+    // A sign-in Cloud SQL refuses (SQLSTATE class 28) may be the certificate's, whose token it no longer takes: the app gets Cloud SQL's
+    // own words, and the next connection fetches a new certificate.
+    for (sqlstate, forgotten) in [("28000", 1), ("28P01", 2)] {
+        assert_eq!(refused(sqlstate), (sqlstate.to_string(), cloud_sql_refusal(sqlstate)));
+        assert_eq!(upstream.forgotten.load(Ordering::SeqCst), forgotten, "{sqlstate}");
+    }
+    // Any other refusal, such as a database that does not exist, says nothing against the certificate.
+    assert_eq!(refused("3D000"), ("3D000".to_string(), cloud_sql_refusal("3D000")));
     assert_eq!(upstream.forgotten.load(Ordering::SeqCst), 2);
 }
 
