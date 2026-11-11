@@ -70,9 +70,10 @@ const live = (phase: DatabasePhase, patch: Partial<DatabaseView["live"]> = {}): 
   error: null,
   ...patch,
 });
-/** A saved database as the list shows it: a prod database that runs on its saved port, with writes locked. */
+/** A saved database as the list shows it: a prod database that runs on its saved port, with writes locked, in the environment it is saved in. */
 function view(patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase> = {}): DatabaseView {
-  return { database: { ...ORDERS, ...database }, live: live("running"), synced: true, blocked: false, removed: false, ...patch };
+  const saved = { ...ORDERS, ...database };
+  return { database: saved, live: live("running"), synced: true, blocked: false, removed: false, changed: false, environment: saved.environment, ...patch };
 }
 /** A running prod database whose writes lock again `left` milliseconds after 10:00. */
 const writable = (left: number) => view({ live: live("running", { writable_until_ms: AT + left }) });
@@ -243,6 +244,15 @@ describe("the card", () => {
       expect(buttonTag(html, "Copy password"), environment).not.toContain(DISABLED);
     }
     expect(text(card().html())).toContain("Locked");
+  });
+
+  it("draws_the_lock_by_the_environment_the_port_locks_by", () => {
+    // Saved as dev on another device while its port runs as prod: the lock stays until the database is started again.
+    const kept = card(view({ changed: true, environment: "prod" }, { environment: "dev" })).html();
+    expect(text(kept)).toContain("Locked");
+    expect(buttonTag(kept, "Locked")).not.toContain(DISABLED);
+    // A port that does not lock as prod has no lock, whatever the record says.
+    expect(text(card(view({ environment: "dev" })).html())).not.toMatch(/Locked|Writes on|Reconnect now/);
   });
 
   it("the_card_is_a_region_with_the_id_its_toggle_controls_and_a_label_of_its_own", () => {

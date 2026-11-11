@@ -70,7 +70,9 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
  * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
  * removes it from the list. A row given `details` has a button that shows or hides its connection details, which the page draws under
  * the row; the row's bottom line is left out while they are open, so that the two read as one. A prod database whose writable window is
- * open says so in its Status, with the time left, whether its details are open or not. No hooks: exported for the tests.
+ * open says so in its Status, with the time left, whether its details are open or not. A database that runs here as it was saved before
+ * another device changed it says that its port applies the change once it is started again, and its badge and its lock follow the
+ * environment its port locks by (`row.environment`), which stays prod until then. No hooks: exported for the tests.
  */
 export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, details }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
@@ -87,10 +89,11 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
     <td className="max-w-72 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
         {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button className="min-w-0 truncate text-left font-medium hover:text-primary disabled:cursor-default" title={name} disabled={active || busy || row.blocked} onClick={edit}>{name}</button>}
-        {!row.removed && <EnvironmentBadge environment={database.environment} />}
+        {!row.removed && <EnvironmentBadge environment={row.environment} />}
       </div>
       {row.removed ? <span className="mt-1 block text-xs text-warning">Deleted on another device. Stop this running database to remove it here.</span> : <>
         <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
+        {row.changed && <span className="mt-1 block text-xs text-warning">The database changed on another device. Stop and start it again to apply it.</span>}
         {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
       </>}
       <span className="database-address-compact mt-1 truncate font-mono text-xs text-muted-foreground" title={address}>{address}</span>
@@ -105,7 +108,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
         {databasePhases[live.phase]}
       </span>
       {live.phase === "error" && live.error ? <span className="mt-1 block max-w-64 whitespace-normal text-xs text-destructive">{revealHidden(live.error)}</span> : <span className="mt-1 block text-xs text-muted-foreground">{note}</span>}
-      {database.environment === "prod" && live.writable_until_ms !== null && <WritesOnMarker until={live.writable_until_ms} />}
+      {row.environment === "prod" && live.writable_until_ms !== null && <WritesOnMarker until={live.writable_until_ms} />}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
       {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={databaseDetailsId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}

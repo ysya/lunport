@@ -40,9 +40,10 @@ const ORDERS: SavedDatabase = {
   local_port: 6543,
 };
 const live = (phase: DatabasePhase, patch: Partial<DatabaseView["live"]> = {}): DatabaseView["live"] => ({ phase, port: phase === "stopped" || phase === "error" ? null : 6543, connections: 0, writable_until_ms: null, error: null, ...patch });
-/** A saved database as the list shows it: stopped, synced, held by nothing. */
+/** A saved database as the list shows it: stopped, synced, held by nothing, and shown in the environment it is saved in. */
 function row(patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase> = {}): DatabaseView {
-  return { database: { ...ORDERS, ...database }, live: live("stopped"), synced: true, blocked: false, removed: false, ...patch };
+  const saved = { ...ORDERS, ...database };
+  return { database: saved, live: live("stopped"), synced: true, blocked: false, removed: false, changed: false, environment: saved.environment, ...patch };
 }
 const status = (patch: Partial<PamStatusView>): PamStatusView => ({ entitlement: "prod-operate", state: "active", active_until_ms: AT + 30 * MINUTE, message: null, ...patch });
 
@@ -429,6 +430,32 @@ describe("the marker of a prod row whose writes are on", () => {
     expect(vi.mocked(useNow)).not.toHaveBeenCalled();
     render([writable(MINUTE)]);
     expect(vi.mocked(useNow)).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a database another device changed while it runs here", () => {
+  const CHANGED = "The database changed on another device. Stop and start it again to apply it.";
+
+  it("says_that_starting_it_again_applies_the_change", () => {
+    const html = render([row({ live: live("running", { connections: 1 }), changed: true }, { pam: null })]);
+    expect(text(html)).toContain(CHANGED);
+    expect(html).toContain(">Stop</button>");
+    // One that runs as it is saved, and one that does not run, say nothing of it.
+    expect(text(render([row({ live: live("running") }, { pam: null })]))).not.toContain(CHANGED);
+    expect(text(render([row({}, { pam: null })]))).not.toContain(CHANGED);
+  });
+
+  it("is_badged_and_marked_by_the_environment_its_port_locks_by", () => {
+    // Saved as dev elsewhere while its port runs as prod: still PROD, with its writes on marked, until it is started again.
+    const html = render([row({ live: live("running", { writable_until_ms: AT + MINUTE }), changed: true, environment: "prod" }, { environment: "dev", pam: null })]);
+    expect(text(html)).toMatch(/Orders\s+PROD/);
+    expect(text(html)).not.toContain("DEV");
+    expect(text(html)).toContain("Writes on · 01:00");
+    // Saved as prod elsewhere while its port runs as dev: PROD at once.
+    const promoted = render([row({ live: live("running"), changed: true, environment: "prod" }, { environment: "prod", pam: null })]);
+    expect(text(promoted)).toMatch(/Orders\s+PROD/);
+    // A port that does not lock as prod has no window to mark, whatever the record says.
+    expect(text(render([row({ live: live("running", { writable_until_ms: AT + MINUTE }), environment: "dev" }, { pam: null })]))).not.toContain("Writes on");
   });
 });
 

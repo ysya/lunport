@@ -136,12 +136,81 @@ fn a_running_database_is_listed_with_its_port_and_one_deleted_elsewhere_to_be_st
 }
 
 #[test]
+fn what_connecting_or_locking_reads_marks_a_running_database_changed() {
+    let running = guarded();
+    let changes = [
+        SavedDatabase { project: "acme-dev-654321".into(), ..running.clone() },
+        SavedDatabase { region: "europe-west1".into(), ..running.clone() },
+        SavedDatabase { instance: "billing-pg".into(), ..running.clone() },
+        SavedDatabase { account: Some("ops@example.com".into()), ..running.clone() },
+        SavedDatabase { account: None, ..running.clone() },
+        SavedDatabase { environment: DatabaseEnvironment::Staging, ..running.clone() },
+        SavedDatabase { pam: None, ..running.clone() },
+        SavedDatabase { pam: Some(PamCheck { duration_secs: 3600, ..running.pam.clone().unwrap() }), ..running.clone() },
+        SavedDatabase { local_port: Some(6544), ..running.clone() },
+        SavedDatabase { local_port: None, ..running.clone() },
+    ];
+    for saved in &changes {
+        assert!(changed_for_port(&running, saved), "{saved:?}");
+    }
+    // What is only shown is no change to the port.
+    let shown_only = SavedDatabase { name: "Orders (prod)".into(), default_database: "orders".into(), ..running.clone() };
+    assert!(!changed_for_port(&running, &shown_only));
+    assert!(!changed_for_port(&running, &running));
+}
+
+#[test]
+fn a_running_database_saved_anew_elsewhere_is_marked_changed_and_shown_as_it_locks() {
+    let ports = DatabasePorts::new(Arc::new(FakeUpstream::default()));
+    // A port the system leaves free, saved with the database, so that the port runs exactly what is saved.
+    let free = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+    let orders = SavedDatabase { local_port: Some(free), ..database(ORDERS) };
+    let saved = databases::set(&state(), ORDERS, None, Some(orders.clone()), 10).unwrap();
+    ports.start(&orders, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    let listed = views(&saved, &ports);
+    assert!(!listed[0].changed, "it runs what is saved");
+    assert_eq!(listed[0].environment, DatabaseEnvironment::Prod);
+    // Another device renames it: nothing a connection reads has changed.
+    let renamed = SavedDatabase { name: "Orders (prod)".into(), ..orders.clone() };
+    assert!(!views(&databases::set(&saved, ORDERS, Some(&orders), Some(renamed), 11).unwrap(), &ports)[0].changed);
+    // It saves it as dev: the row says it changed, and it is still shown and locked as prod until it is started again.
+    let dev = SavedDatabase { environment: DatabaseEnvironment::Dev, ..orders.clone() };
+    let saved_as_dev = databases::set(&saved, ORDERS, Some(&orders), Some(dev.clone()), 11).unwrap();
+    let listed = views(&saved_as_dev, &ports);
+    assert_eq!(listed[0].database, dev, "the record as it is saved");
+    assert!(listed[0].changed);
+    assert_eq!(listed[0].environment, DatabaseEnvironment::Prod);
+    // Once stopped, it is listed as it is saved.
+    ports.stop(ORDERS);
+    wait_until("the port stopped", || !ports.running(ORDERS));
+    let listed = views(&saved_as_dev, &ports);
+    assert!(!listed[0].changed);
+    assert_eq!(listed[0].environment, DatabaseEnvironment::Dev);
+    // A dev database that runs and is saved as prod elsewhere is shown as prod at once.
+    ports.start(&dev, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    let listed = views(&saved, &ports);
+    assert!(listed[0].changed);
+    assert_eq!(listed[0].environment, DatabaseEnvironment::Prod);
+    ports.stop(ORDERS);
+    wait_until("the port stopped", || !ports.running(ORDERS));
+}
+
+#[test]
 fn a_view_serializes_with_snake_case_phases_and_null_gaps() {
-    let view = DatabaseView { database: database(ORDERS), live: DatabaseLive::default(), synced: false, blocked: false, removed: false };
+    let view = DatabaseView {
+        database: database(ORDERS),
+        live: DatabaseLive::default(),
+        synced: false,
+        blocked: false,
+        removed: false,
+        changed: false,
+        environment: DatabaseEnvironment::Prod,
+    };
     let value = serde_json::to_value(&view).unwrap();
     assert_eq!(value["live"], json!({"phase": "stopped", "port": null, "connections": 0, "writable_until_ms": null, "error": null}));
     assert_eq!(value["database"], serde_json::to_value(database(ORDERS)).unwrap());
     assert_eq!((value["synced"].clone(), value["blocked"].clone(), value["removed"].clone()), (json!(false), json!(false), json!(false)));
+    assert_eq!((value["changed"].clone(), value["environment"].clone()), (json!(false), json!("prod")));
     let phases = [DatabasePhase::Stopped, DatabasePhase::Starting, DatabasePhase::Running, DatabasePhase::Stopping, DatabasePhase::Error];
     let written: Vec<_> = phases.iter().map(|phase| serde_json::to_value(phase).unwrap()).collect();
     assert_eq!(written, vec![json!("stopped"), json!("starting"), json!("running"), json!("stopping"), json!("error")]);

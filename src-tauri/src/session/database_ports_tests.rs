@@ -898,7 +898,7 @@ fn a_failed_port_is_not_given_a_password() {
 
 #[test]
 fn a_port_takes_a_new_password_while_it_starts_or_runs_only() {
-    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Clocks::default());
+    let port = Port::new(orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Clocks::default(), Arc::new(|_: &str| Ok(None)));
     assert_eq!(port.live().phase, DatabasePhase::Starting);
     port.set_password(Zeroizing::new("first".into()));
     assert_eq!(*port.password(), "first", "a port that starts takes it");
@@ -1217,6 +1217,81 @@ fn unlock_is_refused_for_dev_and_staging() {
     ports.stop(ID);
     wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
     assert_eq!(unlock(&ports, SystemTime::now()), not_running);
+}
+
+// ---- The database as it is saved now ----
+
+/// What the ports read as the database saved now, which a test changes as another device would.
+type Saved = Arc<Mutex<Result<Option<SavedDatabase>, String>>>;
+
+/// Ports over `upstream` that read the database saved now from `saved`.
+fn reading(upstream: &Arc<FakeUpstream>, saved: &Saved) -> DatabasePorts {
+    let saved = Arc::clone(saved);
+    DatabasePorts::new(upstream.clone()).reading_saved(move |_: &str| saved.lock().unwrap().clone())
+}
+
+#[test]
+fn the_effective_environment_is_prod_while_either_database_is() {
+    let dev = SavedDatabase { environment: DatabaseEnvironment::Dev, ..orders() };
+    let staging = SavedDatabase { environment: DatabaseEnvironment::Staging, ..orders() };
+    assert_eq!(effective_environment(&orders(), None), DatabaseEnvironment::Prod);
+    assert_eq!(effective_environment(&dev, None), DatabaseEnvironment::Dev, "a database that does not run is as it is saved");
+    assert_eq!(effective_environment(&dev, Some(&orders())), DatabaseEnvironment::Prod, "started as prod, saved as dev since");
+    assert_eq!(effective_environment(&orders(), Some(&dev)), DatabaseEnvironment::Prod, "started as dev, saved as prod since");
+    assert_eq!(effective_environment(&staging, Some(&dev)), DatabaseEnvironment::Staging, "the saved one's while neither is prod");
+}
+
+#[test]
+fn a_database_saved_as_prod_elsewhere_while_it_runs_locks_its_next_connection() {
+    let upstream = fake();
+    let dev = SavedDatabase { environment: DatabaseEnvironment::Dev, project: "acme-dev-654321".into(), ..orders() };
+    let saved: Saved = Arc::new(Mutex::new(Ok(Some(dev.clone()))));
+    let ports = reading(&upstream, &saved);
+    let port = running(&ports, &dev);
+    App::signed_in(port);
+    assert_eq!(unlock(&ports, SystemTime::now()), Err("Only prod databases are locked.".to_string()));
+    // Another device saves it as prod. The port runs the dev database it started with, but its next connection is locked, and its
+    // writes can be unlocked as any prod database's.
+    *saved.lock().unwrap() = Ok(Some(SavedDatabase { environment: DatabaseEnvironment::Prod, ..dev.clone() }));
+    App::signed_in(port);
+    assert_eq!(upstream.received(), vec![startup_for(false), startup_for(true)]);
+    assert!(unlock(&ports, SystemTime::now()).is_ok());
+    App::signed_in(port);
+    assert_eq!(upstream.received().last(), Some(&startup_for(false)), "writes are on");
+}
+
+#[test]
+fn a_database_saved_as_dev_elsewhere_stays_locked_until_it_is_started_again() {
+    let upstream = fake();
+    let dev = SavedDatabase { environment: DatabaseEnvironment::Dev, ..orders() };
+    let saved: Saved = Arc::new(Mutex::new(Ok(Some(orders()))));
+    let ports = reading(&upstream, &saved);
+    let port = running(&ports, &orders());
+    *saved.lock().unwrap() = Ok(Some(dev.clone()));
+    App::signed_in(port);
+    assert_eq!(upstream.received(), vec![startup_for(true)], "the prod database it started with still locks it");
+    assert!(ports.unlockable(ID).is_ok(), "and its writes can still be unlocked");
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    // Started again, it runs the dev database.
+    App::signed_in(running(&ports, &dev));
+    assert_eq!(upstream.received().last(), Some(&startup_for(false)));
+    assert_eq!(unlock(&ports, SystemTime::now()), Err("Only prod databases are locked.".to_string()));
+}
+
+#[test]
+fn a_database_no_longer_saved_locks_as_it_started_and_a_library_that_cannot_be_read_locks() {
+    let upstream = fake();
+    let dev = SavedDatabase { environment: DatabaseEnvironment::Dev, project: "acme-dev-654321".into(), ..orders() };
+    let saved: Saved = Arc::new(Mutex::new(Ok(None)));
+    let ports = reading(&upstream, &saved);
+    let port = running(&ports, &dev);
+    // Deleted on another device while it runs: the dev database it started with decides.
+    App::signed_in(port);
+    // The library cannot be read: the connection is locked rather than let through unchecked.
+    *saved.lock().unwrap() = Err("The library could not be read.".to_string());
+    App::signed_in(port);
+    assert_eq!(upstream.received(), vec![startup_for(false), startup_for(true)]);
 }
 
 #[test]

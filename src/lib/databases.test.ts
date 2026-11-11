@@ -114,6 +114,8 @@ describe("saved databases", () => {
       synced: true,
       blocked: false,
       removed: false,
+      changed: false,
+      environment: "prod",
     };
     const renamed = { ...ORDERS, name: "Orders (prod)" };
     const replies: Record<string, unknown> = { databases_list: [view], databases_save: renamed, databases_delete: null };
@@ -173,7 +175,7 @@ const NOW = new Date(2027, 0, 15, 10, 0).getTime();
 const PAM = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null };
 
 function view(patch: Partial<DatabaseView> = {}): DatabaseView {
-  return { database: ORDERS, live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null }, synced: true, blocked: false, removed: false, ...patch };
+  return { database: ORDERS, live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null }, synced: true, blocked: false, removed: false, changed: false, environment: ORDERS.environment, ...patch };
 }
 
 describe("the Databases page's reads and actions", () => {

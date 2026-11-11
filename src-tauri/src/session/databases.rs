@@ -3,7 +3,7 @@
 //! show and request the Privileged Access Manager grant a database needs, and list the instances of a project for the New database dialog.
 use super::broker::Broker;
 use super::connect::CancelToken;
-use super::database_ports::{ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
+use super::database_ports::{effective_environment, ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
 use super::pam::checked_account;
 use super::transports::{pam_status_for, PamStatusView};
@@ -15,7 +15,7 @@ use crate::{
     error::AppError,
     state::AppState,
     sync::{
-        databases::{self, SavedDatabase},
+        databases::{self, DatabaseEnvironment, SavedDatabase},
         env::{Keychain, OsKeychain, SyncEnv},
         records_v3::SyncStateV3,
         transports,
@@ -80,6 +80,19 @@ pub struct DatabaseView {
     pub blocked: bool,
     /// Whether its record is gone while it still runs here, so that it is listed only to be stopped.
     pub removed: bool,
+    /// Whether it runs here as it was saved before another device changed what connecting to it or locking it reads: its port applies
+    /// the change once it is stopped and started again.
+    pub changed: bool,
+    /// The environment the page shows it in and its port locks by (`effective_environment`): prod when the saved database is prod, or
+    /// when it runs and the database its port started with is; the saved one's otherwise.
+    pub environment: DatabaseEnvironment,
+}
+
+/// Whether `saved` differs from `running`, the database a port started with, in anything connecting or locking reads: where the instance
+/// is, the Google account, the environment, the grant check and the local port. Its name and its default database are only shown.
+fn changed_for_port(running: &SavedDatabase, saved: &SavedDatabase) -> bool {
+    (&running.project, &running.region, &running.instance, &running.account, running.environment, &running.pam, running.local_port)
+        != (&saved.project, &saved.region, &saved.instance, &saved.account, saved.environment, &saved.pam, saved.local_port)
 }
 
 /// Every saved database with what this device runs for it (`ports`), by name and then by identity. A database that runs here although its
@@ -87,11 +100,30 @@ pub struct DatabaseView {
 fn views(state: &SyncStateV3, ports: &DatabasePorts) -> Vec<DatabaseView> {
     let mut views: Vec<DatabaseView> = databases::view(state)
         .into_iter()
-        .map(|row| DatabaseView { live: ports.live(&row.database.id), database: row.database, synced: row.synced, blocked: row.blocked, removed: false })
+        .map(|row| {
+            let running = ports.running_database(&row.database.id);
+            DatabaseView {
+                live: ports.live(&row.database.id),
+                changed: running.as_ref().is_some_and(|running| changed_for_port(running, &row.database)),
+                environment: effective_environment(&row.database, running.as_ref()),
+                database: row.database,
+                synced: row.synced,
+                blocked: row.blocked,
+                removed: false,
+            }
+        })
         .collect();
     let saved: BTreeSet<String> = views.iter().map(|view| view.database.id.clone()).collect();
     let removed = ports.unsaved(&|id| saved.contains(id));
-    views.extend(removed.into_iter().map(|(database, live)| DatabaseView { database, live, synced: false, blocked: true, removed: true }));
+    views.extend(removed.into_iter().map(|(database, live)| DatabaseView {
+        environment: database.environment,
+        database,
+        live,
+        synced: false,
+        blocked: true,
+        removed: true,
+        changed: false,
+    }));
     views.sort_by_cached_key(|view| (view.database.name.to_lowercase(), view.database.id.clone()));
     views
 }
@@ -242,6 +274,9 @@ fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
     let ports = &state.session.databases;
     ports.use_upstream(|| Arc::new(CloudSqlUpstream::for_app(app, &broker)));
+    // A port reads the database as the library holds it now for each new connection, so that one saved as prod elsewhere is locked.
+    let library = app.clone();
+    ports.use_library(|| Arc::new(move |id: &str| snapshot(&library).map(|state| saved(&state, id).ok())));
     // The database is read and started under the edit lock, so that no save comes in between.
     let _editing = ports.editing();
     let database = saved(&snapshot(app)?, id)?;

@@ -6,7 +6,10 @@
 //!
 //! The lock stays with a session for as long as it lasts. Once the person unlocks writes, for `WRITABLE_WINDOW`, the new connections to a
 //! prod database come without it; the locked ones go on until their apps connect again. When the window ends, the connections that came
-//! without the lock close as soon as they are idle, and `CLOSE_UNLOCKED_WITHIN` after the window at the latest.
+//! without the lock close as soon as they are idle, and `CLOSE_UNLOCKED_WITHIN` after the window at the latest. A port runs the database
+//! as it was saved when the port started, but locks as prod whenever either that database or the one saved now is prod
+//! (`effective_environment`): another device that makes a running database prod locks its next connections at once, and one that makes it
+//! dev leaves it locked until it is started again.
 //!
 //! The ports run on one small runtime of their own. What blocks (Google's APIs, a grant question that waits for the person) runs on its
 //! blocking threads. Each port is registered with the broker while it runs, so quitting the app stops it.
@@ -30,7 +33,7 @@ use super::auth::printable;
 use super::connect::CancelToken;
 use super::databases::{DatabaseLive, DatabasePhase};
 use super::pgwire::{auth_cleartext, error_response, passwords_match, read_first, read_password, read_server_auth, FirstMessage, ReadyTracker, ServerAuth, Startup};
-use crate::sync::databases::SavedDatabase;
+use crate::sync::databases::{DatabaseEnvironment, SavedDatabase};
 use crate::sync::env::Keychain;
 
 /// The most connections one port has open at once.
@@ -172,6 +175,21 @@ pub(crate) struct Dialling {
     pub stream: BoxFuture<'static, io::Result<BoxStream>>,
 }
 
+/// Reads the saved database `id` as the library holds it now: `None` once it is gone, and the sentence of why when the library cannot be
+/// read. It blocks on the library, so the ports call it on a blocking thread.
+pub(crate) type ReadSaved = Arc<dyn Fn(&str) -> Result<Option<SavedDatabase>, String> + Send + Sync>;
+
+/// The environment a database is shown in and its port locks by: prod when `saved`, the database as it is saved now, is prod, or when it
+/// runs and `running`, the database its port started with, is; the saved one's otherwise. A port runs the database it started with, so a
+/// change another device makes to it waits for the next start, but the lock does not wait.
+pub(crate) fn effective_environment(saved: &SavedDatabase, running: Option<&SavedDatabase>) -> DatabaseEnvironment {
+    if saved.is_prod() || running.is_some_and(SavedDatabase::is_prod) {
+        DatabaseEnvironment::Prod
+    } else {
+        saved.environment
+    }
+}
+
 // ---- Passwords ----
 
 /// The keychain account that holds the password of the database `id`'s port.
@@ -204,6 +222,9 @@ pub(crate) fn replace_password(keychain: &dyn Keychain, id: &str) -> Result<Zero
 /// The local ports of the saved databases this device runs.
 pub(crate) struct DatabasePorts {
     upstream: OnceLock<Arc<dyn Upstream>>,
+    /// Reads the saved databases as the library holds them now (the app's ports get it with `use_library`). Without it the database a
+    /// port started with decides alone.
+    saved: OnceLock<ReadSaved>,
     /// Made when the first port starts; `None` when it could not be made.
     runtime: OnceLock<Option<PortRuntime>>,
     /// Held by an edit of a saved database, and by a start while it reads the database it starts: the two do not interleave.
@@ -218,6 +239,7 @@ impl Default for DatabasePorts {
     fn default() -> Self {
         DatabasePorts {
             upstream: OnceLock::new(),
+            saved: OnceLock::new(),
             runtime: OnceLock::new(),
             edits: Mutex::new(()),
             ports: Mutex::default(),
@@ -265,6 +287,23 @@ impl DatabasePorts {
         self.upstream.get_or_init(make);
     }
 
+    /// Has the ports read the saved databases through `make()`'s reader, made the first time this is called; later calls keep that one.
+    pub(crate) fn use_library(&self, make: impl FnOnce() -> ReadSaved) {
+        self.saved.get_or_init(make);
+    }
+
+    /// The ports reading the saved databases through `read` (the tests change what it answers as another device would).
+    #[cfg(test)]
+    pub(crate) fn reading_saved(self, read: impl Fn(&str) -> Result<Option<SavedDatabase>, String> + Send + Sync + 'static) -> Self {
+        let _ = self.saved.set(Arc::new(read));
+        self
+    }
+
+    /// The reader a port is started with: the library's, or, before the app has given one, a reader that finds nothing saved.
+    fn reader(&self) -> ReadSaved {
+        self.saved.get().cloned().unwrap_or_else(|| Arc::new(|_: &str| Ok(None)))
+    }
+
     /// The ports with another time limit for an app's start-up and password (the tests do not wait thirty seconds).
     #[cfg(test)]
     fn signing_in_within(mut self, limit: Duration) -> Self {
@@ -292,23 +331,26 @@ impl DatabasePorts {
         (self.clocks.wall)()
     }
 
-    /// The port of the database `id`, provided writes can be unlocked on it now: it is a prod database, and its port runs. The person is
-    /// asked to confirm after this, and `unlock` unlocks this port only.
+    /// The port of the database `id`, provided writes can be unlocked on it now: it locks as prod (`Port::locks_as_prod`), and it runs.
+    /// The person is asked to confirm after this, and `unlock` unlocks this port only. It may read the library, so it runs on a blocking
+    /// thread.
     pub(crate) fn unlockable(&self, id: &str) -> Result<Unlockable, String> {
         let port = self.port(id).ok_or(NOT_RUNNING)?;
-        port.unlockable(&locked(&port.state))?;
+        let prod = port.locks_as_prod();
+        port.unlockable(&locked(&port.state), prod)?;
         Ok(Unlockable { port })
     }
 
     /// Opens the writable window of the port `checked` found for `WRITABLE_WINDOW` from `now`, and answers when it ends, in milliseconds
     /// since the Unix epoch. Until then the connections that come are not locked; the open ones keep their lock. A window that is open
     /// already starts again from `now`. A database that was stopped and started again since runs on another port, which nobody was asked
-    /// about, and stays locked.
+    /// about, and stays locked; so does one that no longer locks as prod. It may read the library, so it runs on a blocking thread.
     pub fn unlock(&self, checked: &Unlockable, now: SystemTime) -> Result<u64, String> {
         if !self.port(&checked.port.db.id).is_some_and(|port| Arc::ptr_eq(&port, &checked.port)) {
             return Err(STAY_LOCKED.to_string());
         }
-        checked.port.unlock(Moment { wall: now, monotonic: (self.clocks.monotonic)() }).map(millis)
+        let prod = checked.port.locks_as_prod();
+        checked.port.unlock(Moment { wall: now, monotonic: (self.clocks.monotonic)() }, prod).map(millis)
     }
 
     /// Ends the writable window of the database `id` now, when it is open: new connections are locked, and those that came without the lock
@@ -349,7 +391,7 @@ impl DatabasePorts {
             if ports.values().filter(|port| port.busy()).count() >= MAX_RUNNING_DATABASES {
                 return Err(format!("Lunport runs up to {MAX_RUNNING_DATABASES} databases at once."));
             }
-            let port = Arc::new(Port::new(db.clone(), password, quit, self.clocks.clone()));
+            let port = Arc::new(Port::new(db.clone(), password, quit, self.clocks.clone(), self.reader()));
             ports.insert(db.id.clone(), Arc::clone(&port));
             port
         };
@@ -381,6 +423,11 @@ impl DatabasePorts {
 
     pub fn live(&self, id: &str) -> DatabaseLive {
         locked(&self.ports).get(id).map(|port| port.live()).unwrap_or_default()
+    }
+
+    /// The database the port of `id` runs, as it was saved when the port started, while the port starts, runs or stops.
+    pub(crate) fn running_database(&self, id: &str) -> Option<SavedDatabase> {
+        locked(&self.ports).get(id).filter(|port| port.busy()).map(|port| port.db.clone())
     }
 
     /// Whether the database `id`'s port is starting, running or stopping here.
@@ -442,8 +489,11 @@ impl Unlockable {
 
 /// One database's port.
 struct Port {
-    /// The database as it was saved when the port started: an edit elsewhere changes nothing that runs.
+    /// The database as it was saved when the port started: an edit elsewhere changes nothing that runs, except that a database saved as
+    /// prod since then locks the port's next connections (`locks_as_prod`).
     db: SavedDatabase,
+    /// Reads the database as it is saved now.
+    saved: ReadSaved,
     password: Mutex<Zeroizing<String>>,
     /// Cancelled when the port stops or the app quits: the port closes its connections, and what they wait for (Google's APIs, a question
     /// to the person) gives up.
@@ -469,9 +519,10 @@ struct PortState {
 }
 
 impl Port {
-    fn new(db: SavedDatabase, password: Zeroizing<String>, quit: CancelToken, clocks: Clocks) -> Port {
+    fn new(db: SavedDatabase, password: Zeroizing<String>, quit: CancelToken, clocks: Clocks, saved: ReadSaved) -> Port {
         Port {
             db,
+            saved,
             password: Mutex::new(password),
             quit,
             woken: Notify::new(),
@@ -572,9 +623,24 @@ impl Port {
         Some(Slot(Arc::clone(self)))
     }
 
-    /// Whether writes can be unlocked on its database while the port is in `state`: a prod database, whose port runs.
-    fn unlockable(&self, state: &PortState) -> Result<(), String> {
-        if !self.db.is_prod() {
+    /// Whether its connections are locked as prod (`effective_environment`): the database it started with is prod, or the one saved now
+    /// is. One that is no longer saved leaves the database it started with to decide, and a library that cannot be read counts as prod, so
+    /// that no connection goes unlocked for want of a read. It may read the library, so it runs on a blocking thread.
+    fn locks_as_prod(&self) -> bool {
+        if self.db.is_prod() {
+            return true;
+        }
+        match (self.saved)(&self.db.id) {
+            Ok(Some(saved)) => effective_environment(&saved, Some(&self.db)) == DatabaseEnvironment::Prod,
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Whether writes can be unlocked on its database while the port is in `state`, with `prod` read by `locks_as_prod`: a database that
+    /// locks as prod, whose port runs.
+    fn unlockable(&self, state: &PortState, prod: bool) -> Result<(), String> {
+        if !prod {
             Err(ONLY_PROD.to_string())
         } else if state.phase != DatabasePhase::Running {
             Err(NOT_RUNNING.to_string())
@@ -583,11 +649,12 @@ impl Port {
         }
     }
 
-    /// Opens its writable window from `now`, and answers when it ends. A connection that came without the lock and was to close since an
-    /// earlier window ended goes on while this one is open. The phase is held meanwhile, so that a port that stops keeps no window.
-    fn unlock(&self, now: Moment) -> Result<SystemTime, String> {
+    /// Opens its writable window from `now`, and answers when it ends; `prod` is as `unlockable` takes it. A connection that came without
+    /// the lock and was to close since an earlier window ended goes on while this one is open. The phase is held meanwhile, so that a port
+    /// that stops keeps no window.
+    fn unlock(&self, now: Moment, prod: bool) -> Result<SystemTime, String> {
         let state = locked(&self.state);
-        self.unlockable(&state)?;
+        self.unlockable(&state, prod)?;
         let until = now.after(WRITABLE_WINDOW);
         let mut writes = locked(&self.writes);
         writes.until = Some(until);
@@ -629,11 +696,11 @@ impl Port {
     }
 
     /// Registers a connection that is about to pass its start-up message on to Cloud SQL, until the registration is dropped. It carries
-    /// the lock unless the database is not prod or the window is open now; the window is held meanwhile, so that it cannot end in between
-    /// and miss the connection.
-    fn register(self: &Arc<Port>) -> Registered {
+    /// the lock unless the port does not lock as prod (`prod`, read by `locks_as_prod` just before) or the window is open now; the window
+    /// is held meanwhile, so that it cannot end in between and miss the connection.
+    fn register(self: &Arc<Port>, prod: bool) -> Registered {
         let mut writes = locked(&self.writes);
-        let lock = self.db.is_prod() && writes.open_until(self.clocks.now()).is_none();
+        let lock = prod && writes.open_until(self.clocks.now()).is_none();
         let connection = Arc::new(Connection::new(lock));
         let number = writes.next;
         writes.next += 1;
@@ -922,14 +989,17 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
         return refuse(&mut app, "28P01", &format!("Wrong password for {}. Copy the password from Lunport.", port.db.name)).await;
     }
     drop(password);
-    let (db, quit, preparing) = (port.db.clone(), port.quit.clone(), Arc::clone(&upstream));
-    let prepared = match tokio::task::spawn_blocking(move || preparing.prepare(&db, &quit)).await {
-        Ok(Ok(prepared)) => prepared,
+    let (db, quit, preparing, reading) = (port.db.clone(), port.quit.clone(), Arc::clone(&upstream), Arc::clone(&port));
+    // Whether the port locks as prod is read once the connection is ready, on the blocking thread: the database may have been saved anew
+    // while a grant question waited for the person.
+    let ready = tokio::task::spawn_blocking(move || preparing.prepare(&db, &quit).map(|prepared| (prepared, reading.locks_as_prod())));
+    let (prepared, prod) = match ready.await {
+        Ok(Ok(ready)) => ready,
         Ok(Err(sentence)) => return refuse(&mut app, "28000", &cut(&sentence)).await,
         Err(_) => return refuse(&mut app, "28000", "Lunport could not get the connection ready.").await,
     };
     // Whether the session carries the lock is decided here, and the port follows the connection from here on.
-    let registered = port.register();
+    let registered = port.register(prod);
     let startup = startup.with_user(&prepared.iam_user);
     let startup = if registered.connection.locked { startup.with_read_only_lock() } else { startup };
     let message = startup.encode();

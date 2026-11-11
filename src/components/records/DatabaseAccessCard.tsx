@@ -208,9 +208,9 @@ function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
 }
 
 /**
- * The card drawn from the database as the list shows it. No hooks: exported for the tests. Only a prod database has the lock; whatever
- * the list says of a window for another, none is drawn. A window that has ended by the clock reads as locked even before the list is read
- * again. While a change is under way every control is held.
+ * The card drawn from the database as the list shows it. No hooks: exported for the tests. Only a database whose port locks as prod
+ * (`view.environment`) has the lock; whatever the list says of a window for another, none is drawn. A window that has ended by the clock
+ * reads as locked even before the list is read again. While a change is under way every control is held.
  */
 export function DatabaseAccessView(props: DatabaseAccessViewProps) {
   const { view, url, pending, error, asking, actions } = props;
@@ -243,7 +243,7 @@ export function DatabaseAccessView(props: DatabaseAccessViewProps) {
         </div>
         <p className="text-xs text-muted-foreground">Apps sign in to the local port with it. It stays in the keychain and is never shown.</p>
       </div>
-      {database.environment === "prod" && writeLock(props)}
+      {view.environment === "prod" && writeLock(props)}
       {error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
