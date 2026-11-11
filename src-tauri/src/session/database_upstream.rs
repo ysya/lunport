@@ -331,22 +331,31 @@ fn failing(kind: io::ErrorKind, sentence: &'static str) -> Dialling {
     Dialling { material: None, stream: Box::pin(async move { Err(io::Error::new(kind, sentence)) }) }
 }
 
-/// A dial through the host `alias` to the instance at `ip` that failed, said as the person knows the way there: the host and the instance's
-/// address, never the loopback end of the forward, which is all the dial itself saw. The forward's latest error says why the host could not
-/// reach the instance, when it has one. The error keeps the kind of the dial's own, but for an end of file: the forward ends a connection
-/// it could not carry that way, and the port would tell the app that Cloud SQL closed it.
+/// A dial through the host `alias` to the instance at `ip` that failed, as the person is told it. The dial itself saw only the loopback end
+/// of the forward, so:
+/// - when the forward reports a latest error, that is why the host could not reach the instance: "{alias} could not reach {ip}:3307:
+///   {forward error}";
+/// - else a timeout of the dial, whose words name the loopback end, or an end of file, which is how the forward ends a connection it could
+///   not carry, reads "Cloud SQL at {ip}:3307 did not answer through {alias}.";
+/// - else the error stays as it is, words and kind: a TLS reason, such as a certificate made out to another name, or a refused connection
+///   names no address, and it is what the person needs to see.
+///
+/// The first two keep the dial error's kind, but for an end of file, which becomes `ConnectionAborted`: the port would tell the app that
+/// Cloud SQL closed the connection.
 fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io::Error {
     let instance = SocketAddr::new(ip, cloudsql_tls::PORT);
-    let reason = locked(&route.path).as_ref().and_then(|path| path.forward_error(ip));
-    let sentence = match reason {
-        Some(reason) => format!("{} could not reach {instance}: {reason}", label(alias)),
-        None => format!("Cloud SQL at {instance} did not answer through {}.", label(alias)),
-    };
     let kind = match error.kind() {
         io::ErrorKind::UnexpectedEof => io::ErrorKind::ConnectionAborted,
         kind => kind,
     };
-    io::Error::new(kind, sentence)
+    let reason = locked(&route.path).as_ref().and_then(|path| path.forward_error(ip));
+    match reason {
+        Some(reason) => io::Error::new(kind, format!("{} could not reach {instance}: {reason}", label(alias))),
+        None if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::UnexpectedEof) => {
+            io::Error::new(kind, format!("Cloud SQL at {instance} did not answer through {}.", label(alias)))
+        }
+        None => error,
+    }
 }
 
 impl Upstream for CloudSqlUpstream {

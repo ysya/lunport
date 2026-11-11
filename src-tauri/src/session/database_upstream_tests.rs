@@ -863,9 +863,32 @@ fn a_host_route_dial_error_names_the_host_not_the_loopback() {
 
 #[test]
 fn a_host_route_dial_error_without_a_forward_error_says_cloud_sql_did_not_answer() {
-    let error = dial_error_through_the_host(io::ErrorKind::ConnectionRefused, "Connection refused", None);
+    // The dial gave up at the loopback end of the forward, which its words name.
+    let words = format!("Cloud SQL did not answer at {} within 10s.", loopback(FORWARD_PORT));
+    let error = dial_error_through_the_host(io::ErrorKind::TimedOut, &words, None);
     assert_eq!(error.to_string(), format!("Cloud SQL at {PRIVATE_IP}:3307 did not answer through web-1."));
-    assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused, "of the kind the dial failed with");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "of the kind the dial failed with");
+    // The forward ended the connection during the TLS handshake: not as Cloud SQL closing it.
+    let error = dial_error_through_the_host(io::ErrorKind::UnexpectedEof, "tls handshake eof", None);
+    assert_eq!(error.to_string(), format!("Cloud SQL at {PRIVATE_IP}:3307 did not answer through web-1."));
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+}
+
+#[test]
+fn a_tls_failure_through_a_host_keeps_its_reason() {
+    // The instance's certificate is not made out to the name it is checked against. The reason names no address, and it is what the person
+    // needs to see.
+    let error = dial_error_through_the_host(io::ErrorKind::InvalidData, "invalid peer certificate: NotValidForName", None);
+    assert_eq!(error.to_string(), "invalid peer certificate: NotValidForName");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_refused_dial_through_a_host_keeps_its_reason() {
+    // The forward's listener went away after the connection looked it up.
+    let error = dial_error_through_the_host(io::ErrorKind::ConnectionRefused, "Connection refused (os error 61)", None);
+    assert_eq!(error.to_string(), "Connection refused (os error 61)");
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
 }
 
 #[test]
