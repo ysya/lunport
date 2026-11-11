@@ -266,19 +266,20 @@ describe("the card", () => {
     expect(databaseDetailsId("00000000000000a2")).not.toBe(databaseDetailsId(ID));
   });
 
-  it("names_the_lock_button_for_what_it_does_and_keeps_the_words_on_it", () => {
+  it("names_the_lock_button_by_the_words_on_it_and_what_it_does", () => {
+    // The name begins with the words the button shows, so that a person who says them reaches it, and goes on with what pressing it does.
     const locked = card().html();
-    expect(buttonTag(locked, "Locked")).toContain('aria-label="Unlock writes on Orders"');
+    expect(buttonTag(locked, "Locked")).toContain('aria-label="Locked, unlock writes on Orders"');
     const on = card(writable(10 * MINUTE)).html();
-    expect(buttonTag(on, "Writes on · 10:00")).toContain('aria-label="Lock writes on Orders"');
+    expect(buttonTag(on, "Writes on · 10:00")).toContain('aria-label="Writes on · 10:00, lock writes on Orders"');
     // The reconnect button is named by its words, and none of the other controls take a label of their own.
     expect(buttonTag(on, "Reconnect now")).not.toContain("aria-label");
     expect(buttonTag(on, "Copy URL")).not.toContain("aria-label");
     // It says the same while a change is under way, or while the database does not run, and shows a hidden character as a code.
-    expect(buttonTag(card(view(), { pending: "unlock" }).html(), "Locked")).toContain('aria-label="Unlock writes on Orders"');
-    expect(buttonTag(card(view({ live: live("stopped") })).html(), "Locked")).toContain('aria-label="Unlock writes on Orders"');
-    expect(buttonTag(card(view({}, { name: "Ord\u202eers" })).html(), "Locked")).toContain('aria-label="Unlock writes on Ord⟨U+202E⟩ers"');
-    expect(buttonTag(card(writable(MINUTE)).html(), "Writes on · 01:00")).toContain('aria-label="Lock writes on Orders"');
+    expect(buttonTag(card(view(), { pending: "unlock" }).html(), "Locked")).toContain('aria-label="Locked, unlock writes on Orders"');
+    expect(buttonTag(card(view({ live: live("stopped") })).html(), "Locked")).toContain('aria-label="Locked, unlock writes on Orders"');
+    expect(buttonTag(card(view({}, { name: "Ord\u202eers" })).html(), "Locked")).toContain('aria-label="Locked, unlock writes on Ord⟨U+202E⟩ers"');
+    expect(buttonTag(card(writable(MINUTE)).html(), "Writes on · 01:00")).toContain('aria-label="Writes on · 01:00, lock writes on Orders"');
   });
 
   it("a_prod_database_that_runs_offers_to_unlock_writes", () => {

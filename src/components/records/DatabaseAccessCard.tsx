@@ -163,7 +163,8 @@ const groupLabel = "text-xs font-medium text-muted-foreground";
  * refuses otherwise, and the card says to start the database while it is stopped or failed, rather than ask a question that could
  * not be answered. While writes are on it shows the time left and offers to lock again, and to
  * close the idle connections that opened before the unlock, which stay read-only until their apps connect again. The lock button's
- * words are the state it shows, so that a screen reader is told what pressing it does (`aria-label`) instead.
+ * words are the state it shows; its name (`aria-label`) begins with them, so that a person who says what they see reaches it, and goes
+ * on with what pressing it does.
  */
 function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
   const { live } = view;
@@ -184,13 +185,13 @@ function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
       <p className={groupLabel}>Write lock</p>
       <div className="flex flex-wrap items-center gap-2">
         {left === null ? (
-          <Button variant="outline" size="sm" aria-label={`Unlock writes on ${name}`} title="Unlock writes for 15 minutes" disabled={busy || live.phase !== "running"} onClick={actions.unlock}>
+          <Button variant="outline" size="sm" aria-label={`Locked, unlock writes on ${name}`} title="Unlock writes for 15 minutes" disabled={busy || live.phase !== "running"} onClick={actions.unlock}>
             {pending === "unlock" ? <LoaderCircle className="animate-spin" /> : <Lock />}
             Locked
           </Button>
         ) : (
           <>
-            <Button variant="destructive" size="sm" aria-label={`Lock writes on ${name}`} title="Lock writes again" disabled={busy} onClick={actions.lock}>
+            <Button variant="destructive" size="sm" aria-label={`Writes on · ${left}, lock writes on ${name}`} title="Lock writes again" disabled={busy} onClick={actions.lock}>
               {pending === "lock" ? <LoaderCircle className="animate-spin" /> : <LockOpen />}
               {`Writes on · ${left}`}
             </Button>
