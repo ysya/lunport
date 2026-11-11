@@ -11,6 +11,10 @@ export type TerminalEvent =
   | { type: "closed" }
   | { type: "bridge_error"; text: string };
 
+// Batch IPC acknowledgements while leaving room in the native 256 KiB window.
+const ACK_BATCH_BYTES = 64 * 1024;
+const ACK_DELAY_MS = 8;
+
 /** One native broker session. Output stays binary, outside React state. */
 export class EmbeddedTerminal {
   readonly id = crypto.randomUUID();
@@ -21,6 +25,7 @@ export class EmbeddedTerminal {
   private received = 0;
   private acknowledged = 0;
   private acking = false;
+  private ackTimer: ReturnType<typeof setTimeout> | null = null;
   private opening: Promise<void> | null = null;
   private closing: Promise<void> | null = null;
   private output = new Channel<ArrayBuffer>();
@@ -34,7 +39,11 @@ export class EmbeddedTerminal {
         if (packet[0] === 0) {
           this.writeOutput(packet.subarray(1));
           this.received += packet.length - 1;
-          void this.acknowledge();
+          if (this.received - this.acknowledged >= ACK_BATCH_BYTES) {
+            void this.acknowledge();
+          } else if (!this.acking && this.ackTimer === null) {
+            this.ackTimer = setTimeout(() => { this.ackTimer = null; void this.acknowledge(); }, ACK_DELAY_MS);
+          }
         } else if (packet[0] === 1) {
           const event = JSON.parse(new TextDecoder().decode(packet.subarray(1))) as TerminalEvent;
           if (event.type === "opened") {
@@ -60,6 +69,7 @@ export class EmbeddedTerminal {
   }
   private async acknowledge() {
     if (this.acking || this.disposed) return;
+    if (this.ackTimer !== null) { clearTimeout(this.ackTimer); this.ackTimer = null; }
     this.acking = true;
     try {
       while (!this.disposed && this.acknowledged < this.received) {
@@ -99,6 +109,7 @@ export class EmbeddedTerminal {
     if (this.closing) return this.closing;
     this.disposed = true;
     this.opened = false;
+    if (this.ackTimer !== null) { clearTimeout(this.ackTimer); this.ackTimer = null; }
     const opening = this.opening;
     const stop = () => tauriInvoke<void>("terminal_close", { id: this.id }).catch(() => {});
     this.closing = (async () => {

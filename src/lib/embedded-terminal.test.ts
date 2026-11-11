@@ -9,6 +9,33 @@ const open = () => event({ type: "opened", session_id: "broker-session" });
 beforeEach(() => { mocks.invoke.mockReset().mockResolvedValue(undefined); mocks.channels.length = 0; });
 
 describe("embedded SSH transport", () => {
+  it("acknowledges short output bursts together while writing them immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      const output = vi.fn();
+      const terminal = new EmbeddedTerminal(output, vi.fn());
+      await terminal.start({ id: "host" }, 80, 24); open();
+      packet(0, Uint8Array.of(65)); packet(0, Uint8Array.of(66)); packet(0, Uint8Array.of(67));
+      expect(output.mock.calls.map(([bytes]) => bytes[0])).toEqual([65, 66, 67]);
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === "terminal_ack")).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === "terminal_ack")).toEqual([
+        ["terminal_ack", { id: terminal.id, total: 3 }],
+      ]);
+      terminal.close();
+    } finally { vi.useRealTimers(); }
+  });
+  it("acknowledges sustained output before the native window fills", async () => {
+    vi.useFakeTimers();
+    try {
+      const terminal = new EmbeddedTerminal(vi.fn(), vi.fn());
+      await terminal.start({ id: "host" }, 80, 24); open();
+      packet(0, new Uint8Array(32 * 1024)); packet(0, new Uint8Array(32 * 1024));
+      await Promise.resolve();
+      expect(mocks.invoke).toHaveBeenCalledWith("terminal_ack", { id: terminal.id, total: 64 * 1024 });
+      terminal.close();
+    } finally { vi.useRealTimers(); }
+  });
   it("stops accepting input immediately when the broker reports disconnection", async () => {
     const terminal = new EmbeddedTerminal(vi.fn(), vi.fn());
     await terminal.start({ alias: "legacy-web" }, 80, 24); open();

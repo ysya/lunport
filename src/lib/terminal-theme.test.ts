@@ -3,6 +3,21 @@ import { COLOR_THEMES } from "./color-themes";
 import { terminalColors } from "./terminal-theme";
 import { clampTerminalFontSize, DEFAULT_TERMINAL_FONT_SIZE } from "./settings-logic";
 describe("terminal appearance", () => {
+  it("uses each light theme's own ANSI colors in terminal applications", () => {
+    const reds = {
+      lunport: 0xb42332,
+      nord: 0xa3414b,
+      dracula: 0xcb3a2a,
+      catppuccin: 0xd20f39,
+      "tokyo-night": 0xf52a65,
+      solarized: 0xdc322f,
+    } as const;
+    for (const [theme, red] of Object.entries(reds)) {
+      expect(terminalColors(theme, "light").palette[1]).toBe(red);
+    }
+    expect(terminalColors("dracula", "light").palette[4]).toBe(0x644ac9);
+    expect(terminalColors("catppuccin", "light").palette[7]).toBe(0xacb0be);
+  });
   it("uses each app theme's light and dark colors with a complete 24-bit ANSI palette", () => {
     for (const theme of COLOR_THEMES) for (const mode of ["light", "dark"] as const) {
       const colors = terminalColors(theme.id, mode);
