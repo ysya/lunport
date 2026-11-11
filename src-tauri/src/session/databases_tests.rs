@@ -12,7 +12,7 @@ use crate::session::database_ports::WRITABLE_WINDOW;
 use crate::session::transports::pam_status;
 use crate::sync::{
     databases::{
-        tests::{database, state, through_host},
+        tests::{database, state, through_host, ROUTE_HOST},
         DatabaseEnvironment,
     },
     record_runtime, records_v3,
@@ -825,6 +825,16 @@ fn a_grant_is_neither_read_nor_requested_for_a_database_that_is_not_saved() {
     // Another database's identity finds nothing either.
     assert_eq!(saved(&library_of(guarded()), ANALYTICS), Err(GONE.to_string()));
     assert_eq!(saved(&library_of(guarded()), ORDERS), Ok(guarded()));
+}
+
+#[test]
+fn the_grant_of_a_databases_host_is_asked_for_only_when_the_database_goes_through_one() {
+    // Through a host of the library: that host is the one asked about.
+    assert_eq!(route_host(&library_of(through_host(ORDERS)), ORDERS), Ok(ROUTE_HOST.to_string()));
+    // On its public address there is no host, and a database that is not saved has none to name: refused before anybody is asked.
+    assert_eq!(route_host(&library_of(database(ORDERS)), ORDERS), Err("This database does not connect through a host.".to_string()));
+    assert_eq!(route_host(&state(), ORDERS), Err(GONE.to_string()));
+    assert_eq!(route_host(&library_of(through_host(ORDERS)), ANALYTICS), Err(GONE.to_string()));
 }
 
 // ---- Listing instances ----

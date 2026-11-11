@@ -1,6 +1,7 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import { tauriInvoke } from "./ipc";
-import { grantHeld, isProjectId, pamStatusOptions, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
+import { firstHop, grantHeld, isProjectId, pamStatusOptions, transportFor, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
+import type { RecordOverview } from "./records";
 import { revealHidden } from "./reveal-hidden";
 import { errorMessage } from "./utils";
 import type { SavedDatabase } from "@/bindings/SavedDatabase";
@@ -26,6 +27,8 @@ export const startDatabase = (id: string) => tauriInvoke<void>("databases_start"
 export const stopDatabase = (id: string) => tauriInvoke<void>("databases_stop", { id });
 /** Opens the Request-a-grant window for the grant the database needs and answers when the grant is active, or fails with the sentence of why not. */
 export const requestDatabaseGrant = (id: string) => tauriInvoke<void>("databases_request_grant", { id });
+/** Opens the Request-a-grant window for the grant the host the database is reached through needs, and answers when the grant is active, or fails with the sentence of why not. */
+export const requestRouteGrant = (id: string) => tauriInvoke<void>("databases_request_route_grant", { id });
 /** The password apps sign in to the database's local port with; the first ask makes it, so it is there before the database starts. */
 export const databasePassword = (id: string) => tauriInvoke<string>("databases_port_password", { id });
 /** Replaces the port's password and answers the new one. Connections that are open go on; new ones need it. */
@@ -112,6 +115,24 @@ export const databasePamStatusQuery = (id: string) =>
     queryFn: () => tauriInvoke<PamStatusView>("databases_pam_status", { id }),
     ...pamStatusOptions,
   });
+
+/** The grant the host a database is reached through asks for: the host to read it for, the alias of the host the database goes through, and the grant check. */
+export type RouteHostGrant = { hostId: string; alias: string; pam: PamCheck };
+
+/**
+ * The grant the host `database` is reached through needs. A connection to a host applies the Google Cloud IAP route of its first hop only
+ * (`firstHop`), so the grant is that route's grant check and is read for that hop, while the alias is the one of the host the database
+ * names. None for a database on its public address, for a host this computer has not got (or whose jump hosts go round in a circle),
+ * and for a first hop with no route or a route with no grant check.
+ */
+export function routeHostGrant(overview: RecordOverview, database: SavedDatabase): RouteHostGrant | null {
+  const via = database.network === "private" ? database.via_host : undefined;
+  const host = via ? overview.hosts.find((candidate) => candidate.id === via) : undefined;
+  if (!host) return null;
+  const hostId = firstHop(overview, host.id);
+  const pam = transportFor(overview, hostId)?.kind.pam;
+  return hostId && pam ? { hostId, alias: host.payload.alias, pam } : null;
+}
 
 /** How a phase reads in the Status column. */
 export const databasePhases: Record<DatabasePhase, string> = { stopped: "Stopped", starting: "Starting", running: "Running", stopping: "Stopping", error: "Failed" };

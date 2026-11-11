@@ -6,8 +6,9 @@ use super::connect::CancelToken;
 use super::database_ports::{effective_environment, ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
 use super::auth::label;
+use super::auth_window::{NativeOwner, TauriAuthSurface};
 use super::pam::checked_account;
-use super::protocol::AiAsker;
+use super::protocol::{AiAsker, HostQuery};
 use super::transports::{pam_status_for, PamStatusView};
 use super::tunnels::{main_only, snapshot};
 use crate::gcp::cloudsql::{InstanceSummary, SqlAdmin};
@@ -32,6 +33,8 @@ use zeroize::Zeroizing;
 const GONE: &str = "The saved database no longer exists.";
 /// What a start is refused with when the database is no longer saved as the request that starts it read it.
 const CHANGED: &str = "The database changed while the request was open; read it again and retry.";
+/// What a request for the grant of a database's host is refused with when the database does not connect through one.
+const NO_ROUTE_HOST: &str = "This database does not connect through a host.";
 
 /// Where the local port of a database stands on this device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -216,6 +219,12 @@ fn saved_or_running(state: &SyncStateV3, ports: &DatabasePorts, id: &str) -> Res
 /// The saved database `id` as the library holds it, or the sentence that it is not there.
 fn saved(state: &SyncStateV3, id: &str) -> Result<SavedDatabase, String> {
     databases::view(state).into_iter().map(|row| row.database).find(|database| database.id == id).ok_or_else(|| GONE.to_string())
+}
+
+/// The id of the library host the saved database `id` is reached through, or the sentence of why there is none: the database is not
+/// saved, or it connects to its instance over the public address.
+fn route_host(state: &SyncStateV3, id: &str) -> Result<String, String> {
+    saved(state, id)?.route_host().map(str::to_owned).ok_or_else(|| NO_ROUTE_HOST.to_string())
 }
 
 /// The grant state of the saved database `id` as the page's grant line shows it, read the way a host's route is (`pam_status_for`): for
@@ -450,6 +459,30 @@ pub async fn databases_request_grant(app: tauri::AppHandle, window: tauri::Webvi
         let broker = started_broker(&app)?;
         let database = saved(&snapshot(&app)?, &id)?;
         CloudSqlUpstream::for_app(&app, &broker).request_grant(&database, &CancelToken::default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Asks for the grant the host the saved database is reached through needs, ahead of Start: as a connection to that host does when none
+/// is held (the Request-a-grant window, through the gates hosts use), and answers when the grant is active or when none is needed, or with
+/// the sentence of why not. A database that connects through no host is refused. It blocks for as long as the person takes to answer, and
+/// then for the request, on a blocking thread.
+#[tauri::command]
+pub async fn databases_request_route_grant(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = route_host(&snapshot(&app)?, &id)?;
+        let broker = started_broker(&app)?;
+        let cancel = CancelToken::default();
+        let owner = NativeOwner {
+            ai: None,
+            hub: Arc::clone(&app.state::<AppState>().session.auth_questions),
+            surface: Arc::new(TauriAuthSurface { app: app.clone() }),
+            request_id: format!("database-route-grant-{id}"),
+            cancel: cancel.clone(),
+        };
+        broker.connector().request_route_grant(&HostQuery::Id(host), &owner, &cancel).map_err(|failure| failure.text)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -431,6 +431,7 @@ fn run_app(host: bool, start_hidden: bool) {
             session::databases::databases_reconnect_locked,
             session::databases::databases_pam_status,
             session::databases::databases_request_grant,
+            session::databases::databases_request_route_grant,
             session::databases::databases_list_instances,
             os_auth::os_unlock_method,
             session::transports::transports_oslogin_profile,

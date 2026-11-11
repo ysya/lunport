@@ -13,27 +13,10 @@ import { revealHidden } from "@/lib/reveal-hidden";
 import { errorMessage } from "@/lib/utils";
 import type { RecordOverview } from "@/lib/records";
 import { useNow } from "@/lib/use-now";
-import { grantHeld, pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";
+import { firstHop, grantHeld, pamStatusQuery, transportFor, tunnelGrantLine, type PamCheck } from "@/lib/transports";
 import { listTunnels, saveTunnel, deleteTunnel, startTunnel, stopTunnel, tunnelsKey, tunnelKinds, tunnelBusy, tunnelRoute, newTunnel, type TunnelRule, type TunnelView, type ForwardKind } from "@/lib/tunnels";
 
 const phases = { stopped: "Stopped", connecting: "Connecting", running: "Running", stopping: "Stopping", error: "Failed" };
-
-/**
- * The host a connection to `hostId` dials first, as the backend chains jump hosts (`record_repository::route_indices`): the host
- * itself, or else its first jump host's own first hop. It is the only hop an IAP route applies to. `null` when the chain cannot be
- * followed: a host this computer has not got, or jump hosts that go round in a circle (the backend refuses both).
- */
-function firstHop(overview: RecordOverview, hostId: string): string | null {
-  const seen = new Set<string>();
-  let host = overview.hosts.find((candidate) => candidate.id === hostId);
-  while (host && !seen.has(host.id)) {
-    seen.add(host.id);
-    const jump: string | undefined = host.effective_payload.jump[0];
-    if (jump === undefined) return host.id;
-    host = overview.hosts.find((candidate) => candidate.id === jump);
-  }
-  return null;
-}
 
 /**
  * The grant a tunnel's first hop needs, on the tunnel's row: read when

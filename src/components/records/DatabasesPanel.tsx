@@ -1,6 +1,6 @@
 import "./databases.css";
 import { Fragment, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,7 @@ import { cn, errorMessage } from "@/lib/utils";
 import type { RecordOverview } from "@/lib/records";
 import { useLastNonNull } from "@/lib/use-last-non-null";
 import { useNow } from "@/lib/use-now";
-import { gcloudAccountsQuery, type PamCheck } from "@/lib/transports";
+import { gcloudAccountsQuery, pamStatusQuery, type PamCheck, type PamStatusView } from "@/lib/transports";
 import {
   connectionsLine,
   databaseBusy,
@@ -31,12 +31,15 @@ import {
   newDatabase,
   otherDatabases,
   requestDatabaseGrant,
+  requestRouteGrant,
+  routeHostGrant,
   runDatabaseAction,
   saveDatabase,
   startDatabase,
   stopDatabase,
   type DatabaseDraft,
   type DatabaseView,
+  type RouteHostGrant,
   type SavedDatabase,
 } from "@/lib/databases";
 import { DatabaseAccessCard, WritesOnMarker } from "./DatabaseAccessCard";
@@ -44,25 +47,49 @@ import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
 
 /**
- * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
- * Drawn only for a database with a grant check. A grant that is missing is in the warning color and comes with Request grant; one that
- * ends within five minutes is in the warning color too, and says that a new one can be requested when it ends, since PAM takes no request
- * while a grant is active. A read that fails shows its error in place of whatever an earlier read found, as a host's details pane does.
+ * A grant line of a database's row, from the grant `read` found: the line itself, in the warning color when the grant is missing or
+ * about to end, Request grant beside it when one can be requested, and under it what else it has to say (`databaseGrantLine`). `led`
+ * leads the line, and `subject` is what the button names. A read that fails shows its error in place of whatever an earlier read found,
+ * as a host's details pane does.
  */
-function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: string; pam: PamCheck; busy: boolean; request: () => void }) {
+function GrantLine({ read, pam, subject, led = "", busy, request }: { read: UseQueryResult<PamStatusView>; pam: PamCheck; subject: string; led?: string; busy: boolean; request: () => void }) {
   const now = useNow(1000);
-  const read = useQuery(databasePamStatusQuery(id));
   const status = read.isError ? null : (read.data ?? null);
   const grant = status ? databaseGrantLine(status, pam, now) : null;
-  const line = revealHidden(grant ? grant.text : read.isError ? errorMessage(read.error) : "Checking the grant…");
+  const line = revealHidden(led + (grant ? grant.text : read.isError ? errorMessage(read.error) : "Checking the grant…"));
   const tone = grant?.tone === "held" ? "text-primary" : grant?.tone === "warning" ? "text-warning" : "text-muted-foreground";
   return <>
     <span className={`mt-1 flex min-w-0 items-center gap-1 text-xs ${tone}`}>
       <LockKeyhole className="size-3 shrink-0" aria-hidden="true" /><span className="truncate" title={line}>{line}</span>
-      {grant?.request && <Button size="xs" variant="outline" className="ml-1 shrink-0 text-foreground" aria-label={`Request grant for ${revealHidden(name)}`} disabled={busy} onClick={request}>Request grant</Button>}
+      {grant?.request && <Button size="xs" variant="outline" className="ml-1 shrink-0 text-foreground" aria-label={`Request grant for ${revealHidden(subject)}`} disabled={busy} onClick={request}>Request grant</Button>}
     </span>
     {grant?.note && <span className="mt-0.5 block text-xs text-muted-foreground">{grant.note}</span>}
   </>;
+}
+
+/**
+ * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
+ * Drawn only for a database with a grant check. A grant that is missing is in the warning color and comes with Request grant; one that
+ * ends within five minutes is in the warning color too, and says that a new one can be requested when it ends, since PAM takes no request
+ * while a grant is active.
+ */
+function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: string; pam: PamCheck; busy: boolean; request: () => void }) {
+  const read = useQuery(databasePamStatusQuery(id));
+  return <GrantLine read={read} pam={pam} subject={name} busy={busy} request={request} />;
+}
+
+/** The grant of the host a database is reached through, with the request that its button makes. */
+type RouteGrantRequest = RouteHostGrant & { request: () => void };
+
+/**
+ * The grant the host a database is reached through needs, on its row beside the database's own and read the same way, through the
+ * `pamStatusQuery` of the host's first hop: the host's details pane and the tunnels through it share that read. It says what the
+ * database's line does, led by the host's alias, and comes with a Request grant of its own, since the host's grant is not the database's.
+ * Drawn only for a host whose first hop has a route with a grant check (`routeHostGrant`).
+ */
+function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & { busy: boolean }) {
+  const read = useQuery(pamStatusQuery(hostId));
+  return <GrantLine read={read} pam={pam} subject={alias} led={`${alias}: `} busy={busy} request={request} />;
 }
 
 /**
@@ -73,9 +100,11 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
  * the row; the row's bottom line is left out while they are open, so that the two read as one. A prod database whose writable window is
  * open says so in its Status, with the time left, whether its details are open or not. A database that runs here as it was saved before
  * another device changed it says that its port applies the change once it is started again, and its badge and its lock follow the
- * environment its port locks by (`row.environment`), which stays prod until then. No hooks: exported for the tests.
+ * environment its port locks by (`row.environment`), which stays prod until then. A database reached through a host whose first hop's
+ * route asks for a grant has a `routeGrant`, which the row draws as a grant line of its own under the database's. No hooks: exported for
+ * the tests.
  */
-export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, details }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void } }) {
+export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, details, routeGrant }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void }; routeGrant?: RouteGrantRequest | null }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
   const route = revealHidden(databaseRoute(database));
@@ -96,6 +125,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
         <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
         {row.changed && <span className="mt-1 block text-xs text-warning">The database changed on another device. Stop and start it again to apply it.</span>}
         {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
+        {routeGrant && <RouteGrant {...routeGrant} busy={busy} />}
       </>}
       <span className="database-address-compact mt-1 truncate font-mono text-xs text-muted-foreground" title={address}>{address}</span>
     </td>
@@ -200,6 +230,11 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     try { await requestDatabaseGrant(id); }
     finally { await client.invalidateQueries({ queryKey: databasePamStatusKey(id) }); }
   });
+  // The same for the grant of the host the database is reached through, which its first hop's query holds.
+  const requestHostGrant = (id: string, hostId: string) => void action(async () => {
+    try { await requestRouteGrant(id); }
+    finally { await client.invalidateQueries({ queryKey: pamStatusQuery(hostId).queryKey }); }
+  });
   const toggleDetails = (id: string) => setOpened((current) => {
     const next = new Set(current);
     if (!next.delete(id)) next.add(id);
@@ -242,10 +277,12 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
           // A database that is not offered on a port, or whose record is gone, has no details to give; if it loses its port while open, they close.
           const offered = hasConnectionDetails(row);
           const open = offered && opened.has(id);
+          const via = routeHostGrant(overview, row.database);
           return <Fragment key={id}>
             <DatabaseRow row={row} busy={busy}
               toggle={() => toggle(row)}
               requestGrant={() => requestGrant(id)} ask={() => setDeleting(row)} edit={() => edit(row)}
+              routeGrant={via && { ...via, request: () => requestHostGrant(id, via.hostId) }}
               details={offered ? { open, toggle: () => toggleDetails(id) } : undefined} />
             {open && <tr className="border-b last:border-0"><td colSpan={4} className="px-4 pb-4"><div className="database-details"><DatabaseAccess row={row} /></div></td></tr>}
           </Fragment>;

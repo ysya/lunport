@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stubBackend } from "./test-ipc";
 import { pamStatusOptions, pamStatusQuery, type PamStatusView } from "./transports";
+import { hostPayload, hostTransport, hostView, recordOverview } from "@/components/records/fixtures";
 import {
   GRANT_ENDING_SOON_MS,
   connectionName,
@@ -23,7 +24,9 @@ import {
   parseConnectionName,
   reconnectLockedConnections,
   requestDatabaseGrant,
+  requestRouteGrant,
   rotateDatabasePassword,
+  routeHostGrant,
   runDatabaseAction,
   saveDatabase,
   startDatabase,
@@ -186,10 +189,12 @@ describe("the Databases page's reads and actions", () => {
     await startDatabase(ORDERS.id);
     await stopDatabase(ORDERS.id);
     await requestDatabaseGrant(ORDERS.id);
+    await requestRouteGrant(ORDERS.id);
     expect(calls).toEqual([
       ["databases_start", { id: ORDERS.id }],
       ["databases_stop", { id: ORDERS.id }],
       ["databases_request_grant", { id: ORDERS.id }],
+      ["databases_request_route_grant", { id: ORDERS.id }],
     ]);
   });
 
@@ -316,6 +321,44 @@ describe("the grant line of a database", () => {
     const refused = "Privileged Access Manager refused the request: quota exceeded.";
     expect(line({ state: "error", entitlement: null, message: refused })).toEqual({ text: refused, tone: "plain", request: false });
     expect(line({ state: "error", entitlement: null, message: null }).text).toBe("The grant could not be checked.");
+  });
+});
+
+describe("the grant of the host a database is reached through", () => {
+  const [WEB, JUMP] = ["00000000000000b1", "00000000000000b2"];
+  const GRANT = { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null };
+  /** A saved host that connects through the hosts of `jump`. */
+  const host = (id: string, alias: string, jump: string[] = []) => hostView({ id, payload: hostPayload({ alias, jump }) });
+  /** `ORDERS` over its private address, through the library host `via`. */
+  const through = (via: string): SavedDatabase => ({ ...ORDERS, network: "private", via_host: via });
+
+  it("is_the_route_of_the_hosts_first_hop_named_by_the_host", () => {
+    // The host itself holds the route that asks for the grant.
+    const direct = recordOverview({ hosts: [host(WEB, "web-1")], transports: [hostTransport({ pam: GRANT }, WEB)] });
+    expect(routeHostGrant(direct, through(WEB))).toEqual({ hostId: WEB, alias: "web-1", pam: GRANT });
+    // A host behind a jump host is reached through the jump host's route: the grant is read for it, the line names the host.
+    const behind = recordOverview({ hosts: [host(WEB, "web-1", [JUMP]), host(JUMP, "jump-1")], transports: [hostTransport({ pam: GRANT }, JUMP)] });
+    expect(routeHostGrant(behind, through(WEB))).toEqual({ hostId: JUMP, alias: "web-1", pam: GRANT });
+  });
+
+  it("is_none_for_a_database_on_its_public_address", () => {
+    const overview = recordOverview({ hosts: [host(WEB, "web-1")], transports: [hostTransport({ pam: GRANT }, WEB)] });
+    expect(routeHostGrant(overview, ORDERS)).toBeNull();
+    // A record that names a host while public, or private without one, goes through none.
+    expect(routeHostGrant(overview, { ...ORDERS, via_host: WEB })).toBeNull();
+    expect(routeHostGrant(overview, { ...ORDERS, network: "private" })).toBeNull();
+  });
+
+  it("is_none_when_the_host_is_missing_or_its_first_hop_asks_for_no_grant", () => {
+    const route = (pam: typeof GRANT | null) => recordOverview({ hosts: [host(WEB, "web-1")], transports: [hostTransport({ pam }, WEB)] });
+    expect(routeHostGrant(route(null), through(WEB))).toBeNull();
+    expect(routeHostGrant(recordOverview({ hosts: [host(WEB, "web-1")], transports: [] }), through(WEB))).toBeNull();
+    expect(routeHostGrant(recordOverview({ hosts: [], transports: [hostTransport({ pam: GRANT }, WEB)] }), through(WEB))).toBeNull();
+    // Jump hosts that go round in a circle have no first hop; the route of a host that is not the first hop is not the one that applies.
+    const loop = recordOverview({ hosts: [host(WEB, "web-1", [JUMP]), host(JUMP, "jump-1", [WEB])], transports: [hostTransport({ pam: GRANT }, WEB)] });
+    expect(routeHostGrant(loop, through(WEB))).toBeNull();
+    const notFirst = recordOverview({ hosts: [host(WEB, "web-1", [JUMP]), host(JUMP, "jump-1")], transports: [hostTransport({ pam: GRANT }, WEB)] });
+    expect(routeHostGrant(notFirst, through(WEB))).toBeNull();
   });
 });
 

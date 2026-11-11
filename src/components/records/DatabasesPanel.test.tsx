@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatabaseAccess, DatabaseRow, DatabasesPanel, StopDatabaseDialog } from "./DatabasesPanel";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
-import { recordOverview } from "./fixtures";
+import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
 import { DISABLED, buttonTag, buttonsIn, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { Dialog } from "@/components/ui/dialog";
 import { AlertDialog } from "@/components/ui/alert-dialog";
@@ -13,8 +13,9 @@ import { PageHeader } from "@/components/app/PageHeader";
 import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
 import { useNow } from "@/lib/use-now";
+import type { RecordOverview } from "@/lib/records";
 import { databasesKey, type DatabasePhase, type DatabaseView, type SavedDatabase } from "@/lib/databases";
-import { gcloudAccountsKey, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
+import { gcloudAccountsKey, pamStatusQuery, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
 
 const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false, collapsedRecordGroups: [] as string[], toggleRecordGroup: () => {} }));
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
@@ -363,6 +364,185 @@ describe("the Databases page", () => {
     expect(invoke.mock.calls.map(([command]) => command).filter((command) => /password/.test(command))).toEqual([]);
     const cached = JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data));
     expect(cached).not.toMatch(/password/i);
+  });
+});
+
+describe("the grant of the host a database is reached through", () => {
+  const [WEB, JUMP] = ["00000000000000b1", "00000000000000b2"];
+  const ROUTE_PAM = { entitlements: ["jump-access"], location: "global", duration_secs: 1800, justification: null };
+  const none = status({ state: "none", entitlement: null, active_until_ms: null });
+  const host = (id: string, alias: string, jump: string[] = []) => hostView({ id, payload: hostPayload({ alias, jump }) });
+  /** The library with the host `web-1`, whose route asks for a grant. */
+  const library = (patch: Partial<RecordOverview> = {}) => recordOverview({ hosts: [host(WEB, "web-1")], transports: [hostTransport({ pam: ROUTE_PAM }, WEB)], ...patch });
+  /** Orders over its private address through `web-1`; with a grant check of its own unless `pam` is cleared. */
+  const through = (database: Partial<SavedDatabase> = {}) => row({}, { network: "private", via_host: WEB, ...database });
+  /** The grant lines of the page: the classes of each and the words it says. */
+  const grantLines = (html: string) =>
+    [...html.matchAll(/<span class="(mt-1 flex[^"]*)"[^>]*><svg[\s\S]*?<\/svg><span class="truncate"[^>]*>([^<]*)<\/span>/g)].map(([, classes, words]) => ({ classes: new Set(classes.split(/\s+/)), words }));
+
+  /**
+   * The panel once the grants are answered, a route host's too: `hostGrant` answers the grant of the host's first hop, `databaseGrant`
+   * the database's own. A server render never reads them, so this draws the panel once, which makes the queries its rows hold, runs
+   * those through the real fetcher against the mocked commands, and draws it again with what they found.
+   */
+  async function renderThroughHost(rows: DatabaseView[], overview: RecordOverview, hostGrant: PamStatusView | Error, databaseGrant: PamStatusView | Error = status({})) {
+    invoke.mockImplementation(async (command: string) => {
+      const answer = command === "databases_pam_status" ? databaseGrant : command === "transports_pam_status" ? hostGrant : new Error(`unexpected command ${command}`);
+      if (answer instanceof Error) throw answer;
+      return answer;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
+    client.setQueryData(databasesKey, rows);
+    const draw = () => renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} /></QueryClientProvider>);
+    draw();
+    await Promise.all(client.getQueryCache().findAll({ queryKey: ["gcp", "pam-status"] }).map((query) => query.fetch().catch(() => undefined)));
+    return { client, html: draw() };
+  }
+
+  it("shows_the_hosts_grant_beside_the_databases_own_with_a_request_of_its_own", async () => {
+    const { html } = await renderThroughHost([through()], library(), none);
+    // The database's own line is as it was; the host's comes second, led by the host's alias, in the warning color.
+    const [own, route, ...more] = grantLines(html);
+    expect(more).toEqual([]);
+    expect(own.words).toBe("prod-operate · Active until 10:30");
+    expect(own.classes.has("text-primary")).toBe(true);
+    expect(route.words).toBe("web-1: Needs a grant: jump-access");
+    expect(route.classes.has("text-warning")).toBe(true);
+    // The host's button is named for the host; the database's own grant is held, so that line offers none.
+    expect(iconButton(html, "Request grant for web-1")).not.toContain(DISABLED);
+    expect(html.match(/>Request grant<\/button>/g)).toHaveLength(1);
+    // The grant is read for the host, once, and the database's own is read as before.
+    expect(invoke.mock.calls.map(([command, args]) => [command, args])).toEqual([
+      ["databases_pam_status", { id: ORDERS.id }],
+      ["transports_pam_status", { hostId: WEB }],
+    ]);
+  });
+
+  it("shows_the_hosts_grant_alone_for_a_database_without_a_grant_check", async () => {
+    const { html } = await renderThroughHost([through({ pam: null })], library(), none);
+    expect(grantLines(html).map((line) => line.words)).toEqual(["web-1: Needs a grant: jump-access"]);
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transports_pam_status"]);
+  });
+
+  it("each_line_offers_its_own_request", async () => {
+    const { html } = await renderThroughHost([through()], library(), none, none);
+    expect(grantLines(html).map((line) => line.words)).toEqual(["Needs a grant: prod-operate, prod-admin", "web-1: Needs a grant: jump-access"]);
+    expect(iconButton(html, "Request grant for Orders")).not.toContain(DISABLED);
+    expect(iconButton(html, "Request grant for web-1")).not.toContain(DISABLED);
+  });
+
+  it("a_database_on_its_public_address_shows_no_host_line", async () => {
+    const { client, html } = await renderThroughHost([row()], library(), none);
+    expect(grantLines(html).map((line) => line.words)).toEqual(["prod-operate · Active until 10:30"]);
+    expect(text(html)).not.toContain("web-1");
+    expect(client.getQueryCache().findAll({ queryKey: ["gcp", "pam-status", WEB] })).toHaveLength(0);
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["databases_pam_status"]);
+  });
+
+  it("reads_the_grant_of_the_hosts_first_hop_and_names_the_host_the_database_goes_through", async () => {
+    const behind = library({ hosts: [host(WEB, "web-1", [JUMP]), host(JUMP, "jump-1")], transports: [hostTransport({ pam: ROUTE_PAM }, JUMP)] });
+    const { html } = await renderThroughHost([through({ pam: null })], behind, none);
+    expect(grantLines(html).map((line) => line.words)).toEqual(["web-1: Needs a grant: jump-access"]);
+    expect(iconButton(html, "Request grant for web-1")).not.toContain(DISABLED);
+    expect(invoke.mock.calls).toEqual([["transports_pam_status", { hostId: JUMP }]]);
+  });
+
+  it("shows_no_host_line_for_a_host_whose_first_hop_asks_for_no_grant_or_that_is_not_in_the_library", async () => {
+    const without = { transports: [hostTransport({ pam: null }, WEB)] };
+    for (const overview of [library(without), library({ transports: [] }), library({ hosts: [] }), library({ hosts: [host(WEB, "web-1", [WEB])] })]) {
+      invoke.mockReset();
+      const { html } = await renderThroughHost([through({ pam: null })], overview, none);
+      expect(grantLines(html)).toEqual([]);
+      expect(text(html)).not.toContain("web-1");
+      expect(invoke).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reads_as_the_databases_own_line_does", async () => {
+    const lineFor = async (answer: PamStatusView | Error) => {
+      const { html } = await renderThroughHost([through({ pam: null })], library(), answer);
+      return { html, line: grantLines(html)[0] };
+    };
+    // Held with time to spare: the primary color and no request.
+    const held = await lineFor(status({ entitlement: "jump-access", active_until_ms: AT + 30 * MINUTE }));
+    expect(held.line.words).toBe("web-1: jump-access · Active until 10:30");
+    expect(held.line.classes.has("text-primary")).toBe(true);
+    expect(held.html).not.toContain("Request grant");
+    // Ending within five minutes: the warning color, the minutes, the note, and no request.
+    const ending = await lineFor(status({ entitlement: "jump-access", active_until_ms: AT + 4 * MINUTE }));
+    expect(ending.line.words).toBe("web-1: Grant ends in 4 min");
+    expect(ending.line.classes.has("text-warning")).toBe(true);
+    expect(text(ending.html)).toContain("You can request a new grant when this one ends.");
+    expect(ending.html).not.toContain("Request grant");
+    // On its way, waiting for its approver, or could not be read: no request.
+    expect((await lineFor(status({ state: "activating", entitlement: "jump-access", active_until_ms: null }))).line.words).toBe("web-1: jump-access · Activating…");
+    const awaiting = await lineFor(status({ state: "approval_awaited", entitlement: "jump-access", active_until_ms: null }));
+    expect(awaiting.line.words).toBe("web-1: jump-access · Awaiting approval");
+    expect(awaiting.html).not.toContain("Request grant");
+    const refusal = "Privileged Access Manager refused the request: quota exceeded.";
+    const refused = await lineFor(status({ state: "error", entitlement: null, active_until_ms: null, message: refusal }));
+    expect(refused.line.words).toBe(`web-1: ${refusal}`);
+    expect(refused.html).not.toContain("Request grant");
+    const failed = await lineFor(new Error("Google did not answer."));
+    expect(failed.line.words).toBe("web-1: Google did not answer.");
+    expect(failed.html).not.toContain("Request grant");
+  });
+
+  it("says_the_grant_is_being_checked_until_it_is_read", () => {
+    const html = render([through({ pam: null })], library());
+    expect(grantLines(html).map((line) => line.words)).toEqual(["web-1: Checking the grant…"]);
+    expect(html).not.toContain("Request grant");
+  });
+
+  it("holds_the_host_button_back_while_a_change_is_under_way_and_shows_hidden_characters_as_codes", () => {
+    // The grant was read already, so that a server render draws it.
+    const client = new QueryClient();
+    client.setQueryData(pamStatusQuery(WEB).queryKey, none);
+    const drawn = (busy: boolean) => renderToStaticMarkup(<QueryClientProvider client={client}><table><tbody>{DatabaseRow({
+      row: through({ pam: null }), busy, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(),
+      routeGrant: { hostId: WEB, alias: "web\u202e-1", pam: ROUTE_PAM, request: vi.fn() },
+    })}</tbody></table></QueryClientProvider>);
+    // The code's plus sign is escaped: the label is matched as a pattern.
+    const button = (busy: boolean) => iconButton(drawn(busy), "Request grant for web⟨U\\+202E⟩-1");
+    expect(text(drawn(false))).toContain("web⟨U+202E⟩-1: Needs a grant: jump-access");
+    expect(button(false)).not.toContain(DISABLED);
+    expect(button(true)).toContain(DISABLED);
+    expect(drawn(false)).not.toContain("\u202e");
+  });
+
+  it("a_row_that_is_only_listed_to_be_stopped_shows_no_host_line", async () => {
+    const gone = row({ live: live("running"), removed: true, blocked: true, synced: false }, { network: "private", via_host: WEB });
+    const { html } = await renderThroughHost([gone], library(), none);
+    expect(grantLines(html)).toEqual([]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("its_button_asks_for_the_route_grant_of_the_database_and_reads_the_hosts_grant_again", async () => {
+    invoke.mockResolvedValue(undefined);
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, [through()]);
+    const tree = renderHook(client, () => DatabasesPanel({ overview: library() }));
+    const props = elementsOf(tree, DatabaseRow)[0].props as unknown as { routeGrant: { hostId: string; alias: string; request: () => void } | null; requestGrant: () => void };
+    expect(props.routeGrant).toMatchObject({ hostId: WEB, alias: "web-1" });
+    const invalidated = vi.spyOn(client, "invalidateQueries");
+    props.routeGrant!.request();
+    // It asks for the host's grant, not the database's own.
+    expect(invoke.mock.calls).toEqual([["databases_request_route_grant", { id: ORDERS.id }]]);
+    await vi.waitFor(() => expect(invalidated).toHaveBeenCalledWith({ queryKey: ["gcp", "pam-status", WEB] }));
+    expect(invoke.mock.calls.map(([command]) => command)).not.toContain("databases_request_grant");
+  });
+
+  it("a_request_the_backend_refuses_is_said_on_the_page_and_the_hosts_grant_is_read_again", async () => {
+    const sentence = "Could not connect through web-1: Connection refused.";
+    invoke.mockRejectedValue(sentence);
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, [through()]);
+    const tree = renderHook(client, () => DatabasesPanel({ overview: library() }));
+    const props = elementsOf(tree, DatabaseRow)[0].props as unknown as { routeGrant: { request: () => void } };
+    const invalidated = vi.spyOn(client, "invalidateQueries");
+    props.routeGrant.request();
+    await vi.waitFor(() => expect(invalidated).toHaveBeenCalledWith({ queryKey: ["gcp", "pam-status", WEB] }));
+    expect(invalidated).toHaveBeenCalledWith({ queryKey: databasesKey, refetchType: "all" });
   });
 });
 
