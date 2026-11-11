@@ -76,6 +76,9 @@ rustls-native-certs = "0.8"
 # certificate that names no DNS name.
 tokio-rustls = { version = "0.26", default-features = false }
 x509-cert = "0.2"
+# TCP keepalive on the connection to a Cloud SQL instance (src/gcp/cloudsql_tls.rs), which tokio does not set. It is already in the
+# lockfile through tokio and hyper-util.
+socket2 = "0.6"
 # Privileged Access Manager through Google's client library (src/gcp/rest.rs); the credentials stay Lunport's (src/gcp/credentials.rs
 # plugs the gcloud sign-in files in). google-cloud-gax for the paginator and the error type the library answers with.
 google-cloud-privilegedaccessmanager-v1 = "1.16"

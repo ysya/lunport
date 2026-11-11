@@ -1,6 +1,6 @@
 //! The TLS connection to a Cloud SQL instance, made as Google's Go connector for Cloud SQL makes it: TLS 1.3 only, straight to the
-//! instance's address on port 3307, without ALPN, and with the client certificate Cloud SQL signed for the connection's key as the client's
-//! identity. PostgreSQL then runs inside the TLS as over plain TCP, with no SSLRequest of its own. The Go connector can also exchange a
+//! instance's address on port 3307 with TCP keepalive on, without ALPN, and with the client certificate Cloud SQL signed for the
+//! connection's key as the client's identity. PostgreSQL then runs inside the TLS as over plain TCP, with no SSLRequest of its own. The Go connector can also exchange a
 //! metadata frame with the instance, but only when its caller asks for that; it does not by default, and this module does not at all.
 //!
 //! The server certificate must chain to one of the certificate authorities in the instance's connect settings: any of them, since an
@@ -22,6 +22,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, DnsName, ServerName, UnixTime};
 use rustls::sign::CertifiedKey;
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, Error, InconsistentKeys, RootCertStore, SignatureScheme};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
@@ -37,6 +38,9 @@ const PORT: u16 = 3307;
 /// How long the TCP connection may take to open, and then how long the TLS handshake may take.
 const TCP_LIMIT: Duration = Duration::from_secs(10);
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
+/// How long a connection may stay idle before the system probes it with TCP keepalive, as Google's Go connector sets it, and how long it
+/// waits between probes where the time between them can be set.
+const KEEPALIVE: Duration = Duration::from_secs(30);
 /// The server name for an instance without a usable DNS name. The `.invalid` top-level domain never names a host, so no certificate is
 /// made out to it and only the common name can let a certificate through.
 const NO_DNS_NAME: &str = "cloudsql.invalid";
@@ -93,6 +97,9 @@ async fn dial_within(address: SocketAddr, config: Arc<ClientConfig>, name: Serve
     // Nagle is off: the PostgreSQL messages this carries are small, and each one waits for its answer. A socket that refuses the option
     // still carries them, so the dial goes on without it.
     let _ = socket.set_nodelay(true);
+    // Keepalive is on, so that a router or a firewall on the way does not drop a session that sits idle while its app waits for the
+    // person. The dial goes on without it, as without the option above.
+    let _ = keep_alive(&socket);
     tokio::time::timeout(handshake_limit, TlsConnector::from(config).connect(name, socket))
         .await
         .map_err(|_| timed_out(format!("The TLS handshake with Cloud SQL at {address} did not finish within {handshake_limit:?}.")))?
@@ -100,6 +107,15 @@ async fn dial_within(address: SocketAddr, config: Arc<ClientConfig>, name: Serve
 
 fn timed_out(sentence: String) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, sentence)
+}
+
+/// Turns TCP keepalive on for `socket`, after `KEEPALIVE` of idleness. The time between probes is `KEEPALIVE` too on the systems where
+/// socket2 sets it: Windows takes both times at once, and socket2 would give it no time between probes at all.
+fn keep_alive(socket: &TcpStream) -> io::Result<()> {
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE);
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let keepalive = keepalive.with_interval(KEEPALIVE);
+    SockRef::from(socket).set_tcp_keepalive(&keepalive)
 }
 
 /// The server certificate check. webpki verifies the chain against the instance's certificate authorities and then the name; a name
@@ -481,6 +497,18 @@ mod tests {
         let (address, _seen) = serve(server_cert(&server_ca, Some(DNS_NAME), "server"), &client_ca, &[&rustls::version::TLS12]).await;
         let error = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(Some(DNS_NAME))).await.err().expect("TLS 1.2 is refused");
         assert!(matches!(tls_error(&error), Some(rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion))), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_connection_keeps_tcp_keepalive_on_every_30_seconds() {
+        let (server_ca, client_ca) = (authority("Server CA"), authority("Client CA"));
+        let (address, _seen) = serve(server_cert(&server_ca, Some(DNS_NAME), "server"), &client_ca, &[&rustls::version::TLS13]).await;
+        let stream = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(Some(DNS_NAME))).await.expect("the handshake completes");
+        let socket = socket2::SockRef::from(stream.get_ref().0);
+        assert!(socket.keepalive().unwrap(), "keepalive is on");
+        // The times read back where socket2 can read them (its `all` feature, which hyper-util turns on, has the getters).
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!((socket.tcp_keepalive_time().unwrap(), socket.tcp_keepalive_interval().unwrap()), (Duration::from_secs(30), Duration::from_secs(30)));
     }
 
     /// A listener that never answers makes the dial end at its own handshake limit, with an error rather than a panic.

@@ -3722,6 +3722,7 @@ dependencies = [
  "sha2 0.10.9",
  "shellexpand",
  "signature 2.2.0",
+ "socket2",
  "ssh-encoding 0.2.0",
  "ssh-key 0.6.7",
  "subtle",
