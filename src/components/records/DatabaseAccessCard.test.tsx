@@ -22,6 +22,7 @@ import {
   writableSecondsLeft,
   type DatabasePhase,
   type DatabaseView,
+  type RouteSummary,
   type SavedDatabase,
 } from "@/lib/databases";
 import { DatabaseAccessCard, DatabaseAccessView, beginUnlock, copyPassword, rotatePassword, type DatabaseAccessViewProps } from "./DatabaseAccessCard";
@@ -47,6 +48,9 @@ const SERVICE_ACCOUNT = "orders-sa@acme-prod-123456.iam.gserviceaccount.com";
 const PASSWORD = "c3ludGhldGljLXBvcnQtcGFzc3dvcmQ";
 const NEW_PASSWORD = "bmV3LXN5bnRoZXRpYy1wb3J0LXBhc3N3b3Jk";
 const ORDERS_URL = "postgresql://frank%40example.com@127.0.0.1:6543/postgres";
+const ORDERS_JDBC = "jdbc:postgresql://127.0.0.1:6543/postgres?user=frank%40example.com";
+/** The route of a database on its public IP: no host, and no IAP. */
+const PUBLIC: RouteSummary = { alias: null, iap: false };
 
 const ORDERS: SavedDatabase = {
   id: ID,
@@ -110,6 +114,7 @@ type Shown = Partial<Omit<DatabaseAccessViewProps, "actions">>;
 function card(shown: DatabaseView = view(), props: Shown = {}) {
   const actions = {
     copyUrl: vi.fn(),
+    copyJdbcUrl: vi.fn(),
     copyPassword: vi.fn(),
     ask: vi.fn(),
     rotate: vi.fn(),
@@ -118,7 +123,7 @@ function card(shown: DatabaseView = view(), props: Shown = {}) {
     lock: vi.fn(),
     reconnect: vi.fn(),
   };
-  const all: DatabaseAccessViewProps = { view: shown, url: ORDERS_URL, now: AT, pending: null, error: null, asking: null, actions, ...props };
+  const all: DatabaseAccessViewProps = { view: shown, url: ORDERS_URL, jdbc: ORDERS_JDBC, route: PUBLIC, now: AT, pending: null, error: null, asking: null, actions, ...props };
   const tree = () => DatabaseAccessView(all);
   return { actions, tree, html: () => renderToStaticMarkup(tree()) };
 }
@@ -140,7 +145,7 @@ const dialogProps = (element: ReactElement) => element.props as unknown as { ope
 
 /** The card the page keeps, as far as a server render gets: the view it draws and the actions it gave that view. */
 function kept(shown: DatabaseView = view(), client = new QueryClient()) {
-  const tree = renderHook(client, () => DatabaseAccessCard({ view: shown, iamUser: ACCOUNT }));
+  const tree = renderHook(client, () => DatabaseAccessCard({ view: shown, iamUser: ACCOUNT, route: PUBLIC }));
   return { client, props: tree.props as DatabaseAccessViewProps };
 }
 
@@ -216,7 +221,7 @@ describe("the card", () => {
     const shown = text(html);
     expect(html).toContain('aria-label="Local connection to Orders"');
     expect(shown).toContain(ORDERS_URL);
-    for (const label of ["Copy URL", "Copy password", "Rotate password"]) expect(buttonTag(html, label), label).not.toContain(DISABLED);
+    for (const label of ["Copy URL", "Copy JDBC URL", "Copy password", "Rotate password"]) expect(buttonTag(html, label), label).not.toContain(DISABLED);
     // The password is never drawn; the card only says where it is kept.
     expect(shown).toContain("It stays in the keychain and is never shown.");
     expect(html).not.toContain("<input");
@@ -355,7 +360,7 @@ describe("the card", () => {
   });
 
   it("counts_down_with_the_clock_of_the_card_that_keeps_state", () => {
-    const html = (shown: DatabaseView) => renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccessCard view={shown} iamUser={ACCOUNT} /></QueryClientProvider>);
+    const html = (shown: DatabaseView) => renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccessCard view={shown} iamUser={ACCOUNT} route={PUBLIC} /></QueryClientProvider>);
     expect(text(html(writable(15 * MINUTE - SECOND)))).toContain("Writes on · 14:59");
     expect(text(html(writable(30 * SECOND)))).toContain("Writes lock again in 30 s.");
     expect(text(html(view()))).toContain(ORDERS_URL);
@@ -369,7 +374,7 @@ describe("the card", () => {
     const fresh = AT + 900;
     vi.mocked(Date.now).mockReturnValue(fresh);
     vi.mocked(useNow).mockReturnValue(AT);
-    const html = (shown: DatabaseView) => text(renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccessCard view={shown} iamUser={ACCOUNT} /></QueryClientProvider>));
+    const html = (shown: DatabaseView) => text(renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccessCard view={shown} iamUser={ACCOUNT} route={PUBLIC} /></QueryClientProvider>));
     const unlocked = html(view({ live: live("running", { writable_until_ms: fresh + 15 * MINUTE }) }));
     expect(unlocked).toContain("Writes on · 15:00");
     expect(unlocked).not.toContain("15:01");
@@ -382,9 +387,9 @@ describe("the card", () => {
   });
 
   it("holds_every_control_while_a_change_is_under_way", () => {
-    for (const pending of ["url", "password", "rotate", "unlock", "lock", "reconnect"] as const) {
+    for (const pending of ["url", "jdbc", "password", "rotate", "unlock", "lock", "reconnect"] as const) {
       const html = card(writable(10 * MINUTE), { pending }).html();
-      for (const label of ["Copy URL", "Copy password", "Rotate password", "Writes on · 10:00", "Reconnect now"]) expect(buttonTag(html, label), `${pending}: ${label}`).toContain(DISABLED);
+      for (const label of ["Copy URL", "Copy JDBC URL", "Copy password", "Rotate password", "Writes on · 10:00", "Reconnect now"]) expect(buttonTag(html, label), `${pending}: ${label}`).toContain(DISABLED);
     }
     // The control that waits shows it: the unlock may wait for Touch ID.
     expect(card(view(), { pending: "unlock" }).html()).toContain("animate-spin");
@@ -404,6 +409,101 @@ describe("the card", () => {
     expect(html).toContain('aria-label="Local connection to Ord⟨U+202E⟩ers"');
     expect(html).not.toContain("\u202e");
     expect(textIn(dialog(card(view({}, { name: "Ord\u202eers" })).tree(), "Rotate"))).toContain("Rotate the password of Ord⟨U+202E⟩ers?");
+  });
+});
+
+describe("the way to the instance a card shows", () => {
+  const WEB = "00000000000000b1";
+  const ADDRESS = "198.51.100.7:3307";
+  const THROUGH: RouteSummary = { alias: "web-1", iap: true };
+  /** Orders over its private address through web-1, in the state `state`. */
+  const routed = (state: DatabaseView["live"]) => view({ live: state }, { network: "private", via_host: WEB });
+  /** The parts of the route line: the words of each, its state and the classes it is drawn with. */
+  const parts = (html: string) =>
+    [...html.matchAll(/<span class="([^"]*)" data-state="([a-z]+)">([^<]*)<\/span>/g)].map(([, classes, state, words]) => ({ words, state, classes: new Set(classes.split(/\s+/)) }));
+  const COLOURS: Record<string, string> = { done: "text-success", active: "text-primary", failed: "text-destructive", idle: "text-muted-foreground" };
+
+  it("joins_the_parts_of_the_way_to_the_instance", () => {
+    const html = card(routed(live("running", { address: ADDRESS })), { route: THROUGH }).html();
+    expect(text(html)).toContain("Route");
+    expect(text(html)).toContain("Lunport → IAP → web-1 → 198.51.100.7:3307 → Cloud SQL (TLS, IAM)");
+    expect(parts(html).map((part) => part.state)).toEqual(["done", "done", "done", "done", "done"]);
+  });
+
+  it("colours_each_part_by_how_far_a_start_got", () => {
+    const connecting = parts(card(routed(live("starting", { step: "connect" })), { route: THROUGH }).html());
+    expect(connecting.map((part) => part.words)).toEqual(["Lunport", "IAP", "web-1", "Private IP", "Cloud SQL (TLS, IAM)"]);
+    expect(connecting.map((part) => part.state)).toEqual(["done", "active", "active", "idle", "idle"]);
+    for (const part of connecting) expect(part.classes.has(COLOURS[part.state]), `${part.words}: ${part.state}`).toBe(true);
+    const refused = parts(card(routed(live("error", { step: "certificate", address: ADDRESS, error: "Cloud SQL refused the certificate." })), { route: THROUGH }).html());
+    expect(refused.map((part) => part.state)).toEqual(["done", "done", "done", "done", "failed"]);
+    expect(refused[4].classes.has("text-destructive")).toBe(true);
+    expect(refused[0].classes.has("text-success")).toBe(true);
+  });
+
+  it("a_database_on_its_public_ip_reads_its_address_once_a_start_fetched_it", () => {
+    expect(text(card(view({ live: live("stopped") })).html())).toContain("Lunport → Public IP → Cloud SQL (TLS, IAM)");
+    expect(text(card(view({ live: live("running", { address: "203.0.113.5:3307" }) })).html())).toContain("Lunport → 203.0.113.5:3307 → Cloud SQL (TLS, IAM)");
+    // A host whose first hop has no IAP route draws no IAP, and a host that is not here is said to be unavailable.
+    expect(text(card(routed(live("stopped")), { route: { alias: "web-1", iap: false } }).html())).toContain("Lunport → web-1 → Private IP → Cloud SQL (TLS, IAM)");
+    expect(text(card(routed(live("stopped")), { route: PUBLIC }).html())).toContain("Lunport → Host unavailable → Private IP → Cloud SQL (TLS, IAM)");
+  });
+
+  it("shows_a_hosts_hidden_characters_as_codes", () => {
+    const html = card(routed(live("stopped")), { route: { alias: "web‮-1", iap: true } }).html();
+    expect(text(html)).toContain("Lunport → IAP → web⟨U+202E⟩-1 → Private IP");
+    expect(html).not.toContain("‮");
+  });
+
+  it("the_card_that_keeps_state_draws_the_route_it_is_given", () => {
+    const html = renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccessCard view={routed(live("running", { address: ADDRESS }))} iamUser={ACCOUNT} route={THROUGH} /></QueryClientProvider>);
+    expect(text(html)).toContain("Lunport → IAP → web-1 → 198.51.100.7:3307 → Cloud SQL (TLS, IAM)");
+  });
+});
+
+describe("the JDBC URL", () => {
+  it("copy_jdbc_url_sits_beside_copy_url_and_presses_through", () => {
+    const { actions, html, tree } = card();
+    const markup = html();
+    expect(buttonTag(markup, "Copy JDBC URL")).not.toContain(DISABLED);
+    // In the address's group, after Copy URL.
+    const group = markup.match(/<div class="flex flex-wrap items-center gap-2"><code[\s\S]*?<\/div>/)?.[0] ?? "";
+    expect(text(group)).toMatch(/Copy URL\s+Copy JDBC URL/);
+    press(button(tree(), "Copy JDBC URL"));
+    expect(actions.copyJdbcUrl).toHaveBeenCalledTimes(1);
+    expect(actions.copyUrl).not.toHaveBeenCalled();
+    // Held while a change is under way, and when there is no port to name.
+    expect(buttonTag(card(view(), { pending: "url" }).html(), "Copy JDBC URL")).toContain(DISABLED);
+    expect(buttonTag(card(view(), { jdbc: null }).html(), "Copy JDBC URL")).toContain(DISABLED);
+    expect(buttonTag(card(view(), { jdbc: null }).html(), "Copy URL")).not.toContain(DISABLED);
+  });
+
+  it("copy_jdbc_url_puts_the_jdbc_url_with_the_port_and_user_of_copy_url_on_the_clipboard", async () => {
+    backend({});
+    const { props } = kept();
+    expect(props.jdbc).toBe(ORDERS_JDBC);
+    await props.actions.copyJdbcUrl();
+    expect(copy).toHaveBeenCalledExactlyOnceWith(ORDERS_JDBC);
+    // The address is no secret: it is not told to be cleared, and nothing is asked of the backend.
+    expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("JDBC URL copied.");
+    expect(calls()).toEqual([]);
+    // The port that runs, and the user the card is given, as Copy URL names them.
+    const moved = renderHook(new QueryClient(), () => DatabaseAccessCard({ view: view({ live: live("running", { port: 6544 }) }), iamUser: UNKNOWN_IAM_USER, route: PUBLIC })).props as DatabaseAccessViewProps;
+    expect(moved.url).toBe("postgresql://your-google-account@127.0.0.1:6544/postgres");
+    expect(moved.jdbc).toBe("jdbc:postgresql://127.0.0.1:6544/postgres?user=your-google-account");
+    // No port to name: nothing to copy.
+    const unshared = renderHook(new QueryClient(), () => DatabaseAccessCard({ view: view({ live: live("stopped") }, { local_port: null }), iamUser: ACCOUNT, route: PUBLIC })).props as DatabaseAccessViewProps;
+    expect(unshared.jdbc).toBeNull();
+  });
+
+  it("a_jdbc_url_that_cannot_be_copied_is_not_said_to_be_copied", async () => {
+    backend({});
+    copy.mockRejectedValueOnce(new Error("plugin failed"));
+    const client = new QueryClient();
+    const { props } = kept(view(), client);
+    await props.actions.copyJdbcUrl();
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled();
+    expect(copy).toHaveBeenCalledExactlyOnceWith(ORDERS_JDBC);
   });
 });
 
@@ -458,7 +558,7 @@ describe("what the controls do", () => {
     // Not in the query cache, not in a mutation (both keep their results), not in the card, and not in anything it said.
     expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toContain(PASSWORD);
     expect(client.getMutationCache().getAll()).toHaveLength(0);
-    const html = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccessCard view={view()} iamUser={ACCOUNT} /></QueryClientProvider>);
+    const html = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccessCard view={view()} iamUser={ACCOUNT} route={PUBLIC} /></QueryClientProvider>);
     expect(html).not.toContain(PASSWORD);
     expect(JSON.stringify(vi.mocked(toast.success).mock.calls)).not.toContain(PASSWORD);
   });
@@ -516,7 +616,7 @@ describe("what the controls do", () => {
     expect(vi.mocked(toast.success)).toHaveBeenCalledExactlyOnceWith("URL copied.");
     expect(calls()).toEqual([]);
     // An address with no account known still copies.
-    const unknown = renderHook(new QueryClient(), () => DatabaseAccessCard({ view: view(), iamUser: UNKNOWN_IAM_USER })).props as DatabaseAccessViewProps;
+    const unknown = renderHook(new QueryClient(), () => DatabaseAccessCard({ view: view(), iamUser: UNKNOWN_IAM_USER, route: PUBLIC })).props as DatabaseAccessViewProps;
     expect(unknown.url).toBe("postgresql://your-google-account@127.0.0.1:6543/postgres");
     await unknown.actions.copyUrl();
     expect(copy).toHaveBeenLastCalledWith("postgresql://your-google-account@127.0.0.1:6543/postgres");

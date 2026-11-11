@@ -15,6 +15,7 @@ import { useLastNonNull } from "@/lib/use-last-non-null";
 import { useNow } from "@/lib/use-now";
 import { gcloudAccountsQuery, pamStatusQuery, type PamCheck, type PamStatusView } from "@/lib/transports";
 import {
+  HOST_UNAVAILABLE,
   connectionsLine,
   databaseBusy,
   databaseDetailsId,
@@ -32,14 +33,18 @@ import {
   otherDatabases,
   requestDatabaseGrant,
   requestRouteGrant,
+  routeHost,
   routeHostGrant,
+  routeSummary,
   runDatabaseAction,
   saveDatabase,
   startDatabase,
+  stepSentence,
   stopDatabase,
   type DatabaseDraft,
   type DatabaseView,
   type RouteHostGrant,
+  type RouteSummary,
   type SavedDatabase,
 } from "@/lib/databases";
 import { DatabaseAccessCard, WritesOnMarker } from "./DatabaseAccessCard";
@@ -101,20 +106,26 @@ function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & {
  * open says so in its Status, with the time left, whether its details are open or not. A database that runs here as it was saved before
  * another device changed it says that its port applies the change once it is started again, and its badge and its lock follow the
  * environment its port locks by (`row.environment`), which stays prod until then. A database reached through a host whose first hop's
- * route asks for a grant has a `routeGrant`, which the row draws as a grant line of its own under the database's. No hooks: exported for
- * the tests.
+ * route asks for a grant has a `routeGrant`, which the row draws as a grant line of its own under the database's. A database reached
+ * through a host names it after where it is, by `hostAlias`; one whose host is not in the library (no alias) says that the host is
+ * unavailable, in the warning color. While a database starts its Status says the step its start is at. No hooks: exported for the tests.
  */
-export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, details, routeGrant }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void }; routeGrant?: RouteGrantRequest | null }) {
+export function DatabaseRow({ row, hostAlias, busy, toggle, requestGrant, ask, edit, details, routeGrant }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void }; routeGrant?: RouteGrantRequest | null }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
-  const route = revealHidden(databaseRoute(database));
+  const route = revealHidden(databaseRoute(database, hostAlias));
+  const unavailable = routeHost(database) !== null && hostAlias === null;
   const address = localAddress(row);
   const active = databaseBusy(row);
   const changing = live.phase === "starting" || live.phase === "stopping";
   // A port that runs can be stopped whatever the record holds now (another device may have cleared its port); starting needs a saved one.
   const controllable = active || database.local_port !== null;
   const verb = active ? "Stop" : live.phase === "error" ? "Retry" : "Start";
-  const note = live.phase === "running" ? connectionsLine(live.connections) : row.blocked && !row.removed ? "Sync review needed" : "\u00a0";
+  const note =
+    live.phase === "running" ? connectionsLine(live.connections)
+    : live.phase === "starting" && live.step ? revealHidden(stepSentence(live.step, hostAlias))
+    : row.blocked && !row.removed ? "Sync review needed"
+    : "\u00a0";
   return <tr className={cn("border-b last:border-0 hover:bg-muted/20", details?.open && "border-b-0")}>
     <td className="max-w-72 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
@@ -123,6 +134,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
       </div>
       {row.removed ? <span className="mt-1 block text-xs text-warning">Deleted on another device. Stop this running database to remove it here.</span> : <>
         <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
+        {unavailable && <span className="mt-1 block text-xs text-warning">{HOST_UNAVAILABLE}</span>}
         {row.changed && <span className="mt-1 block text-xs text-warning">The database changed on another device. Stop and start it again to apply it.</span>}
         {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
         {routeGrant && <RouteGrant {...routeGrant} busy={busy} />}
@@ -165,15 +177,16 @@ export function StopDatabaseDialog({ row, busy, onCancel, onStop }: { row: Datab
 
 /**
  * The connection details of a database that is offered on a port, with the database user its address names (`iamUserFor`): the database's
- * own account, else the one gcloud is signed in as. gcloud's accounts are read only for a database that names no account of its own, and
- * only while its details are open.
+ * own account, else the one gcloud is signed in as, and the way to the instance (`route`). gcloud's accounts are read only for a database
+ * that names no account of its own, and only while its details are open.
  */
-export function DatabaseAccess({ row }: { row: DatabaseView }) {
+export function DatabaseAccess({ row, route }: { row: DatabaseView; route: RouteSummary }) {
   const accounts = useQuery({ ...gcloudAccountsQuery, enabled: row.database.account === null });
-  return <DatabaseAccessCard view={row} iamUser={iamUserFor(row.database.account, accounts.data?.active ?? null)} />;
+  return <DatabaseAccessCard view={row} iamUser={iamUserFor(row.database.account, accounts.data?.active ?? null)} route={route} />;
 }
 
-export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
+/** The Databases page. `createIapHost` opens the host editor for a new host that connects through IAP, which the editor's New IAP host asks for. */
+export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOverview; createIapHost: () => void }) {
   const query = useQuery(databasesQuery);
   const client = useQueryClient();
   const [search, setSearch] = useState("");
@@ -193,6 +206,8 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   // Whether what is in the editor differs from what it opened with, and whether closing it is being asked about.
   const [dirty, setDirty] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  // What follows once the changes are discarded and the editor is closed: the host editor, for New IAP host.
+  const afterDiscard = useRef<(() => void) | null>(null);
   // The dialog takes a moment to animate out once `editing` is null; its title and body keep what they showed until then.
   const shown = useLastNonNull(editing);
   const rows = query.data ?? [];
@@ -217,13 +232,19 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     setEditing({ key: openings.current, ...(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null }) });
   };
   // Cancel, the X, Escape and a click outside all close the dialog from here: not while a save is under way, and only once the person
-  // has said that changes may be lost.
-  const closeEditor = () => {
+  // has said that changes may be lost. New IAP host closes it the same way, and `then` opens the host editor once it is closed: never over
+  // it, and not at all when the person keeps editing.
+  const closeEditor = (then?: () => void) => {
     if (flight.current) return;
-    if (dirty) setDiscarding(true);
-    else setEditing(null);
+    if (dirty) { afterDiscard.current = then ?? null; setDiscarding(true); }
+    else { setEditing(null); then?.(); }
   };
-  const discard = () => { setDiscarding(false); setDirty(false); setEditing(null); };
+  const discard = () => {
+    const then = afterDiscard.current;
+    afterDiscard.current = null;
+    setDiscarding(false); setDirty(false); setEditing(null);
+    then?.();
+  };
   const save = (next: SavedDatabase) => { if (editing) void action(async () => { await saveDatabase(next, editing.expected); }, true); };
   // The grant is read again too, so that the row shows what was requested.
   const requestGrant = (id: string) => void action(async () => {
@@ -278,20 +299,21 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
           const offered = hasConnectionDetails(row);
           const open = offered && opened.has(id);
           const via = routeHostGrant(overview, row.database);
+          const route = routeSummary(overview, row.database);
           return <Fragment key={id}>
-            <DatabaseRow row={row} busy={busy}
+            <DatabaseRow row={row} hostAlias={route.alias} busy={busy}
               toggle={() => toggle(row)}
               requestGrant={() => requestGrant(id)} ask={() => setDeleting(row)} edit={() => edit(row)}
               routeGrant={via && { ...via, request: () => requestHostGrant(id, via.hostId) }}
               details={offered ? { open, toggle: () => toggleDetails(id) } : undefined} />
-            {open && <tr className="border-b last:border-0"><td colSpan={4} className="px-4 pb-4"><div className="database-details"><DatabaseAccess row={row} /></div></td></tr>}
+            {open && <tr className="border-b last:border-0"><td colSpan={4} className="px-4 pb-4"><div className="database-details"><DatabaseAccess row={row} route={route} /></div></td></tr>}
           </Fragment>;
         })}</tbody></table>
       {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
     </div>}
     <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">
       <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
-      {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} onDirty={setDirty} />}
+      {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} overview={overview} busy={busy} error={editorError} onSave={save} onCancel={() => closeEditor()} createIapHost={() => closeEditor(createIapHost)} onDirty={setDirty} />}
     </TaskDialogContent></Dialog>
     <AlertDialog open={discarding} onOpenChange={setDiscarding}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard database changes?</AlertDialogTitle><AlertDialogDescription>Your unsaved changes will be lost.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={discard}>Discard</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <StopDatabaseDialog row={askedToStop} busy={busy} onCancel={() => setStopping(null)} onStop={stop} />

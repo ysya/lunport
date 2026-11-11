@@ -5,6 +5,7 @@ import { pamStatusOptions, pamStatusQuery, type PamStatusView } from "./transpor
 import { hostPayload, hostTransport, hostView, recordOverview } from "@/components/records/fixtures";
 import {
   GRANT_ENDING_SOON_MS,
+  HOST_UNAVAILABLE,
   connectionName,
   connectionsLine,
   databaseBusy,
@@ -16,6 +17,9 @@ import {
   databasesKey,
   databasesQuery,
   deleteDatabase,
+  jdbcUrl,
+  jumpHostCandidates,
+  libraryHosts,
   listDatabases,
   localAddress,
   lockDatabaseWrites,
@@ -26,16 +30,23 @@ import {
   requestDatabaseGrant,
   requestRouteGrant,
   rotateDatabasePassword,
+  routeHost,
   routeHostGrant,
+  routeParts,
+  routeSummary,
   runDatabaseAction,
   saveDatabase,
   startDatabase,
+  stepSentence,
   stopDatabase,
   unlockDatabaseWrites,
   unlockMethod,
+  type DatabaseLive,
   type DatabasePhase,
   type DatabaseView,
   type InstanceSummary,
+  type RoutePartState,
+  type RouteSummary,
   type SavedDatabase,
 } from "./databases";
 
@@ -359,6 +370,131 @@ describe("the grant of the host a database is reached through", () => {
     expect(routeHostGrant(loop, through(WEB))).toBeNull();
     const notFirst = recordOverview({ hosts: [host(WEB, "web-1", [JUMP]), host(JUMP, "jump-1")], transports: [hostTransport({ pam: GRANT }, WEB)] });
     expect(routeHostGrant(notFirst, through(WEB))).toBeNull();
+  });
+});
+
+describe("the route of a database", () => {
+  const [WEB_1, WEB_2, WEB_3] = ["00000000000000b1", "00000000000000b2", "00000000000000b3"];
+  const host = (id: string, alias: string, jump: string[] = []) => hostView({ id, payload: hostPayload({ alias, jump }) });
+  /** `ORDERS` over its private address, through the library host `via`. */
+  const through = (via: string): SavedDatabase => ({ ...ORDERS, network: "private", via_host: via });
+  const ADDRESS = "198.51.100.7:3307";
+
+  it("goes through the host a private database names, and through none over the public IP", () => {
+    expect(routeHost(ORDERS)).toBeNull();
+    expect(routeHost(through(WEB_1))).toBe(WEB_1);
+    // A record that names a host while public, or is private without one, goes through none.
+    expect(routeHost({ network: "public", via_host: WEB_1 })).toBeNull();
+    expect(routeHost({ network: "private" })).toBeNull();
+  });
+
+  it("offers as jump hosts the hosts whose own IAP route is in the project", () => {
+    const overview = recordOverview({
+      hosts: [host(WEB_1, "web-1"), host(WEB_2, "web-2"), host(WEB_3, "web-3")],
+      transports: [hostTransport({ project: "acme-dev-654321" }, WEB_1), hostTransport({ project: "acme-prod-123456" }, WEB_2)],
+    });
+    expect(jumpHostCandidates(overview, "acme-dev-654321")).toEqual([{ id: WEB_1, alias: "web-1" }]);
+    expect(jumpHostCandidates(overview, "acme-prod-123456")).toEqual([{ id: WEB_2, alias: "web-2" }]);
+    expect(jumpHostCandidates(overview, "")).toEqual([]);
+  });
+
+  it("judges a jump host by its own route, not by its first hop's, and lists them by alias, then by id", () => {
+    const BEHIND = "00000000000000b4";
+    const overview = recordOverview({
+      // web-2 is reached through web-1 and has no route of its own; a route whose host is not here is no host's. Two hosts share an alias.
+      hosts: [host(WEB_3, "web-3"), host(BEHIND, "web-2", [WEB_1]), host(WEB_2, "web-1"), host(WEB_1, "web-1")],
+      transports: [
+        hostTransport({ project: "acme-dev-654321" }, WEB_3),
+        hostTransport({ project: "acme-dev-654321" }, WEB_2),
+        hostTransport({ project: "acme-dev-654321" }, WEB_1),
+        hostTransport({ project: "acme-dev-654321" }, "00000000000000b9"),
+      ],
+    });
+    expect(jumpHostCandidates(overview, "acme-dev-654321")).toEqual([
+      { id: WEB_1, alias: "web-1" },
+      { id: WEB_2, alias: "web-1" },
+      { id: WEB_3, alias: "web-3" },
+    ]);
+    // Every host of the library, a route or not, in the same order.
+    expect(libraryHosts(overview)).toEqual([
+      { id: WEB_1, alias: "web-1" },
+      { id: WEB_2, alias: "web-1" },
+      { id: BEHIND, alias: "web-2" },
+      { id: WEB_3, alias: "web-3" },
+    ]);
+  });
+
+  it("names the host and whether the way to it begins with IAP, by the route of its first hop", () => {
+    const overview = recordOverview({ hosts: [host(WEB_1, "web-1"), host(WEB_2, "web-2", [WEB_1]), host(WEB_3, "web-3")], transports: [hostTransport({}, WEB_1)] });
+    expect(routeSummary(overview, through(WEB_1))).toEqual({ alias: "web-1", iap: true });
+    // web-2 is reached through web-1, whose route is the one that applies; its own alias is the one named.
+    expect(routeSummary(overview, through(WEB_2))).toEqual({ alias: "web-2", iap: true });
+    expect(routeSummary(overview, through(WEB_3))).toEqual({ alias: "web-3", iap: false });
+    // A host this computer has not got, and a database on its public IP, name none.
+    expect(routeSummary(overview, through("00000000000000b9"))).toEqual({ alias: null, iap: false });
+    expect(routeSummary(overview, ORDERS)).toEqual({ alias: null, iap: false });
+  });
+
+  it("words the route after where the database is", () => {
+    expect(databaseRoute(through(WEB_1), "web-1")).toBe("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg · via web-1");
+    // A host whose alias is not known, and a database on its public IP, say where the database is and nothing more.
+    expect(databaseRoute(through(WEB_1), null)).toBe("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
+    expect(databaseRoute(through(WEB_1))).toBe("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
+    expect(databaseRoute(ORDERS, "web-1")).toBe("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
+  });
+
+  it("says what a start is doing at each step", () => {
+    expect(stepSentence("grant", "web-1")).toBe("Requesting grant…");
+    expect(stepSentence("connect", "web-1")).toBe("Connecting through web-1…");
+    expect(stepSentence("connect", null)).toBe("Connecting through the host…");
+    expect(stepSentence("certificate", "web-1")).toBe("Getting the Cloud SQL certificate…");
+    expect(stepSentence("certificate", null)).toBe("Getting the Cloud SQL certificate…");
+  });
+
+  it("writes the JDBC URL with the database and the user encoded", () => {
+    expect(jdbcUrl({ ...ORDERS, default_database: "app" }, 6543, "frank@example.com")).toBe("jdbc:postgresql://127.0.0.1:6543/app?user=frank%40example.com");
+    expect(jdbcUrl({ ...ORDERS, default_database: "orders db/2" }, 6544, "orders-sa@acme-prod-123456.iam")).toBe(
+      "jdbc:postgresql://127.0.0.1:6544/orders%20db%2F2?user=orders-sa%40acme-prod-123456.iam",
+    );
+  });
+
+  describe("drawn as its parts", () => {
+    const live = (phase: DatabasePhase, patch: Partial<DatabaseLive> = {}): DatabaseLive => ({ phase, port: null, connections: 0, writable_until_ms: null, error: null, step: null, address: null, ...patch });
+    const WEB = { alias: "web-1", iap: true };
+    const PUBLIC: RouteSummary = { alias: null, iap: false };
+    const FIVE = ["Lunport", "IAP", "web-1", ADDRESS, "Cloud SQL (TLS, IAM)"];
+    const cases: [string, SavedDatabase, DatabaseLive, RouteSummary, string[], RoutePartState[]][] = [
+      ["running through web-1", through(WEB_1), live("running", { address: ADDRESS }), WEB, FIVE, ["done", "done", "done", "done", "done"]],
+      ["starting at grant", through(WEB_1), live("starting", { step: "grant", address: ADDRESS }), WEB, FIVE, ["active", "idle", "idle", "idle", "idle"]],
+      ["starting at connect", through(WEB_1), live("starting", { step: "connect", address: ADDRESS }), WEB, FIVE, ["done", "active", "active", "idle", "idle"]],
+      ["starting at certificate", through(WEB_1), live("starting", { step: "certificate", address: ADDRESS }), WEB, FIVE, ["done", "done", "done", "done", "active"]],
+      ["failed at grant", through(WEB_1), live("error", { step: "grant", address: ADDRESS }), WEB, FIVE, ["failed", "idle", "idle", "idle", "idle"]],
+      ["failed at connect", through(WEB_1), live("error", { step: "connect", address: ADDRESS }), WEB, FIVE, ["done", "failed", "failed", "idle", "idle"]],
+      ["failed at certificate", through(WEB_1), live("error", { step: "certificate", address: ADDRESS }), WEB, FIVE, ["done", "done", "done", "done", "failed"]],
+      ["failed before a step", through(WEB_1), live("error", { address: ADDRESS }), WEB, FIVE, ["failed", "idle", "idle", "idle", "idle"]],
+      ["stopping", through(WEB_1), live("stopping", { address: ADDRESS }), WEB, FIVE, ["idle", "idle", "idle", "idle", "idle"]],
+      // Until a start fetched the address, and once a dial that was refused cleared it, the part says which address it is.
+      ["stopped through web-1", through(WEB_1), live("stopped"), WEB, ["Lunport", "IAP", "web-1", "Private IP", "Cloud SQL (TLS, IAM)"], ["idle", "idle", "idle", "idle", "idle"]],
+      ["running with its address cleared", through(WEB_1), live("running"), WEB, ["Lunport", "IAP", "web-1", "Private IP", "Cloud SQL (TLS, IAM)"], ["done", "done", "done", "done", "done"]],
+      // A first hop without an IAP route draws no IAP; the host alone is at the connect step.
+      ["through a host without IAP", through(WEB_1), live("starting", { step: "connect" }), { alias: "web-1", iap: false }, ["Lunport", "web-1", "Private IP", "Cloud SQL (TLS, IAM)"], ["done", "active", "idle", "idle"]],
+      ["through a host that is not here", through(WEB_1), live("stopped"), PUBLIC, ["Lunport", HOST_UNAVAILABLE, "Private IP", "Cloud SQL (TLS, IAM)"], ["idle", "idle", "idle", "idle"]],
+      ["public while stopped", ORDERS, live("stopped"), PUBLIC, ["Lunport", "Public IP", "Cloud SQL (TLS, IAM)"], ["idle", "idle", "idle"]],
+      ["public at certificate", ORDERS, live("starting", { step: "certificate" }), PUBLIC, ["Lunport", "Public IP", "Cloud SQL (TLS, IAM)"], ["done", "done", "active"]],
+      ["public while running", ORDERS, live("running", { address: "203.0.113.5:3307" }), PUBLIC, ["Lunport", "203.0.113.5:3307", "Cloud SQL (TLS, IAM)"], ["done", "done", "done"]],
+      // A database on its public IP goes through no host, whatever it is handed.
+      ["public handed a host", ORDERS, live("stopped"), WEB, ["Lunport", "Public IP", "Cloud SQL (TLS, IAM)"], ["idle", "idle", "idle"]],
+    ];
+
+    it.each(cases)("%s", (_case, database, state, route, labels, states) => {
+      const parts = routeParts(database, state, route);
+      expect(parts.map((part) => part.label)).toEqual(labels);
+      expect(parts.map((part) => part.state)).toEqual(states);
+    });
+
+    it("names an unavailable host as the row does", () => {
+      expect(HOST_UNAVAILABLE).toBe("Host unavailable");
+    });
   });
 });
 

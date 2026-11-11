@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { text } from "@/components/keychain/test-markup";
 import type { SavedDatabase } from "@/bindings/SavedDatabase";
 import type { CatalogCollision, CatalogReview, CentralConflict } from "@/lib/central-sync";
+import type { RecordOverview } from "@/lib/records";
 import type { TunnelRule } from "@/lib/tunnels";
 import { groupView, hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
 import { CATALOG_CHOICE_NOTE, CatalogConflictView, catalogChoiceTitle } from "./CatalogConflict";
@@ -83,12 +84,33 @@ describe("a Catalog conflict", () => {
     }));
     for (const expected of [
       "Database “Orders”",
-      "acme-prod-123456 / orders-pg · asia-east1, prod, database postgres, account frank@example.com, local port 6544",
-      "acme-prod-123456 / orders-pg · asia-east1, prod, database postgres, PAM prod-operate, prod-admin",
+      "acme-prod-123456 / orders-pg · asia-east1, Public IP, prod, database postgres, account frank@example.com, local port 6544",
+      "acme-prod-123456 / orders-pg · asia-east1, Public IP, prod, database postgres, PAM prod-operate, prod-admin",
       "Database “Billing”",
-      "acme-prod-123456 / orders-pg · asia-east1, dev, database billing, account frank@example.com, local port 6543",
+      "acme-prod-123456 / orders-pg · asia-east1, Public IP, dev, database billing, account frank@example.com, local port 6543",
       "Removed",
     ]) expect(words).toContain(expected);
+  });
+
+  it("names the route of each version of a database, its host by alias or else by id", () => {
+    const web = hostView({ id: "00000000000000b1", payload: hostPayload({ alias: "web-1" }) });
+    const moved = review({
+      items: [
+        { kind: "database", id: "00000000000000d1", local: savedDatabase({ network: "private", via_host: web.id }), remote: savedDatabase() },
+        { kind: "database", id: "00000000000000d2", local: savedDatabase({ id: "00000000000000d2", name: "Billing", network: "private", via_host: "00000000000000b9" }), remote: null },
+      ],
+    });
+    const drawn = (library?: RecordOverview) => text(renderToStaticMarkup(<CatalogConflictView review={moved} overview={library} disabled={false} choose={() => {}} />));
+    const words = drawn(recordOverview({ hosts: [web] }));
+    expect(words).toContain("acme-prod-123456 / orders-pg · asia-east1, Through web-1, prod, database postgres, account frank@example.com, local port 6543");
+    expect(words).toContain("acme-prod-123456 / orders-pg · asia-east1, Public IP, prod, database postgres, account frank@example.com, local port 6543");
+    // A host this device has not got, and any host while the library is not at hand, is named by its id.
+    expect(words).toContain("acme-prod-123456 / orders-pg · asia-east1, Through 00000000000000b9, prod");
+    expect(drawn()).toContain("asia-east1, Through 00000000000000b1, prod");
+    // A host's hidden characters show as codes.
+    const spoofed = drawn(recordOverview({ hosts: [hostView({ id: web.id, payload: hostPayload({ alias: "web\u202e-1" }) })] }));
+    expect(spoofed).toContain("Through web⟨U+202E⟩-1");
+    expect(spoofed).not.toContain("\u202e");
   });
 
   it("names a database's two names only when they differ", () => {

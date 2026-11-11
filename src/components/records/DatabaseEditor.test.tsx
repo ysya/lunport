@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { buttonsIn, buttonTag, DISABLED, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { tauriInvoke } from "@/lib/ipc";
+import type { RecordOverview } from "@/lib/records";
 import { renderHook } from "@/lib/test-ipc";
 import { databaseInstancesQuery, newDatabase, suggestPort, type DatabaseDraft, type InstanceSummary, type SavedDatabase } from "@/lib/databases";
 import { gcloudAccountsKey, newPamCheck, pamSuggestionsQuery, type GcloudAccountsView, type TransportKind } from "@/lib/transports";
@@ -24,6 +25,7 @@ import {
   type InstancesRead,
   type Mode,
 } from "./DatabaseEditor";
+import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
 import { RecordField } from "./form";
 import { EntitlementsInput, EntitlementSuggestions, EntitlementSuggestionsView, GoogleAccountField, IapRouteFields, segmented } from "./IapRouteFields";
 
@@ -94,13 +96,17 @@ type Options = {
   client?: QueryClient;
   /** What Google is asked about; by default the draft's account and project, as when typing has paused. */
   lookup?: { account: string | null; project: string };
+  /** The library the Route field lists the hosts of; by default one host, `web`, with no route. */
+  overview?: RecordOverview;
 };
 
 /** The view of the dialog over `initial`, with the state the dialog keeps for it: pressing a control changes `kept` as the dialog's state setters do. */
 function editor(initial: DatabaseDraft, options: Options = {}) {
-  const kept = { draft: initial, mode: options.mode ?? (initial.instance === "" ? "pick" : "manual"), connection: options.connection ?? "" };
+  const kept = { draft: initial, mode: options.mode ?? (initial.instance === "" ? "pick" : "manual"), connection: options.connection ?? "", hostMissing: false };
   const onSave = vi.fn();
   const onCancel = vi.fn();
+  const createIapHost = vi.fn();
+  const overview = options.overview ?? recordOverview();
   const props = (): DatabaseEditorViewProps => ({
     draft: kept.draft,
     mode: kept.mode,
@@ -121,10 +127,16 @@ function editor(initial: DatabaseDraft, options: Options = {}) {
     },
     onSave,
     onCancel,
+    overview,
+    hostMissing: kept.hostMissing,
+    onHostMissing: () => {
+      kept.hostMissing = true;
+    },
+    createIapHost,
   });
   const tree = () => DatabaseEditorView(props());
   const markup = () => renderToStaticMarkup(<QueryClientProvider client={options.client ?? cache()}>{tree()}</QueryClientProvider>);
-  return { kept, onSave, onCancel, tree, markup };
+  return { kept, onSave, onCancel, createIapHost, tree, markup };
 }
 
 const propsOf = <T,>(element: ReactElement) => element.props as unknown as T;
@@ -212,17 +224,20 @@ describe("the New database dialog", () => {
     expect(instanceProblem(ORDERS_PG)).toBeNull();
   });
 
-  it("an_instance_without_a_public_ip_is_listed_disabled_with_its_own_sentence", () => {
+  it("an_instance_without_a_public_ip_can_be_picked", () => {
     const dialog = editor({ ...newDatabase(), project: PROD }, { instances: listed([ORDERS_PG, BILLING_PG, REPORTS_PG]) });
     const html = dialog.markup();
-    expect(text(html).match(/This instance has no public IP\. Lunport connects over public IP in this release\./g)).toHaveLength(1);
-    expect(radioTag(html, "billing-pg")).toContain(DISABLED);
-    expect(radioOf(dialog.tree(), "billing-pg").disabled).toBe(true);
-    // Each disabled row says its own reason, and the instance that can be chosen says none.
+    // It is reached through a host of the library: nothing says it cannot be connected to, and its radio is on.
+    expect(text(html)).not.toContain(NO_PUBLIC_IP);
+    expect(radioTag(html, "billing-pg")).not.toContain(DISABLED);
+    expect(radioOf(dialog.tree(), "billing-pg").disabled).toBe(false);
+    expect(instanceProblem(BILLING_PG)).toBeNull();
+    radioOf(dialog.tree(), "billing-pg").onChange();
+    expect(dialog.kept.draft).toMatchObject({ region: "asia-east1", instance: "billing-pg" });
+    // The instance with IAM sign-in off is still held back, and says why, once, whatever addresses it has.
     expect(text(html).match(/IAM sign-in is off on this instance\./g)).toHaveLength(1);
-    expect(instanceProblem(BILLING_PG)).toBe(NO_PUBLIC_IP);
-    // Without a public address the IAM flag is beside the point: that is the reason given.
-    expect(instanceProblem(instance({ public_ip: false, private_ip: false, iam_authentication: false }))).toBe(NO_PUBLIC_IP);
+    expect(radioTag(html, "reports-pg")).toContain(DISABLED);
+    expect(instanceProblem(instance({ public_ip: false, private_ip: false, iam_authentication: false }))).toBe(IAM_OFF);
   });
 
   it("describes_each_instance_by_its_region_addresses_and_version", () => {
@@ -557,6 +572,8 @@ describe("the New database dialog", () => {
       { pam: newPamCheck() },
       { local_port: null },
       { local_port: 6544 },
+      { network: "private", via_host: "00000000000000b1" },
+      { network: "private" },
     ];
     for (const edit of edits) expect(changed({ ...opened, ...edit }, opened), JSON.stringify(edit)).toBe(true);
     expect(changed({ ...SAVED, pam: null }, SAVED)).toBe(true);
@@ -643,6 +660,176 @@ describe("the New database dialog", () => {
   });
 });
 
+/** The Route field: how the database is reached, and the host an instance without a public IP goes through. */
+describe("the route of a database in the dialog", () => {
+  const [WEB_1, WEB_2, WEB_3, GONE] = ["00000000000000b1", "00000000000000b2", "00000000000000b3", "00000000000000b9"];
+  const host = (id: string, alias: string) => hostView({ id, payload: hostPayload({ alias }) });
+  /** web-1 has its IAP route in the dev project, web-2 in the prod project, and web-3 has none. */
+  const LIBRARY = recordOverview({
+    hosts: [host(WEB_3, "web-3"), host(WEB_2, "web-2"), host(WEB_1, "web-1")],
+    transports: [hostTransport({ project: DEV }, WEB_1), hostTransport({ project: PROD }, WEB_2)],
+  });
+  const newInDev: DatabaseDraft = { ...newDatabase(), account: "frank@example.com", project: DEV, environment: "dev" };
+  const routes = (tree: ReactNode) => elementsOf(controlOf(tree, "Route"), "option");
+  /** The words of each Route option. */
+  const routeLabels = (tree: ReactNode) => routes(tree).map((option) => textIn(option));
+  /** The Route option that says `label`. */
+  function optionOf(tree: ReactNode, label: string) {
+    const found = routes(tree).find((option) => textIn(option) === label);
+    if (!found) throw new Error(`no ${label} route`);
+    return propsOf<{ value: string; disabled?: boolean }>(found);
+  }
+  const press = (tree: ReactNode, label: string) => buttonsIn(tree).find((button) => textIn(button) === label)!.props.onClick!();
+
+  it("a_private_only_instance_with_one_jump_host_in_its_project_goes_through_it", () => {
+    const dialog = editor(newInDev, { overview: LIBRARY, instances: listed([ORDERS_PG, BILLING_PG]) });
+    // The row says which host it would go through before it is picked, and an instance with a public IP says nothing of one.
+    expect(text(dialog.markup())).toContain("billing-pg PostgreSQL 16 asia-east1 · Private IP only · via web-1 · IAM sign-in on");
+    expect(text(dialog.markup())).toContain("orders-pg PostgreSQL 16 asia-east1 · Public IP and private IP · IAM sign-in on");
+    radioOf(dialog.tree(), "billing-pg").onChange();
+    expect(dialog.kept.draft).toMatchObject({ instance: "billing-pg", network: "private", via_host: WEB_1 });
+    expect(valueOf(dialog.tree(), "Route")).toBe(WEB_1);
+    expect(text(dialog.markup())).toContain("billing-pg PostgreSQL 16 asia-east1 · Private IP only · via web-1 · IAM sign-in on");
+    expect(text(dialog.markup())).not.toContain("New IAP host");
+    submit(dialog.tree());
+    expect(dialog.onSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ instance: "billing-pg", network: "private", via_host: WEB_1 }));
+  });
+
+  it("a_private_only_instance_with_several_jump_hosts_waits_for_one_and_save_says_to_choose", () => {
+    const both = recordOverview({ ...LIBRARY, transports: [hostTransport({ project: DEV }, WEB_1), hostTransport({ project: DEV }, WEB_2)] });
+    const dialog = editor(newInDev, { overview: both, instances: listed([BILLING_PG]) });
+    radioOf(dialog.tree(), "billing-pg").onChange();
+    expect(dialog.kept.draft.network).toBe("private");
+    expect(dialog.kept.draft.via_host).toBeUndefined();
+    expect(text(dialog.markup())).toContain("Private IP only · Choose a host");
+    // The field shows that none is chosen yet, as a choice that cannot be chosen.
+    expect(valueOf(dialog.tree(), "Route")).toBe("");
+    expect(optionOf(dialog.tree(), "Choose a host")).toMatchObject({ value: "", disabled: true });
+    expect(text(dialog.markup())).not.toContain("New IAP host");
+    // Save stays on; pressing it saves nothing and says what is missing.
+    expect(buttonTag(dialog.markup(), "Save database")).not.toContain(DISABLED);
+    expect(dialog.markup()).not.toContain("Choose a host to connect through.");
+    submit(dialog.tree());
+    expect(dialog.onSave).not.toHaveBeenCalled();
+    expect(dialog.markup()).toMatch(/<p[^>]*role="alert"[^>]*>Choose a host to connect through\.<\/p>/);
+    // Once a host is chosen the sentence goes, the row names it, and the database is saved through it.
+    typeInto(dialog.tree(), "Route", WEB_2);
+    expect(dialog.markup()).not.toContain("Choose a host to connect through.");
+    expect(text(dialog.markup())).toContain("Private IP only · via web-2");
+    expect(routeLabels(dialog.tree())).not.toContain("Choose a host");
+    submit(dialog.tree());
+    expect(dialog.onSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ network: "private", via_host: WEB_2 }));
+  });
+
+  it("the_sentence_about_a_missing_host_takes_the_place_of_an_earlier_failure", () => {
+    const dialog = editor({ ...newInDev, region: "asia-east1", instance: "billing-pg", name: "billing-pg", network: "private" }, { error: "Enter a database name (up to 128 characters)." });
+    expect(dialog.markup()).toMatch(/<p[^>]*role="alert"[^>]*>Enter a database name \(up to 128 characters\)\.<\/p>/);
+    submit(dialog.tree());
+    expect(dialog.onSave).not.toHaveBeenCalled();
+    expect(dialog.markup().match(/role="alert"/g)).toHaveLength(1);
+    expect(dialog.markup()).toMatch(/<p[^>]*role="alert"[^>]*>Choose a host to connect through\.<\/p>/);
+  });
+
+  it("a_private_only_instance_without_a_jump_host_offers_a_new_iap_host", () => {
+    const bare = recordOverview({ hosts: [host(WEB_3, "web-3")], transports: [] });
+    const dialog = editor(newInDev, { overview: bare, instances: listed([BILLING_PG]) });
+    expect(text(dialog.markup())).toContain("billing-pg PostgreSQL 16 asia-east1 · Private IP only · Needs a jump host · IAM sign-in on");
+    // Nothing is offered before the instance is picked.
+    expect(text(dialog.markup())).not.toContain("New IAP host");
+    radioOf(dialog.tree(), "billing-pg").onChange();
+    expect(dialog.kept.draft.network).toBe("private");
+    expect(dialog.kept.draft.via_host).toBeUndefined();
+    const html = dialog.markup();
+    expect(text(html)).toContain("Private IP only · Needs a jump host");
+    expect(buttonTag(html, "New IAP host")).not.toContain(DISABLED);
+    press(dialog.tree(), "New IAP host");
+    expect(dialog.createIapHost).toHaveBeenCalledTimes(1);
+    // The page closes the dialog the way Cancel does; the dialog itself saves and cancels nothing.
+    expect(dialog.onCancel).not.toHaveBeenCalled();
+    expect(dialog.onSave).not.toHaveBeenCalled();
+    // A host whose route is elsewhere can still be chosen by hand, and then nothing more is offered.
+    expect(routeLabels(dialog.tree())).toEqual(["Choose a host", "Public IP", "Through web-3"]);
+    typeInto(dialog.tree(), "Route", WEB_3);
+    expect(dialog.kept.draft).toMatchObject({ network: "private", via_host: WEB_3 });
+    expect(text(dialog.markup())).not.toContain("New IAP host");
+    expect(text(dialog.markup())).toContain("Private IP only · via web-3");
+  });
+
+  it("picking_an_instance_with_a_public_ip_goes_over_it_again", () => {
+    const dialog = editor(newInDev, { overview: LIBRARY, instances: listed([ORDERS_PG, BILLING_PG]) });
+    radioOf(dialog.tree(), "billing-pg").onChange();
+    expect(dialog.kept.draft.via_host).toBe(WEB_1);
+    radioOf(dialog.tree(), "orders-pg").onChange();
+    expect(dialog.kept.draft.network).toBe("public");
+    expect(dialog.kept.draft.via_host).toBeUndefined();
+    expect(valueOf(dialog.tree(), "Route")).toBe(optionOf(dialog.tree(), "Public IP").value);
+    // After that the route is the person's to change.
+    typeInto(dialog.tree(), "Route", WEB_2);
+    expect(dialog.kept.draft).toMatchObject({ instance: "orders-pg", network: "private", via_host: WEB_2 });
+    // The same, picked straight: one jump host is taken, several or none leave the host to be chosen.
+    const one = [{ id: WEB_1, alias: "web-1" }];
+    const two = [...one, { id: WEB_2, alias: "web-2" }];
+    const route = ({ network, via_host }: DatabaseDraft) => [network, via_host];
+    expect(route(pickInstance({ ...newDatabase(), network: "private", via_host: WEB_1 }, ORDERS_PG, one))).toEqual(["public", undefined]);
+    expect(route(pickInstance(newDatabase(), BILLING_PG, one))).toEqual(["private", WEB_1]);
+    expect(route(pickInstance({ ...newDatabase(), network: "private", via_host: WEB_2 }, BILLING_PG, two))).toEqual(["private", undefined]);
+    expect(route(pickInstance(newDatabase(), BILLING_PG))).toEqual(["private", undefined]);
+    // An instance with no address at all goes the private way too, and its start says what it lacks.
+    expect(route(pickInstance(newDatabase(), instance({ public_ip: false, private_ip: false }), one))).toEqual(["private", WEB_1]);
+  });
+
+  it("the_route_offers_the_public_ip_then_every_host_by_alias_and_saves_the_one_chosen", () => {
+    const dialog = editor(SAVED, { overview: LIBRARY });
+    expect(routeLabels(dialog.tree())).toEqual(["Public IP", "Through web-1", "Through web-2", "Through web-3"]);
+    expect(valueOf(dialog.tree(), "Route")).toBe(optionOf(dialog.tree(), "Public IP").value);
+    expect(routes(dialog.tree()).map((option) => propsOf<{ value: string }>(option).value).slice(1)).toEqual([WEB_1, WEB_2, WEB_3]);
+    typeInto(dialog.tree(), "Route", WEB_3);
+    submit(dialog.tree());
+    expect(dialog.onSave).toHaveBeenLastCalledWith({ ...SAVED, network: "private", via_host: WEB_3 });
+    // Back on the public IP it is saved as it was, naming no host.
+    typeInto(dialog.tree(), "Route", optionOf(dialog.tree(), "Public IP").value);
+    submit(dialog.tree());
+    expect(dialog.onSave).toHaveBeenLastCalledWith(SAVED);
+    expect(Object.keys(dialog.onSave.mock.lastCall![0])).not.toContain("via_host");
+    // The field is labelled Route, and a host's hidden characters show as codes.
+    expect(text(dialog.markup())).toContain("Route");
+    const spoofed = recordOverview({ hosts: [host(WEB_1, "web‮-1")], transports: [] });
+    expect(routeLabels(editor(SAVED, { overview: spoofed }).tree())).toEqual(["Public IP", "Through web⟨U+202E⟩-1"]);
+    expect(editor(SAVED, { overview: spoofed }).markup()).not.toContain("‮");
+  });
+
+  it("a_saved_database_whose_host_is_gone_keeps_it_and_says_it_is_unavailable", () => {
+    const gone: SavedDatabase = { ...SAVED, network: "private", via_host: GONE };
+    const dialog = editor(gone, { overview: LIBRARY });
+    expect(valueOf(dialog.tree(), "Route")).toBe(GONE);
+    expect(optionOf(dialog.tree(), "Host unavailable")).toMatchObject({ value: GONE, disabled: true });
+    // Saved as it is: changing something else does not need another host.
+    submit(dialog.tree());
+    expect(dialog.onSave).toHaveBeenLastCalledWith(gone);
+    typeInto(dialog.tree(), "Route", WEB_1);
+    expect(routeLabels(dialog.tree())).not.toContain("Host unavailable");
+  });
+
+  it("a_route_chosen_and_chosen_back_is_no_change", () => {
+    const dialog = editor(SAVED, { overview: LIBRARY });
+    typeInto(dialog.tree(), "Route", WEB_1);
+    expect(changed(dialog.kept.draft, SAVED)).toBe(true);
+    typeInto(dialog.tree(), "Route", optionOf(dialog.tree(), "Public IP").value);
+    expect(changed(dialog.kept.draft, SAVED)).toBe(false);
+    // The same for a database that goes through a host, its fields in the order the list gives them: another host, or the public IP, and back.
+    const { account, default_database, pam, local_port, ...where } = SAVED;
+    const routed: SavedDatabase = { ...where, network: "private", via_host: WEB_1, account, default_database, pam, local_port };
+    expect(Object.keys(routed).indexOf("via_host")).toBe(Object.keys(routed).indexOf("network") + 1);
+    const again = editor(routed, { overview: LIBRARY });
+    typeInto(again.tree(), "Route", WEB_2);
+    expect(changed(again.kept.draft, routed)).toBe(true);
+    typeInto(again.tree(), "Route", optionOf(again.tree(), "Public IP").value);
+    expect(changed(again.kept.draft, routed)).toBe(true);
+    typeInto(again.tree(), "Route", WEB_1);
+    expect(changed(again.kept.draft, routed)).toBe(false);
+  });
+});
+
 /** A client that has read gcloud's accounts, and whatever else `seed` puts in its cache: a server render uses the cache and reads nothing. */
 function cache(seed: (client: QueryClient) => void = () => {}) {
   const client = new QueryClient();
@@ -651,7 +838,17 @@ function cache(seed: (client: QueryClient) => void = () => {}) {
   return client;
 }
 
-const dialogProps = (patch: Partial<Parameters<typeof DatabaseEditor>[0]> = {}) => ({ initial: newDatabase(), existing: [], busy: false, error: null, onSave: vi.fn(), onCancel: vi.fn(), ...patch });
+const dialogProps = (patch: Partial<Parameters<typeof DatabaseEditor>[0]> = {}) => ({
+  initial: newDatabase(),
+  existing: [],
+  overview: recordOverview(),
+  busy: false,
+  error: null,
+  onSave: vi.fn(),
+  onCancel: vi.fn(),
+  createIapHost: vi.fn(),
+  ...patch,
+});
 
 /** What the dialog hands its view when it mounts over `client`. */
 const viewOf = (client: QueryClient, patch: Partial<Parameters<typeof DatabaseEditor>[0]> = {}) =>
@@ -740,6 +937,16 @@ describe("the dialog as the Databases page mounts it", () => {
   it("changes_without_anyone_listening_for_the_dirt", () => {
     const view = viewOf(cache(), { initial: SAVED }).props;
     expect(() => view.onDraft({ ...SAVED, name: "Orders (prod)" })).not.toThrow();
+  });
+
+  it("hands_its_view_the_library_and_the_new_iap_host_it_was_given_and_asks_for_no_host_until_save_is_pressed", () => {
+    const overview = recordOverview({ hosts: [] });
+    const createIapHost = vi.fn();
+    const props = viewOf(cache(), { overview, createIapHost }).props;
+    expect(props.overview).toBe(overview);
+    expect(props.createIapHost).toBe(createIapHost);
+    expect(props.hostMissing).toBe(false);
+    expect(() => props.onHostMissing()).not.toThrow();
   });
 
   it("skips_the_ports_of_the_other_databases_and_hands_over_what_it_was_given", () => {

@@ -14,7 +14,7 @@ import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
 import { useNow } from "@/lib/use-now";
 import type { RecordOverview } from "@/lib/records";
-import { databasesKey, type DatabasePhase, type DatabaseView, type SavedDatabase } from "@/lib/databases";
+import { databasesKey, type DatabasePhase, type DatabaseStep, type DatabaseView, type SavedDatabase } from "@/lib/databases";
 import { gcloudAccountsKey, pamStatusQuery, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
 
 const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false, collapsedRecordGroups: [] as string[], toggleRecordGroup: () => {} }));
@@ -47,6 +47,8 @@ function row(patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase>
   return { database: saved, live: live("stopped"), synced: true, blocked: false, removed: false, changed: false, environment: saved.environment, ...patch };
 }
 const status = (patch: Partial<PamStatusView>): PamStatusView => ({ entitlement: "prod-operate", state: "active", active_until_ms: AT + 30 * MINUTE, message: null, ...patch });
+/** What the details of a database on its public IP show of its route: no host, and no IAP. */
+const PUBLIC_ROUTE = { alias: null, iap: false };
 
 const invoke = vi.mocked(tauriInvoke);
 const lastInvoke = (command: string) => invoke.mock.calls.filter(([name]) => name === command).slice(-1)[0]?.[1] as Record<string, unknown>;
@@ -65,7 +67,7 @@ afterEach(() => vi.restoreAllMocks());
 function render(rows?: DatabaseView[], overview = recordOverview()) {
   const client = new QueryClient();
   if (rows) client.setQueryData(databasesKey, rows);
-  return renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} /></QueryClientProvider>);
+  return renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} createIapHost={vi.fn()} /></QueryClientProvider>);
 }
 
 /**
@@ -81,7 +83,7 @@ async function renderWithGrants(rows: DatabaseView[], answer: PamStatusView | Er
   // A mounting row reads again whatever the last read found; this one draws what that read left, even a failure.
   const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
   client.setQueryData(databasesKey, rows);
-  const draw = () => renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={recordOverview()} /></QueryClientProvider>);
+  const draw = () => renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={recordOverview()} createIapHost={vi.fn()} /></QueryClientProvider>);
   draw();
   await Promise.all(grantQueries(client).map((query) => query.fetch().catch(() => undefined)));
   return { client, html: draw() };
@@ -393,7 +395,7 @@ describe("the grant of the host a database is reached through", () => {
     });
     const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
     client.setQueryData(databasesKey, rows);
-    const draw = () => renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} /></QueryClientProvider>);
+    const draw = () => renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} createIapHost={vi.fn()} /></QueryClientProvider>);
     draw();
     await Promise.all(client.getQueryCache().findAll({ queryKey: ["gcp", "pam-status"] }).map((query) => query.fetch().catch(() => undefined)));
     return { client, html: draw() };
@@ -453,7 +455,8 @@ describe("the grant of the host a database is reached through", () => {
       invoke.mockReset();
       const { html } = await renderThroughHost([through({ pam: null })], overview, none);
       expect(grantLines(html)).toEqual([]);
-      expect(text(html)).not.toContain("web-1");
+      // The route may name the host; no line is led by it.
+      expect(text(html)).not.toContain("web-1:");
       expect(invoke).not.toHaveBeenCalled();
     }
   });
@@ -499,7 +502,7 @@ describe("the grant of the host a database is reached through", () => {
     const client = new QueryClient();
     client.setQueryData(pamStatusQuery(WEB).queryKey, none);
     const drawn = (busy: boolean) => renderToStaticMarkup(<QueryClientProvider client={client}><table><tbody>{DatabaseRow({
-      row: through({ pam: null }), busy, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(),
+      row: through({ pam: null }), hostAlias: "web\u202e-1", busy, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(),
       routeGrant: { hostId: WEB, alias: "web\u202e-1", pam: ROUTE_PAM, request: vi.fn() },
     })}</tbody></table></QueryClientProvider>);
     // The code's plus sign is escaped: the label is matched as a pattern.
@@ -521,7 +524,7 @@ describe("the grant of the host a database is reached through", () => {
     invoke.mockResolvedValue(undefined);
     const client = new QueryClient();
     client.setQueryData(databasesKey, [through()]);
-    const tree = renderHook(client, () => DatabasesPanel({ overview: library() }));
+    const tree = renderHook(client, () => DatabasesPanel({ overview: library(), createIapHost: vi.fn() }));
     const props = elementsOf(tree, DatabaseRow)[0].props as unknown as { routeGrant: { hostId: string; alias: string; request: () => void } | null; requestGrant: () => void };
     expect(props.routeGrant).toMatchObject({ hostId: WEB, alias: "web-1" });
     const invalidated = vi.spyOn(client, "invalidateQueries");
@@ -537,12 +540,83 @@ describe("the grant of the host a database is reached through", () => {
     invoke.mockRejectedValue(sentence);
     const client = new QueryClient();
     client.setQueryData(databasesKey, [through()]);
-    const tree = renderHook(client, () => DatabasesPanel({ overview: library() }));
+    const tree = renderHook(client, () => DatabasesPanel({ overview: library(), createIapHost: vi.fn() }));
     const props = elementsOf(tree, DatabaseRow)[0].props as unknown as { routeGrant: { request: () => void } };
     const invalidated = vi.spyOn(client, "invalidateQueries");
     props.routeGrant.request();
     await vi.waitFor(() => expect(invalidated).toHaveBeenCalledWith({ queryKey: ["gcp", "pam-status", WEB] }));
     expect(invalidated).toHaveBeenCalledWith({ queryKey: databasesKey, refetchType: "all" });
+  });
+});
+
+describe("the route of a database on its row", () => {
+  const [WEB, GONE] = ["00000000000000b1", "00000000000000b9"];
+  /** The library with the host web-1, which has an IAP route of its own. */
+  const library = recordOverview({ hosts: [hostView({ id: WEB, payload: hostPayload({ alias: "web-1" }) })], transports: [hostTransport({}, WEB)] });
+  /** Orders over its private address through `via`, with no grant check of its own. */
+  const through = (patch: Partial<DatabaseView> = {}, via = WEB) => row(patch, { network: "private", via_host: via, pam: null });
+  const starting = (step: DatabaseStep | null): Partial<DatabaseView> => ({ live: live("starting", { step }) });
+  const STEPS = /Requesting grant…|Connecting through|Getting the Cloud SQL certificate…/;
+
+  it("names_the_host_after_where_the_database_is", () => {
+    expect(text(render([through()], library))).toContain("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg · via web-1");
+    // A database on its public IP names none.
+    const shown = text(render([row({}, { pam: null })], library));
+    expect(shown).toContain("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
+    expect(shown).not.toContain("· via");
+  });
+
+  it("says_the_step_its_start_is_at_while_it_starts", () => {
+    const note = (patch: Partial<DatabaseView>) => text(render([through(patch)], library));
+    expect(note(starting("connect"))).toContain("Connecting through web-1…");
+    expect(note(starting("grant"))).toContain("Requesting grant…");
+    expect(note(starting("certificate"))).toContain("Getting the Cloud SQL certificate…");
+    // A database on its public IP says its steps too.
+    expect(text(render([row(starting("certificate"), { pam: null })], library))).toContain("Getting the Cloud SQL certificate…");
+    // A start that has not reached a step says nothing of one; a running database counts its connections; a failed one says why.
+    expect(note(starting(null))).not.toMatch(STEPS);
+    expect(note({ live: live("running", { connections: 2 }) })).toContain("2 active connections");
+    const failed = note({ live: live("error", { step: "connect", error: "Could not connect through web-1: Connection refused." }) });
+    expect(failed).toContain("Could not connect through web-1: Connection refused.");
+    expect(failed).not.toContain("Connecting through web-1…");
+  });
+
+  it("a_host_that_is_not_in_the_library_is_unavailable_in_the_warning_color", () => {
+    const html = render([through({}, GONE)], library);
+    const line = html.match(/<span class="([^"]*)">Host unavailable<\/span>/);
+    expect(line?.[1].split(/\s+/)).toContain("text-warning");
+    // The route says where the database is and names no host; a start says it connects through the host.
+    expect(text(html)).toContain("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
+    expect(text(html)).not.toContain("· via");
+    expect(text(render([through(starting("connect"), GONE)], library))).toContain("Connecting through the host…");
+    // A host in the library, and a database on its public IP, are not unavailable.
+    expect(text(render([through()], library))).not.toContain("Host unavailable");
+    expect(text(render([row({}, { pam: null })], recordOverview({ hosts: [] })))).not.toContain("Host unavailable");
+    // A row that is only listed to be stopped says nothing of it.
+    expect(text(render([through({ live: live("running"), removed: true, blocked: true }, GONE)], library))).not.toContain("Host unavailable");
+  });
+
+  it("shows_a_hosts_hidden_characters_as_codes", () => {
+    const spoofed = recordOverview({ hosts: [hostView({ id: WEB, payload: hostPayload({ alias: "web‮-1" }) })] });
+    const html = render([through(starting("connect"))], spoofed);
+    expect(text(html)).toContain("· via web⟨U+202E⟩-1");
+    expect(text(html)).toContain("Connecting through web⟨U+202E⟩-1…");
+    expect(html).not.toContain("‮");
+  });
+
+  it("hands_each_row_the_alias_of_its_host_and_none_for_one_that_is_gone_or_public", () => {
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, [through(), through({}, GONE), row({}, { id: "00000000000000a2", name: "Analytics", pam: null })]);
+    const tree = renderHook(client, () => DatabasesPanel({ overview: library, createIapHost: vi.fn() }));
+    expect(elementsOf(tree, DatabaseRow).map((element) => (element.props as unknown as { hostAlias: string | null }).hostAlias)).toEqual(["web-1", null, null]);
+  });
+
+  it("the_details_show_the_way_to_the_instance_and_a_jdbc_url_to_copy", () => {
+    const details = (route: { alias: string | null; iap: boolean }) =>
+      text(renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccess row={through({ live: live("running", { address: "198.51.100.7:3307" }) })} route={route} /></QueryClientProvider>));
+    expect(details({ alias: "web-1", iap: true })).toContain("Lunport → IAP → web-1 → 198.51.100.7:3307 → Cloud SQL (TLS, IAM)");
+    expect(details({ alias: "web-1", iap: true })).toContain("Copy JDBC URL");
+    expect(details({ alias: "web-1", iap: false })).toContain("Lunport → web-1 → 198.51.100.7:3307 → Cloud SQL (TLS, IAM)");
   });
 });
 
@@ -647,7 +721,7 @@ describe("stopping a database", () => {
   const panel = (rows: DatabaseView[]) => {
     const client = new QueryClient();
     client.setQueryData(databasesKey, rows);
-    return renderHook(client, () => DatabasesPanel({ overview: recordOverview() }));
+    return renderHook(client, () => DatabasesPanel({ overview: recordOverview(), createIapHost: vi.fn() }));
   };
   const toggleOf = (tree: ReactNode) => (elementsOf(tree, DatabaseRow)[0].props as unknown as { toggle: () => void }).toggle;
 
@@ -710,11 +784,11 @@ describe("the connection details under a row", () => {
   });
 
   it("the_details_button_controls_the_card_that_carries_its_id", () => {
-    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
+    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
     // Closed or open, it names the card it opens, which is drawn under the row with that id.
     for (const open of [false, true]) expect(toggle(open), String(open)).toContain('aria-controls="database-details-00000000000000a1"');
     const client = new QueryClient();
-    const card = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} /></QueryClientProvider>);
+    const card = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} route={PUBLIC_ROUTE} /></QueryClientProvider>);
     expect(card).toContain(`id="${toggle(true).match(/aria-controls="([^"]*)"/)?.[1]}"`);
     // The card is labelled for what it holds: not with the name of the button that opens it.
     expect(card).toContain('aria-label="Local connection to Orders"');
@@ -725,7 +799,7 @@ describe("the connection details under a row", () => {
 
   it("the_details_button_follows_whether_the_details_are_open_and_presses_through", () => {
     const [toggle, requestGrant, ask, edit, details] = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
-    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), busy: false, toggle, requestGrant, ask, edit, details: { open, toggle: details } });
+    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle, requestGrant, ask, edit, details: { open, toggle: details } });
     const html = (open: boolean) => renderToStaticMarkup(<table><tbody>{drawn(open)}</tbody></table>);
     expect(iconButton(html(false), "Connection details for Orders")).toContain('aria-expanded="false"');
     expect(iconButton(html(true), "Connection details for Orders")).toContain('aria-expanded="true"');
@@ -740,7 +814,7 @@ describe("the connection details under a row", () => {
   });
 
   it("a_row_given_no_details_has_no_details_button", () => {
-    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn() })}</tbody></table>);
+    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn() })}</tbody></table>);
     expect(html).not.toContain("Connection details");
     // The shared Button's class names carry `aria-expanded:` variants, so only the attribute itself says a button opens something.
     expect(html).not.toContain('aria-expanded="');
@@ -773,7 +847,7 @@ describe("the connection details under a row", () => {
     function details(database: Partial<SavedDatabase>, read?: GcloudAccountsView) {
       const client = new QueryClient();
       if (read) client.setQueryData(gcloudAccountsKey, read);
-      return text(renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, { pam: null, ...database })} /></QueryClientProvider>));
+      return text(renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, { pam: null, ...database })} route={PUBLIC_ROUTE} /></QueryClientProvider>));
     }
 
     it("is_the_databases_account_else_the_one_gcloud_is_signed_in_as", () => {
@@ -795,7 +869,7 @@ describe("the connection details under a row", () => {
 
     it("keeps_the_passwords_off_the_page_and_out_of_the_cache", () => {
       const client = new QueryClient();
-      const html = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} /></QueryClientProvider>);
+      const html = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} route={PUBLIC_ROUTE} /></QueryClientProvider>);
       expect(invoke).not.toHaveBeenCalled();
       expect(html).not.toContain("<input");
       expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toMatch(/password/i);
@@ -808,7 +882,7 @@ describe("opening the editor from the page", () => {
 
   it("a_rows_name_and_edit_button_both_open_the_editor_for_that_row", () => {
     const [toggle, requestGrant, ask, edit] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
-    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), busy: false, toggle, requestGrant, ask, edit }));
+    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), hostAlias: null, busy: false, toggle, requestGrant, ask, edit }));
     buttons.find((button) => textIn(button) === "Orders")!.props.onClick!();
     expect(edit).toHaveBeenCalledTimes(1);
     buttons.find((button) => labelOf(button) === "Edit Orders")!.props.onClick!();
@@ -833,7 +907,7 @@ describe("opening the editor from the page", () => {
   it("the_header_opens_the_editor_and_nothing_is_open_until_it_is_asked", () => {
     const client = new QueryClient();
     client.setQueryData(databasesKey, [row()]);
-    const tree = renderHook(client, () => DatabasesPanel({ overview: recordOverview() }));
+    const tree = renderHook(client, () => DatabasesPanel({ overview: recordOverview(), createIapHost: vi.fn() }));
     const header = elementsOf(tree, PageHeader)[0].props as unknown as { actions: ReactNode };
     expect(buttonsIn(header.actions).find((button) => textIn(button) === "New database")?.props.onClick).toBeTypeOf("function");
     expect((elementsOf(tree, Dialog)[0].props as unknown as { open: boolean }).open).toBe(false);
@@ -844,7 +918,7 @@ describe("opening the editor from the page", () => {
   it("closing_the_dialog_with_changes_asks_with_the_words_the_tunnels_page_uses", () => {
     const client = new QueryClient();
     client.setQueryData(databasesKey, [row()]);
-    const tree = renderHook(client, () => DatabasesPanel({ overview: recordOverview() }));
+    const tree = renderHook(client, () => DatabasesPanel({ overview: recordOverview(), createIapHost: vi.fn() }));
     // The delete confirmation is the other one; the dialog that asks about discarding is closed until a changed dialog is closed.
     const asking = elementsOf(tree, AlertDialog).filter((dialog) => textIn(dialog).includes("Discard database changes?"));
     expect(asking).toHaveLength(1);

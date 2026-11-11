@@ -10,9 +10,10 @@ import type { DatabaseLive } from "@/bindings/DatabaseLive";
 import type { DatabasePhase } from "@/bindings/DatabasePhase";
 import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
 import type { DatabaseEngine } from "@/bindings/DatabaseEngine";
+import type { DatabaseStep } from "@/bindings/DatabaseStep";
 import type { InstanceSummary } from "@/bindings/InstanceSummary";
 import type { UnlockMethod } from "@/bindings/UnlockMethod";
-export type { SavedDatabase, DatabaseView, DatabaseLive, DatabasePhase, DatabaseEnvironment, InstanceSummary, UnlockMethod };
+export type { SavedDatabase, DatabaseView, DatabaseLive, DatabasePhase, DatabaseStep, DatabaseEnvironment, InstanceSummary, UnlockMethod };
 
 export const databasesKey = ["databases"] as const;
 export const listDatabases = () => tauriInvoke<DatabaseView[]>("databases_list");
@@ -116,6 +117,11 @@ export const databasePamStatusQuery = (id: string) =>
     ...pamStatusOptions,
   });
 
+/** The library host `d` is reached through: its `via_host` over its private IP; none for a database on its public IP. */
+export function routeHost(d: Pick<SavedDatabase, "network" | "via_host">): string | null {
+  return d.network === "private" ? (d.via_host ?? null) : null;
+}
+
 /** The grant the host a database is reached through asks for: the host to read it for, the alias of the host the database goes through, and the grant check. */
 export type RouteHostGrant = { hostId: string; alias: string; pam: PamCheck };
 
@@ -126,12 +132,103 @@ export type RouteHostGrant = { hostId: string; alias: string; pam: PamCheck };
  * and for a first hop with no route or a route with no grant check.
  */
 export function routeHostGrant(overview: RecordOverview, database: SavedDatabase): RouteHostGrant | null {
-  const via = database.network === "private" ? database.via_host : undefined;
+  const via = routeHost(database);
   const host = via ? overview.hosts.find((candidate) => candidate.id === via) : undefined;
   if (!host) return null;
   const hostId = firstHop(overview, host.id);
   const pam = transportFor(overview, hostId)?.kind.pam;
   return hostId && pam ? { hostId, alias: host.payload.alias, pam } : null;
+}
+
+/** A library host a database can be reached through: its identity and its alias. */
+export type JumpHost = { id: string; alias: string };
+const byAlias = (a: JumpHost, b: JumpHost) => a.alias.localeCompare(b.alias) || a.id.localeCompare(b.id);
+
+/** Every host of the library, as the editor's Route field offers them: by alias, then by id. */
+export function libraryHosts(overview: RecordOverview): JumpHost[] {
+  return overview.hosts.map((host) => ({ id: host.id, alias: host.payload.alias })).sort(byAlias);
+}
+
+/**
+ * The hosts an instance of `project` without a public IP is reached through unless another is chosen: those whose own Google Cloud IAP
+ * route is in that project (a host reached through another one is judged by its own route, not its first hop's), by alias, then by id.
+ */
+export function jumpHostCandidates(overview: RecordOverview, project: string): JumpHost[] {
+  return libraryHosts(overview).filter((host) => {
+    const route = transportFor(overview, host.id)?.kind;
+    return route?.type === "gcp_iap" && route.project === project;
+  });
+}
+
+/** What the page shows of the way to a database: the alias of the host it goes through, and whether that way begins with IAP. */
+export type RouteSummary = { alias: string | null; iap: boolean };
+
+/**
+ * The way to `database`: the alias of the host it is reached through, none for a database on its public IP and for a host this computer
+ * has not got; and whether the connection to that host begins with a Google Cloud IAP route, which is the route of its first hop
+ * (`firstHop`), the only hop a route applies to.
+ */
+export function routeSummary(overview: RecordOverview, database: SavedDatabase): RouteSummary {
+  const via = routeHost(database);
+  const host = via === null ? undefined : overview.hosts.find((candidate) => candidate.id === via);
+  if (!host) return { alias: null, iap: false };
+  return { alias: host.payload.alias, iap: transportFor(overview, firstHop(overview, host.id))?.kind.type === "gcp_iap" };
+}
+
+/** What the page says of a host a database is reached through that is not in the library. */
+export const HOST_UNAVAILABLE = "Host unavailable";
+
+/** What a database's row says while it starts, by the step its start is at; `alias` is the host it is reached through, when known. */
+export function stepSentence(step: DatabaseStep, alias: string | null): string {
+  switch (step) {
+    case "grant":
+      return "Requesting grant…";
+    case "connect":
+      return alias === null ? "Connecting through the host…" : `Connecting through ${alias}…`;
+    case "certificate":
+      return "Getting the Cloud SQL certificate…";
+  }
+}
+
+/** How far a start got along a part of the way: not yet, now, past it, or failed there. */
+export type RoutePartState = "idle" | "active" | "done" | "failed";
+/** One part of the way to a database, as its card draws it. */
+export type RoutePart = { label: string; state: RoutePartState };
+
+/**
+ * Where each part of the way sits among the steps of a start: Lunport asks for the grant, IAP and the host are the connect step, the
+ * instance's address is fetched between that step and the certificate, and Cloud SQL is reached with the certificate.
+ */
+const STEP_AT: Record<DatabaseStep, number> = { grant: 0, connect: 1, certificate: 3 };
+const ADDRESS_AT = 2;
+
+/**
+ * The way to `database`, part by part: Lunport; IAP when the way to the host begins with it (`route.iap`); the host (`route.alias`, or
+ * `HOST_UNAVAILABLE` for one this computer has not got) for a database reached through one; the instance's address once a start fetched
+ * it, else which address it is; and Cloud SQL, with TLS and IAM sign-in. A running database has gone the whole way. A starting one is at
+ * the part of its step, past the parts before it; one that failed failed there, or at Lunport when no step was reached. In every other
+ * phase no part is under way. The address is not kept: once it is cleared (a refused dial, a grant that ended) the part says which
+ * address it is again, until a connection fetches it anew.
+ */
+export function routeParts(database: SavedDatabase, live: DatabaseLive, route: RouteSummary): RoutePart[] {
+  const through = routeHost(database) !== null;
+  const parts: [string, number][] = [
+    ["Lunport", STEP_AT.grant],
+    ...(through && route.iap ? [["IAP", STEP_AT.connect] as [string, number]] : []),
+    ...(through ? [[route.alias ?? HOST_UNAVAILABLE, STEP_AT.connect] as [string, number]] : []),
+    [live.address ?? (through ? "Private IP" : "Public IP"), ADDRESS_AT],
+    ["Cloud SQL (TLS, IAM)", STEP_AT.certificate],
+  ];
+  const state = (at: number): RoutePartState => {
+    if (live.phase === "running") return "done";
+    if (live.phase === "starting" && live.step) return at < STEP_AT[live.step] ? "done" : at === STEP_AT[live.step] ? "active" : "idle";
+    if (live.phase === "error") {
+      const failedAt = STEP_AT[live.step ?? "grant"];
+      return at < failedAt ? "done" : at === failedAt ? "failed" : "idle";
+    }
+    return "idle";
+  };
+  return parts.map(([label, at]) => ({ label, state: state(at) }));
 }
 
 /** How a phase reads in the Status column. */
@@ -141,8 +238,14 @@ const engines: Record<DatabaseEngine, string> = { postgres: "PostgreSQL" };
 /** Whether the database's port is starting, running or stopping on this computer: it is not changed then. */
 export const databaseBusy = (row: DatabaseView) => ["starting", "running", "stopping"].includes(row.live.phase);
 
-/** Where the database comes from, as the row names it: `PostgreSQL · project · region · instance`. */
-export const databaseRoute = (d: SavedDatabase) => `${engines[d.engine]} · ${d.project} · ${d.region} · ${d.instance}`;
+/**
+ * Where the database comes from, as the row names it: `PostgreSQL · project · region · instance`, and ` · via {alias}` after it for a
+ * database reached through a host whose alias is known.
+ */
+export function databaseRoute(d: SavedDatabase, alias?: string | null): string {
+  const place = `${engines[d.engine]} · ${d.project} · ${d.region} · ${d.instance}`;
+  return routeHost(d) !== null && alias != null ? `${place} · via ${alias}` : place;
+}
 
 /** The port apps reach the database on: the one that runs, else the one saved; none for a database that is not offered on a port. */
 export const databasePort = (row: DatabaseView): number | null => row.live.port ?? row.database.local_port;
@@ -177,6 +280,13 @@ export function iamUserFor(account: string | null, active: string | null): strin
  */
 export const connectionUrl = (db: SavedDatabase, iamUser: string): string =>
   `postgresql://${encodeURIComponent(iamUser)}@127.0.0.1:${db.local_port}/${encodeURIComponent(db.default_database)}`;
+
+/**
+ * The address a JDBC app connects to on `port`: `jdbc:postgresql://127.0.0.1:port/database?user=user`, with the database and the user
+ * percent-encoded, since pgJDBC requires reserved characters such as `@` encoded. Like `connectionUrl` it holds no password.
+ */
+export const jdbcUrl = (db: SavedDatabase, port: number, iamUser: string): string =>
+  `jdbc:postgresql://127.0.0.1:${port}/${encodeURIComponent(db.default_database)}?user=${encodeURIComponent(iamUser)}`;
 
 /**
  * How many whole seconds of the writable window are left at `now`, rounded up so that the last part of a second still counts as one

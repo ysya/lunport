@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { LoaderCircle } from "lucide-react";
+import { LoaderCircle, Plus } from "lucide-react";
 import { RadioGroup } from "radix-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,28 +8,36 @@ import { DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { TaskDialogBody } from "@/components/app/TaskDialog";
+import type { RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { useDebounced } from "@/lib/use-debounced";
 import { cn, errorMessage } from "@/lib/utils";
 import {
+  HOST_UNAVAILABLE,
   connectionName,
   databaseInstancesQuery,
+  jumpHostCandidates,
+  libraryHosts,
   parseConnectionName,
+  routeHost,
   suggestPort,
   type DatabaseDraft,
   type DatabaseEnvironment,
   type InstanceSummary,
+  type JumpHost,
   type SavedDatabase,
 } from "@/lib/databases";
 import { isProjectId, newPamCheck } from "@/lib/transports";
-import { RecordField } from "./form";
+import { RecordField, selectClass } from "./form";
 import { choice, EntitlementsInput, EntitlementSuggestions, GoogleAccountField, segmented } from "./IapRouteFields";
 
 /*
  * The dialog that adds a Cloud SQL database to the library or changes one: where the instance is (picked from the list Google gives
- * for a project, or typed as its connection name), which Google account signs in, what it is called, what it is used for, whether
- * connecting needs a PAM grant, and whether other apps may connect on a local port. The backend judges the values when the database is
- * saved and says why in a sentence, which the dialog shows; the dialog only keeps a database from being saved before it is anywhere.
+ * for a project, or typed as its connection name), the way it is reached (over its public IP, or over its private IP through a host of
+ * the library), which Google account signs in, what it is called, what it is used for, whether connecting needs a PAM grant, and whether
+ * other apps may connect on a local port. The backend judges the values when the database is saved and says why in a sentence, which the
+ * dialog shows; the dialog only keeps a database from being saved before it is anywhere, and says to choose a host for one that goes
+ * through none.
  *
  * `DatabaseEditor` keeps the state and reads what the view shows; `DatabaseEditorView` is the dialog's body and footer without hooks,
  * and decides every change to the draft, so that the tests can press it.
@@ -58,11 +66,14 @@ export function instancesRead(project: string, query: { data: InstanceSummary[] 
 }
 
 const IAM_OFF = "IAM sign-in is off on this instance.";
-const NO_PUBLIC_IP = "This instance has no public IP. Lunport connects over public IP in this release.";
+/** What Save says of a database over its private IP that goes through no host yet. */
+const NO_HOST = "Choose a host to connect through.";
 
-/** Why an instance is listed but cannot be chosen, or null when it can. Without a public address nothing else about it matters. */
+/**
+ * Why an instance is listed but cannot be chosen, or null when it can. An instance without a public IP can be chosen: it is reached
+ * through a host of the library, and its start says so when it has no private IP either.
+ */
 export function instanceProblem(instance: InstanceSummary): string | null {
-  if (!instance.public_ip) return NO_PUBLIC_IP;
   return instance.iam_authentication ? null : IAM_OFF;
 }
 
@@ -82,9 +93,34 @@ function placed(draft: DatabaseDraft, place: Place): DatabaseDraft {
   return { ...draft, ...place, name: follows ? place.instance : draft.name };
 }
 
-/** `draft` at the instance picked from the list, which starts again from the database `postgres`. */
-export function pickInstance(draft: DatabaseDraft, instance: InstanceSummary): DatabaseDraft {
-  return { ...placed(draft, { project: draft.project, region: instance.region, instance: instance.name }), default_database: "postgres" };
+/**
+ * `draft` over its public IP, naming no host. The field stays, empty, where the draft has it, so that a host chosen again lands in the
+ * same place and the draft reads as unchanged (`changed`); `finished` leaves it out of the saved database.
+ */
+const overPublicIp = (draft: DatabaseDraft): DatabaseDraft => ({ ...draft, network: "public", via_host: undefined });
+/** `draft` over its private IP through the library host `host`, or through none yet. */
+const throughHost = (draft: DatabaseDraft, host: string | undefined): DatabaseDraft => ({ ...draft, network: "private", via_host: host });
+
+/** The host `draft` goes through, or none: over its public IP, or over its private IP before a host is chosen. */
+const chosenHost = (draft: DatabaseDraft): string | null => routeHost(draft) || null;
+/** Whether `draft` is over its private IP and goes through no host yet, which it cannot be saved as. */
+const hostless = (draft: DatabaseDraft) => draft.network === "private" && chosenHost(draft) === null;
+
+/** The value of the Route field's Public IP; every other value is a host's identity. */
+const PUBLIC_ROUTE = "public";
+
+/** `draft` the way the Route field's `value` says: over its public IP, or through that host. */
+const withRoute = (draft: DatabaseDraft, value: string): DatabaseDraft => (value === PUBLIC_ROUTE ? overPublicIp(draft) : throughHost(draft, value));
+
+/**
+ * `draft` at the instance picked from the list, which starts again from the database `postgres` and goes the way the instance is
+ * reached: over its public IP when it has one, else through the one jump host of its project (`candidates`), or through none yet when
+ * there are several to choose from, or none.
+ */
+export function pickInstance(draft: DatabaseDraft, instance: InstanceSummary, candidates: JumpHost[] = []): DatabaseDraft {
+  const moved = { ...placed(draft, { project: draft.project, region: instance.region, instance: instance.name }), default_database: "postgres" };
+  if (instance.public_ip) return overPublicIp(moved);
+  return throughHost(moved, candidates.length === 1 ? candidates[0].id : undefined);
 }
 
 /** `draft` with the project typed in the list's project field: an instance picked in another project is no longer picked. */
@@ -106,9 +142,16 @@ export function changed(draft: DatabaseDraft, opened: DatabaseDraft): boolean {
   return JSON.stringify(draft) !== JSON.stringify(opened);
 }
 
-/** The database as it is saved: its typed names without the spaces around them. None while no environment is chosen, which a record needs. */
-const finished = (draft: DatabaseDraft): SavedDatabase | null =>
-  draft.environment === null ? null : { ...draft, environment: draft.environment, name: draft.name.trim(), default_database: draft.default_database.trim() };
+/**
+ * The database as it is saved: its typed names without the spaces around them, and the host it goes through only when it is over its
+ * private IP. None while no environment is chosen, which a record needs.
+ */
+function finished(draft: DatabaseDraft): SavedDatabase | null {
+  if (draft.environment === null) return null;
+  const { via_host: host, ...fields } = draft;
+  const saved: SavedDatabase = { ...fields, environment: draft.environment, name: draft.name.trim(), default_database: draft.default_database.trim() };
+  return draft.network === "private" && host !== undefined ? { ...saved, via_host: host } : saved;
+}
 
 /** The local ports the other databases hold. */
 const usedPorts = (existing: SavedDatabase[]) => existing.flatMap((database) => database.local_port ?? []);
@@ -133,14 +176,37 @@ const addresses = (instance: InstanceSummary) =>
 
 const environments: [DatabaseEnvironment, string][] = [["dev", "Dev"], ["staging", "Staging"], ["prod", "Prod"]];
 
+/** The alias of the library host `id`, or none when this computer has not got it. */
+const aliasOf = (overview: RecordOverview, id: string) => overview.hosts.find((host) => host.id === id)?.payload.alias ?? null;
+
+/**
+ * What the list says, after the addresses of an instance without a public IP, of the host it goes through. The instance picked says the
+ * draft's way: the host chosen (or that it is unavailable), else that a host is to be chosen or that a jump host is needed; over the
+ * public IP, nothing. Any other says what picking it does: the one jump host of the project it takes, else that there are several to
+ * choose from, or none.
+ */
+function hostNote(instance: InstanceSummary, chosen: boolean, draft: DatabaseDraft, candidates: JumpHost[], overview: RecordOverview): string | null {
+  if (instance.public_ip) return null;
+  const unchosen = candidates.length === 0 ? "Needs a jump host" : "Choose a host";
+  if (!chosen) return candidates.length === 1 ? `via ${revealHidden(candidates[0].alias)}` : unchosen;
+  const host = chosenHost(draft);
+  if (host === null) return draft.network === "private" ? unchosen : null;
+  const alias = aliasOf(overview, host);
+  return alias === null ? HOST_UNAVAILABLE : `via ${revealHidden(alias)}`;
+}
+
 /*
  * The two drawings of the instance list below are plain functions rather than components: they hold no state and no hooks, and the
  * view's tests read the controls straight from the view's element tree.
  */
 
-/** One instance of the list: a radio that cannot be chosen when the instance cannot be connected to, with the reason under it. */
-function instanceRow(instance: InstanceSummary, chosen: boolean, onPick: () => void) {
+/**
+ * One instance of the list: a radio that cannot be chosen when the instance cannot be connected to, with the reason under it. One that
+ * can be says, after its addresses, the `note` of the host it goes through (`hostNote`).
+ */
+function instanceRow(instance: InstanceSummary, chosen: boolean, note: string | null, onPick: () => void) {
   const problem = instanceProblem(instance);
+  const facts = [instance.region, addresses(instance), ...(problem === null && note !== null ? [note] : []), ...(problem ? [] : ["IAM sign-in on"])];
   return (
     <label key={`${instance.region}/${instance.name}`} className={cn("flex items-start gap-3 px-3 py-2.5 text-sm", problem ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/40", chosen && "bg-primary/5")}>
       <input type="radio" name="database-instance" className="mt-1 accent-primary" checked={chosen} disabled={problem !== null} onChange={onPick} />
@@ -149,24 +215,25 @@ function instanceRow(instance: InstanceSummary, chosen: boolean, onPick: () => v
           {instance.name}
           <Badge variant="secondary">{versionName(instance.database_version)}</Badge>
         </span>
-        <span className="block text-xs text-muted-foreground">{[instance.region, addresses(instance), ...(problem ? [] : ["IAM sign-in on"])].join(" · ")}</span>
+        <span className="block text-xs text-muted-foreground">{facts.join(" · ")}</span>
         {problem && <span className="block text-xs text-warning">{problem}</span>}
       </span>
     </label>
   );
 }
 
-/** The instances of the project, to choose from, or why there are none to show yet. */
-function instanceList(draft: DatabaseDraft, instances: InstancesRead, onDraft: (next: DatabaseDraft) => void) {
+/** The instances of the project, to choose from, or why there are none to show yet; `candidates` are the jump hosts of the project. */
+function instanceList(draft: DatabaseDraft, instances: InstancesRead, candidates: JumpHost[], overview: RecordOverview, onDraft: (next: DatabaseDraft) => void) {
   const rows = instances.state === "listed" ? instances.instances : [];
   return (
     <fieldset className="min-w-0 space-y-2">
       <legend className="mb-2 p-0 text-sm font-medium">{isProjectId(draft.project) ? `Cloud SQL instances in ${draft.project}` : "Cloud SQL instances"}</legend>
       {rows.length > 0 && (
         <div className="divide-y overflow-hidden rounded-lg border">
-          {rows.map((instance) =>
-            instanceRow(instance, instance.name === draft.instance && instance.region === draft.region, () => onDraft(pickInstance(draft, instance))),
-          )}
+          {rows.map((instance) => {
+            const chosen = instance.name === draft.instance && instance.region === draft.region;
+            return instanceRow(instance, chosen, hostNote(instance, chosen, draft, candidates, overview), () => onDraft(pickInstance(draft, instance, candidates)));
+          })}
         </div>
       )}
       {instances.state === "waiting" && <p className="text-xs text-muted-foreground">Enter a project id to list its Cloud SQL instances.</p>}
@@ -200,22 +267,39 @@ export type DatabaseEditorViewProps = {
   busy: boolean;
   /** The sentence the last save failed with. */
   error: string | null;
+  /** The library: the hosts the Route field offers, and the jump hosts of the draft's project. */
+  overview: RecordOverview;
+  /** Whether Save was pressed while the draft went through no host, so that the dialog says to choose one while it still does. */
+  hostMissing: boolean;
   onDraft: (next: DatabaseDraft) => void;
   onMode: (next: Mode) => void;
   onConnection: (text: string) => void;
   onSave: (next: SavedDatabase) => void;
+  /** Told when Save is pressed while the draft is over its private IP and goes through no host. */
+  onHostMissing: () => void;
   onCancel: () => void;
+  /** New IAP host: the page closes the dialog as Cancel does and opens the host editor for a host that connects through IAP. */
+  createIapHost: () => void;
 };
 
 /**
  * The dialog's body and its buttons, drawn from the draft. No hooks: exported for the tests. Every control hands the whole next draft
  * to `onDraft`. Saving is held back while the database is nowhere and while no environment is chosen, which a new database starts
- * without, and while a save is under way every control is off.
+ * without, and while a save is under way every control is off. Save on a database over its private IP that goes through no host saves
+ * nothing and says to choose one; with no jump host in the project the Route field offers New IAP host.
  */
-export function DatabaseEditorView({ draft, mode, connection, instances, lookup, used, busy, error, onDraft, onMode, onConnection, onSave, onCancel }: DatabaseEditorViewProps) {
+export function DatabaseEditorView(props: DatabaseEditorViewProps) {
+  const { draft, mode, connection, instances, lookup, used, busy, error, overview, hostMissing, onDraft, onMode, onConnection, onSave, onHostMissing, onCancel, createIapHost } = props;
   const patch = (changes: Partial<DatabaseDraft>) => onDraft({ ...draft, ...changes });
   const ready = located(draft) && draft.environment !== null;
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
+  const candidates = jumpHostCandidates(overview, draft.project);
+  const hosts = libraryHosts(overview);
+  const host = chosenHost(draft);
+  const missing = hostless(draft);
+  // A host the library no longer has stays the route until another is chosen, and the field shows it as unavailable.
+  const unavailable = host !== null && !hosts.some((candidate) => candidate.id === host);
+  const alert = hostMissing && missing ? NO_HOST : error;
   const chooseMode = (next: Mode) => {
     onMode(next);
     // The field shows the connection name of the instance picked, or nothing: never a name typed before that pick was taken back.
@@ -229,7 +313,9 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
         onSubmit={(event) => {
           event.preventDefault();
           const saved = finished(draft);
-          if (located(draft) && saved) onSave(saved);
+          if (!located(draft) || !saved) return;
+          if (missing) onHostMissing();
+          else onSave(saved);
         }}
       >
         <TaskDialogBody>
@@ -252,7 +338,7 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
                 <RecordField label="Project">
                   <Input value={draft.project} placeholder="my-project-123456" onChange={(event) => onDraft(withProject(draft, event.target.value.trim()))} />
                 </RecordField>
-                {instanceList(draft, instances, onDraft)}
+                {instanceList(draft, instances, candidates, overview, onDraft)}
               </>
             ) : (
               <RecordField label="Connection name">
@@ -270,6 +356,32 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
                 </p>
               </RecordField>
             )}
+            <RecordField label="Route">
+              <select className={selectClass} value={draft.network === "public" ? PUBLIC_ROUTE : (host ?? "")} onChange={(event) => onDraft(withRoute(draft, event.target.value))}>
+                {missing && (
+                  <option value="" disabled>
+                    Choose a host
+                  </option>
+                )}
+                {unavailable && (
+                  <option value={host} disabled>
+                    {HOST_UNAVAILABLE}
+                  </option>
+                )}
+                <option value={PUBLIC_ROUTE}>Public IP</option>
+                {hosts.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {`Through ${revealHidden(candidate.alias)}`}
+                  </option>
+                ))}
+              </select>
+              {missing && candidates.length === 0 && (
+                <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => createIapHost()}>
+                  <Plus />
+                  New IAP host
+                </Button>
+              )}
+            </RecordField>
             <div className="grid gap-4 sm:grid-cols-2">
               <RecordField label="Name">
                 <Input value={draft.name} maxLength={128} required placeholder="Orders" onChange={(event) => patch({ name: event.target.value })} />
@@ -344,9 +456,9 @@ export function DatabaseEditorView({ draft, mode, connection, instances, lookup,
         </TaskDialogBody>
       </form>
       <DialogFooter>
-        {error && (
+        {alert && (
           <p role="alert" className="min-w-0 flex-1 basis-60 self-center text-sm text-destructive">
-            {error}
+            {alert}
           </p>
         )}
         <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
@@ -366,11 +478,15 @@ export type DatabaseEditorProps = {
   initial: DatabaseDraft;
   /** The other saved databases, whose local ports a port proposed here skips. */
   existing: SavedDatabase[];
+  /** The library, whose hosts a database can be reached through. */
+  overview: RecordOverview;
   busy: boolean;
   /** The sentence the last save failed with, if it did. */
   error: string | null;
   onSave: (next: SavedDatabase) => void;
   onCancel: () => void;
+  /** New IAP host: closes the dialog as Cancel does, then opens the host editor for a host that connects through IAP. */
+  createIapHost: () => void;
   /** Told after every change whether the draft now differs from the database the dialog opened with, so that closing it can ask first. */
   onDirty?: (dirty: boolean) => void;
 };
@@ -384,11 +500,12 @@ const LOOKUP_DELAY_MS = 400;
  * shown. Google is asked about the account and project the draft holds once typing in them has paused (`LOOKUP_DELAY_MS`), not about
  * every start of a project id typed by hand; the dialog opens with what it was given, without waiting.
  */
-export function DatabaseEditor({ initial, existing, busy, error, onSave, onCancel, onDirty }: DatabaseEditorProps) {
+export function DatabaseEditor({ initial, existing, overview, busy, error, onSave, onCancel, createIapHost, onDirty }: DatabaseEditorProps) {
   const [opened] = useState(() => opening(initial, existing));
   const [draft, setDraft] = useState(opened);
   const [mode, setMode] = useState<Mode>(() => (initial.instance === "" ? "pick" : "manual"));
   const [connection, setConnection] = useState(() => (located(initial) ? connectionName(initial) : ""));
+  const [hostMissing, setHostMissing] = useState(false);
   const project = useDebounced(draft.project, LOOKUP_DELAY_MS);
   const account = useDebounced(draft.account, LOOKUP_DELAY_MS);
   const settled = project === draft.project && account === draft.account;
@@ -408,11 +525,15 @@ export function DatabaseEditor({ initial, existing, busy, error, onSave, onCance
       used={usedPorts(existing)}
       busy={busy}
       error={error}
+      overview={overview}
+      hostMissing={hostMissing}
       onDraft={change}
       onMode={setMode}
       onConnection={setConnection}
       onSave={onSave}
+      onHostMissing={() => setHostMissing(true)}
       onCancel={onCancel}
+      createIapHost={createIapHost}
     />
   );
 }
