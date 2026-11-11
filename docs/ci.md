@@ -27,10 +27,20 @@ so dispatch scripts and Rust caches continue to work.
 - UI changes run frontend tests/build without three native suites.
 - Rust changes run native suites without rebuilding the UI. Changes spanning both
   areas run both. Rust dependency changes also run credential checks.
+- Release-profile boundary builds run on all three desktop platforms when their
+  profile, identity, write policy, central sync capability, library entry point,
+  build configuration or test changes. Dependency-only Cargo manifest and lockfile
+  changes keep the full platform debug suites and macOS credential checks, and skip
+  the extra production and development release builds. Adding Tauri command
+  registrations alone also skips those profile builds; changes elsewhere in
+  `src-tauri/src/lib.rs` still run them.
 - Docs changes run the inexpensive policy/version/workflow check.
 - The Linux upgrade check runs for changes to its script and to the identity data it reads
   (`scripts/identity.mjs`, `scripts/legacy-identity.json`). The Rust tests compare
   `scripts/legacy-identity.json` with `legacy_identity`, so it runs the native suites too.
+- The archived 1.2.0 group-order compatibility build runs when group-order writing
+  or its compatibility harness changes. Other native changes use the current Rust
+  suites without compiling the archived application again.
 - `scripts/windows-console-helper.mjs` and `scripts/identity.mjs` run the Windows suite,
   whose console helper step builds the helper the way the Windows builds do.
 - The macOS credential checks run for changes to the frozen helpers and their scripts, to

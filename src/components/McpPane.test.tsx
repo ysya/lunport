@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SettingsCategoryPane } from "./SettingsPage";
 import { recordOverview, hostView, hostPayload, groupView } from "./records/fixtures";
 import { mcpStatusKey } from "@/lib/mcp";
+import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import type { McpStatus } from "@/bindings/McpStatus";
 
 vi.mock("@/lib/queries", async load => ({
@@ -11,6 +12,7 @@ vi.mock("@/lib/queries", async load => ({
 }));
 const status: McpStatus = {
   enabled: true, bridge_active: true, approval_mode: "ask",
+  max_transfer_mib: 1024,
   noninteractive_credentials_supported: false,
   noninteractive_credentials_notice: "Stored credentials require Ask on macOS.",
   audit_error: "Audit file unavailable", allowed_hosts: ["0000000000000001"], allowed_groups: [], pending: [],
@@ -18,64 +20,63 @@ const status: McpStatus = {
     id: "a", client: "mcp", host_id: "0000000000000001", alias: "web", command: "sleep 4", mode: "ask",
     requested_by: ["observed-process"], requester_id: "42", client_info: { name: "claimed-client", title: null, version: "1" },
     at_ms: 1, completed_at_ms: 2, outcome: "allowed", ended: "disconnected", exit_code: null, signal: null, detail: null,
+    review: null, stop: null, tunnel: null,
   }],
   executable: "/fixture/lunport", last_client_at_ms: null,
 };
-function render(overview = recordOverview(), data: McpStatus = status) {
+function render(overview = recordOverview(), data: McpStatus = status, onOpenActivity?: () => void) {
   const client = new QueryClient();
   client.setQueryData(mcpStatusKey, data);
   return renderToStaticMarkup(
-    <QueryClientProvider client={client}><SettingsCategoryPane category="ai" recordOverview={overview} /></QueryClientProvider>,
+    <QueryClientProvider client={client}><SettingsCategoryPane category="ai" recordOverview={overview} onOpenActivity={onOpenActivity} /></QueryClientProvider>,
   );
 }
+/** The text a person reads: no tags, entities decoded. */
+const text = (html: string) => html.replace(/<[^>]*>/g, "").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
 describe("Records AI Access", () => {
+  it("shows the current file transfer limit as an editable MiB setting", () => {
+    const html = render();
+    expect(html).toContain("Single-file transfer limit");
+    expect(html).toMatch(/type="number"[^>]*value="1024"/);
+    expect(html).toContain("Save limit");
+  });
   it("offers Ask and Auto-log and shows the actual platform credential capability", () => {
     const html = render();
     expect(html).toContain("Auto-log");
     expect(html).toContain(status.noninteractive_credentials_notice);
   });
 
-  it("shows public audit failure and authorization separately from a missing exit", () => {
+  it("shows the audit persistence error above the activity summary", () => {
     const html = render();
-    expect(html).toContain(status.audit_error!);
-    expect(html).toContain("disconnected");
-    expect(html).toContain("Connection lost");
-    expect(html).toContain("Exit code</dt><dd>Not reported");
-    expect(html).not.toContain("Succeeded");
-    expect(html).toContain("observed-process");
-    expect(html).toContain("Self-reported client");
-    expect(html).toContain("claimed-client");
+    expect(html).toContain(`Audit persistence error: ${status.audit_error}`);
+    expect(html.indexOf(status.audit_error!)).toBeLessThan(html.indexOf("Last:"));
   });
 
-  it("shows request and completion dates with seconds and the local time zone", () => {
-    const requested = new Date("2026-10-21T23:59:58.000Z");
-    const completed = new Date("2026-10-22T00:00:02.000Z");
-    const html = render(recordOverview(), { ...status, recent: [{
-      ...status.recent[0], at_ms: requested.getTime(), completed_at_ms: completed.getTime(),
-    }] });
-    const details = html.slice(html.indexOf("<details", html.indexOf('aria-label="Recent AI activity"')));
-    const times = [...details.matchAll(/<time dateTime="([^"]+)">([^<]+)<\/time>/g)];
-    expect(times.map(match => match[1])).toEqual([requested.toISOString(), completed.toISOString()]);
-    expect(html).toContain("Requested:");
-    expect(html).toContain("Completed:");
-    [requested, completed].forEach((date, index) => {
-      expect(times[index][2]).toContain(date.toLocaleDateString(undefined, { dateStyle: "medium" }));
-      expect(times[index][2]).toContain(date.toLocaleTimeString(undefined, { timeStyle: "long" }));
-    });
+  it("summarizes the latest AI entry and opens the page", () => {
+    const completed = new Date();
+    completed.setHours(14, 20, 0, 0);
+    const latest: McpAuditEntry = {
+      ...status.recent[0], alias: "web-1", command: "uptime", outcome: "allowed", ended: "exited", exit_code: 0,
+      review: "approved", at_ms: completed.getTime() - 800, completed_at_ms: completed.getTime(),
+    };
+    const html = render(recordOverview(), { ...status, recent: [latest] }, () => {});
+    expect(html).toMatch(/<h2[^>]*>Activity<\/h2>/);
+    expect(html).toContain("What AI clients did, with each result, is on its own page.");
+    const clock = completed.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    expect(text(html)).toContain(`Last: today ${clock} · Ran a command on web-1 · Succeeded`);
+    expect(html).toContain("Open AI activity");
+    expect(render(recordOverview(), { ...status, recent: [latest] })).not.toContain("Open AI activity");
+    const timeless = text(render(recordOverview(), { ...status, recent: [{ ...latest, at_ms: 0, completed_at_ms: Number.MAX_SAFE_INTEGER }] }));
+    expect(timeless).toContain("Last: Ran a command on web-1 · Succeeded");
+    expect(timeless).not.toContain("Invalid Date");
   });
 
-  it("shows only the known time for older entries and avoids invented or invalid dates", () => {
-    const entry = { ...status.recent[0], at_ms: 0, completed_at_ms: Date.parse("2026-10-22T00:00:02.000Z") };
-    const html = render(recordOverview(), { ...status, recent: [entry] });
-    expect(html).not.toContain("Requested:");
-    expect(html).toContain('dateTime="2026-10-22T00:00:02.000Z"');
-    expect(html).toContain("Completed:");
-    const missing = render(recordOverview(), { ...status, recent: [{ ...entry, completed_at_ms: Number.MAX_SAFE_INTEGER }] });
-    expect(missing).toContain("Time unavailable");
-    expect(missing).not.toContain("<time");
-    expect(missing).not.toContain("1970");
-    expect(missing).not.toContain("Invalid Date");
+  it("says when there is no AI activity yet", () => {
+    const html = render(recordOverview(), { ...status, recent: [] }, () => {});
+    expect(html).toContain("No AI activity yet");
+    expect(html).not.toContain("Last:");
+    expect(html).toContain("Open AI activity");
   });
 
   it("offers nested Group rules and a separate Hosts tab without misleading switches", () => {
@@ -111,23 +112,9 @@ describe("Records AI Access", () => {
     expect(partial).not.toContain("Remove grant for Group Operations");
   });
 
-  it("renders only the latest ten real endings without inferring success", () => {
-    const recent = Array.from({ length: 11 }, (_, i) => ({
-      ...status.recent[0], id: `audit-${i}`, alias: `entry-${i}`,
-      ended: i === 0 ? "timed_out" : i === 1 ? "truncated" : "canceled", exit_code: null,
-    }));
-    const html = render(recordOverview(), { ...status, recent });
-    expect(html).toContain("entry-9");
-    expect(html).not.toContain("entry-10");
-    expect(html).toContain("timed_out");
-    expect(html).toContain("truncated");
-    expect(html).toContain("canceled");
-    expect(html).not.toContain("Exit: 0");
-  });
-
   it("shows the host destination and direct action while keeping technical IDs out of the access list", () => {
     const html = render();
-    const access = html.slice(html.indexOf('id="settings-allowed-hosts"'), html.indexOf('id="settings-recent-activity"'));
+    const access = html.slice(html.indexOf('id="settings-allowed-hosts"'), html.indexOf('id="settings-activity"'));
     expect(access).toContain("deploy@fixture.invalid:22");
     expect(access).toContain("Individual grant");
     expect(access).toContain("Remove individual grant for web");

@@ -3,7 +3,7 @@
  */
 export function auditRows<T extends { id: string }>(entries: readonly T[]) {
   const occurrences = new Map<string, number>();
-  return entries.slice(0, 10).map((entry) => {
+  return entries.map((entry) => {
     const identity = JSON.stringify(entry);
     const occurrence = occurrences.get(identity) ?? 0;
     occurrences.set(identity, occurrence + 1);

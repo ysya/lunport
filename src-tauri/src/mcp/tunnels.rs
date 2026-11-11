@@ -378,10 +378,10 @@ const DELETE_WORDS: Words = Words {
     not_saved: "tunnel_not_deleted",
 };
 
-/// What the audit names a tunnel request by: the host and the tunnel (the audit keeps no detail).
-fn audit_alias(state: &SyncStateV3, rule: &TunnelRule) -> String {
-    let host = repo::get_host(state, &rule.host_id).map(|host| host.host.payload.alias).unwrap_or_else(|_| rule.host_id.clone());
-    format!("{host} · {}", rule.name)
+/// The host a tunnel request's audit entry names (`alias`; its `tunnel` names the tunnel): the alias of the host the tunnel goes through,
+/// or its id once the host is gone.
+fn host_alias(state: &SyncStateV3, rule: &TunnelRule) -> String {
+    repo::get_host(state, &rule.host_id).map(|host| host.host.payload.alias).unwrap_or_else(|_| rule.host_id.clone())
 }
 
 /// The approval request for a proposal about a tunnel through `host`.
@@ -430,9 +430,12 @@ fn save(
     live(runtime, policy.approval_mode, cancel)?;
     let request = request_for(&context, host, proposal, Vec::new());
     let hosts: Vec<String> = before.iter().chain(after.iter()).map(|rule| rule.host_id.clone()).collect();
+    let mut decision = None;
     let result = (|| {
         // Saving a tunnel is never covered by Auto-log's execution permission.
-        match approve(&request) {
+        let decided = approve(&request);
+        decision = Some(decided);
+        match decided {
             ApprovalDecision::Allow => {}
             ApprovalDecision::TimedOut => return Err(words.timed_out.into()),
             ApprovalDecision::Cancel => return Err(words.canceled.into()),
@@ -467,12 +470,15 @@ fn save(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(host.host.id.clone()),
-        alias: audit_alias(state, &rule),
+        alias: host_alias(state, &rule),
+        tunnel: Some(rule.name.clone()),
         mode: policy.approval_mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
         outcome: if result.is_ok() { words.saved } else { words.not_saved }.into(),
+        review: decision.and_then(activity::review_of),
+        stop: result.as_ref().err().map(|error: &String| activity::stop_for(error, decision, None, runtime.withdrawn(policy.approval_mode, cancel))),
         ..Default::default()
     });
     result
@@ -593,10 +599,28 @@ pub(super) fn start(
     connector: &Connector<'_>,
     owner: &dyn crate::session::auth::Owner,
     input: &Value,
+    context: RequestContext,
+    cancel: &CancelToken,
+    approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
+    launch: &Launch<'_>,
+) -> Result<Value, String> {
+    start_within(env, runtime, tunnels, connector, owner, input, context, cancel, approve, launch, START_WAIT)
+}
+
+/// `start`, waiting up to `wait` for the launched tunnel to run or fail.
+#[allow(clippy::too_many_arguments)]
+fn start_within(
+    env: &SyncEnv,
+    runtime: &McpRuntime,
+    tunnels: &Tunnels,
+    connector: &Connector<'_>,
+    owner: &dyn crate::session::auth::Owner,
+    input: &Value,
     mut context: RequestContext,
     cancel: &CancelToken,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
     launch: &Launch<'_>,
+    wait: Duration,
 ) -> Result<Value, String> {
     let policy = enabled_policy(runtime)?;
     let key = tunnel_ref(input)?;
@@ -632,9 +656,20 @@ pub(super) fn start(
     settings.push(("Route".into(), route.join(" → ")));
     let proposal = McpHostProposal { kind: proposal_kinds::START_TUNNEL.into(), settings };
     let request = request_for(&context, &host, proposal, route);
+    // What the start's windows decided, for its audit entry: the approval window's decision, the questions the person declined or left
+    // unanswered here, and those of the launched tunnel's connection, which its entry notes.
+    let mut decision = None;
+    let declines = activity::Declines::default();
+    let noting = activity::NotingOwner { inner: owner, declines: &declines };
+    let confirmer = records::ClientConfirmer::new(connector.confirmer, records::asker(&context, mode, Unreviewed::Tunnel));
+    let mut launched: Option<Arc<Entry>> = None;
+    // Whether the tunnel ran by the time the call answered: one still connecting then is recorded as starting, not as started.
+    let mut running = false;
     let result = (|| {
         if mode == ApprovalMode::Ask {
-            match approve(&request) {
+            let decided = approve(&request);
+            decision = Some(decided);
+            match decided {
                 ApprovalDecision::Allow => {}
                 ApprovalDecision::TimedOut => return Err("Tunnel start approval timed out.".to_string()),
                 ApprovalDecision::Cancel => return Err("Tunnel start was canceled.".into()),
@@ -651,17 +686,18 @@ pub(super) fn start(
         approved.check(connector, &query)?;
         // A server key this device has not verified is decided here, before the tunnel launches: its worker would
         // ask while this call waits only `START_WAIT`. A rule changed meanwhile is refused by the launch.
-        let confirmer = records::ClientConfirmer::new(connector.confirmer, records::asker(&context, mode, Unreviewed::Tunnel));
         let host_still_allowed = || -> Result<(), String> {
             live(runtime, mode, cancel)?;
             let current = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
             permissions::ensure_record(&runtime.policy.lock().unwrap().clone(), &current, &rule.host_id)?;
             approved.check(connector, &query)
         };
-        records::verify_unverified(runtime, connector, &query, &target, owner, cancel, &host_still_allowed, &confirmer, (&context, mode), TUNNEL_STOPPED)?;
+        records::verify_unverified(runtime, connector, &query, &target, &noting, &declines, cancel, &host_still_allowed, &confirmer, (&context, mode), TUNNEL_STOPPED)?;
         let entry = launch(&rule, approved.clone(), mode, records::client_label(&context))?;
+        launched = Some(Arc::clone(&entry));
         // The answer is the tunnel as last seen, so that its state, the message and the audit agree.
-        let seen = wait_for_start(&entry, cancel, START_WAIT)?;
+        let seen = wait_for_start(&entry, cancel, wait)?;
+        running = matches!(seen.phase, TunnelPhase::Running);
         let current = record_runtime::snapshot(env).map_err(|e| e.to_string())?.0;
         let mut view = tunnels.list(&current).into_iter().find(|view| view.rule.id == rule.id).ok_or("The saved tunnel no longer exists.")?;
         view.live = seen;
@@ -680,12 +716,26 @@ pub(super) fn start(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(rule.host_id.clone()),
-        alias: audit_alias(&state, &rule),
+        alias: host_alias(&state, &rule),
+        tunnel: Some(rule.name.clone()),
         mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
-        outcome: if result.is_ok() { "tunnel_started" } else { "tunnel_not_started" }.into(),
+        outcome: match &result {
+            Ok(_) if running => "tunnel_started",
+            Ok(_) => "tunnel_starting",
+            Err(_) => "tunnel_not_started",
+        }
+        .into(),
+        review: if mode == ApprovalMode::AutoLog { Some(McpReview::AutoLog) } else { decision.and_then(activity::review_of) },
+        stop: result.as_ref().err().map(|error: &String| {
+            let declined = declines
+                .first()
+                .or_else(|| confirmer.declined())
+                .or_else(|| launched.as_ref().and_then(|entry| entry.declines().first()));
+            activity::stop_for(error, decision, declined, runtime.withdrawn(mode, cancel))
+        }),
         ..Default::default()
     });
     result
@@ -756,12 +806,15 @@ pub(super) fn stop(
         id: context.id,
         client: "mcp".into(),
         host_id: Some(view.rule.host_id.clone()),
-        alias: audit_alias(&state, &view.rule),
+        alias: host_alias(&state, &view.rule),
+        tunnel: Some(view.rule.name.clone()),
         mode: policy.approval_mode,
         requested_by: context.requested_by,
         requester_id: context.requester_id,
         client_info: context.client_info,
         outcome: "tunnel_stopped".into(),
+        // Stopping never asks.
+        review: Some(McpReview::NotAsked),
         ..Default::default()
     });
     Ok(json!({"tunnel": view_json(&usable, &view), "message": message}))

@@ -39,7 +39,7 @@ pub mod vault;
 
 use connect::connect_list_terminals;
 use known_hosts::{known_hosts_list, known_hosts_remove};
-use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_set_group_allowed, mcp_status};
+use mcp::{mcp_activity, mcp_set_approval_mode, mcp_set_transfer_limit, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_set_group_allowed, mcp_status};
 use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
 use tauri::Manager;
@@ -404,6 +404,9 @@ fn run_app(host: bool, start_hidden: bool) {
             session::deploy::records_deploy_preview,
             session::deploy::records_deploy_confirm,
             session::deploy::records_deploy_cancel,
+            session::files::records_files_list,
+            session::files::records_files_transfer,
+            session::files::records_files_cancel,
             sync::record_commands::records_migration_preview,
             sync::record_commands::records_migration_confirm,
             sync::record_commands::records_migration_cancel,
@@ -456,10 +459,12 @@ fn run_app(host: bool, start_hidden: bool) {
             settings_export,
             settings_import,
             mcp_status,
+            mcp_activity,
             mcp_setup::mcp_setup_overview,
             mcp_setup::mcp_setup_add,
             mcp_setup::mcp_setup_export,
             mcp_set_approval_mode,
+            mcp_set_transfer_limit,
             session::auth_window::auth_pending,
             session::auth_window::auth_resolve,
             mcp_set_enabled,

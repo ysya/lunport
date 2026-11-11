@@ -20,17 +20,22 @@ use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
 
+pub(crate) mod activity;
 pub(crate) mod records;
 mod adapter;
 mod management;
 mod permissions;
 mod tunnels;
+mod transfers;
+pub use activity::{McpActivityLog, McpReview, McpStop, McpStopKind, McpWindow};
 pub use records::RequestContext;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_BRIDGE_LINE: u64 = 1_048_576;
 const MAX_COMMAND_BYTES: usize = 16_384;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_TRANSFER_LIMIT_MIB: u32 = 1024;
+const MAX_TRANSFER_LIMIT_MIB: u32 = 10_240;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct McpPolicy {
@@ -41,6 +46,12 @@ struct McpPolicy {
     allowed_groups: BTreeSet<String>,
     #[serde(default)]
     approval_mode: ApprovalMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_transfer_mib: Option<u32>,
+}
+
+fn transfer_limit_mib(policy: &McpPolicy) -> u32 {
+    policy.max_transfer_mib.filter(|value| (1..=MAX_TRANSFER_LIMIT_MIB).contains(value)).unwrap_or(DEFAULT_TRANSFER_LIMIT_MIB)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +117,13 @@ pub struct McpAuditEntry {
     pub detail: Option<String>,
     #[cfg_attr(test, ts(type = "number"))]
     pub completed_at_ms: u64,
+    /// How the review of the command or proposal went; `None` in entries written before it was recorded, and when the request stopped
+    /// before its review.
+    #[serde(default)] pub review: Option<McpReview>,
+    /// What stopped an AI request that did not succeed; `None` when nothing did, and in entries written before it was recorded.
+    #[serde(default)] pub stop: Option<McpStop>,
+    /// The tunnel's name, for a tunnel request (`alias` is its host's).
+    #[serde(default)] pub tunnel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +133,7 @@ pub struct McpStatus {
     pub noninteractive_credentials_supported: bool,
     pub noninteractive_credentials_notice: String,
     pub approval_mode: ApprovalMode,
+    pub max_transfer_mib: u32,
     pub audit_error: Option<String>,
     pub enabled: bool,
     pub bridge_active: bool,
@@ -176,6 +195,8 @@ pub struct McpRuntime {
     records_active:Mutex<HashMap<String,(String,crate::session::connect::CancelToken)>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
+    /// Changes whenever `recent` does, while it is locked (`activity`).
+    revision: AtomicU64,
     pub keep_alive: AtomicBool,
     next_request_id: AtomicU64,
     last_client_at_ms: AtomicU64,
@@ -189,6 +210,7 @@ impl Default for McpRuntime {
             records_active:Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
+            revision: AtomicU64::new(0),
             keep_alive: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
             last_client_at_ms: AtomicU64::new(0),
@@ -205,6 +227,9 @@ fn read_audit_bytes(reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
 }
 
 impl McpRuntime {
+    pub(crate) fn file_transfer_limit_mib(&self) -> u32 {
+        transfer_limit_mib(&self.policy.lock().unwrap())
+    }
     fn status(&self) -> McpStatus {
         let policy = self.policy.lock().unwrap().clone();
         let mut pending: Vec<_> = self
@@ -215,12 +240,13 @@ impl McpRuntime {
             .map(|p| p.request.clone())
             .collect();
         pending.sort_by_key(|p| p.requested_at_ms);
-        let recent = self.recent.lock().unwrap().iter().take(10).cloned().collect();
+        let recent = self.recent.lock().unwrap().iter().filter(|entry| entry.is_ai()).take(10).cloned().collect();
         let last = self.last_client_at_ms.load(Ordering::Relaxed);
         McpStatus {
             noninteractive_credentials_supported: cfg!(windows),
             noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization. Credentials stay in Lunport and are never returned to the AI client.".into(),
             approval_mode: policy.approval_mode,
+            max_transfer_mib: transfer_limit_mib(&policy),
             audit_error: self.audit.lock().unwrap().error.clone(),
             enabled: policy.enabled,
             bridge_active: false,
@@ -245,7 +271,8 @@ impl McpRuntime {
         let mut audit = self.audit.lock().unwrap();
         let mut recent = self.recent.lock().unwrap();
         recent.push_front(entry);
-        recent.truncate(1000);
+        activity::retain_per_kind(&mut recent);
+        self.revision.fetch_add(1, Ordering::SeqCst);
         let result = audit.path.as_ref().map(|path| {
             let mut bytes = Vec::new();
             for item in recent.iter().rev() {
@@ -269,8 +296,11 @@ impl McpRuntime {
         match std::fs::File::open(&path).and_then(read_audit_bytes) {
             Ok(bytes) if bytes.len() as u64 <= AUDIT_READ_LIMIT=>{
                 let mut entries=VecDeque::new();let lines=bytes.split(|b|*b==b'\n').collect::<Vec<_>>();
-                for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);entries.truncate(1000);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
-                *self.recent.lock().unwrap()=entries;
+                for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
+                activity::retain_per_kind(&mut entries);
+                let mut recent=self.recent.lock().unwrap();
+                *recent=entries;
+                self.revision.fetch_add(1, Ordering::SeqCst);
             }
             Ok(_)=>audit.error=Some("Session log exceeds the 32 MiB read limit.".into()),
             Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
@@ -454,6 +484,12 @@ fn display_safe_command(command: &str) -> bool {
 pub fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
     status_for(&state)
 }
+
+/// The AI activity page's read: the AI entries, newest first, unless the log is still at `since`.
+#[tauri::command]
+pub fn mcp_activity(state: tauri::State<AppState>, since: Option<u64>) -> McpActivityLog {
+    state.mcp.activity(since)
+}
 fn status_for(state:&AppState)->McpStatus{
     let mut status=state.mcp.status();
     {
@@ -470,6 +506,24 @@ fn change_approval_mode(policy:&Mutex<McpPolicy>,mode:ApprovalMode,acknowledged:
     let mut current=policy.lock().unwrap();
     if mode==ApprovalMode::AutoLog && current.approval_mode!=mode && !acknowledged{return Err(AppError::Other("Confirm the risk of allowing AI commands without per-command approval.".into()));}
     let mut next=current.clone();next.approval_mode=mode;persist(&next)?;*current=next;Ok(())
+}
+
+fn change_transfer_limit(policy: &Mutex<McpPolicy>, max_transfer_mib: u32, persist: impl FnOnce(&McpPolicy) -> Result<(), AppError>) -> Result<(), AppError> {
+    if !(1..=MAX_TRANSFER_LIMIT_MIB).contains(&max_transfer_mib) {
+        return Err(AppError::Other(format!("Choose a transfer limit from 1 to {MAX_TRANSFER_LIMIT_MIB} MiB.")));
+    }
+    let mut current = policy.lock().unwrap();
+    let mut next = current.clone();
+    next.max_transfer_mib = Some(max_transfer_mib);
+    persist(&next)?;
+    *current = next;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mcp_set_transfer_limit(state: tauri::State<AppState>, max_transfer_mib: u32) -> Result<McpStatus, AppError> {
+    change_transfer_limit(&state.mcp.policy, max_transfer_mib, save_policy)?;
+    Ok(status_for(&state))
 }
 #[tauri::command]
 pub fn mcp_set_approval_mode(state:tauri::State<AppState>,approval_mode:ApprovalMode,risk_acknowledged:bool)->Result<McpStatus,AppError>{
@@ -657,7 +711,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log only skips per-command approval. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -719,6 +773,7 @@ fn tool_definitions() -> Value {
     ]);
     tools.as_array_mut().unwrap().extend(management::tool_definitions());
     tools.as_array_mut().unwrap().extend(tunnels::tool_definitions());
+    tools.as_array_mut().unwrap().extend(transfers::tool_definitions());
     tools
 }
 
@@ -791,6 +846,29 @@ mod tests {
             .unwrap();
         assert_eq!(run["annotations"]["readOnlyHint"], false);
         assert_eq!(run["annotations"]["destructiveHint"], true);
+    }
+
+    #[test]
+    fn tool_list_exposes_single_file_scp_in_both_directions() {
+        let tools = tool_definitions();
+        for name in ["scp_upload", "scp_download"] {
+            let tool = tools.as_array().unwrap().iter().find(|tool| tool["name"] == name).expect("SCP tool is listed");
+            assert_eq!(tool["annotations"]["destructiveHint"], true);
+            assert_eq!(tool["annotations"]["readOnlyHint"], false);
+            assert_eq!(tool["inputSchema"]["required"], json!(["alias", "local_path", "remote_path"]));
+        }
+    }
+
+    #[test]
+    fn transfer_limit_defaults_for_old_policy_and_changes_only_after_persistence() {
+        let old: McpPolicy = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(transfer_limit_mib(&old), 1024);
+        let policy = Mutex::new(old);
+        assert!(change_transfer_limit(&policy, 0, |_| panic!("invalid limit must not persist")).is_err());
+        assert!(change_transfer_limit(&policy, 2048, |_| Err(AppError::Other("disk full".into()))).is_err());
+        assert_eq!(transfer_limit_mib(&policy.lock().unwrap()), 1024);
+        change_transfer_limit(&policy, 2048, |_| Ok(())).unwrap();
+        assert_eq!(transfer_limit_mib(&policy.lock().unwrap()), 2048);
     }
 
     #[test]

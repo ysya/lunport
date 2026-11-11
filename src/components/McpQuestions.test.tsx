@@ -35,6 +35,17 @@ function disabled(html: string, label: string) {
 }
 
 describe("MCP command review", () => {
+  it("shows transfer paths and direction in the Ask review", () => {
+    const transfer = { ...request, command: "", host_proposal: { kind: "scp_upload", settings: [
+      ["Local file", "/tmp/report.txt"], ["Remote path", "/srv/report.txt"],
+    ] as [string, string][] } };
+    const html = renderReview({ request: transfer });
+    expect(html).toContain("Upload this file?");
+    expect(html).toContain("/tmp/report.txt");
+    expect(html).toContain("/srv/report.txt");
+    expect(html).toContain("Upload file");
+    expect(html).toContain("Route: jump-id → stable-host");
+  });
   it("keeps full command, effective endpoint, stable host and route with distinct observed and claimed attribution", () => {
     const html = renderReview();
     expect(html).toContain("END-OF-COMMAND");

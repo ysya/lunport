@@ -517,7 +517,7 @@ fn deleting_a_tunnel_asks_and_removes_it_only_on_consent() {
     assert_eq!(value, json!({"tunnel": null, "message": "Tunnel deleted."}));
     assert_eq!(last_outcome(&r), "tunnel_deleted");
     let audited = r.recent.lock().unwrap().front().unwrap().clone();
-    assert_eq!(audited.alias, "web-1 · Database");
+    assert_eq!((audited.alias.as_str(), audited.tunnel.as_deref()), ("web-1", Some("Database")));
     assert!(audited.command.is_empty());
 }
 
@@ -566,10 +566,16 @@ struct Launches<'a> {
     tunnels: &'a Tunnels,
     then: Option<TunnelLive>,
     given: Mutex<Vec<(ApprovalMode, String)>>,
+    /// A window the worker's connection noted on the entry as declined before it stood in `then`, as a refused password is.
+    declined: Option<(McpStopKind, McpWindow)>,
 }
 impl<'a> Launches<'a> {
     fn new(d: &'a TestDevice, tunnels: &'a Tunnels, then: Option<TunnelLive>) -> Self {
-        Launches { d, tunnels, then, given: Mutex::new(Vec::new()) }
+        Launches { d, tunnels, then, given: Mutex::new(Vec::new()), declined: None }
+    }
+    /// The launch whose worker notes `window` as declined (`kind`) before the tunnel stands in `then`.
+    fn declining(self, kind: McpStopKind, window: McpWindow) -> Self {
+        Launches { declined: Some((kind, window)), ..self }
     }
     fn launch(&self, rule: &TunnelRule, _: records::ApprovedTarget, mode: ApprovalMode, started_by: String) -> Result<Arc<Entry>, String> {
         self.given.lock().unwrap().push((mode, started_by.clone()));
@@ -577,8 +583,12 @@ impl<'a> Launches<'a> {
         if let Some(mut then) = self.then.clone() {
             then.started_by = Some(started_by);
             let worker = Arc::clone(&entry);
+            let declined = self.declined;
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(30));
+                if let Some((kind, window)) = declined {
+                    worker.declines().note(kind, window);
+                }
                 worker.set_live(then);
             });
         }
@@ -997,4 +1007,148 @@ fn stopping_needs_no_window_and_leaves_a_stopped_tunnel_alone() {
     let value = stop(&d.env(), &r, &tunnels, &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default()).unwrap();
     assert_eq!(value["message"], "The tunnel is not running.");
     assert_eq!(r.recent.lock().unwrap().len(), audited, "nothing stopped, nothing audited");
+}
+
+// ---- What the AI activity page reads of a tunnel: its host and its name, how its start was reviewed and what stopped it ----
+
+fn last_entry(r: &McpRuntime) -> McpAuditEntry {
+    r.recent.lock().unwrap().front().unwrap().clone()
+}
+fn stop_of(entry: &McpAuditEntry) -> Option<(McpStopKind, Option<McpWindow>)> {
+    entry.stop.as_ref().map(|stop| (stop.kind, stop.window))
+}
+/// The worker of the running tunnel `entry`: once stopped, it finishes.
+fn finishing_once_stopped(entry: &Arc<Entry>) -> thread::JoinHandle<()> {
+    let worker = Arc::clone(entry);
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(worker.live().phase, TunnelPhase::Stopping) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        worker.set_live(TunnelLive::default());
+    })
+}
+
+#[test]
+fn tunnel_entries_name_the_host_and_the_tunnel_apart() {
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    let web = host(&d, &r, "web-1", true);
+    let id = created(&d, &r, &tunnels);
+    let names = |r: &McpRuntime| {
+        let entry = last_entry(r);
+        (entry.outcome, entry.alias, entry.tunnel)
+    };
+    assert_eq!(names(&r), ("tunnel_created".to_string(), "web-1".to_string(), Some("Database".to_string())));
+    let route = Route::to(&web, true);
+    let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
+    start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap();
+    assert_eq!(names(&r), ("tunnel_started".to_string(), "web-1".to_string(), Some("Database".to_string())));
+    let finishing = finishing_once_stopped(&tunnels.entry(&id).unwrap());
+    stop(&d.env(), &r, &tunnels, &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default()).unwrap();
+    finishing.join().unwrap();
+    assert_eq!(names(&r), ("tunnel_stopped".to_string(), "web-1".to_string(), Some("Database".to_string())));
+}
+
+/// A tunnel still connecting when the start stops waiting is not recorded as started: the answer says it is still connecting, and its
+/// audit entry says so too.
+#[test]
+fn a_tunnel_still_connecting_when_the_start_answers_is_recorded_as_starting() {
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    let web = host(&d, &r, "web-1", true);
+    let id = created(&d, &r, &tunnels);
+    let route = Route::to(&web, true);
+    // The launched tunnel never leaves Connecting.
+    let launches = Launches::new(&d, &tunnels, None);
+    let launch = |rule: &TunnelRule, approved, mode, who| launches.launch(rule, approved, mode, who);
+    let value = start_within(
+        &d.env(),
+        &r,
+        &tunnels,
+        &route.connector(),
+        &FakeOwner::default(),
+        &json!({"tunnel": "Database"}),
+        RequestContext::default(),
+        &CancelToken::default(),
+        &never,
+        &launch,
+        Duration::from_millis(100),
+    )
+    .unwrap();
+    assert_eq!(value["tunnel"]["state"], "connecting");
+    assert_eq!(value["message"], "The tunnel is still connecting; read list_tunnels for its state.");
+    let entry = last_entry(&r);
+    assert_eq!(entry.outcome, "tunnel_starting");
+    assert_eq!(stop_of(&entry), None);
+    assert_eq!(entry.review, Some(McpReview::AutoLog));
+    tunnels.entry(&id).unwrap().stop();
+}
+
+#[test]
+fn start_tunnel_records_refused_no_answer_and_errors_apart() {
+    for (decision, review, kind) in [
+        (ApprovalDecision::Deny, McpReview::Refused, McpStopKind::Refused),
+        (ApprovalDecision::TimedOut, McpReview::NoAnswer, McpStopKind::NoAnswer),
+    ] {
+        let d = device();
+        let r = runtime(ApprovalMode::Ask);
+        let tunnels = Tunnels::default();
+        let web = host(&d, &r, "web-1", true);
+        created(&d, &r, &tunnels);
+        let route = Route::to(&web, true);
+        let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
+        start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &|_| decision, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+        let entry = last_entry(&r);
+        assert_eq!(entry.review, Some(review), "{decision:?}");
+        assert_eq!(stop_of(&entry), Some((kind, Some(McpWindow::Approval))), "{decision:?}");
+    }
+
+    // Auto-log, and the tunnel's connection fails: an error with its reason.
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    let web = host(&d, &r, "web-1", true);
+    created(&d, &r, &tunnels);
+    let route = Route::to(&web, true);
+    let failed = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some("Connection refused by web-1.example.com".into()), ..Default::default() }, started_by: None };
+    let launches = Launches::new(&d, &tunnels, Some(failed));
+    start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+    let entry = last_entry(&r);
+    assert_eq!(entry.review, Some(McpReview::AutoLog));
+    assert_eq!(stop_of(&entry), Some((McpStopKind::Error, None)));
+    assert!(entry.stop.and_then(|stop| stop.reason).is_some_and(|reason| reason.starts_with("The tunnel could not start")));
+}
+
+#[test]
+fn a_password_refused_in_the_tunnel_worker_is_refused_by_you() {
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    let web = host(&d, &r, "web-1", true);
+    created(&d, &r, &tunnels);
+    let route = Route::to(&web, true);
+    let failed = TunnelLive { phase: TunnelPhase::Error, forwarding: ForwardStatus { error: Some("Authentication failed for deploy@web-1.".into()), ..Default::default() }, started_by: None };
+    let launches = Launches::new(&d, &tunnels, Some(failed)).declining(McpStopKind::Refused, McpWindow::Credentials);
+    start(&d.env(), &r, &tunnels, &route.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default(), &never, &|rule, approved, mode, who| launches.launch(rule, approved, mode, who)).unwrap_err();
+    assert_eq!(stop_of(&last_entry(&r)), Some((McpStopKind::Refused, Some(McpWindow::Credentials))));
+}
+
+#[test]
+fn stop_tunnel_records_no_review_step() {
+    let d = device();
+    let r = runtime(ApprovalMode::Ask);
+    let tunnels = Tunnels::default();
+    host(&d, &r, "web-1", true);
+    let id = created(&d, &r, &tunnels);
+    let entry = start_here(&d, &tunnels, &id);
+    let finishing = finishing_once_stopped(&entry);
+    stop(&d.env(), &r, &tunnels, &json!({"tunnel": "Database"}), RequestContext::default(), &CancelToken::default()).unwrap();
+    finishing.join().unwrap();
+    let audited = last_entry(&r);
+    assert_eq!(audited.outcome, "tunnel_stopped");
+    assert_eq!(audited.review, Some(McpReview::NotAsked));
+    assert_eq!(audited.stop, None);
 }

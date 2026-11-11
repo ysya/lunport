@@ -32,6 +32,7 @@ pub struct SessionRuntime {
     pub(crate) databases: database_ports::DatabasePorts,
     pub embedded: std::sync::Arc<embedded::Terminals>,
     pub deployments: deploy::Deployments,
+    pub files: files::Transfers,
     pub auth_questions: std::sync::Arc<auth_window::AuthHub>,
     /// The host key questions waiting for the window.
     pub host_keys: std::sync::Arc<hostkey_window::HostKeyHub>,
@@ -60,6 +61,7 @@ pub mod grants;
 pub mod verify;
 pub mod directory;
 pub mod deploy;
+pub mod files;
 pub mod format_directory;
 pub mod record_directory;
 pub mod record_material;

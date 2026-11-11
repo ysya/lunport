@@ -55,8 +55,48 @@ impl GateKey {
     }
 }
 
-/// How a request came out, for the connections that waited on it: the grant, or the sentence the connection that asked failed with.
-pub type Outcome = Result<GrantReceipt, String>;
+/// How a request came out, for the connections that waited on it: the grant, or why there is none.
+pub type Outcome = Result<GrantReceipt, NoGrant>;
+
+/// Why a request gave no grant: the sentence the connection that asked failed with, and how the person ended its question when they
+/// said no or let it time out. The connections that waited on it share that question, so the person's answer is theirs too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoGrant {
+    pub sentence: String,
+    pub declined: Option<Declined>,
+}
+
+impl NoGrant {
+    /// A request that gave no grant for a reason of its own, not the person's.
+    pub fn said(sentence: impl Into<String>) -> NoGrant {
+        NoGrant { sentence: sentence.into(), declined: None }
+    }
+}
+
+/// A grant question the person said no to (`Cancelled`) or left until its deadline (`TimedOut`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Declined {
+    Cancelled,
+    TimedOut,
+}
+
+impl Declined {
+    /// How `reply` ended a question, when the person said no or did not answer.
+    pub fn of(reply: &Reply) -> Option<Declined> {
+        match reply {
+            Reply::Cancelled => Some(Declined::Cancelled),
+            Reply::TimedOut => Some(Declined::TimedOut),
+            Reply::Answer(_) | Reply::Gone => None,
+        }
+    }
+
+    pub fn reply(self) -> Reply {
+        match self {
+            Declined::Cancelled => Reply::Cancelled,
+            Declined::TimedOut => Reply::TimedOut,
+        }
+    }
+}
 
 #[derive(Default)]
 struct Gate {
@@ -117,11 +157,11 @@ impl GrantGates {
                 break outcome.clone();
             }
             if cancel.is_cancelled() {
-                break Err(CANCELLED.to_string());
+                break Err(NoGrant::said(CANCELLED));
             }
             let now = Instant::now();
             if now >= deadline {
-                break Err(TOO_LONG.to_string());
+                break Err(NoGrant::said(TOO_LONG));
             }
             // Woken by the lead, or every so often to look at `cancel`.
             let (guard, _) = gate.settled.wait_timeout(outcome, (deadline - now).min(Duration::from_millis(250))).unwrap_or_else(PoisonError::into_inner);
@@ -133,19 +173,38 @@ impl GrantGates {
     }
 
     /// Gets the grant `key` names through its gate, so that connections needing the same grant at once ask the person once: the one that
-    /// leads runs `request` (it asks the person and requests the grant) and settles the gate, the others take its outcome. `refusal` is
-    /// what the others are told when the lead went away before the grant was had: that is nothing to them, and how to request a grant
-    /// themselves is.
-    pub(crate) fn obtain<E: GrantFailure>(&self, key: GateKey, cancel: &CancelToken, refusal: &str, request: impl FnOnce() -> Result<GrantReceipt, E>) -> Result<(), E> {
+    /// leads runs `request` (it asks the person and requests the grant, `ask_and_request`) and settles the gate, the others take its
+    /// outcome, and the person's no or no answer to the lead's question as their own: they share the question, so a waiting connection
+    /// tells its `owner` (`Owner::answered_elsewhere`). `refusal` is what the others are told when the lead went away before the grant was
+    /// had: that is nothing to them, and how to request a grant themselves is.
+    pub(crate) fn obtain<E: GrantFailure>(
+        &self,
+        key: GateKey,
+        owner: &dyn Owner,
+        cancel: &CancelToken,
+        refusal: &str,
+        request: impl FnOnce() -> Result<GrantReceipt, (E, Option<Declined>)>,
+    ) -> Result<(), E> {
         match self.enter(key, cancel, GATE_WAIT) {
             Entry::Lead(lease) => {
                 let outcome = request();
-                let for_the_others = outcome.clone().map_err(|failure| if cancel.is_cancelled() { refusal.to_string() } else { failure.sentence() });
+                // The others are told what went wrong, unless it was this connection going away: that is nothing to them, and the refusal
+                // (how to request a grant themselves) is.
+                let for_the_others = match &outcome {
+                    Ok(receipt) => Ok(receipt.clone()),
+                    Err(_) if cancel.is_cancelled() => Err(NoGrant::said(refusal)),
+                    Err((failure, declined)) => Err(NoGrant { sentence: failure.sentence(), declined: *declined }),
+                };
                 lease.settle(for_the_others);
-                outcome.map(|_| ())
+                outcome.map(|_| ()).map_err(|(failure, _)| failure)
             }
             Entry::Outcome(Ok(_)) => Ok(()),
-            Entry::Outcome(Err(sentence)) => Err(E::waited_on(sentence)),
+            Entry::Outcome(Err(no_grant)) => {
+                if let Some(declined) = no_grant.declined {
+                    owner.answered_elsewhere(QuestionKind::Grant, &declined.reply());
+                }
+                Err(E::waited_on(no_grant.sentence))
+            }
         }
     }
 
@@ -188,12 +247,12 @@ impl Lease<'_> {
 
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        self.finish(Err(UNSETTLED.to_string()));
+        self.finish(Err(NoGrant::said(UNSETTLED)));
     }
 }
 
 /// A failure to get a grant, as the connections that waited on its request are told of it (`GrantGates::obtain`).
-pub(crate) trait GrantFailure: Clone {
+pub(crate) trait GrantFailure {
     /// The sentence the connections waiting on the request are told when it failed with this.
     fn sentence(&self) -> String;
     /// The failure of a connection that waited on a request that failed with `sentence`.
@@ -241,19 +300,21 @@ pub(crate) fn pause(cancel: &CancelToken, span: Duration) -> bool {
 
 /// The lead's part of a grant request: asks the person for a justification and a length (Lunport's Request-a-grant window, five
 /// minutes), has `request` ask for the grant with what they answered, and tells them what was got. Cancel, no answer in time, a client
-/// that went away or an answer that is not one end with `refused`. Blocks until the person has answered and the grant is had.
+/// that went away or an answer that is not one end with `refused`, and with the person's no or no answer (`Declined`), which
+/// `GrantGates::obtain` passes on to the connections that waited on the question; a failed request carries none. Blocks until the person
+/// has answered and the grant is had.
 pub(crate) fn ask_and_request<E>(
     owner: &dyn Owner,
     prompt: &GrantPrompt,
     refused: impl FnOnce() -> E,
     request: impl FnOnce(&GrantAnswer) -> Result<GrantReceipt, E>,
-) -> Result<GrantReceipt, E> {
+) -> Result<GrantReceipt, (E, Option<Declined>)> {
     let answer = match owner.ask(QuestionKind::Grant, &prompt.to_text(), true, Some(Instant::now() + GRANT_QUESTION_WAIT)) {
-        Reply::Answer(text) => GrantAnswer::decode(&text),
-        Reply::Cancelled | Reply::TimedOut | Reply::Gone => None,
+        Reply::Answer(text) => GrantAnswer::decode(&text).ok_or(None),
+        reply => Err(Declined::of(&reply)),
     };
-    let Some(answer) = answer else { return Err(refused()) };
-    let receipt = request(&answer)?;
+    let answer = answer.map_err(|declined| (refused(), declined))?;
+    let receipt = request(&answer).map_err(|failure| (failure, None))?;
     owner.host_key_notice(&format!(
         "Requested a {}-minute {} grant on {}; active until {}.",
         answer.minutes,
@@ -365,10 +426,10 @@ mod tests {
         drop(lease);
         assert!(matches!(gates.enter(key("dropped"), &cancel, Duration::from_secs(5)), Entry::Lead(_)), "a dropped lease takes its gate down");
         let Entry::Lead(_lead) = gates.enter(key("slow"), &cancel, Duration::from_secs(5)) else { panic!() };
-        assert!(matches!(gates.enter(key("slow"), &cancel, Duration::from_millis(20)), Entry::Outcome(Err(text)) if text == TOO_LONG));
+        assert!(matches!(gates.enter(key("slow"), &cancel, Duration::from_millis(20)), Entry::Outcome(Err(no)) if no == NoGrant::said(TOO_LONG)));
         let cancelled = CancelToken::default();
         cancelled.cancel();
-        assert!(matches!(gates.enter(key("slow"), &cancelled, Duration::from_secs(5)), Entry::Outcome(Err(text)) if text == CANCELLED));
+        assert!(matches!(gates.enter(key("slow"), &cancelled, Duration::from_secs(5)), Entry::Outcome(Err(no)) if no == NoGrant::said(CANCELLED)));
         assert_eq!(gates.waiting(), 0);
         let _ = HostId::from("unused");
     }

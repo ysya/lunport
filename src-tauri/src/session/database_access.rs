@@ -52,10 +52,10 @@ pub(crate) fn grant_state(gcp: &dyn GcpClient, db: &SavedDatabase, now: SystemTi
 /// ask the person once. The one that leads asks in Lunport's Request-a-grant window (five minutes; the question starts from what `state`
 /// remembers for the entitlement, else from the database's own length and nothing to prefill), requests the grant with the answer, waits up to
 /// a minute for it to become active, tells `owner` what was got and hands the answer to `remember` (the entitlement's full name, the
-/// justification and the length in seconds; a memory that cannot be written is `remember`'s to ignore). The others take its outcome.
-/// Cancel, no answer in time, a client that went away or an answer that is not one end with the sentence that names the gcloud command.
-/// Blocks until the grant is had or the request ends (for as long as the person takes to answer, and then for the request), so it runs on
-/// a blocking thread.
+/// justification and the length in seconds; a memory that cannot be written is `remember`'s to ignore). The others take its outcome, and
+/// the person's no or no answer to its question as their own (`owner` is told, `Owner::answered_elsewhere`). Cancel, no answer in time,
+/// a client that went away or an answer that is not one end with the sentence that names the gcloud command. Blocks until the grant is
+/// had or the request ends (for as long as the person takes to answer, and then for the request), so it runs on a blocking thread.
 pub(crate) fn obtain_grant(
     gates: &GrantGates,
     gcp: &dyn GcpClient,
@@ -77,7 +77,7 @@ pub(crate) fn obtain_grant(
     };
     let key = gate_key(db, pam, first);
     let refusal = refusal_sentence(&pam.entitlements, first, &pam.location, &db.project);
-    gates.obtain(key, cancel, &refusal, || {
+    gates.obtain(key, owner, cancel, &refusal, || {
         ask_and_request(
             owner,
             &prompt,

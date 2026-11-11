@@ -85,6 +85,8 @@ pub struct FakeOwner {
     pub asked: Mutex<Vec<Asked>>,
     pub notices: Mutex<Vec<String>>,
     pub banners: Mutex<Vec<String>>,
+    /// The questions another connection asked for this one too, and how the person ended them (`answered_elsewhere`).
+    pub told: Mutex<Vec<(QuestionKind, &'static str)>>,
 }
 
 impl FakeOwner {
@@ -111,6 +113,16 @@ impl Owner for FakeOwner {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
         locked(&self.asked).push(Asked { kind, text: text.to_string(), echo, deadline });
         locked(&self.replies).pop_front().unwrap_or(Reply::Gone)
+    }
+
+    fn answered_elsewhere(&self, kind: QuestionKind, reply: &Reply) {
+        let name = match reply {
+            Reply::Answer(_) => "Answer",
+            Reply::Cancelled => "Cancelled",
+            Reply::TimedOut => "TimedOut",
+            Reply::Gone => "Gone",
+        };
+        locked(&self.told).push((kind, name));
     }
 
     fn host_key_notice(&self, text: &str) {

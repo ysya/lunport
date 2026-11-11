@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type PointerEvent } from "react";
 import {
   Folder, FolderOpen, Hash, KeyRound, Plus,
-  Server, ChevronRight, ArrowUp, ArrowDown, ArrowDownAZ, MoreHorizontal, ArrowLeftRight, Cloud, Database,
+  Server, ChevronRight, ArrowUp, ArrowDown, ArrowDownAZ, MoreHorizontal, ArrowLeftRight, Cloud, Database, Bot,
 } from "lucide-react";
 import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
@@ -24,7 +24,7 @@ type GroupOrdering = {
   move: (siblings: string[], id: string, target: string, side: "before" | "after") => void;
 };
 
-export type WorkspacePanel = "hosts" | "keys" | "account" | "import" | "tunnels" | "databases" | "transports";
+export type WorkspacePanel = "hosts" | "keys" | "account" | "import" | "tunnels" | "databases" | "transports" | "activity";
 export const LIBRARY_NAVIGATION_ID = "library-navigation";
 
 function NavigationItem({ label, icon, active, action, count, collapsed = false }: {
@@ -241,6 +241,7 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
           {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.filter((key) => key.status !== "deleted").length)}
           {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
           {row("Databases", <Database className="size-4" />, panel === "databases", () => navigate("databases"))}
+          {row("AI activity", <Bot className="size-4" />, panel === "activity", () => navigate("activity"))}
         </nav>
         <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Cloud</div>
         <nav aria-label="Cloud providers" className="space-y-1">

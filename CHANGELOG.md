@@ -1,5 +1,58 @@
 # Changelog
 
+## [2.0.0](https://github.com/ysya/lunport/compare/v1.14.4...v2.0.0) (2026-11-10)
+
+Lunport 2.0 gives Lunport its own identity, adds the AI activity page and lets AI clients work with tunnels.
+
+### Updating from 1.x
+
+- The first start after this update moves your data, saved passwords, settings, login item and the MCP settings Lunport set up for Claude Desktop, Claude Code and Codex, so there is nothing to set up again. If an earlier Lunport, or an AI tool's earlier MCP adapter, is still running, Lunport waits and asks you to quit it first; nothing moves until it can move completely.
+- macOS: saved passwords move without prompts. A few older items may need your permission once; Lunport lists them and lets you allow them now or later. macOS may also ask again for Automation and Local Network access.
+- Restart Claude Desktop, Claude Code and Codex after updating. The MCP server is now named `lunport`, so Claude Code and Codex ask again to approve its tools.
+- Cursor and VS Code: add Lunport again from Settings → AI access. Set up again any MCP configuration you exported for other tools.
+- The command-line program is now `lunport`, for example `lunport connect web-1`. Update scripts that call the earlier command.
+- Windows: the update replaces the earlier installation in place and keeps one entry in Installed apps. If the earlier program was in use during the update, its file is removed by the next update.
+- Updates are now checked at lunport.ysya.dev first, with GitHub as the fallback.
+- Please do not go back to a 1.x version after updating: it would open with an empty library, because your data has moved.
+
+### What's new
+
+- **AI activity**: a new Library page below Tunnels lists what AI clients asked Lunport to do through its tools (commands, tunnels, host and route changes, server key checks), newest first and grouped by day. Each entry shows the result (Succeeded, Failed, Not run or Error), the AI client, how the request was reviewed and when it finished. A refusal or an unanswered window is never counted as an error. Search and filter by AI client, host, action or result. Lunport keeps the latest 1,000 AI entries on this computer, and Settings → AI access → Activity shows the latest one with **Open AI activity**.
+- **Tunnels for AI clients**: `list_tunnels`, `create_tunnel`, `update_tunnel`, `delete_tunnel`, `start_tunnel` and `stop_tunnel` work on tunnels through hosts the AI client is allowed to use. Saving, changing and deleting a tunnel always ask you, in Auto-log too. Starting follows Ask or Auto-log as `ssh_exec` does, and stopping never asks. A tunnel an AI client started stops when AI access to its host ends.
+- **Lunport's windows for AI requests**: Auto-log only skips the per-command review. In both modes, an AI request that needs you (a password, key passphrase or 2FA, a server key Lunport has not verified, a changed server key, or a Privileged Access Manager grant) opens the same window a connection of yours would, instead of failing. Each window names the AI client that asked.
+- **Server keys**: when `ssh_exec` or `start_tunnel` reaches a server whose key this device has not verified, Lunport shows the key before any login, and the call continues after **Trust this key**. A key that differs from the one saved in your library, for example by another device, is shown as a changed key with the saved fingerprint and date, in terminals, AI requests and **Verify server fingerprint**.
+- **Legacy workspace retired**: the OpenSSH (Legacy) workspace is gone. If Lunport still opened one, it now opens on **Your existing workspace**: choose **Preview migration** to copy the hosts and keys you still use into the library. The original files stay where they are.
+- **Preferences transfer**: Settings → Preferences transfer now imports a preferences file that Lunport exported. Earlier versions refused it as coming from a newer Lunport.
+
+
+### ⚠ BREAKING CHANGES
+
+* the command-line program is now `lunport` (for example `lunport connect`) and the MCP server is named `lunport`, so Claude Code and Codex ask again to approve its tools, and Cursor and VS Code need Lunport added again. Going back to a 1.x version after updating starts with an empty library.
+
+### Features
+
+* AI activity page ([c061e44](https://github.com/ysya/lunport/commit/c061e440058b4fc3137c7b0447c42981eed33639))
+* **mcp:** ask in Lunport's windows instead of failing in Auto-log ([e031d35](https://github.com/ysya/lunport/commit/e031d35b915cfabda2ed289142293a3157d22b94))
+* **mcp:** ask the trust window for a server key the AI meets first ([76dfd16](https://github.com/ysya/lunport/commit/76dfd1694bbae459c6bc41334af03960d6137b34))
+* **mcp:** manage tunnels through MCP tools ([0879fc0](https://github.com/ysya/lunport/commit/0879fc097fb2e3053f5e90959795537c8c3adeea))
+* **mcp:** record AI review and stop, keep 1,000 AI entries apart ([30bfa79](https://github.com/ysya/lunport/commit/30bfa7917bc62b266c97d2b97398bcf13ba703ba))
+* **mcp:** record proposal and tunnel decisions apart from errors ([abd9ee2](https://github.com/ysya/lunport/commit/abd9ee26d7cf04011e2b5aa10a4df160ca006e01))
+* **mcp:** record when ssh_exec started and why it stopped ([4e9a2e9](https://github.com/ysya/lunport/commit/4e9a2e99c049d075436a0c6d9648f2b5b703dc71))
+* move to the dev.ysya.lunport identity ([8c0115f](https://github.com/ysya/lunport/commit/8c0115fe71724f0f4b4e212e6c6e58bea92540e0))
+* **ui:** add AI activity result wording and query ([4995bc6](https://github.com/ysya/lunport/commit/4995bc6620f0da2a64642209b9128489039f8fba))
+* **ui:** add the AI activity page to the Library ([0a8d1a7](https://github.com/ysya/lunport/commit/0a8d1a7016e75238aa774eeb1b8efe9226594211))
+* **ui:** summarize AI activity in Settings and document the page ([0375937](https://github.com/ysya/lunport/commit/03759374dcea1e46bd7e38ab9d21aabb6885d699))
+
+
+### Bug Fixes
+
+* **mcp:** name hosts by their alias in update, route and server key entries ([d6abe3a](https://github.com/ysya/lunport/commit/d6abe3a0c03098285a744ed6ac283497e9c0f861))
+* **mcp:** record a tunnel still connecting when start_tunnel answers as tunnel_starting ([9b0ce24](https://github.com/ysya/lunport/commit/9b0ce240cdee84e602f9e76c9bf773e44efdd42b))
+* **session:** give the requests that shared a grant question the person's answer ([c4d1d70](https://github.com/ysya/lunport/commit/c4d1d70330dcb6ba5d5e275aed006150be431094))
+* **session:** warn when a server key differs from another device's saved key ([be28b89](https://github.com/ysya/lunport/commit/be28b897eb7ec338df405c12ad3e93244800d3f9))
+* **settings:** import settings exported by this version ([52e3af4](https://github.com/ysya/lunport/commit/52e3af478e7998d42901da628a99e189387d87e2))
+* **ui:** show still-connecting tunnels and commands canceled after they ran as they happened ([3e98254](https://github.com/ysya/lunport/commit/3e98254b58ea80af94f0f99149a93321caaa0fe9))
+
 ## [1.14.4](https://github.com/ysya/lunport/compare/v1.14.3...v1.14.4) (2026-11-07)
 
 

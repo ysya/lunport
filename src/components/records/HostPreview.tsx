@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRight,
   ArrowRight,
+  FolderOpen,
   Cloud,
   KeyRound,
   LockKeyhole,
@@ -31,6 +32,7 @@ import { readinessLabel } from "./HostList";
 import { DetailPane } from "./DetailPane";
 import { KnownHostsManager } from "./KnownHostsManager";
 import { ConnectionCheck } from "./ConnectionCheck";
+import { HostFiles } from "./HostFiles";
 
 /**
  * A route's Privileged Access Manager grant as it stands now: read when the pane opens and
@@ -87,6 +89,7 @@ export function HostPreview({
   busy: boolean;
 }) {
   const payload = host.effective_payload;
+  const [filesOpen, setFilesOpen] = useState(false);
   const ready = host.readiness.kind === "ready" && !host.group_error;
   const transport = transportFor(overview, host.id);
   const field = (name: string, value: string, mono = false) => (
@@ -117,7 +120,12 @@ export function HostPreview({
             <Pencil className="size-3.5" />
             Edit
           </Button>
+          <Button variant="outline" disabled={!ready || busy} onClick={() => setFilesOpen(true)}>
+            <FolderOpen className="size-3.5" />
+            Files
+          </Button>
         </div>
+        <HostFiles key={host.id} host={host} open={filesOpen} onOpenChange={setFilesOpen} />
         {!ready && (
           <div role="status" className="library-preview-warning">
             <strong>

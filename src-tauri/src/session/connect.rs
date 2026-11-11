@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use super::auth::{label, printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
 use super::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, Prepared};
-use super::grants::{ask_and_request, pause, GateKey, Grace, GrantFailure, GrantGates};
+use super::grants::{ask_and_request, pause, Declined, GateKey, Grace, GrantFailure, GrantGates};
 use super::protocol::{kinds, AiAsker, GrantPrompt, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
 use crate::sync::env::Keychain;
@@ -404,15 +404,16 @@ impl Connector<'_> {
     }
 
     /// Gets the grant `need` describes: through the app's gate, so that connections needing the same grant at once ask the person once.
-    /// The lead asks and requests; the others take the lead's outcome.
+    /// The lead asks and requests; the others take the lead's outcome, and the person's no or no answer to the lead's question as their
+    /// own.
     fn obtain_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<(), ConnectFailure> {
-        self.grants.obtain(GateKey::of(need), cancel, &need.refusal_sentence(), || self.request_grant(need, owner, cancel))
+        self.grants.obtain(GateKey::of(need), owner, cancel, &need.refusal_sentence(), || self.request_grant(need, owner, cancel))
     }
 
     /// Asks the person for a justification and a duration (Lunport's Request-a-grant window, five minutes), requests the grant and waits
     /// for it to become active, and tells the terminal what was got. Cancel, no answer in time, a client that went away or an answer that
-    /// is not one end with the refusal that names the gcloud command.
-    fn request_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<GrantReceipt, ConnectFailure> {
+    /// is not one end with the refusal that names the gcloud command, and with the person's no or no answer (`Declined`).
+    fn request_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<GrantReceipt, (ConnectFailure, Option<Declined>)> {
         let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes: need.duration_secs / 60, justification: need.justification.clone() };
         ask_and_request(
             owner,
@@ -2058,6 +2059,75 @@ mod tests {
         assert_eq!(lead.err(), Some(failure(CANCELLED, "The connection was cancelled.")));
         assert_eq!(waiter.err(), Some(failure(kinds::AUTH, &need().refusal_sentence())));
         assert!(world.owner.asked().is_empty(), "the waiter asked nothing");
+    }
+
+    /// The person at the terminal who answers the grant question with `reply` once the test lets them (`release`); with `leaving`, the
+    /// lead's own connection is cancelled as they answer (its client went away).
+    struct Declining {
+        reply: Mutex<Option<Reply>>,
+        asking: std::sync::atomic::AtomicBool,
+        released: (Mutex<bool>, Condvar),
+        leaving: Option<CancelToken>,
+    }
+
+    impl Owner for Declining {
+        fn ask(&self, _kind: QuestionKind, _text: &str, _echo: bool, _deadline: Option<std::time::Instant>) -> Reply {
+            self.asking.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut go = locked(&self.released.0);
+            while !*go {
+                go = self.released.1.wait(go).unwrap();
+            }
+            drop(go);
+            if let Some(cancel) = &self.leaving {
+                cancel.cancel();
+            }
+            locked(&self.reply).take().unwrap_or(Reply::Gone)
+        }
+
+        fn host_key_notice(&self, _text: &str) {}
+
+        fn banner(&self, _text: &str) {}
+    }
+
+    /// The person's no, or no answer, to the grant question one connection asked is told to the connections that waited on it, as
+    /// their own: they share the question. A client that was gone, or a lead whose own connection went away, tells them nothing.
+    #[test]
+    fn a_declined_grant_question_is_told_to_the_waiting_connections() {
+        let cases: [(fn() -> Reply, bool, Vec<(QuestionKind, &str)>); 4] = [
+            (|| Reply::Cancelled, false, vec![(QuestionKind::Grant, "Cancelled")]),
+            (|| Reply::TimedOut, false, vec![(QuestionKind::Grant, "TimedOut")]),
+            (|| Reply::Gone, false, vec![]),
+            (|| Reply::Cancelled, true, vec![]),
+        ];
+        for (reply, leaving, told) in cases {
+            let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password();
+            let directory = Preparing::needing(&world.directory, need(), vec![]);
+            let lead_cancel = CancelToken::default();
+            let lead_owner = Declining {
+                reply: Mutex::new(Some(reply())),
+                asking: Default::default(),
+                released: (Mutex::new(false), Condvar::new()),
+                leaving: leaving.then(|| lead_cancel.clone()),
+            };
+            let waiter_owner = FakeOwner::default();
+            let (waiter, lined) = std::thread::scope(|scope| {
+                let lead = scope.spawn(|| {
+                    let connector = Connector { engine: &world.engine, directory: &directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer, grants: &world.grants };
+                    connector.connect(&web(), &lead_owner, &lead_cancel)
+                });
+                let asking = lined_up(|| lead_owner.asking.load(std::sync::atomic::Ordering::SeqCst));
+                let waiter = scope.spawn(|| world.connect_through(&directory, &web(), &waiter_owner));
+                let lined = asking && lined_up(|| world.grants.waiting() == 1);
+                *locked(&lead_owner.released.0) = true;
+                lead_owner.released.1.notify_all();
+                let _ = lead.join().unwrap();
+                (waiter.join().unwrap(), lined)
+            });
+            assert!(lined, "the lead asked, then the waiter lined up behind it (leaving: {leaving})");
+            assert_eq!(waiter.err(), Some(failure(kinds::AUTH, &need().refusal_sentence())), "leaving: {leaving}");
+            assert!(waiter_owner.asked().is_empty(), "the waiter asked nothing");
+            assert_eq!(locked(&waiter_owner.told).clone(), told, "leaving: {leaving}");
+        }
     }
 
     /// IAP can take about 1½ minutes to see a grant given moments ago: a 4033 then is tried again every few seconds,
