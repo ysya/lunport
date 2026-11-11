@@ -12,13 +12,16 @@ import { AlertDialog } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
+import { useNow } from "@/lib/use-now";
 import { databasesKey, type DatabasePhase, type DatabaseView, type SavedDatabase } from "@/lib/databases";
 import { gcloudAccountsKey, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
 
 const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false, collapsedRecordGroups: [] as string[], toggleRecordGroup: () => {} }));
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
+vi.mock("@/lib/use-now", () => ({ useNow: vi.fn() }));
 vi.mock("@/stores/ui", () => ({ useUiStore: (selector: (state: typeof ui) => unknown) => selector(ui) }));
 
+const SECOND = 1000;
 const MINUTE = 60_000;
 const AT = new Date(2027, 0, 15, 10, 0).getTime(); // 10:00 on this computer's clock
 const PAM = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null };
@@ -50,6 +53,9 @@ const grantQueries = (client: QueryClient) => client.getQueryCache().findAll({ q
 beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(AT);
   invoke.mockReset();
+  // The clock the countdowns and the grant lines re-render by; its value is the time of the last tick, which a test may set behind the time now.
+  vi.mocked(useNow).mockReset();
+  vi.mocked(useNow).mockImplementation(() => Date.now());
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -356,6 +362,73 @@ describe("the Databases page", () => {
     expect(invoke.mock.calls.map(([command]) => command).filter((command) => /password/.test(command))).toEqual([]);
     const cached = JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data));
     expect(cached).not.toMatch(/password/i);
+  });
+});
+
+describe("the marker of a prod row whose writes are on", () => {
+  /** A running prod database, offered on a port, whose writes lock again `left` milliseconds after 10:00. */
+  const writable = (left: number, patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase> = {}) => row({ live: live("running", { writable_until_ms: AT + left }), ...patch }, { pam: null, ...database });
+  /** The marker of the first row that has one: the classes of the element that says Writes on, and its words. */
+  const marker = (html: string) => {
+    const found = html.match(/<span class="([^"]*)">(?:<svg[\s\S]*?<\/svg>)?(Writes on · \d\d:\d\d)<\/span>/);
+    return found ? { classes: new Set(found[1].split(/\s+/)), words: found[2] } : null;
+  };
+
+  it("a_collapsed_prod_row_whose_writes_are_on_shows_the_time_left_in_the_destructive_style", () => {
+    const html = render([writable(14 * MINUTE + 59 * SECOND)]);
+    // The details are closed: the danger state is on the row itself.
+    expect(html).not.toContain("<section");
+    expect(marker(html)?.words).toBe("Writes on · 14:59");
+    expect(marker(html)?.classes.has("text-destructive")).toBe(true);
+    expect(marker(html)?.classes.has("bg-destructive/10")).toBe(true);
+    expect(html).toMatch(/lucide-lock-open/);
+  });
+
+  it("a_locked_row_or_one_that_is_not_prod_shows_no_marker", () => {
+    // Locked: no window, and a window that has ended by the clock is none, though the list may still hold it for a moment.
+    expect(text(render([row({ live: live("running") }, { pam: null })]))).not.toContain("Writes on");
+    expect(text(render([writable(0)]))).not.toContain("Writes on");
+    expect(text(render([writable(-SECOND)]))).not.toContain("Writes on");
+    // Only prod is locked, so only prod has a window, whatever the list says of another.
+    for (const environment of ["dev", "staging"] as const) expect(text(render([writable(MINUTE, {}, { environment })])), environment).not.toContain("Writes on");
+    // A database that does not run holds no window.
+    expect(text(render([row({ live: live("stopped") }, { pam: null })]))).not.toContain("Writes on");
+    expect(render([row({ live: live("running") }, { pam: null })])).not.toMatch(/lucide-lock-open/);
+  });
+
+  it("marks_each_row_by_its_own_window", () => {
+    const html = render([
+      writable(5 * MINUTE, {}, { id: "00000000000000a1", name: "Orders" }),
+      row({ live: live("running") }, { id: "00000000000000a2", name: "Billing", pam: null }),
+      writable(30 * SECOND, {}, { id: "00000000000000a3", name: "Reports" }),
+    ]);
+    expect(html.match(/Writes on · \d\d:\d\d/g)).toEqual(["Writes on · 05:00", "Writes on · 00:30"]);
+  });
+
+  it("a_row_that_runs_although_its_record_is_gone_still_says_that_writes_are_on", () => {
+    // It is listed only to be stopped, and stopping it is what ends the window.
+    const html = render([writable(10 * MINUTE, { removed: true, blocked: true, synced: false })]);
+    expect(marker(html)?.words).toBe("Writes on · 10:00");
+    expect(html).toContain(">Stop</button>");
+  });
+
+  it("counts_down_from_the_time_at_its_own_render_not_the_one_kept_in_state", () => {
+    // The clock keeps its time in state, a second behind; the end of a window that was just unlocked is fresh. Worked out from the two,
+    // fifteen minutes would read 15:01 until the next tick.
+    vi.mocked(Date.now).mockReturnValue(AT + 900);
+    vi.mocked(useNow).mockReturnValue(AT);
+    const html = render([row({ live: live("running", { writable_until_ms: AT + 900 + 15 * MINUTE }) }, { pam: null })]);
+    expect(marker(html)?.words).toBe("Writes on · 15:00");
+    expect(html).not.toContain("15:01");
+    expect(vi.mocked(useNow)).toHaveBeenCalledWith(1000);
+  });
+
+  it("holds_no_clock_for_a_row_without_a_window", () => {
+    // Only a row whose window is open counts down: the grant line of a database with a grant check is the one that asks for the clock.
+    render([row({ live: live("running") }, { pam: null }), writable(MINUTE, {}, { id: "00000000000000a2", name: "Reports", environment: "dev" })]);
+    expect(vi.mocked(useNow)).not.toHaveBeenCalled();
+    render([writable(MINUTE)]);
+    expect(vi.mocked(useNow)).toHaveBeenCalledTimes(1);
   });
 });
 

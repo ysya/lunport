@@ -37,7 +37,7 @@ import {
   type DatabaseView,
   type SavedDatabase,
 } from "@/lib/databases";
-import { DatabaseAccessCard } from "./DatabaseAccessCard";
+import { DatabaseAccessCard, WritesOnMarker } from "./DatabaseAccessCard";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
 
@@ -68,7 +68,8 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
  * change is under way, and while its library's writes are blocked. A database that runs here although its record is gone (deleted on
  * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
  * removes it from the list. A row given `details` has a button that shows or hides its connection details, which the page draws under
- * the row; the row's bottom line is left out while they are open, so that the two read as one. No hooks: exported for the tests.
+ * the row; the row's bottom line is left out while they are open, so that the two read as one. A prod database whose writable window is
+ * open says so in its Status, with the time left, whether its details are open or not. No hooks: exported for the tests.
  */
 export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, details }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
@@ -103,6 +104,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
         {databasePhases[live.phase]}
       </span>
       {live.phase === "error" && live.error ? <span className="mt-1 block max-w-64 whitespace-normal text-xs text-destructive">{revealHidden(live.error)}</span> : <span className="mt-1 block text-xs text-muted-foreground">{note}</span>}
+      {database.environment === "prod" && live.writable_until_ms !== null && <WritesOnMarker until={live.writable_until_ms} />}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
       {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
