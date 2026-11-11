@@ -117,10 +117,55 @@ export const databaseBusy = (row: DatabaseView) => ["starting", "running", "stop
 /** Where the database comes from, as the row names it: `PostgreSQL · project · region · instance`. */
 export const databaseRoute = (d: SavedDatabase) => `${engines[d.engine]} · ${d.project} · ${d.region} · ${d.instance}`;
 
+/** The port apps reach the database on: the one that runs, else the one saved; none for a database that is not offered on a port. */
+export const databasePort = (row: DatabaseView): number | null => row.live.port ?? row.database.local_port;
+
 /** Where apps reach the database on this computer: the port that runs, else the one saved; "Not shared" for a database with none. */
 export function localAddress(row: DatabaseView): string {
-  const port = row.live.port ?? row.database.local_port;
+  const port = databasePort(row);
   return port === null ? "Not shared" : `127.0.0.1:${port}`;
+}
+
+/** Whether the page has connection details to give for the database: it is offered on a port, and its record is not gone. */
+export const hasConnectionDetails = (row: DatabaseView): boolean => !row.removed && databasePort(row) !== null;
+
+/** What the address names as the database user while no Google account is known. Lunport signs in as the real user whatever an app sends. */
+export const UNKNOWN_IAM_USER = "your-google-account";
+const SERVICE_ACCOUNT_SUFFIX = ".gserviceaccount.com";
+
+/**
+ * The database user the address names, as the backend names the IAM user of an account: the email, and for a service account the email
+ * without a trailing `.gserviceaccount.com`. The account is the database's own, else the one gcloud is signed in as (`active`); with
+ * neither known it is `UNKNOWN_IAM_USER`, so that the address still copies.
+ */
+export function iamUserFor(account: string | null, active: string | null): string {
+  const email = account ?? active;
+  if (!email) return UNKNOWN_IAM_USER;
+  return email.endsWith(SERVICE_ACCOUNT_SUFFIX) ? email.slice(0, -SERVICE_ACCOUNT_SUFFIX.length) : email;
+}
+
+/**
+ * The address apps connect to: `postgresql://user@127.0.0.1:port/database`, with the user and the database encoded. It holds no password:
+ * that is copied on its own. The database must have a local port (`hasConnectionDetails`); the card draws no address for one without.
+ */
+export const connectionUrl = (db: SavedDatabase, iamUser: string): string =>
+  `postgresql://${encodeURIComponent(iamUser)}@127.0.0.1:${db.local_port}/${encodeURIComponent(db.default_database)}`;
+
+/**
+ * How many whole seconds of the writable window are left at `now`, rounded up so that the last part of a second still counts as one
+ * (the countdown never reads zero while writes are on). None while writes are locked, once the window has ended, and for a time that
+ * is not one. Both times are in milliseconds since the Unix epoch.
+ */
+export function writableSecondsLeft(untilMs: number | null, now: number): number | null {
+  if (untilMs === null || !(untilMs > now)) return null;
+  return Math.ceil((untilMs - now) / 1000);
+}
+
+/** The time left of the writable window as `mm:ss`, such as `14:59`; none while writes are locked or once the window has ended. */
+export function writableLeft(untilMs: number | null, now: number): string | null {
+  const seconds = writableSecondsLeft(untilMs, now);
+  if (seconds === null) return null;
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 /** The connections open through the port, as the Status column counts them. */

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseRow, DatabasesPanel } from "./DatabasesPanel";
+import { DatabaseAccess, DatabaseRow, DatabasesPanel } from "./DatabasesPanel";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
 import { recordOverview } from "./fixtures";
@@ -13,7 +13,7 @@ import { PageHeader } from "@/components/app/PageHeader";
 import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
 import { databasesKey, type DatabasePhase, type DatabaseView, type SavedDatabase } from "@/lib/databases";
-import type { PamStatusView } from "@/lib/transports";
+import { gcloudAccountsKey, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
 
 const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false, collapsedRecordGroups: [] as string[], toggleRecordGroup: () => {} }));
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
@@ -356,6 +356,102 @@ describe("the Databases page", () => {
     expect(invoke.mock.calls.map(([command]) => command).filter((command) => /password/.test(command))).toEqual([]);
     const cached = JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data));
     expect(cached).not.toMatch(/password/i);
+  });
+});
+
+describe("the connection details under a row", () => {
+  const labelOf = (button: { props: unknown }) => (button.props as { "aria-label"?: string })["aria-label"];
+  const noDetails = { pam: null };
+  const shared = (name: string, id: string, patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase> = {}) => row(patch, { id, name, ...noDetails, ...database });
+
+  it("a_database_with_a_port_has_a_details_button_that_is_closed_until_asked", () => {
+    const html = render([row({}, noDetails)]);
+    const toggle = iconButton(html, "Connection details for Orders");
+    expect(toggle).toContain('aria-expanded="false"');
+    expect(toggle).not.toContain(DISABLED);
+    // Nothing of the details is drawn, asked for or read until then.
+    expect(html).not.toContain("<section");
+    expect(text(html)).not.toMatch(/Copy URL|Copy password|Rotate password|postgresql:\/\//);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("the_details_button_follows_whether_the_details_are_open_and_presses_through", () => {
+    const [toggle, requestGrant, ask, edit, details] = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), busy: false, toggle, requestGrant, ask, edit, details: { open, toggle: details } });
+    const html = (open: boolean) => renderToStaticMarkup(<table><tbody>{drawn(open)}</tbody></table>);
+    expect(iconButton(html(false), "Connection details for Orders")).toContain('aria-expanded="false"');
+    expect(iconButton(html(true), "Connection details for Orders")).toContain('aria-expanded="true"');
+    // Open, the row leaves out its bottom line so that it and its details read as one.
+    expect(html(false).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).toContain("border-b");
+    expect(html(true).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).not.toContain("border-b");
+    expect(html(true).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).toContain("border-b-0");
+    buttonsIn(drawn(false)).find((button) => labelOf(button) === "Connection details for Orders")!.props.onClick!();
+    expect(details).toHaveBeenCalledTimes(1);
+    // It starts, stops, edits, deletes and asks for nothing.
+    expect([toggle, requestGrant, ask, edit].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("a_row_given_no_details_has_no_details_button", () => {
+    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn() })}</tbody></table>);
+    expect(html).not.toContain("Connection details");
+    // The shared Button's class names carry `aria-expanded:` variants, so only the attribute itself says a button opens something.
+    expect(html).not.toContain('aria-expanded="');
+  });
+
+  it("only_a_database_offered_on_a_port_with_a_record_gives_details", () => {
+    const html = render([
+      shared("Orders", "00000000000000a1"),
+      shared("Scratch", "00000000000000a2", {}, { local_port: null }),
+      shared("Old", "00000000000000a3", { live: live("running"), removed: true, blocked: true }),
+      // Another device cleared its port while this one's went on running: the port that runs has details.
+      shared("Moved", "00000000000000a4", { live: live("running") }, { local_port: null }),
+    ]);
+    expect(html).toContain('aria-label="Connection details for Orders"');
+    expect(html).not.toContain('aria-label="Connection details for Scratch"');
+    expect(html).not.toContain('aria-label="Connection details for Old"');
+    expect(html).toContain('aria-label="Connection details for Moved"');
+  });
+
+  it("names_each_details_button_by_its_database_with_hidden_characters_as_codes", () => {
+    const html = render([shared("Ord\u202eers", "00000000000000a1"), shared("Analytics", "00000000000000a2")]);
+    expect(html).toContain('aria-label="Connection details for Ord⟨U+202E⟩ers"');
+    expect(html).toContain('aria-label="Connection details for Analytics"');
+    expect(html).not.toContain("\u202e");
+  });
+
+  describe("and the database user they name", () => {
+    const accounts = (active: string | null): GcloudAccountsView => ({ config_found: true, active, accounts: [] });
+    /** The details of `database` as a server render draws them, with gcloud's accounts as they were read (none: not read). */
+    function details(database: Partial<SavedDatabase>, read?: GcloudAccountsView) {
+      const client = new QueryClient();
+      if (read) client.setQueryData(gcloudAccountsKey, read);
+      return text(renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, { pam: null, ...database })} /></QueryClientProvider>));
+    }
+
+    it("is_the_databases_account_else_the_one_gcloud_is_signed_in_as", () => {
+      expect(details({ account: "frank@example.com" }, accounts("ops@example.com"))).toContain("postgresql://frank%40example.com@127.0.0.1:6543/postgres");
+      expect(details({ account: null }, accounts("ops@example.com"))).toContain("postgresql://ops%40example.com@127.0.0.1:6543/postgres");
+    });
+
+    it("drops_the_service_account_suffix_as_the_backend_does", () => {
+      const account = "orders-sa@acme-prod-123456.iam.gserviceaccount.com";
+      expect(details({ account })).toContain("postgresql://orders-sa%40acme-prod-123456.iam@127.0.0.1:6543/postgres");
+      expect(details({ account: null }, accounts(account))).toContain("postgresql://orders-sa%40acme-prod-123456.iam@127.0.0.1:6543/postgres");
+    });
+
+    it("is_a_placeholder_while_no_account_is_known_and_the_address_still_shows", () => {
+      expect(details({ account: null })).toContain("postgresql://your-google-account@127.0.0.1:6543/postgres");
+      expect(details({ account: null }, accounts(null))).toContain("postgresql://your-google-account@127.0.0.1:6543/postgres");
+      expect(details({ account: null })).toContain("Copy URL");
+    });
+
+    it("keeps_the_passwords_off_the_page_and_out_of_the_cache", () => {
+      const client = new QueryClient();
+      const html = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} /></QueryClientProvider>);
+      expect(invoke).not.toHaveBeenCalled();
+      expect(html).not.toContain("<input");
+      expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data))).not.toMatch(/password/i);
+    });
   });
 });
 

@@ -1,7 +1,7 @@
 import "./databases.css";
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
@@ -9,11 +9,11 @@ import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, A
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { TaskDialogContent } from "@/components/app/TaskDialog";
 import { revealHidden } from "@/lib/reveal-hidden";
-import { errorMessage } from "@/lib/utils";
+import { cn, errorMessage } from "@/lib/utils";
 import type { RecordOverview } from "@/lib/records";
 import { useLastNonNull } from "@/lib/use-last-non-null";
 import { useNow } from "@/lib/use-now";
-import type { PamCheck } from "@/lib/transports";
+import { gcloudAccountsQuery, type PamCheck } from "@/lib/transports";
 import {
   connectionsLine,
   databaseBusy,
@@ -24,6 +24,8 @@ import {
   databaseRoute,
   databasesQuery,
   deleteDatabase,
+  hasConnectionDetails,
+  iamUserFor,
   localAddress,
   newDatabase,
   otherDatabases,
@@ -35,6 +37,7 @@ import {
   type DatabaseView,
   type SavedDatabase,
 } from "@/lib/databases";
+import { DatabaseAccessCard } from "./DatabaseAccessCard";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
 
@@ -64,9 +67,10 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
  * One saved database. Its name and its Edit button open the editor, and both are held back while its port starts, runs or stops, while a
  * change is under way, and while its library's writes are blocked. A database that runs here although its record is gone (deleted on
  * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
- * removes it from the list. No hooks: exported for the tests.
+ * removes it from the list. A row given `details` has a button that shows or hides its connection details, which the page draws under
+ * the row; the row's bottom line is left out while they are open, so that the two read as one. No hooks: exported for the tests.
  */
-export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void }) {
+export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, details }: { row: DatabaseView; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
   const route = revealHidden(databaseRoute(database));
@@ -77,7 +81,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit }: { ro
   const controllable = active || database.local_port !== null;
   const verb = active ? "Stop" : live.phase === "error" ? "Retry" : "Start";
   const note = live.phase === "running" ? connectionsLine(live.connections) : row.blocked && !row.removed ? "Sync review needed" : "\u00a0";
-  return <tr className="border-b last:border-0 hover:bg-muted/20">
+  return <tr className={cn("border-b last:border-0 hover:bg-muted/20", details?.open && "border-b-0")}>
     <td className="max-w-72 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
         {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button className="min-w-0 truncate text-left font-medium hover:text-primary disabled:cursor-default" title={name} disabled={active || busy || row.blocked} onClick={edit}>{name}</button>}
@@ -101,6 +105,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit }: { ro
       {live.phase === "error" && live.error ? <span className="mt-1 block max-w-64 whitespace-normal text-xs text-destructive">{revealHidden(live.error)}</span> : <span className="mt-1 block text-xs text-muted-foreground">{note}</span>}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
+      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
       {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} aria-label={`${verb} ${name}`} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{verb}</Button>}
       {!row.removed && <>
         <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked} onClick={edit}><PencilLine className="size-3.5" /></Button>
@@ -108,6 +113,16 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit }: { ro
       </>}
     </div></td>
   </tr>;
+}
+
+/**
+ * The connection details of a database that is offered on a port, with the database user its address names (`iamUserFor`): the database's
+ * own account, else the one gcloud is signed in as. gcloud's accounts are read only for a database that names no account of its own, and
+ * only while its details are open.
+ */
+export function DatabaseAccess({ row }: { row: DatabaseView }) {
+  const accounts = useQuery({ ...gcloudAccountsQuery, enabled: row.database.account === null });
+  return <DatabaseAccessCard view={row} iamUser={iamUserFor(row.database.account, accounts.data?.active ?? null)} />;
 }
 
 export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
@@ -118,6 +133,8 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   const flight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<DatabaseView | null>(null);
+  // The databases whose connection details are open: none until asked, and several may be, so that a lock that is on stays in view.
+  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
   // while the dialog is open. The opening keys the editor, so that one that is still mounted never shows the draft of an earlier opening.
   const [editing, setEditing] = useState<{ key: number; initial: SavedDatabase; expected: SavedDatabase | null } | null>(null);
@@ -163,6 +180,11 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     try { await requestDatabaseGrant(id); }
     finally { await client.invalidateQueries({ queryKey: databasePamStatusKey(id) }); }
   });
+  const toggleDetails = (id: string) => setOpened((current) => {
+    const next = new Set(current);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  });
   // A delete can fail once the record is gone, and a dialog that stayed open would offer to delete it again: it closes either way, and
   // the failure is shown on the page beside the list that was read again.
   const remove = (row: DatabaseView) => void action(async () => {
@@ -183,9 +205,19 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
         <p className="max-w-sm text-sm text-muted-foreground">Save a PostgreSQL instance and Lunport offers it to your other apps on a local port, signed in with your Google account.</p>
       </div> : <div className="overflow-x-auto rounded-lg border">
       <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Local address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
-        <tbody>{visible.map((row) => <DatabaseRow key={row.database.id} row={row} busy={busy}
-          toggle={() => void action(() => databaseBusy(row) ? stopDatabase(row.database.id) : startDatabase(row.database.id))}
-          requestGrant={() => requestGrant(row.database.id)} ask={() => setDeleting(row)} edit={() => edit(row)} />)}</tbody></table>
+        <tbody>{visible.map((row) => {
+          const id = row.database.id;
+          // A database that is not offered on a port, or whose record is gone, has no details to give; if it loses its port while open, they close.
+          const offered = hasConnectionDetails(row);
+          const open = offered && opened.has(id);
+          return <Fragment key={id}>
+            <DatabaseRow row={row} busy={busy}
+              toggle={() => void action(() => databaseBusy(row) ? stopDatabase(id) : startDatabase(id))}
+              requestGrant={() => requestGrant(id)} ask={() => setDeleting(row)} edit={() => edit(row)}
+              details={offered ? { open, toggle: () => toggleDetails(id) } : undefined} />
+            {open && <tr className="border-b last:border-0"><td colSpan={4} className="px-4 pb-4"><div className="database-details"><DatabaseAccess row={row} /></div></td></tr>}
+          </Fragment>;
+        })}</tbody></table>
       {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
     </div>}
     <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">

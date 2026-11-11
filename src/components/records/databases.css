@@ -1,7 +1,10 @@
 .databases-panel { container-type: inline-size; min-width: 0; padding: 1.4rem var(--page-inset) 2rem; }
 .database-address-compact { display: none; }
+/* A row's connection details are as wide as the list shows: its table is wider than the list in a narrow window and scrolls sideways, and the details stay in view. */
+.database-details { position: sticky; left: 1rem; width: calc(100cqw - 2rem - 2px); }
 @container (max-width: 720px) {
   .database-address-column { display: none; }
   .database-address-compact { display: block; }
   .databases-panel td { padding-left: .65rem; padding-right: .65rem; }
+  .database-details { left: .65rem; width: calc(100cqw - 1.3rem - 2px); }
 }
