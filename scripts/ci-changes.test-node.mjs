@@ -5,7 +5,7 @@ import { cargoLockVersion, selectChecks, validateVersions, withoutVersion } from
 import { cratePackageName } from "./identity.mjs";
 import { setCargoPackageVersion } from "./set-app-version.mjs";
 
-const unchanged = { frontend: false, native: false, profiles: false, packages: false, credentials: false, windows: false };
+const unchanged = { frontend: false, native: false, profiles: false, packages: false, credentials: false, windows: false, group_compat: false };
 // The application crate's package name, which ci-changes.mjs finds in Cargo.lock.
 const PACKAGE = cratePackageName(readFileSync("src-tauri/Cargo.toml", "utf8"));
 const noRead = () => { throw new Error("not a version-only change"); };
@@ -33,14 +33,47 @@ test("version-only release edits skip compilation, dependency and config edits d
   assert.notEqual(withoutVersion("src-tauri/Cargo.lock", lock("1")), withoutVersion("src-tauri/Cargo.lock", lock("2")));
 });
 
+test("Cargo dependency updates keep native checks without repeating release-profile builds", () => {
+  const base = `[package]\nname = "${PACKAGE}"\nversion = "2.0.0"\n[features]\ndefault = ["central-sync"]\n[dependencies]\nrussh = "1"\n[build-dependencies]\ncc = "1"\n[target.'cfg(windows)'.dependencies]\nwindows-sys = "1"\n`;
+  const head = base.replace('russh = "1"', 'russh = "2"').replace('cc = "1"', 'cc = "2"').replace('windows-sys = "1"', 'windows-sys = "2"');
+  const lock = `[[package]]\nname = "${PACKAGE}"\nversion = "2.0.0"\n[[package]]\nname = "russh"\nversion = "1"`;
+  const read = (revision, path) => path.endsWith("Cargo.toml") ? revision === "base" ? base : head : revision === "base" ? lock : lock.replace('version = "1"', 'version = "2"');
+  assert.deepEqual(selectChecks(["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"], read), { ...unchanged, native: true, credentials: true });
+  assert.deepEqual(selectChecks(["src-tauri/Cargo.lock"], read), { ...unchanged, native: true, credentials: true });
+  assert.equal(selectChecks(["src-tauri/Cargo.toml"], (revision) => revision === "base" ? base : head.replace('default = ["central-sync"]', 'default = []')).profiles, true);
+  assert.equal(selectChecks(["src-tauri/Cargo.toml"], noRead).profiles, true);
+});
+
+test("Tauri command registration changes do not repeat release-profile builds", () => {
+  const base = 'pub use sync::central::controller::enabled as central_sync_available;\n.invoke_handler(tauri::generate_handler![\n    command_a,\n])\n';
+  const head = base.replace('    command_a,', '    command_a,\n    command_b,');
+  const read = revision => revision === "base" ? base : head;
+  assert.deepEqual(selectChecks(["src-tauri/src/lib.rs"], read), { ...unchanged, native: true });
+  assert.equal(selectChecks(["src-tauri/src/lib.rs"], revision => revision === "base" ? base : head.replace("central_sync_available", "central_sync_unavailable")).profiles, true);
+  assert.equal(selectChecks(["src-tauri/src/lib.rs"], noRead).profiles, true);
+});
+
 test("missing version files run checks, docs skip builds, manual runs force all routes", () => {
   assert.deepEqual(selectChecks(["src-tauri/tauri.conf.json"], noRead), { ...unchanged, native: true, profiles: true, packages: true, credentials: true });
   assert.deepEqual(selectChecks(["README.md", "src-tauri/signing/README.md"], noRead), unchanged);
-  assert.deepEqual(selectChecks([], noRead, true), { frontend: true, native: true, profiles: true, packages: true, credentials: true, windows: true });
-  assert.deepEqual(selectChecks(["scripts/ci-changes.mjs"], noRead), { ...unchanged, frontend: true, native: true, profiles: true, credentials: true });
+  assert.deepEqual(selectChecks([], noRead, true), { frontend: true, native: true, profiles: true, packages: true, credentials: true, windows: true, group_compat: true });
+  assert.deepEqual(selectChecks(["scripts/ci-changes.mjs"], noRead), { ...unchanged, frontend: true, native: true, profiles: true, credentials: true, group_compat: true });
   assert.equal(selectChecks(["scripts/validate-windows-startup.ps1"], noRead).native, true);
   assert.equal(selectChecks(["src-tauri/Cargo.lock"], noRead).credentials, true);
   assert.equal(selectChecks(["scripts/build-macos-release.sh"], noRead).credentials, true);
+});
+
+test("the archived group-order compatibility build runs only for its inputs", () => {
+  assert.equal(selectChecks(["src-tauri/src/ssh/russh_engine.rs"], noRead).group_compat, false);
+  for (const path of [
+    "scripts/compat/group-order-v1.2.rs",
+    "scripts/validate-group-order-compat.sh",
+    "src-tauri/src/sync/record_groups.rs",
+    "src-tauri/src/sync/record_groups/mod.rs",
+    "src-tauri/src/sync/record_merge.rs",
+  ]) {
+    assert.equal(selectChecks([path], noRead).group_compat, true, path);
+  }
 });
 
 // The Linux upgrade check, the Windows suite and the macOS credential scripts read scripts/identity.mjs; the Linux and macOS checks and
@@ -94,7 +127,6 @@ test("release profile boundaries run only when their build inputs or assertions 
     "src-tauri/src/sync/central/controller.rs",
     "src-tauri/tests/app_profile_build.rs",
     "src-tauri/Cargo.toml",
-    "src-tauri/Cargo.lock",
     "src-tauri/build.rs",
     "src-tauri/tauri.conf.json",
     "src-tauri/tauri.dev.conf.json",
