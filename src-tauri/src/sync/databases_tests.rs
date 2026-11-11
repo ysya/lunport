@@ -142,6 +142,7 @@ fn validation_rejects_each_bad_field() {
         (changed(|d| d.account = Some("frank@".into())), ACCOUNT),
         (changed(|d| d.account = Some(String::new())), ACCOUNT),
         (changed(|d| d.default_database = String::new()), DEFAULT_DATABASE),
+        (changed(|d| d.default_database = "   ".into()), DEFAULT_DATABASE),
         (changed(|d| d.default_database = "d".repeat(64)), DEFAULT_DATABASE),
         (changed(|d| d.default_database = "post\tgres".into()), DEFAULT_DATABASE),
         (changed(|d| d.local_port = Some(0)), LOCAL_PORT),

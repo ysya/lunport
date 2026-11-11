@@ -110,7 +110,7 @@ impl SavedDatabase {
         if self.account.as_deref().is_some_and(|account| !transports::is_email(account)) {
             return Err("Enter the Google account as an email address.".into());
         }
-        if self.default_database.is_empty() || self.default_database.chars().count() > 63 || self.default_database.chars().any(char::is_control) {
+        if self.default_database.trim().is_empty() || self.default_database.chars().count() > 63 || self.default_database.chars().any(char::is_control) {
             return Err("Enter the database to open, such as postgres.".into());
         }
         if let Some(pam) = &self.pam {
