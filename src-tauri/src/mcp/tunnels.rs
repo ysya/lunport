@@ -268,7 +268,7 @@ fn changed_rows(state: &SyncStateV3, before: &TunnelRule, after: &TunnelRule) ->
 }
 
 /// Where a new rule is saved, as the window names it: with the library's account it syncs.
-pub(super) fn storage(state: &SyncStateV3) -> String {
+fn storage(state: &SyncStateV3) -> String {
     if state.account.is_some() { "Synced library" } else { "This device's library" }.into()
 }
 

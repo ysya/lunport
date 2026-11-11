@@ -4,7 +4,7 @@
 //! `start_tunnel` does; stopping never asks. No tool takes or returns a port password: apps sign in with it, and only the person reads it
 //! in Lunport. A database the client started keeps running when AI access to its host ends, since it serves the person's apps.
 use super::management::{active, given, live, PamInput};
-use super::tunnels::{enabled_policy, rows, safe, storage, usable_host, Usable, Words};
+use super::tunnels::{enabled_policy, rows, safe, usable_host, Usable, Words};
 use super::*;
 use crate::session::{
     connect::{CancelToken, Connector},
@@ -17,7 +17,7 @@ use crate::sync::{
     env::{Keychain, SyncEnv},
     record_repository as repo, record_runtime,
     records_v3::SyncStateV3,
-    transports::{refusal, PamCheck},
+    transports::{self, refusal, PamCheck},
 };
 use std::cell::Cell;
 
@@ -207,6 +207,12 @@ fn changed_rows(state: &SyncStateV3, before: &SavedDatabase, after: &SavedDataba
         .filter(|((_, old), (_, new))| old != new)
         .map(|((label, old), (_, new))| (label.to_string(), format!("{old} → {new}")))
         .collect()
+}
+
+/// Where a new database is saved, as the window names it: in the library, which syncs, once it uses central sync, as `databases::set`
+/// stores it and `databases::view` marks it synced; on this device alone otherwise, with an account on the older chain-mode sync as well.
+fn storage(state: &SyncStateV3) -> String {
+    if transports::central_library(state) { "Synced library" } else { "This device's library" }.into()
 }
 
 /// The project, region and instance a connection name (`project:region:instance`) names; `SavedDatabase::validate` checks each.

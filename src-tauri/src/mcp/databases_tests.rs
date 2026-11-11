@@ -405,6 +405,31 @@ fn a_new_database_is_offered_on_the_first_free_port_from_6543() {
     assert!(saved(&d).iter().any(|database| database.name == "orders-qa-3" && database.local_port == Some(7000)));
 }
 
+/// The window says a new database is saved where the library keeps it: in the library, which syncs, once it uses central sync; on this
+/// device alone otherwise, with an account on the older chain-mode sync as well.
+#[test]
+fn the_storage_row_says_where_the_library_keeps_the_database() {
+    let chain_mode = |mut state: SyncStateV3| {
+        state.account = Some(crate::sync::state_v2::AccountState::new(&"a".repeat(64)));
+        state
+    };
+    for (d, storage, synced) in [
+        (device_with(chain_mode), "This device's library", false),
+        (device_with(crate::sync::transports::tests::in_central_mode), "Synced library", true),
+    ] {
+        let r = runtime(ApprovalMode::Ask);
+        let (ports, _) = ports();
+        let input = json!({"name": "orders-dev", "connection_name": "acme-dev-654321:asia-east1:orders-dev", "environment": "dev"});
+        create(&d.env(), &r, &ports, &input, RequestContext::default(), &CancelToken::default(), &|q| {
+            assert!(rows_of(q).contains(&row("Storage", storage)), "{:?}", rows_of(q));
+            ApprovalDecision::Allow
+        })
+        .unwrap();
+        assert_eq!(list(&d.env(), &r, &ports).unwrap()["databases"][0]["synced"], synced, "{storage}");
+        assert_eq!(databases::has_library_rows(&snapshot_of(&d)), synced, "{storage}: kept in the account's rows only when synced");
+    }
+}
+
 #[test]
 fn invalid_settings_are_refused_before_the_window() {
     let d = device();
