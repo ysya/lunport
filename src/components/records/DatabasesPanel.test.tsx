@@ -39,7 +39,7 @@ const ORDERS: SavedDatabase = {
   pam: PAM,
   local_port: 6543,
 };
-const live = (phase: DatabasePhase, patch: Partial<DatabaseView["live"]> = {}): DatabaseView["live"] => ({ phase, port: phase === "stopped" || phase === "error" ? null : 6543, connections: 0, writable_until_ms: null, error: null, ...patch });
+const live = (phase: DatabasePhase, patch: Partial<DatabaseView["live"]> = {}): DatabaseView["live"] => ({ phase, port: phase === "stopped" || phase === "error" ? null : 6543, connections: 0, writable_until_ms: null, error: null, step: null, address: null, ...patch });
 /** A saved database as the list shows it: stopped, synced, held by nothing, and shown in the environment it is saved in. */
 function row(patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase> = {}): DatabaseView {
   const saved = { ...ORDERS, ...database };

@@ -9,8 +9,8 @@ use crate::gcp::rest::GcpError;
 use crate::session::auth::Reply;
 use crate::session::database_ports::tests::{cancel_request, fake_cloud_sql, orders, running, t0, wait_until, Answer, App, Clock, CONNECTION, IAM_USER, ID, LIMIT, PASSWORD};
 use crate::session::database_ports::{DatabasePorts, NotReady, Prepared};
-use crate::session::databases::DatabasePhase;
-use crate::session::protocol::QuestionKind;
+use crate::session::databases::{DatabasePhase, DatabaseStep};
+use crate::session::protocol::{AiAsker, QuestionKind};
 use crate::session::testing::FakeOwner;
 use crate::ssh::forward::{ForwardKind, ForwardSpec, ForwardStatus, Forwarder};
 use crate::ssh::{DisconnectReason, ExecResult, Pty, Session, SessionError, ShellChannel};
@@ -24,6 +24,7 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
+use zeroize::Zeroizing;
 
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3600);
@@ -284,6 +285,8 @@ struct FakeLink {
     failures: Mutex<VecDeque<String>>,
     /// Whether an open cancels the connection it is for before it answers, as a port that stops meanwhile does.
     cancels: AtomicBool,
+    /// A question each open asks its owner before it answers, as the host's login asks for a grant or a password.
+    asks: Mutex<Option<QuestionKind>>,
     /// What the forwards of the next sessions are refused with.
     refusal: Mutex<Option<SessionError>>,
     /// The far ends of the sessions it opened, in order.
@@ -292,7 +295,14 @@ struct FakeLink {
 
 impl FakeLink {
     fn new() -> FakeLink {
-        FakeLink { opened: Mutex::default(), failures: Mutex::default(), cancels: AtomicBool::new(false), refusal: Mutex::default(), ends: Mutex::default() }
+        FakeLink {
+            opened: Mutex::default(),
+            failures: Mutex::default(),
+            cancels: AtomicBool::new(false),
+            asks: Mutex::default(),
+            refusal: Mutex::default(),
+            ends: Mutex::default(),
+        }
     }
 
     /// The hosts it opened a session to, by their ids, in order.
@@ -307,8 +317,12 @@ impl FakeLink {
 }
 
 impl HostLink for FakeLink {
-    fn open(&self, host_id: &str, _: &dyn Owner, cancel: &CancelToken) -> Result<Box<dyn Session>, String> {
+    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken) -> Result<Box<dyn Session>, String> {
         self.opened.lock().unwrap().push(host_id.to_string());
+        let asks = *self.asks.lock().unwrap();
+        if let Some(kind) = asks {
+            owner.ask(kind, "web-1 asks", false, None);
+        }
         if self.cancels.load(Ordering::SeqCst) {
             cancel.cancel();
         }
@@ -399,7 +413,7 @@ impl Cloud {
             gcp: self.pam.clone(),
             sql: self.admin.clone(),
             gates: Arc::new(GrantGates::default()),
-            make_owner: Arc::new(move |_: &CancelToken| -> Box<dyn Owner + Send> { Box::new(Shared(Arc::clone(&owner))) }),
+            make_owner: Arc::new(move |_: &CancelToken, _: Option<&AiAsker>| -> Box<dyn Owner + Send> { Box::new(Shared(Arc::clone(&owner))) }),
             now: Arc::new(move || clock.now()),
             active_account: Arc::new(move || active.lock().unwrap().clone()),
             library: Arc::new(|| -> Result<SyncStateV3, String> { Ok(library()) }),
@@ -622,17 +636,30 @@ fn a_cancel_request_through_cloud_sql_uses_the_cached_certificate() {
     let cloud = Cloud::new(FakeOwner::default());
     let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
     let port = running(&ports, &orders());
-    // Before any connection there is no certificate: the request is dropped.
+    // Start fetched the certificate: a cancel request before any connection dials with it.
     let mut early = App::connect(port);
     early.send(&cancel_request());
     assert!(early.closed());
-    assert!(cloud.dialled.lock().unwrap().is_empty());
+    assert_eq!(*cloud.received.lock().unwrap(), vec![cancel_request()]);
     App::signed_in(port).round_trip(b"select pg_sleep(60)");
     let mut cancel = App::connect(port);
     cancel.send(&cancel_request());
     assert!(cancel.closed());
     assert_eq!(cloud.received.lock().unwrap().last(), Some(&cancel_request()));
     assert_eq!(cloud.certificates(), 1, "no certificate is fetched for a cancel request");
+    // Cloud SQL refuses a dial, which takes the certificate back: a cancel request then has none, and is dropped.
+    *cloud.refusing.lock().unwrap() = 1;
+    let mut refused = App::connect(port);
+    refused.startup(&[("user", "frank"), ("database", "orders")]);
+    refused.asked_for_password();
+    refused.password(PASSWORD);
+    assert_eq!(refused.error().0, "08006");
+    let dialled = cloud.dialled.lock().unwrap().len();
+    let mut dropped = App::connect(port);
+    dropped.send(&cancel_request());
+    assert!(dropped.closed());
+    assert_eq!(cloud.dialled.lock().unwrap().len(), dialled, "nothing was dialled");
+    assert_eq!(cloud.certificates(), 1);
 }
 
 #[test]
@@ -914,6 +941,8 @@ fn an_app_is_told_a_connection_google_could_not_get_ready_from_a_refused_sign_in
     let cloud = Cloud::new(FakeOwner::default());
     let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
     let port = running(&ports, &orders());
+    // The certificate Start fetched is due to be renewed: the next connection asks the Cloud SQL Admin API again.
+    cloud.clock.at(HOUR - REFRESH_AHEAD);
     let refused = |error: GcpError| {
         *cloud.admin.failing.lock().unwrap() = Some(error);
         let mut app = App::connect(port);
@@ -1116,7 +1145,7 @@ fn a_grant_asked_for_on_the_page_and_by_a_connection_at_once_is_asked_for_once()
     let mut upstream = cloud.upstream();
     let (gates, owner) = (Arc::clone(&upstream.gates), Arc::clone(&cloud.owner));
     // Whoever leads is answered only once the other waits behind the question.
-    upstream.make_owner = Arc::new(move |_: &CancelToken| -> Box<dyn Owner + Send> {
+    upstream.make_owner = Arc::new(move |_: &CancelToken, _: Option<&AiAsker>| -> Box<dyn Owner + Send> {
         Box::new(Patient { inner: Arc::clone(&owner), gates: Arc::clone(&gates), followers: 1 })
     });
     let cancel = CancelToken::default();
@@ -1130,4 +1159,115 @@ fn a_grant_asked_for_on_the_page_and_by_a_connection_at_once_is_asked_for_once()
     assert_eq!(cloud.owner.asked().len(), 1, "one question for both");
     assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 1, "one request for both");
     assert_eq!(cloud.remembered.lock().unwrap().len(), 1, "one memory for both");
+}
+
+// ---- Start opens the whole way ----
+
+/// The steps a warm-up of `db` reports, in order, and what it answered.
+fn warm_steps(upstream: &CloudSqlUpstream, db: &SavedDatabase) -> (Vec<DatabaseStep>, Result<(), NotReady>) {
+    let steps = Mutex::new(Vec::new());
+    let warmed = upstream.warm(db, &CancelToken::default(), None, &|step| steps.lock().unwrap().push(step));
+    (steps.into_inner().unwrap(), warmed)
+}
+
+#[test]
+fn warm_reports_each_step_in_order() {
+    let cloud = Cloud::new(FakeOwner::default());
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() - 10 * MINUTE)];
+    let upstream = cloud.upstream();
+    let guarded_through_a_host = SavedDatabase { pam: guarded().pam, ..routed() };
+    let (steps, warmed) = warm_steps(&upstream, &guarded_through_a_host);
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Grant, DatabaseStep::Connect, DatabaseStep::Certificate]);
+    // The whole way is open: the grant was checked, and the session, its forward and the certificate are kept for the connections.
+    assert_eq!(cloud.looked(), 1);
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string()]);
+    assert_eq!(cloud.link.end(0).forwards(), vec![forward_to_the_instance()]);
+    assert_eq!(cloud.certificates(), 1);
+    let prepared = upstream.prepare(&guarded_through_a_host, &CancelToken::default()).unwrap();
+    let _dialling = upstream.connect(ID, Some(prepared.material));
+    assert_eq!((cloud.looked(), cloud.link.opened().len(), cloud.certificates()), (1, 1, 1), "the first connection opens nothing anew");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(loopback(FORWARD_PORT), the_instances_name())]);
+}
+
+#[test]
+fn warm_of_a_public_database_reports_the_certificate_only() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let (steps, warmed) = warm_steps(&upstream, &orders());
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Certificate]);
+    assert!(cloud.link.opened().is_empty() && cloud.looked() == 0, "no host and no grant");
+    assert_eq!(cloud.certificates(), 1);
+}
+
+#[test]
+fn a_grant_question_while_connecting_shows_the_grant_step() {
+    let cloud = Cloud::new(FakeOwner::default());
+    // web-1's own route asks for a grant while its session opens.
+    *cloud.link.asks.lock().unwrap() = Some(QuestionKind::Grant);
+    let upstream = cloud.upstream();
+    let (steps, warmed) = warm_steps(&upstream, &routed());
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Connect, DatabaseStep::Grant, DatabaseStep::Connect, DatabaseStep::Certificate]);
+    assert_eq!(cloud.owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), vec![QuestionKind::Grant], "the person was asked");
+    // The session is lost, and the next one asks for a password: that is no grant, and the step stays.
+    *cloud.link.asks.lock().unwrap() = Some(QuestionKind::Password);
+    cloud.link.end(0).lose();
+    let (steps, warmed) = warm_steps(&upstream, &routed());
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Connect, DatabaseStep::Certificate]);
+    assert_eq!(cloud.owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), vec![QuestionKind::Grant, QuestionKind::Password]);
+}
+
+#[test]
+fn the_warm_up_asks_in_the_ai_clients_name() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let mut upstream = cloud.upstream();
+    let asked_for = Arc::new(Mutex::new(Vec::new()));
+    let (recording, owner) = (Arc::clone(&asked_for), Arc::clone(&cloud.owner));
+    upstream.make_owner = Arc::new(move |_: &CancelToken, ai: Option<&AiAsker>| -> Box<dyn Owner + Send> {
+        recording.lock().unwrap().push(ai.cloned());
+        Box::new(Shared(Arc::clone(&owner)))
+    });
+    let claude = AiAsker { client: "Claude".into(), unreviewed: None };
+    let cancel = CancelToken::default();
+    // The grant the database asks for: nobody answers, for the AI client's start or for an app's connection.
+    assert!(upstream.warm(&guarded(), &cancel, Some(&claude), &|_| {}).is_err());
+    assert!(upstream.prepare(&guarded(), &cancel).is_err());
+    // The session to the host: the start opens it, and an app's connection opens it again once it is lost.
+    upstream.warm(&routed(), &cancel, Some(&claude), &|_| {}).unwrap();
+    cloud.link.end(0).lose();
+    upstream.prepare(&routed(), &cancel).unwrap();
+    assert_eq!(*asked_for.lock().unwrap(), vec![Some(claude.clone()), None, Some(claude), None]);
+}
+
+#[test]
+fn instance_address_is_known_after_the_certificate() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    assert_eq!(upstream.instance_address(ID), None, "nothing is known before a certificate was fetched");
+    upstream.warm(&routed(), &CancelToken::default(), None, &|_| {}).unwrap();
+    assert_eq!(upstream.instance_address(ID), Some(format!("{PRIVATE_IP}:3307")));
+    upstream.release(ID);
+    assert_eq!(upstream.instance_address(ID), None, "nor once the database stopped");
+    // The row of a database that runs shows it, and the row of one that stopped does not.
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    running(&ports, &orders());
+    assert_eq!(ports.live(ID).address, Some(format!("{PUBLIC_IP}:3307")));
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    assert_eq!(ports.live(ID).address, None);
+}
+
+#[test]
+fn a_start_that_cannot_reach_the_host_fails_at_connecting() {
+    let cloud = Cloud::new(FakeOwner::default());
+    cloud.link.failures.lock().unwrap().push_back("Connection refused.".into());
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    ports.start(&routed(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None).unwrap();
+    wait_until("the start ended", || !ports.running(ID));
+    let live = ports.live(ID);
+    assert_eq!((live.phase, live.error.as_deref(), live.step), (DatabasePhase::Error, Some("Could not connect through web-1: Connection refused."), Some(DatabaseStep::Connect)));
+    assert_eq!(cloud.certificates(), 0, "no certificate is fetched for a database that cannot get through");
 }

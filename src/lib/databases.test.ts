@@ -110,7 +110,7 @@ describe("saved databases", () => {
   it("calls the backend with the command and argument names it registers", async () => {
     const view: DatabaseView = {
       database: ORDERS,
-      live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null },
+      live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null, step: null, address: null },
       synced: true,
       blocked: false,
       removed: false,
@@ -175,7 +175,7 @@ const NOW = new Date(2027, 0, 15, 10, 0).getTime();
 const PAM = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null };
 
 function view(patch: Partial<DatabaseView> = {}): DatabaseView {
-  return { database: ORDERS, live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null }, synced: true, blocked: false, removed: false, changed: false, environment: ORDERS.environment, ...patch };
+  return { database: ORDERS, live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null, step: null, address: null }, synced: true, blocked: false, removed: false, changed: false, environment: ORDERS.environment, ...patch };
 }
 
 describe("the Databases page's reads and actions", () => {
@@ -216,7 +216,7 @@ describe("the Databases page's reads and actions", () => {
   });
 
   it("calls a database busy while its port starts, runs or stops", () => {
-    const busy = (phase: DatabasePhase) => databaseBusy(view({ live: { phase, port: 6543, connections: 0, writable_until_ms: null, error: null } }));
+    const busy = (phase: DatabasePhase) => databaseBusy(view({ live: { phase, port: 6543, connections: 0, writable_until_ms: null, error: null, step: null, address: null } }));
     expect(["starting", "running", "stopping"].map((phase) => busy(phase as DatabasePhase))).toEqual([true, true, true]);
     expect(["stopped", "error"].map((phase) => busy(phase as DatabasePhase))).toEqual([false, false]);
   });
@@ -226,8 +226,8 @@ describe("the Databases page's reads and actions", () => {
     expect(localAddress(view())).toBe("127.0.0.1:6543");
     expect(localAddress(view({ database: { ...ORDERS, local_port: null } }))).toBe("Not shared");
     // The port that runs is the one shown; a port that failed to open falls back to the one saved.
-    expect(localAddress(view({ live: { phase: "running", port: 6544, connections: 0, writable_until_ms: null, error: null } }))).toBe("127.0.0.1:6544");
-    expect(localAddress(view({ live: { phase: "error", port: null, connections: 0, writable_until_ms: null, error: "Port 6543 is already in use on this computer." } }))).toBe("127.0.0.1:6543");
+    expect(localAddress(view({ live: { phase: "running", port: 6544, connections: 0, writable_until_ms: null, error: null, step: null, address: null } }))).toBe("127.0.0.1:6544");
+    expect(localAddress(view({ live: { phase: "error", port: null, connections: 0, writable_until_ms: null, error: "Port 6543 is already in use on this computer.", step: null, address: null } }))).toBe("127.0.0.1:6543");
     expect([0, 1, 2].map(connectionsLine)).toEqual(["0 active connections", "1 active connection", "2 active connections"]);
   });
 });

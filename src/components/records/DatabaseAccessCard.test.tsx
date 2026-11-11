@@ -68,6 +68,8 @@ const live = (phase: DatabasePhase, patch: Partial<DatabaseView["live"]> = {}): 
   connections: 0,
   writable_until_ms: null,
   error: null,
+  step: null,
+  address: null,
   ...patch,
 });
 /** A saved database as the list shows it: a prod database that runs on its saved port, with writes locked, in the environment it is saved in. */

@@ -3,7 +3,8 @@
 //! own tests use the app, the fake Cloud SQL and the clock from here.
 
 use super::*;
-use crate::session::databases::DatabasePhase;
+use crate::session::databases::{DatabasePhase, DatabaseStep};
+use crate::session::protocol::AiAsker;
 use crate::sync::databases::tests::database;
 use crate::sync::databases::DatabaseEnvironment;
 use crate::sync::testkit::MemKeychain;
@@ -210,11 +211,30 @@ pub(crate) async fn fake_cloud_sql(mut stream: DuplexStream, answer: Answer, rec
 /// The first material number the fake upstream's `prepare` hands out, apart from any count of dials.
 const FIRST_MATERIAL: u64 = 1001;
 
+/// What the fake upstream's `warm` does, as a test scripts it: it reports `steps`; then, when it `holds`, it waits until the test releases
+/// it (`FakeUpstream::warm_released`) or its start is cancelled, at most `LIMIT`; and it answers `Ok`, or fails with `failing`. One whose
+/// start was cancelled fails as a cancelled connection does. One that `panics` panics after its steps.
+#[derive(Default)]
+pub(crate) struct Warming {
+    pub steps: Vec<DatabaseStep>,
+    pub holds: bool,
+    pub failing: Option<NotReady>,
+    pub panics: bool,
+}
+
 /// An upstream for the port's own tests: `prepare` answers `frank@example.com` with material numbered from `FIRST_MATERIAL` (or the
-/// sentence it is told to fail with), and `connect` pipes to a `fake_cloud_sql` that answers as `answer` says. What it was asked to do is
-/// counted.
+/// sentence it is told to fail with), `connect` pipes to a `fake_cloud_sql` that answers as `answer` says, and `warm` does what `warming`
+/// says. What it was asked to do is counted.
 #[derive(Default)]
 pub(crate) struct FakeUpstream {
+    /// What `warm` does: by default it reports no step and answers at once.
+    pub warming: Mutex<Warming>,
+    /// Lets a `warm` that holds go on.
+    pub warm_released: AtomicBool,
+    /// How many `warm` calls gave up because their start was cancelled.
+    pub warms_cancelled: AtomicUsize,
+    /// The AI client each `warm` was given, in order.
+    pub warmed_for: Mutex<Vec<Option<AiAsker>>>,
     /// `prepare` fails with this.
     pub refusing: Mutex<Option<NotReady>>,
     /// `prepare` waits until its connection is cancelled, as a question nobody answers does.
@@ -248,6 +268,31 @@ impl FakeUpstream {
 }
 
 impl Upstream for FakeUpstream {
+    fn warm(&self, _db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<(), NotReady> {
+        self.warmed_for.lock().unwrap().push(ai.cloned());
+        let (steps, holds, failing, panics) = {
+            let warming = self.warming.lock().unwrap();
+            (warming.steps.clone(), warming.holds, warming.failing.clone(), warming.panics)
+        };
+        for reached in steps {
+            step(reached);
+        }
+        if panics {
+            panic!("the warm-up broke");
+        }
+        if holds {
+            let end = Instant::now() + LIMIT;
+            while !self.warm_released.load(Ordering::SeqCst) && !cancel.is_cancelled() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if cancel.is_cancelled() {
+                self.warms_cancelled.fetch_add(1, Ordering::SeqCst);
+                return Err(NotReady::Failed("The connection was cancelled.".into()));
+            }
+        }
+        failing.map_or(Ok(()), Err)
+    }
+
     fn prepare(&self, _db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, NotReady> {
         let material = FIRST_MATERIAL + self.prepared.fetch_add(1, Ordering::SeqCst) as u64;
         if self.waiting.load(Ordering::SeqCst) {
@@ -435,12 +480,19 @@ pub(crate) fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// Starts `db` on `ports` with `PASSWORD` and answers the port it listens on.
+/// Starts `db` on `ports` with `PASSWORD`, waits until it runs and answers the port it listens on.
 pub(crate) fn running(ports: &DatabasePorts, db: &SavedDatabase) -> u16 {
-    ports.start(db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(())).expect("the port starts");
-    let live = ports.live(&db.id);
-    assert_eq!(live.phase, DatabasePhase::Running);
-    live.port.expect("a running port has a port")
+    ports.start(db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None).expect("the port starts");
+    runs(ports, &db.id).port.expect("a running port has a port")
+}
+
+/// Waits until the database `id`'s port is past starting, at most `LIMIT`, and answers how it runs: a start opens the whole way on a
+/// thread of its own first, however soon the upstream has it open.
+pub(crate) fn runs(ports: &DatabasePorts, id: &str) -> DatabaseLive {
+    wait_until("the port has started", || ports.live(id).phase != DatabasePhase::Starting);
+    let live = ports.live(id);
+    assert_eq!(live.phase, DatabasePhase::Running, "{live:?}");
+    live
 }
 
 fn fake() -> Arc<FakeUpstream> {
@@ -730,9 +782,10 @@ fn a_port_in_use_fails_with_a_sentence() {
     let ports = DatabasePorts::new(fake());
     let db = SavedDatabase { local_port: Some(taken), ..orders() };
     let sentence = format!("Port {taken} is already in use on this computer.");
-    let started = ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()));
+    let started = ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None);
     assert_eq!(started, Err(sentence.clone()));
-    assert_eq!(ports.live(ID), DatabaseLive { phase: DatabasePhase::Error, port: None, connections: 0, writable_until_ms: None, error: Some(sentence) });
+    let failed = DatabaseLive { phase: DatabasePhase::Error, port: None, connections: 0, writable_until_ms: None, error: Some(sentence), step: None, address: None };
+    assert_eq!(ports.live(ID), failed);
     assert!(!ports.running(ID));
     assert!(locked(&ports.ports)[ID].password().is_empty(), "a port that failed keeps no password");
     // Nothing else breaks: another database starts, and this one does once the port is free.
@@ -749,7 +802,7 @@ fn refused_for(occupant: std::net::TcpListener) {
     let ports = DatabasePorts::new(fake());
     let db = SavedDatabase { local_port: Some(taken), ..orders() };
     let sentence = format!("Port {taken} is already in use on this computer.");
-    assert_eq!(ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(())), Err(sentence.clone()));
+    assert_eq!(ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None), Err(sentence.clone()));
     assert_eq!((ports.live(ID).phase, ports.live(ID).error), (DatabasePhase::Error, Some(sentence)));
     drop(occupant);
 }
@@ -771,7 +824,7 @@ fn a_program_listening_on_the_ipv6_loopback_holds_the_port() {
 fn a_database_without_a_local_port_or_over_the_limit_does_not_start() {
     let ports = DatabasePorts::new(fake());
     let unshared = SavedDatabase { local_port: None, ..orders() };
-    let start = |db: &SavedDatabase| ports.start(db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()));
+    let start = |db: &SavedDatabase| ports.start(db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None);
     assert_eq!(start(&unshared), Err("Turn on Let other apps connect and choose a port first.".to_string()));
     assert_eq!(ports.live(ID), DatabaseLive::default(), "nothing was started");
     let ids: Vec<String> = (1..=MAX_RUNNING_DATABASES + 1).map(|n| format!("{n:016x}")).collect();
@@ -876,16 +929,10 @@ fn stopping_closes_every_connection_and_frees_the_port() {
 
 #[test]
 fn quitting_stops_the_port_and_lets_go_of_what_it_held() {
-    struct Held(Arc<AtomicBool>);
-    impl Drop for Held {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
     let ports = DatabasePorts::new(fake());
     let quit = CancelToken::default();
     let released = Arc::new(AtomicBool::new(false));
-    ports.start(&orders(), Zeroizing::new(PASSWORD.into()), quit.clone(), Box::new(Held(Arc::clone(&released)))).unwrap();
+    ports.start(&orders(), Zeroizing::new(PASSWORD.into()), quit.clone(), Box::new(Held(Arc::clone(&released))), None).unwrap();
     let mut relaying = App::signed_in(ports.live(ID).port.unwrap());
     assert!(!released.load(Ordering::SeqCst), "held while the port runs");
     // The broker cancels the token when the app quits.
@@ -946,7 +993,7 @@ fn a_stopped_port_is_not_given_a_password() {
     ports.set_password(ID, Zeroizing::new(rotated.into()));
     assert!(locked(&ports.ports)[ID].password().is_empty(), "and is not given one");
     // It asks for the password it is started with next.
-    ports.start(&orders(), Zeroizing::new(rotated.into()), CancelToken::default(), Box::new(())).unwrap();
+    ports.start(&orders(), Zeroizing::new(rotated.into()), CancelToken::default(), Box::new(()), None).unwrap();
     let port = ports.live(ID).port.unwrap();
     let mut old = App::connect(port);
     old.startup(&[("user", "frank"), ("database", "orders")]);
@@ -963,7 +1010,7 @@ fn a_failed_port_is_not_given_a_password() {
     let held = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let db = SavedDatabase { local_port: Some(held.local_addr().unwrap().port()), ..orders() };
     let ports = DatabasePorts::new(fake());
-    ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(())).unwrap_err();
+    ports.start(&db, Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None).unwrap_err();
     assert_eq!(ports.live(ID).phase, DatabasePhase::Error);
     ports.set_password(ID, Zeroizing::new("bmV3LXBvcnQtcGFzc3dvcmQtZm9yLWFu".into()));
     assert!(locked(&ports.ports)[ID].password().is_empty(), "a port that failed is not given a password");
@@ -976,6 +1023,9 @@ fn a_port_takes_a_new_password_while_it_starts_or_runs_only() {
     port.set_password(Zeroizing::new("first".into()));
     assert_eq!(*port.password(), "first", "a port that starts takes it");
     port.listening(6543);
+    assert_eq!(port.live().phase, DatabasePhase::Starting, "it listens, and starts until the way to the instance is open");
+    port.warmed();
+    assert_eq!(port.live().phase, DatabasePhase::Running);
     port.set_password(Zeroizing::new("second".into()));
     assert_eq!(*port.password(), "second", "a port that runs takes it");
     // A port that stops wipes its password once its connections are closed: a password it took meanwhile could be written after the wipe.
@@ -984,9 +1034,145 @@ fn a_port_takes_a_new_password_while_it_starts_or_runs_only() {
     port.set_password(Zeroizing::new("third".into()));
     assert_eq!(*port.password(), "second", "a port that stops does not");
     port.forget_password();
-    port.stopped();
+    port.ended();
+    assert_eq!(port.live().phase, DatabasePhase::Stopped);
     port.set_password(Zeroizing::new("fourth".into()));
     assert!(port.password().is_empty(), "nor does one that stopped");
+}
+
+// ---- Opening the way at Start ----
+
+/// What a port is let go with, which tells when it is dropped.
+struct Held(Arc<AtomicBool>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Starts `Orders` on `ports` with `PASSWORD` for `ai`, holding `hold`, without waiting for its start to end.
+fn start_orders(ports: &DatabasePorts, hold: Box<dyn Send>, ai: Option<AiAsker>) {
+    ports.start(&orders(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), hold, ai).expect("the port starts");
+}
+
+/// Waits until the port of `Orders` shows `step` while it starts.
+fn at_step(ports: &DatabasePorts, step: DatabaseStep) {
+    wait_until("the start reached its step", || ports.live(ID).step == Some(step));
+}
+
+/// Asserts that the port of `Orders` reads as `live` for a moment longer: what it does late changes nothing more.
+fn stays(ports: &DatabasePorts, live: &DatabaseLive) {
+    let end = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < end {
+        assert_eq!(ports.live(ID), *live);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn start_stays_starting_until_the_path_is_open() {
+    let upstream = fake();
+    *upstream.warming.lock().unwrap() = Warming { steps: vec![DatabaseStep::Connect], holds: true, ..Warming::default() };
+    let ports = DatabasePorts::new(upstream.clone());
+    start_orders(&ports, Box::new(()), None);
+    at_step(&ports, DatabaseStep::Connect);
+    let connecting = ports.live(ID);
+    let busy = ports.running(ID);
+    // The session to the host opens.
+    upstream.warm_released.store(true, Ordering::SeqCst);
+    assert_eq!(connecting.phase, DatabasePhase::Starting, "it starts while the path opens");
+    assert_eq!(connecting.step, Some(DatabaseStep::Connect));
+    assert!(busy, "a database that starts is not changed or started again");
+    let port = connecting.port.expect("it listens while it starts");
+    let open = runs(&ports, ID);
+    assert_eq!(open.step, None, "a port that runs shows no step");
+    assert_eq!(open.port, Some(port), "on the port it listened on as it started");
+    App::signed_in(port).round_trip(b"select 1");
+}
+
+#[test]
+fn a_failed_start_ends_failed_with_its_sentence_and_step() {
+    let sentence = "Could not connect through web-1: Connection refused.";
+    let upstream = fake();
+    let failing = Some(NotReady::Failed(sentence.into()));
+    *upstream.warming.lock().unwrap() = Warming { steps: vec![DatabaseStep::Certificate], holds: true, failing, ..Warming::default() };
+    let ports = DatabasePorts::new(upstream.clone());
+    let released = Arc::new(AtomicBool::new(false));
+    start_orders(&ports, Box::new(Held(Arc::clone(&released))), None);
+    at_step(&ports, DatabaseStep::Certificate);
+    let port = ports.live(ID).port.expect("it listens while it starts");
+    // An app that connected meanwhile.
+    let mut early = App::connect(port);
+    wait_until("the early app is taken", || ports.live(ID).connections == 1);
+    // The certificate cannot be had.
+    upstream.warm_released.store(true, Ordering::SeqCst);
+    wait_until("the start ended", || !ports.running(ID));
+    let failed = DatabaseLive { phase: DatabasePhase::Error, error: Some(sentence.into()), step: Some(DatabaseStep::Certificate), ..DatabaseLive::default() };
+    assert_eq!(ports.live(ID), failed, "failed with its sentence, at its step, on no port");
+    // It stopped as Stop stops a port.
+    assert!(early.closed(), "the app's connection is closed");
+    let refused = std::net::TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), LIMIT);
+    assert!(refused.is_err(), "the port takes no connection");
+    assert!(ports.held_password(ID).is_empty(), "a port that failed keeps no password");
+    assert_eq!(upstream.released.load(Ordering::SeqCst), 1, "nor what was had for its database");
+    wait_until("what the port held was let go", || released.load(Ordering::SeqCst));
+    // It can be started again.
+    *upstream.warming.lock().unwrap() = Warming::default();
+    running(&ports, &orders());
+}
+
+#[test]
+fn stop_during_start_ends_stopped() {
+    let upstream = fake();
+    // The start waits for the person at the Request-a-grant window.
+    *upstream.warming.lock().unwrap() = Warming { steps: vec![DatabaseStep::Grant], holds: true, ..Warming::default() };
+    let ports = DatabasePorts::new(upstream.clone());
+    start_orders(&ports, Box::new(()), None);
+    at_step(&ports, DatabaseStep::Grant);
+    ports.stop(ID);
+    wait_until("the port stopped", || !ports.running(ID));
+    // The warm-up gives up as its start is cancelled, with an error of its own: the port ends stopped all the same, with no step.
+    wait_until("the warm-up gave up", || upstream.warms_cancelled.load(Ordering::SeqCst) == 1);
+    stays(&ports, &DatabaseLive::default());
+}
+
+#[test]
+fn quitting_during_start_ends_stopped() {
+    let upstream = fake();
+    *upstream.warming.lock().unwrap() = Warming { steps: vec![DatabaseStep::Connect], holds: true, ..Warming::default() };
+    let ports = DatabasePorts::new(upstream.clone());
+    let quit = CancelToken::default();
+    ports.start(&orders(), Zeroizing::new(PASSWORD.into()), quit.clone(), Box::new(()), None).unwrap();
+    at_step(&ports, DatabaseStep::Connect);
+    // The broker cancels the token when the app quits.
+    quit.cancel();
+    wait_until("the warm-up gave up", || upstream.warms_cancelled.load(Ordering::SeqCst) == 1);
+    wait_until("the port stopped", || !ports.running(ID));
+    stays(&ports, &DatabaseLive::default());
+}
+
+#[test]
+fn a_warm_up_that_breaks_ends_failed() {
+    let upstream = fake();
+    *upstream.warming.lock().unwrap() = Warming { steps: vec![DatabaseStep::Connect], panics: true, ..Warming::default() };
+    let ports = DatabasePorts::new(upstream.clone());
+    start_orders(&ports, Box::new(()), None);
+    wait_until("the start ended", || !ports.running(ID));
+    let live = ports.live(ID);
+    assert_eq!((live.phase, live.error.as_deref(), live.step), (DatabasePhase::Error, Some("Lunport could not open the connection."), Some(DatabaseStep::Connect)));
+}
+
+#[test]
+fn the_ai_asker_reaches_the_warm_up() {
+    let upstream = fake();
+    let ports = DatabasePorts::new(upstream.clone());
+    let claude = AiAsker { client: "Claude".into(), unreviewed: None };
+    start_orders(&ports, Box::new(()), Some(claude.clone()));
+    runs(&ports, ID);
+    // The person starts another one.
+    running(&ports, &SavedDatabase { id: OTHER.into(), ..orders() });
+    assert_eq!(*upstream.warmed_for.lock().unwrap(), vec![Some(claude), None]);
 }
 
 // ---- Port passwords ----

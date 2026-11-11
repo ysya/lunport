@@ -7,6 +7,7 @@ use super::database_ports::{effective_environment, ensure_password, password_acc
 use super::database_upstream::CloudSqlUpstream;
 use super::auth::label;
 use super::pam::checked_account;
+use super::protocol::AiAsker;
 use super::transports::{pam_status_for, PamStatusView};
 use super::tunnels::{main_only, snapshot};
 use crate::gcp::cloudsql::{InstanceSummary, SqlAdmin};
@@ -29,6 +30,8 @@ use zeroize::Zeroizing;
 
 /// What a command is refused with when the database it names is not there.
 const GONE: &str = "The saved database no longer exists.";
+/// What a start is refused with when the database is no longer saved as the request that starts it read it.
+const CHANGED: &str = "The database changed while the request was open; read it again and retry.";
 
 /// Where the local port of a database stands on this device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -51,6 +54,20 @@ impl DatabasePhase {
     }
 }
 
+/// What a database's start is doing: Start opens the whole way to the instance before the port runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseStep {
+    /// The Privileged Access Manager grant the database asks for, or the one its host asks for while the person is asked for it.
+    Grant,
+    /// The SSH session to the host the database is reached through, and the forward on it to the instance.
+    Connect,
+    /// The instance's connect settings, and the client certificate Cloud SQL signs.
+    Certificate,
+}
+
 /// What this device runs for a database. It never syncs: another device runs, or does not run, its own.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -66,6 +83,10 @@ pub struct DatabaseLive {
     pub writable_until_ms: Option<u64>,
     /// Why the port failed to start or stopped, as a sentence.
     pub error: Option<String>,
+    /// The step its start is at while it starts, and the step its start failed at once it failed; none otherwise.
+    pub step: Option<DatabaseStep>,
+    /// The address of the instance its connections reach, such as `198.51.100.7:3307`, once its start fetched it.
+    pub address: Option<String>,
 }
 
 /// A saved database as the Databases page lists it.
@@ -90,10 +111,12 @@ pub struct DatabaseView {
 }
 
 /// Whether `saved` differs from `running`, the database a port started with, in anything connecting or locking reads: where the instance
-/// is, the Google account, the environment, the grant check and the local port. Its name and its default database are only shown.
+/// is, how it is reached (its network and the host it connects through), the Google account, the environment, the grant check and the
+/// local port. Its name and its default database are only shown.
 fn changed_for_port(running: &SavedDatabase, saved: &SavedDatabase) -> bool {
-    (&running.project, &running.region, &running.instance, &running.account, running.environment, &running.pam, running.local_port)
-        != (&saved.project, &saved.region, &saved.instance, &saved.account, saved.environment, &saved.pam, saved.local_port)
+    let (was, now) = (running, saved);
+    (&was.project, &was.region, &was.instance, was.network, &was.via_host, &was.account, was.environment, &was.pam, was.local_port)
+        != (&now.project, &now.region, &now.instance, now.network, &now.via_host, &now.account, now.environment, &now.pam, now.local_port)
 }
 
 /// Every saved database with what this device runs for it (`ports`), by name and then by identity. A database that runs here although its
@@ -271,9 +294,21 @@ pub(super) fn started_broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, Stri
     broker.ok_or_else(|| "Lunport's connection service is unavailable. Restart Lunport and try again.".to_string())
 }
 
-/// Starts the saved database `id` on its local port, with the password this device keeps for it. The port is registered with the broker,
-/// so that quitting the app stops it, and its grant questions go through the broker's gates, which hosts use as well.
-fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+/// Refuses `saved`, the database as the library holds it now, when it is not `expected`, the database the request that starts it read
+/// (an AI client's); the page's request reads none, and starts the database as it is saved.
+fn unchanged(saved: &SavedDatabase, expected: Option<&SavedDatabase>) -> Result<(), String> {
+    match expected {
+        Some(expected) if expected != saved => Err(CHANGED.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// Starts the saved database `id` on its local port, with the password this device keeps for it, provided it is still saved as `expected`
+/// when the request read one. The port is registered with the broker, so that quitting the app stops it, and its grant questions go
+/// through the broker's gates, which hosts use as well. The port starts until the whole way to the instance is open (the grant, the
+/// session to its host, the certificate), each step on its row, and the questions on the way name `ai`, the AI client whose request starts
+/// it (`None`: the person's). It answers once the port listens, before the way is open.
+pub(crate) fn start(app: &tauri::AppHandle, id: &str, expected: Option<&SavedDatabase>, ai: Option<AiAsker>) -> Result<(), String> {
     let broker = started_broker(app)?;
     let state = app.state::<AppState>();
     let ports = &state.session.databases;
@@ -284,13 +319,14 @@ fn start(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     // The database is read and started under the edit lock, so that no save comes in between.
     let _editing = ports.editing();
     let database = saved(&snapshot(app)?, id)?;
+    unchanged(&database, expected)?;
     if database.local_port.is_none() {
         return Err(NO_LOCAL_PORT.to_string());
     }
     let password = ensure_password(&OsKeychain, id)?;
     let quit = CancelToken::default();
     let registration = broker.register_tunnel(quit.clone())?;
-    ports.start(&database, password, quit, Box::new(registration))
+    ports.start(&database, password, quit, Box::new(registration), ai)
 }
 
 #[tauri::command]
@@ -332,7 +368,7 @@ pub async fn databases_delete(app: tauri::AppHandle, window: tauri::WebviewWindo
 #[tauri::command]
 pub async fn databases_start(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
     main_only(&window, "Database")?;
-    tauri::async_runtime::spawn_blocking(move || start(&app, &id)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || start(&app, &id, None, None)).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -1,32 +1,36 @@
 //! How the local ports of the saved databases reach Cloud SQL: the grant a database asks for, the connection material the Cloud SQL Admin
 //! API signs, and the TLS dial to the instance, kept for a database's next connections while they last. A database reached through a host
-//! of the library is dialled through an SSH session to that host (`HostPath`), kept while the database runs and the session lives.
+//! of the library is dialled through an SSH session to that host (`HostPath`), kept while the database runs and the session lives. Start
+//! gets all of it ready before the port runs (`Upstream::warm`), and reports each step as it begins.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::future::BoxFuture;
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use tauri::Manager;
 
-use super::auth::{label, Owner};
+use super::auth::{label, Owner, Reply};
 use super::auth_window::{NativeOwner, TauriAuthSurface};
 use super::broker::Broker;
 use super::connect::CancelToken;
 use super::database_access::{fetch_material, grant_state, obtain_grant, Grace, GrantState};
 use super::database_path::{BrokerLink, HostLink, HostPath};
 use super::database_ports::{locked, BoxStream, Dialling, NotReady, Prepared, Upstream};
+use super::databases::DatabaseStep;
 use super::grants::GrantGates;
+use super::protocol::{AiAsker, QuestionKind};
 use super::tunnels::snapshot;
 use crate::error::AppError;
 use crate::gcp::cloudsql::SqlAdmin;
 use crate::gcp::cloudsql_tls::{self, client_config, server_name, ServerIdentity};
 use crate::gcp::rest::GcpClient;
+use crate::ssh::HopRef;
 use crate::state::AppState;
 use crate::sync::databases::SavedDatabase;
 use crate::sync::record_repository as repo;
@@ -45,8 +49,9 @@ const NO_CERTIFICATE: &str = "no certificate is ready for it. Connect again.";
 /// What a connection through a host fails with when the forward it would dial does not run.
 const PATH_NOT_OPEN: &str = "the connection through the host is not open. Connect again.";
 
-/// Makes the owner that asks the person on behalf of a connection that `cancel` cancels.
-type MakeOwner = Arc<dyn Fn(&CancelToken) -> Box<dyn Owner + Send> + Send + Sync>;
+/// Makes the owner that asks the person on behalf of a connection that `cancel` cancels, in the name of the AI client whose request starts
+/// the database (`None`: the person's start, and an app's connection).
+type MakeOwner = Arc<dyn Fn(&CancelToken, Option<&AiAsker>) -> Box<dyn Owner + Send> + Send + Sync>;
 /// Dials an instance: the address to dial, the TLS configuration of the connection, and the name its certificate must be made out to.
 type Dialer = Arc<dyn Fn(SocketAddr, Arc<ClientConfig>, ServerName<'static>) -> BoxFuture<'static, io::Result<BoxStream>> + Send + Sync>;
 
@@ -55,8 +60,8 @@ type Dialer = Arc<dyn Fn(SocketAddr, Arc<ClientConfig>, ServerName<'static>) -> 
 /// database's next connections while they last: a check that the grant is held for five minutes at most and never past the grant's end,
 /// the material until `REFRESH_AHEAD` before its certificate stops being useful. Both are for the Google account the connections sign in
 /// as, and go when it changes; a grant that ended takes the material had under it along. A database reached through a host shares one
-/// session to that host among its connections, opened once the grant is had and opened again when it dies, and closed when the database
-/// stops; the connections dial the loopback end of a forward on it to the instance's private address.
+/// session to that host among its connections, opened as the database starts once the grant is had, opened again when it dies, and closed
+/// when the database stops; the connections dial the loopback end of a forward on it to the instance's private address.
 pub(crate) struct CloudSqlUpstream {
     gcp: Arc<dyn GcpClient>,
     sql: Arc<dyn SqlAdmin>,
@@ -150,8 +155,8 @@ struct Dial {
 
 impl CloudSqlUpstream {
     /// The upstream of the app's ports: Google's APIs through the app's clients, the broker's grant gates and its connector for the hosts
-    /// databases are reached through, a person's questions in Lunport's windows (a person starts a port, as a person starts a tunnel), and
-    /// this device's grant memory.
+    /// databases are reached through, the person's questions in Lunport's windows (naming the AI client whose request starts a database,
+    /// when one does), and this device's grant memory.
     pub(crate) fn for_app(app: &tauri::AppHandle, broker: &Broker) -> CloudSqlUpstream {
         let state = app.state::<AppState>();
         let hub = Arc::clone(&state.session.auth_questions);
@@ -161,9 +166,9 @@ impl CloudSqlUpstream {
             gcp: state.gcp.clone(),
             sql: Arc::clone(&state.sqladmin),
             gates: broker.grants(),
-            make_owner: Arc::new(move |cancel: &CancelToken| -> Box<dyn Owner + Send> {
+            make_owner: Arc::new(move |cancel: &CancelToken, ai: Option<&AiAsker>| -> Box<dyn Owner + Send> {
                 Box::new(NativeOwner {
-                    ai: None,
+                    ai: ai.cloned(),
                     hub: Arc::clone(&hub),
                     surface: Arc::new(TauriAuthSurface { app: for_owner.clone() }),
                     request_id: format!("database-{}", requests.fetch_add(1, Ordering::Relaxed)),
@@ -210,9 +215,9 @@ impl CloudSqlUpstream {
     }
 
     /// Whether the grant `db` asks for is held for `account`; PAM is asked when the last check no longer stands. When none is, the material
-    /// had under the grant that ended goes, and the person is asked for a grant in Lunport's window. Answers whether the grant was given
-    /// moments ago.
-    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken) -> Result<bool, NotReady> {
+    /// had under the grant that ended goes, and the person is asked for a grant in Lunport's window, in `ai`'s name when an AI client's
+    /// request starts the database. Answers whether the grant was given moments ago.
+    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<bool, NotReady> {
         if db.pam.is_none() {
             return Ok(false);
         }
@@ -233,7 +238,7 @@ impl CloudSqlUpstream {
                     kept.dial = None;
                 }
                 // However the request ended, the grant was not had: the connection's grant is refused.
-                self.request_grant(db, cancel).map_err(NotReady::Refused)?;
+                self.ask_for_grant(db, cancel, ai).map_err(NotReady::Refused)?;
                 Ok(true)
             }
         }
@@ -244,8 +249,13 @@ impl CloudSqlUpstream {
     /// sentence of why not. Blocks until then (for as long as the person takes to answer, and then for the request), so it runs on a
     /// blocking thread.
     pub(crate) fn request_grant(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<(), String> {
+        self.ask_for_grant(db, cancel, None)
+    }
+
+    /// `request_grant`, with the question in `ai`'s name when an AI client's request starts the database.
+    fn ask_for_grant(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<(), String> {
         let library = (self.library)()?;
-        let owner = (self.make_owner)(cancel);
+        let owner = (self.make_owner)(cancel, ai);
         let remember = |name: &str, justification: &str, duration_secs: u32| (self.remember)(name, justification, duration_secs);
         obtain_grant(&self.gates, self.gcp.as_ref(), owner.as_ref(), &library, db, &remember, cancel)
     }
@@ -284,8 +294,9 @@ impl CloudSqlUpstream {
 
     /// The alias of `host`, the host `db` is reached through, with `route`'s path to it live: the live one is kept, and a dead one is replaced
     /// by a session the link opens now (dropping the dead one closes it). The caller holds `route.opening`. It blocks for as long as the
-    /// connect takes, the questions the host's login asks of the person included.
-    fn path(&self, db: &SavedDatabase, route: &Route, host: &str, cancel: &CancelToken) -> Result<String, NotReady> {
+    /// connect takes, the questions the host's login asks of the person included: they are asked in `ai`'s name when an AI client's request
+    /// starts the database, and `step` is told `DatabaseStep::Grant` while the host's own grant is asked for.
+    fn path(&self, db: &SavedDatabase, route: &Route, host: &str, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<String, NotReady> {
         {
             let mut path = locked(&route.path);
             if let Some(live) = path.as_ref().filter(|path| path.alive()) {
@@ -301,8 +312,8 @@ impl CloudSqlUpstream {
             )));
         };
         let alias = view.host.payload.alias;
-        let owner = (self.make_owner)(cancel);
-        let opened = self.link.open(host, owner.as_ref(), cancel);
+        let owner = (self.make_owner)(cancel, ai);
+        let opened = self.link.open(host, &Stepping { inner: owner.as_ref(), step }, cancel);
         if cancel.is_cancelled() {
             // A session that opened anyway goes with a path of its own, which closes it.
             drop(opened.map(|session| HostPath::new(session, alias)));
@@ -323,6 +334,88 @@ impl CloudSqlUpstream {
             None => Err(PATH_CLOSED.to_string()),
         };
         forwarded.map_err(|reason| NotReady::Failed(format!("Could not reach {} through {}: {reason}", db.connection_name(), label(alias))))
+    }
+
+    /// Gets the whole way to `db` ready and kept for its connections, as `prepare` answers it: the grant it asks for, the session to the
+    /// host it is reached through with the forward on it, and the connection material. `step` is told each step as it begins (`Grant`
+    /// for a database with a grant check, `Connect` for one reached through a host, then `Certificate`), and the questions on the way are
+    /// asked in `ai`'s name when an AI client's request starts the database.
+    fn ready(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<Prepared, NotReady> {
+        let route = self.route(db);
+        // The account the connection signs in as: the database's own, else gcloud's active one, which the person can switch at any time.
+        let account = db.account.clone().or_else(|| (self.active_account)());
+        locked(&route.kept).keep_for(&account);
+        let mut checked_for_new_account = false;
+        loop {
+            if db.pam.is_some() {
+                step(DatabaseStep::Grant);
+            }
+            let recent_grant = self.grant(db, &route, &account, cancel, ai)?;
+            // Through a host, the session to it comes after the grant and before the material, and `opening` is held until the forward is
+            // had.
+            let through = match db.route_host() {
+                Some(host) => {
+                    step(DatabaseStep::Connect);
+                    let opening = locked(&route.opening);
+                    Some((opening, self.path(db, &route, host, cancel, ai, step)?))
+                }
+                None => None,
+            };
+            step(DatabaseStep::Certificate);
+            let (iam_user, material, ip, other_account) = self.material(db, &route, &account, recent_grant, cancel)?;
+            // A certificate for another account than the last one is used once the grant was checked for its account.
+            if other_account && db.pam.is_some() && !checked_for_new_account {
+                checked_for_new_account = true;
+                continue;
+            }
+            if let Some((_opening, alias)) = through {
+                self.forward(db, &route, &alias, ip)?;
+            }
+            return Ok(Prepared { iam_user, material });
+        }
+    }
+}
+
+/// The owner a database's warm-up opens the session to its host with: while the host's login asks for its Privileged Access Manager grant,
+/// the warm-up is at `DatabaseStep::Grant`, and back at `DatabaseStep::Connect` once the question is answered. Everything else goes to the
+/// owner it wraps as it came.
+struct Stepping<'a> {
+    inner: &'a dyn Owner,
+    step: &'a (dyn Fn(DatabaseStep) + Sync),
+}
+
+impl Stepping<'_> {
+    /// Asks the question `kind` with `ask`, at the grant step while it is a grant question.
+    fn asking(&self, kind: QuestionKind, ask: impl FnOnce() -> Reply) -> Reply {
+        if kind != QuestionKind::Grant {
+            return ask();
+        }
+        (self.step)(DatabaseStep::Grant);
+        let reply = ask();
+        (self.step)(DatabaseStep::Connect);
+        reply
+    }
+}
+
+impl Owner for Stepping<'_> {
+    fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
+        self.asking(kind, || self.inner.ask(kind, text, echo, deadline))
+    }
+
+    fn ask_at(&self, hop: &HopRef, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
+        self.asking(kind, || self.inner.ask_at(hop, kind, text, echo, deadline))
+    }
+
+    fn answered_elsewhere(&self, kind: QuestionKind, reply: &Reply) {
+        self.inner.answered_elsewhere(kind, reply);
+    }
+
+    fn host_key_notice(&self, text: &str) {
+        self.inner.host_key_notice(text);
+    }
+
+    fn banner(&self, text: &str) {
+        self.inner.banner(text);
     }
 }
 
@@ -359,34 +452,21 @@ fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io:
 }
 
 impl Upstream for CloudSqlUpstream {
+    /// An app's connection gets the way ready as Start does, telling nobody its steps.
     fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, NotReady> {
-        let route = self.route(db);
-        // The account the connection signs in as: the database's own, else gcloud's active one, which the person can switch at any time.
-        let account = db.account.clone().or_else(|| (self.active_account)());
-        locked(&route.kept).keep_for(&account);
-        let mut checked_for_new_account = false;
-        loop {
-            let recent_grant = self.grant(db, &route, &account, cancel)?;
-            // Through a host, the session to it comes after the grant and before the material, and `opening` is held until the forward is
-            // had.
-            let through = match db.route_host() {
-                Some(host) => {
-                    let opening = locked(&route.opening);
-                    Some((opening, self.path(db, &route, host, cancel)?))
-                }
-                None => None,
-            };
-            let (iam_user, material, ip, other_account) = self.material(db, &route, &account, recent_grant, cancel)?;
-            // A certificate for another account than the last one is used once the grant was checked for its account.
-            if other_account && db.pam.is_some() && !checked_for_new_account {
-                checked_for_new_account = true;
-                continue;
-            }
-            if let Some((_opening, alias)) = through {
-                self.forward(db, &route, &alias, ip)?;
-            }
-            return Ok(Prepared { iam_user, material });
-        }
+        self.ready(db, cancel, None, &|_| {})
+    }
+
+    fn warm(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<(), NotReady> {
+        self.ready(db, cancel, ai, step).map(drop)
+    }
+
+    /// The address the kept material dials, on Cloud SQL's port: the instance's public one, or its private one for a database reached
+    /// through a host. A database that stopped keeps none.
+    fn instance_address(&self, db_id: &str) -> Option<String> {
+        let route = locked(&self.routes).get(db_id).cloned()?;
+        let ip = locked(&route.kept).dial.as_ref()?.ip;
+        Some(SocketAddr::new(ip, cloudsql_tls::PORT).to_string())
     }
 
     fn connect(&self, db_id: &str, material: Option<u64>) -> Dialling {
