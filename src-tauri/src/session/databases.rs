@@ -5,6 +5,7 @@ use super::broker::Broker;
 use super::connect::CancelToken;
 use super::database_ports::{effective_environment, ensure_password, password_account, replace_password, DatabasePorts, NO_LOCAL_PORT, STAY_LOCKED, WRITABLE_WINDOW};
 use super::database_upstream::CloudSqlUpstream;
+use super::auth::label;
 use super::pam::checked_account;
 use super::transports::{pam_status_for, PamStatusView};
 use super::tunnels::{main_only, snapshot};
@@ -249,7 +250,7 @@ fn unlock_writes(ports: &DatabasePorts, id: &str, method: UnlockMethod, confirme
     let checked = ports.unlockable(id)?;
     let confirmed = match method {
         UnlockMethod::System => {
-            confirm(&format!("unlock writes on {} (PROD) for {} minutes", checked.name(), WRITABLE_WINDOW.as_secs() / 60)) == Ok(true)
+            confirm(&format!("unlock writes on {} (PROD) for {} minutes", label(checked.name()), WRITABLE_WINDOW.as_secs() / 60)) == Ok(true)
         }
         UnlockMethod::Dialog => confirmed_in_app,
     };

@@ -29,7 +29,7 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use zeroize::Zeroizing;
 
-use super::auth::printable;
+use super::auth::{label, printable};
 use super::connect::CancelToken;
 use super::databases::{DatabaseLive, DatabasePhase};
 use super::pgwire::{auth_cleartext, error_response, passwords_match, read_first, read_password, read_server_auth, FirstMessage, ReadyTracker, ServerAuth, Startup};
@@ -1047,7 +1047,7 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
         Err(_) => return,
     };
     let Some(_slot) = slot else {
-        return refuse(&mut app, "53300", &format!("{} has reached {MAX_PORT_CONNECTIONS} connections.", port.db.name)).await;
+        return refuse(&mut app, "53300", &format!("{} has reached {MAX_PORT_CONNECTIONS} connections.", label(&port.db.name))).await;
     };
     // An app that asked for a newer protocol, or for protocol options, is told first what Lunport speaks, as a server tells it.
     let (startup, negotiation) = startup.negotiated();
@@ -1064,7 +1064,7 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
         Err(_) => return,
     };
     if !passwords_match(&port.password(), &password) {
-        return refuse(&mut app, "28P01", &format!("Wrong password for {}. Copy the password from Lunport.", port.db.name)).await;
+        return refuse(&mut app, "28P01", &format!("Wrong password for {}. Copy the password from Lunport.", label(&port.db.name))).await;
     }
     drop(password);
     let (db, quit, preparing, reading) = (port.db.clone(), port.quit.clone(), Arc::clone(&upstream), Arc::clone(&port));

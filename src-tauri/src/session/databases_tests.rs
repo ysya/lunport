@@ -577,6 +577,18 @@ fn the_system_method_asks_the_person_whatever_the_page_says() {
 }
 
 #[test]
+fn the_systems_question_names_the_database_without_the_characters_that_reorder_text() {
+    let ports = running_on(&Clock::new(), SavedDatabase { name: "Ord\u{202e}ers".into(), ..database(ORDERS) });
+    let asked = RefCell::new(Vec::new());
+    let declined = |reason: &str| {
+        asked.borrow_mut().push(reason.to_string());
+        Ok(false)
+    };
+    assert_eq!(unlock_writes(&ports, ORDERS, UnlockMethod::System, false, declined), Err(STAY_LOCKED.to_string()));
+    assert_eq!(*asked.borrow(), vec!["unlock writes on Ord?ers (PROD) for 15 minutes"]);
+}
+
+#[test]
 fn nobody_is_asked_to_unlock_what_cannot_be_unlocked() {
     let never = |_: &str| -> Result<bool, String> { panic!("the person is not asked") };
     // A database that does not run.

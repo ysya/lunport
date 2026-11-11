@@ -467,6 +467,18 @@ fn a_wrong_password_is_refused_before_cloud_sql_is_contacted() {
 }
 
 #[test]
+fn a_database_name_reaches_an_app_without_the_characters_that_reorder_text() {
+    let ports = DatabasePorts::new(fake());
+    // A saved name may hold them: they are not control characters.
+    let port = running(&ports, &SavedDatabase { name: "Ord\u{202e}ers\u{2066}".into(), ..orders() });
+    let mut app = App::connect(port);
+    app.startup(&[("user", "frank"), ("database", "orders")]);
+    app.asked_for_password();
+    app.password("c2VjcmV0LXBvcnQtcGFzc3dvcmQtMDEz");
+    assert_eq!(app.error(), ("28P01".to_string(), "Wrong password for Ord?ers?. Copy the password from Lunport.".to_string()));
+}
+
+#[test]
 fn the_startup_reaches_cloud_sql_with_the_iam_user_and_the_prod_lock() {
     let upstream = fake();
     let ports = DatabasePorts::new(upstream.clone());
