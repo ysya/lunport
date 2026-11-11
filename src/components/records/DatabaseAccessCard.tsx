@@ -18,6 +18,7 @@ import { revealHidden } from "@/lib/reveal-hidden";
 import { useNow } from "@/lib/use-now";
 import {
   connectionUrl,
+  databaseDetailsId,
   databasePassword,
   databasePort,
   lockDatabaseWrites,
@@ -153,10 +154,12 @@ const groupLabel = "text-xs font-medium text-muted-foreground";
 /**
  * The lock of a prod database. It can be unlocked only while the database runs; the backend refuses otherwise, and the card says so
  * rather than ask a question that could not be answered. While writes are on it shows the time left and offers to lock again, and to
- * close the idle connections that opened before the unlock, which stay read-only until their apps connect again.
+ * close the idle connections that opened before the unlock, which stay read-only until their apps connect again. The lock button's
+ * words are the state it shows, so that a screen reader is told what pressing it does (`aria-label`) instead.
  */
 function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
   const { live } = view;
+  const name = revealHidden(view.database.name);
   const busy = pending !== null;
   const left = writableLeft(live.writable_until_ms, now);
   const seconds = writableSecondsLeft(live.writable_until_ms, now);
@@ -166,13 +169,13 @@ function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
       <p className={groupLabel}>Write lock</p>
       <div className="flex flex-wrap items-center gap-2">
         {left === null ? (
-          <Button variant="outline" size="sm" title="Unlock writes for 15 minutes" disabled={busy || live.phase !== "running"} onClick={actions.unlock}>
+          <Button variant="outline" size="sm" aria-label={`Unlock writes on ${name}`} title="Unlock writes for 15 minutes" disabled={busy || live.phase !== "running"} onClick={actions.unlock}>
             {pending === "unlock" ? <LoaderCircle className="animate-spin" /> : <Lock />}
             Locked
           </Button>
         ) : (
           <>
-            <Button variant="destructive" size="sm" title="Lock writes again" disabled={busy} onClick={actions.lock}>
+            <Button variant="destructive" size="sm" aria-label={`Lock writes on ${name}`} title="Lock writes again" disabled={busy} onClick={actions.lock}>
               {pending === "lock" ? <LoaderCircle className="animate-spin" /> : <LockOpen />}
               {`Writes on · ${left}`}
             </Button>
@@ -200,7 +203,7 @@ export function DatabaseAccessView(props: DatabaseAccessViewProps) {
   const name = revealHidden(database.name);
   const busy = pending !== null;
   return (
-    <section aria-label={`Connection details for ${name}`} className="space-y-4 rounded-lg border bg-muted/30 p-4">
+    <section id={databaseDetailsId(database.id)} aria-label={`Local connection to ${name}`} className="space-y-4 rounded-lg border bg-muted/30 p-4">
       <div className={group}>
         <p className={groupLabel}>Connection URL</p>
         <div className="flex flex-wrap items-center gap-2">

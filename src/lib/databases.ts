@@ -168,6 +168,9 @@ export function writableLeft(untilMs: number | null, now: number): string | null
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+/** The id of the card that holds a database's connection details, which the button that shows or hides it controls. */
+export const databaseDetailsId = (databaseId: string) => `database-details-${databaseId}`;
+
 /** The connections open through the port, as the Status column counts them. */
 export const connectionsLine = (count: number) => `${count} active connection${count === 1 ? "" : "s"}`;
 

@@ -448,6 +448,20 @@ describe("the connection details under a row", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it("the_details_button_controls_the_card_that_carries_its_id", () => {
+    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
+    // Closed or open, it names the card it opens, which is drawn under the row with that id.
+    for (const open of [false, true]) expect(toggle(open), String(open)).toContain('aria-controls="database-details-00000000000000a1"');
+    const client = new QueryClient();
+    const card = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} /></QueryClientProvider>);
+    expect(card).toContain(`id="${toggle(true).match(/aria-controls="([^"]*)"/)?.[1]}"`);
+    // The card is labelled for what it holds: not with the name of the button that opens it.
+    expect(card).toContain('aria-label="Local connection to Orders"');
+    expect(card).not.toContain("Connection details for Orders");
+    // Each database's toggle controls its own card.
+    expect(iconButton(render([row({}, { id: "00000000000000a2", name: "Analytics", pam: null })]), "Connection details for Analytics")).toContain('aria-controls="database-details-00000000000000a2"');
+  });
+
   it("the_details_button_follows_whether_the_details_are_open_and_presses_through", () => {
     const [toggle, requestGrant, ask, edit, details] = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
     const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), busy: false, toggle, requestGrant, ask, edit, details: { open, toggle: details } });

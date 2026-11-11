@@ -15,6 +15,7 @@ import {
   connectionUrl,
   databasePort,
   databasesQuery,
+  databaseDetailsId,
   hasConnectionDetails,
   iamUserFor,
   writableLeft,
@@ -210,7 +211,7 @@ describe("the card", () => {
   it("shows_the_address_and_the_password_actions_without_the_password", () => {
     const html = card().html();
     const shown = text(html);
-    expect(html).toContain('aria-label="Connection details for Orders"');
+    expect(html).toContain('aria-label="Local connection to Orders"');
     expect(shown).toContain(ORDERS_URL);
     for (const label of ["Copy URL", "Copy password", "Rotate password"]) expect(buttonTag(html, label), label).not.toContain(DISABLED);
     // The password is never drawn; the card only says where it is kept.
@@ -242,6 +243,32 @@ describe("the card", () => {
       expect(buttonTag(html, "Copy password"), environment).not.toContain(DISABLED);
     }
     expect(text(card().html())).toContain("Locked");
+  });
+
+  it("the_card_is_a_region_with_the_id_its_toggle_controls_and_a_label_of_its_own", () => {
+    const html = card().html();
+    expect(html).toMatch(/<section id="database-details-00000000000000a1" aria-label="Local connection to Orders"/);
+    expect(html).toContain(`id="${databaseDetailsId(ID)}"`);
+    // The toggle that opens it is named "Connection details for Orders": the region is not named the same, so that a screen reader
+    // does not read one name twice, once for the button and once for what it opened.
+    expect(html).not.toContain("Connection details for");
+    // Each database's card has an id of its own.
+    expect(databaseDetailsId("00000000000000a2")).not.toBe(databaseDetailsId(ID));
+  });
+
+  it("names_the_lock_button_for_what_it_does_and_keeps_the_words_on_it", () => {
+    const locked = card().html();
+    expect(buttonTag(locked, "Locked")).toContain('aria-label="Unlock writes on Orders"');
+    const on = card(writable(10 * MINUTE)).html();
+    expect(buttonTag(on, "Writes on · 10:00")).toContain('aria-label="Lock writes on Orders"');
+    // The reconnect button is named by its words, and none of the other controls take a label of their own.
+    expect(buttonTag(on, "Reconnect now")).not.toContain("aria-label");
+    expect(buttonTag(on, "Copy URL")).not.toContain("aria-label");
+    // It says the same while a change is under way, or while the database does not run, and shows a hidden character as a code.
+    expect(buttonTag(card(view(), { pending: "unlock" }).html(), "Locked")).toContain('aria-label="Unlock writes on Orders"');
+    expect(buttonTag(card(view({ live: live("stopped") })).html(), "Locked")).toContain('aria-label="Unlock writes on Orders"');
+    expect(buttonTag(card(view({}, { name: "Ord\u202eers" })).html(), "Locked")).toContain('aria-label="Unlock writes on Ord⟨U+202E⟩ers"');
+    expect(buttonTag(card(writable(MINUTE)).html(), "Writes on · 01:00")).toContain('aria-label="Lock writes on Orders"');
   });
 
   it("a_prod_database_that_runs_offers_to_unlock_writes", () => {
@@ -347,7 +374,7 @@ describe("the card", () => {
 
   it("shows_a_names_hidden_characters_as_codes", () => {
     const html = card(view({}, { name: "Ord\u202eers" }), { asking: "rotate" }).html();
-    expect(html).toContain('aria-label="Connection details for Ord⟨U+202E⟩ers"');
+    expect(html).toContain('aria-label="Local connection to Ord⟨U+202E⟩ers"');
     expect(html).not.toContain("\u202e");
     expect(textIn(dialog(card(view({}, { name: "Ord\u202eers" })).tree(), "Rotate"))).toContain("Rotate the password of Ord⟨U+202E⟩ers?");
   });

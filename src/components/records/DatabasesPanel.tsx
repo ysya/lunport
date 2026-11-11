@@ -17,6 +17,7 @@ import { gcloudAccountsQuery, type PamCheck } from "@/lib/transports";
 import {
   connectionsLine,
   databaseBusy,
+  databaseDetailsId,
   databaseGrantLine,
   databasePamStatusKey,
   databasePamStatusQuery,
@@ -107,7 +108,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
       {database.environment === "prod" && live.writable_until_ms !== null && <WritesOnMarker until={live.writable_until_ms} />}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
-      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
+      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={databaseDetailsId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
       {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} aria-label={`${verb} ${name}`} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{verb}</Button>}
       {!row.removed && <>
         <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked} onClick={edit}><PencilLine className="size-3.5" /></Button>
