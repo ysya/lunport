@@ -278,16 +278,30 @@ describe("the card", () => {
     expect(markup).toMatch(/lucide-lock(?![-\w])/);
     expect(markup).not.toMatch(/lucide-lock-open/);
     expect(text(markup)).not.toMatch(/Reconnect now|Writes on|Writes lock again|Start the database before you unlock writes\./);
+    // It says what the lock does while it is locked.
+    expect(text(markup)).toContain("Connections open read-only until you unlock writes.");
     press(button(tree(), "Locked"));
     expect(actions.unlock).toHaveBeenCalledTimes(1);
     expect(actions.lock).not.toHaveBeenCalled();
   });
 
-  it("a_prod_database_that_does_not_run_cannot_be_unlocked_and_says_why", () => {
-    for (const phase of ["stopped", "starting", "stopping", "error"] as const) {
+  it("a_prod_database_that_is_stopped_or_failed_cannot_be_unlocked_and_says_to_start_it", () => {
+    for (const phase of ["stopped", "error"] as const) {
       const html = card(view({ live: live(phase) })).html();
       expect(buttonTag(html, "Locked"), phase).toContain(DISABLED);
       expect(text(html), phase).toContain("Start the database before you unlock writes.");
+      expect(text(html), phase).not.toMatch(/Connections open read-only|Open connections stay read-only/);
+    }
+  });
+
+  it("a_prod_database_that_is_starting_or_stopping_is_held_without_telling_it_to_start", () => {
+    // It is on its way up or down: the button waits, as it does for every phase but running, and no hint is drawn that would be wrong
+    // a moment later.
+    for (const phase of ["starting", "stopping"] as const) {
+      const html = card(view({ live: live(phase) })).html();
+      expect(buttonTag(html, "Locked"), phase).toContain(DISABLED);
+      expect(text(html), phase).not.toMatch(/Start the database|Connections open read-only|Open connections stay read-only/);
+      expect(text(html), phase).toContain("Write lock");
     }
   });
 

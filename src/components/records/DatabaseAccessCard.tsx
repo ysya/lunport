@@ -42,6 +42,11 @@ import {
 
 const COPY_FAILED = "Could not copy to the clipboard.";
 const ROTATED_NOT_COPIED = "The password was rotated, but it could not be copied. Use Copy password.";
+/**
+ * What the card says under the lock while the database is stopped or has failed: the backend's own sentence for a lock that cannot be
+ * opened yet. This is the only place the page words it. A database that is starting or stopping is on its way, and says nothing.
+ */
+const START_FIRST = "Start the database before you unlock writes.";
 /** The seconds below which the card says that writes are about to lock. */
 const LOCKING_SOON_SECONDS = 60;
 
@@ -152,8 +157,9 @@ const group = "space-y-1.5";
 const groupLabel = "text-xs font-medium text-muted-foreground";
 
 /**
- * The lock of a prod database. It can be unlocked only while the database runs; the backend refuses otherwise, and the card says so
- * rather than ask a question that could not be answered. While writes are on it shows the time left and offers to lock again, and to
+ * The lock of a prod database. It can be unlocked only while the database runs, so the button is held in every other phase; the backend
+ * refuses otherwise, and the card says to start the database while it is stopped or failed, rather than ask a question that could
+ * not be answered. While writes are on it shows the time left and offers to lock again, and to
  * close the idle connections that opened before the unlock, which stay read-only until their apps connect again. The lock button's
  * words are the state it shows, so that a screen reader is told what pressing it does (`aria-label`) instead.
  */
@@ -163,7 +169,14 @@ function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
   const busy = pending !== null;
   const left = writableLeft(live.writable_until_ms, now);
   const seconds = writableSecondsLeft(live.writable_until_ms, now);
-  const hint = left !== null ? "Open connections stay read-only until their apps reconnect." : live.phase === "running" ? "Connections open read-only until you unlock writes." : "Start the database before you unlock writes.";
+  const hint =
+    left !== null
+      ? "Open connections stay read-only until their apps reconnect."
+      : live.phase === "running"
+        ? "Connections open read-only until you unlock writes."
+        : live.phase === "stopped" || live.phase === "error"
+          ? START_FIRST
+          : null;
   return (
     <div className={group}>
       <p className={groupLabel}>Write lock</p>
@@ -187,7 +200,7 @@ function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
         )}
       </div>
       {seconds !== null && seconds < LOCKING_SOON_SECONDS && <p className="text-xs font-medium text-destructive">{`Writes lock again in ${seconds} s.`}</p>}
-      <p className="text-xs text-muted-foreground">{hint}</p>
+      {hint !== null && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
 }
