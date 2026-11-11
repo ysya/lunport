@@ -85,6 +85,16 @@ export async function beginUnlock(id: string, askInApp: () => void): Promise<voi
 /** What Reconnect now says of the connections it closed. */
 const reconnectLine = (closed: number) => (closed === 0 ? "No idle read-only connections to close." : `Closed ${closed} idle read-only connection${closed === 1 ? "" : "s"}.`);
 
+/**
+ * The time at this render, in milliseconds since the Unix epoch, with a render every second so that a countdown keeps moving. `useNow`
+ * only schedules those renders: the time it answers is kept in state, so it can be up to a second old, while the end of a window that
+ * the backend answered just now is not, and a countdown worked out from the two would show more time than the window has (15:01).
+ */
+function useRenderTime(): number {
+  useNow(1000);
+  return Date.now();
+}
+
 /** The change under way. Until it ends every control of the card is held. */
 export type Step = "url" | "password" | "rotate" | "unlock" | "lock" | "reconnect";
 /** The question the card asks before it acts: before it rotates the password, and where the system cannot ask, before it unlocks writes. */
@@ -238,11 +248,11 @@ export function DatabaseAccessView(props: DatabaseAccessViewProps) {
  * The connection details and write lock of the database `view` shows, with the database user the address names (`iamUser`). It keeps
  * what is under way, the sentence the last change failed with, and the question being asked. One change runs at a time; whatever came of
  * it the list is read again, so that the lock follows at once, and the sentence a change failed with is the backend's own, shown in the
- * card as the page shows the failure of its other changes. The countdown moves every second.
+ * card as the page shows the failure of its other changes. The countdown moves every second, from the time at each render.
  */
 export function DatabaseAccessCard({ view, iamUser }: { view: DatabaseView; iamUser: string }) {
   const client = useQueryClient();
-  const now = useNow(1000);
+  const now = useRenderTime();
   const [pending, setPending] = useState<Step | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [asking, setAsking] = useState<Question | null>(null);

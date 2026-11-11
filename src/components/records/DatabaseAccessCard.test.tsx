@@ -9,6 +9,7 @@ import { DISABLED, buttonTag, elementsOf, text, textIn } from "@/components/keyc
 import { copyText } from "@/lib/clipboard";
 import { tauriInvoke } from "@/lib/ipc";
 import { renderHook } from "@/lib/test-ipc";
+import { useNow } from "@/lib/use-now";
 import {
   UNKNOWN_IAM_USER,
   connectionUrl,
@@ -27,6 +28,7 @@ import { DatabaseAccessCard, DatabaseAccessView, beginUnlock, copyPassword, rota
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn() }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("@/lib/use-now", () => ({ useNow: vi.fn() }));
 
 /*
  * There is no DOM here, so the card is drawn two ways: as static markup (its words and the state of its controls), and as the element
@@ -93,6 +95,9 @@ beforeEach(() => {
   copy.mockReset();
   vi.mocked(toast.success).mockReset();
   vi.mocked(toast.error).mockReset();
+  // The clock a countdown re-renders by; its value is the time of the last tick, which a test may set behind the time now.
+  vi.mocked(useNow).mockReset();
+  vi.mocked(useNow).mockImplementation(() => Date.now());
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -302,6 +307,24 @@ describe("the card", () => {
     expect(text(html(view()))).toContain(ORDERS_URL);
     // A database that runs on another port than the record holds is reached on the port that runs.
     expect(text(html(view({ live: live("running", { port: 6544 }) })))).toContain("postgresql://frank%40example.com@127.0.0.1:6544/postgres");
+  });
+
+  it("never_shows_more_than_the_window_when_the_time_kept_in_state_is_behind", () => {
+    // `useNow` keeps its time in state, so it can be a second behind; the end of a window that was just unlocked is not. Worked out from
+    // the two, a fresh fifteen minutes would read 15:01 until the next tick, so the countdown takes the time at its own render.
+    const fresh = AT + 900;
+    vi.mocked(Date.now).mockReturnValue(fresh);
+    vi.mocked(useNow).mockReturnValue(AT);
+    const html = (shown: DatabaseView) => text(renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><DatabaseAccessCard view={shown} iamUser={ACCOUNT} /></QueryClientProvider>));
+    const unlocked = html(view({ live: live("running", { writable_until_ms: fresh + 15 * MINUTE }) }));
+    expect(unlocked).toContain("Writes on · 15:00");
+    expect(unlocked).not.toContain("15:01");
+    // The same near the end: 59 seconds left is not rounded up to a minute, and says that writes lock again.
+    const ending = html(view({ live: live("running", { writable_until_ms: fresh + 59 * SECOND }) }));
+    expect(ending).toContain("Writes on · 00:59");
+    expect(ending).toContain("Writes lock again in 59 s.");
+    // The clock only schedules the renders: it is asked for every second.
+    expect(vi.mocked(useNow)).toHaveBeenCalledWith(1000);
   });
 
   it("holds_every_control_while_a_change_is_under_way", () => {
