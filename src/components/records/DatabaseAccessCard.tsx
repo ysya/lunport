@@ -105,7 +105,7 @@ function useRenderTime(): number {
 
 /**
  * What a row of the list says while its prod database's writable window is open: Writes on and the time left, in the destructive style
- * of the card's lock. It is the danger state of a database, so the row shows it whether its card is open or not, and counts down by the
+ * of the card's lock and of the destructive badge, in figures of one width so that the countdown holds still. It is the danger state of a database, so the row shows it whether its card is open or not, and counts down by the
  * card's own countdown (`writableLeft` from the time at each render, every second). Once the window has ended by the clock it says
  * nothing, though the list has not been read again.
  */
@@ -113,7 +113,7 @@ export function WritesOnMarker({ until }: { until: number }) {
   const left = writableLeft(until, useRenderTime());
   if (left === null) return null;
   return (
-    <span className="mt-1 flex w-fit items-center gap-1 rounded-md bg-destructive/10 px-1.5 py-0.5 text-xs font-medium text-destructive">
+    <span className="mt-1 flex w-fit items-center gap-1 rounded-md bg-destructive/10 px-1.5 py-0.5 text-xs font-medium text-destructive tabular-nums dark:bg-destructive/20">
       <LockOpen className="size-3" />
       {`Writes on · ${left}`}
     </span>

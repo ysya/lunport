@@ -382,6 +382,9 @@ describe("the marker of a prod row whose writes are on", () => {
     expect(marker(html)?.words).toBe("Writes on · 14:59");
     expect(marker(html)?.classes.has("text-destructive")).toBe(true);
     expect(marker(html)?.classes.has("bg-destructive/10")).toBe(true);
+    // In the dark theme as the destructive badge is, and with digits of one width, so that the countdown does not shift as it moves.
+    expect(marker(html)?.classes.has("dark:bg-destructive/20")).toBe(true);
+    expect(marker(html)?.classes.has("tabular-nums")).toBe(true);
     expect(html).toMatch(/lucide-lock-open/);
   });
 
