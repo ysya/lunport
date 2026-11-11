@@ -26,6 +26,38 @@ fn exec_returns_stdout_stderr_and_the_exit_code() {
 }
 
 #[test]
+fn a_pty_exec_answers_one_prompt_without_exposing_the_answer() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+    let marker = "LUNPORT_SUDO_TEST_PROMPT:";
+    let asks = std::sync::atomic::AtomicUsize::new(0);
+    let result = session.exec_with_prompt(
+        "printf 'LUNPORT_SUDO_TEST_PROMPT:'; IFS= read -r answer; if [ \"$answer\" = secret-example ]; then printf '%s:authorized' \"$answer\"; else exit 9; fi",
+        marker,
+        ENOUGH,
+        MIB,
+        &|| { asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Some(zeroize::Zeroizing::new("secret-example".to_string())) },
+    ).unwrap();
+    assert_eq!(asks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!((result.ended, result.exit_code), (Ended::Exited, Some(0)));
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(output.contains("authorized"));
+    assert!(!output.contains(marker));
+    assert!(!output.contains("secret-example"));
+}
+
+#[test]
+fn a_pty_exec_with_no_prompt_runs_without_asking_for_a_password() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+    let result = session.exec_with_prompt("printf 'already authorized'", "LUNPORT_SUDO_UNUSED:", ENOUGH, MIB, &|| panic!("no password prompt")) .unwrap();
+    assert_eq!((result.ended, result.exit_code), (Ended::Exited, Some(0)));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("already authorized"));
+}
+
+#[test]
 fn scp_transfers_binary_file_in_both_directions() {
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &[]);

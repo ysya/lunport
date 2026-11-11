@@ -780,7 +780,7 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log skips command and file transfer review. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
+            Auto-log skips ordinary SSH command and file transfer review. The dedicated sudo tool still asks you to approve each command. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
@@ -815,7 +815,7 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
           <AlertDialogHeader>
             <AlertDialogTitle>Allow AI operations without review?</AlertDialogTitle>
             <AlertDialogDescription>
-              Auto-log lets local MCP clients execute shell commands and transfer files on every allowed host, including current and future members of allowed Groups, without asking you first. Commands can delete files or change services, and transfers can replace remote files or copy files to this computer. The audit records public metadata, not command output or file contents; logging cannot undo an action.
+              Auto-log lets local MCP clients execute ordinary shell commands and transfer files on every allowed host, including current and future members of allowed Groups, without asking you first. The dedicated sudo tool still asks each time, but ordinary commands can also use sudo if the remote account permits it. Commands can delete files or change services, and transfers can replace remote files or copy files to this computer. The audit records public metadata, not command output or file contents; logging cannot undo an action.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <label className="flex items-start gap-2 text-sm">

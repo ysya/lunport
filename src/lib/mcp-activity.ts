@@ -174,6 +174,7 @@ const WINDOWS: Record<McpWindow, string> = {
   approval: "the approval window",
   server_key: "the server key window",
   credentials: "the credentials window",
+  sudo: "the sudo authorization window",
   grant: "the Request a grant window",
 };
 

@@ -50,6 +50,12 @@ pub trait Session: Send + Sync {
     /// channel did not open).
     fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError>;
 
+    /// Runs one command on a PTY exec channel. Only the engine can send the answer to `prompt_marker`; the caller never receives a
+    /// writable terminal. The callback returns a one-time answer or cancels the command. PTY output is merged into stdout.
+    fn exec_with_prompt(&self, _command: &str, _prompt_marker: &str, _timeout: Duration, _output_cap: usize, _answer: &dyn Fn() -> Option<Secret>) -> Result<ExecResult, SessionError> {
+        Err(SessionError::Channel("Interactive command execution is unavailable in this SSH engine.".into()))
+    }
+
     /// Copies one regular file using the remote server's SCP program. The caller owns the local file and bounds its size.
     fn scp_upload(&self, _remote_path: &str, _name: &str, _size: u64, _source: &mut dyn Read, _timeout: Duration) -> Result<u64, SessionError> {
         Err(SessionError::Channel("SCP upload is unavailable in this SSH engine.".into()))

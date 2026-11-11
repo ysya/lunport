@@ -50,6 +50,7 @@ export function AuthenticationCardView({
   // A grant question is Lunport's own, not a server's prompt: it gets the Request-a-grant form.
   const grant = request.kind === "grant" ? request.grant : null;
   const isGrant = grant !== null;
+  const isSudo = request.kind === "sudo";
   // An AI client's request: who asked, and what then runs unreviewed in Auto-log.
   const unreviewed = request.ai && unreviewedNote(request.ai, isGrant ? "grant" : "question");
   useEffect(() => { setShown(false); }, [request.id]);
@@ -58,7 +59,7 @@ export function AuthenticationCardView({
   const inactive = expired || abandoned;
   const cannotSubmit = busy || !armed || inactive || (isGrant && !grantAnswerReady(answer));
   const fields = grantFields(answer);
-  const answerLabel = request.kind === "password" ? "Password" : request.kind === "passphrase" ? "Key passphrase" : "Authentication answer";
+  const answerLabel = isSudo ? "Sudo password" : request.kind === "password" ? "Password" : request.kind === "passphrase" ? "Key passphrase" : "Authentication answer";
   const seconds = Math.ceil(Math.max(0, remainingMs) / 1000);
   const meta = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
   const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -76,7 +77,7 @@ export function AuthenticationCardView({
 
   return (
     <DecisionLayout
-      title={isGrant ? "Request a grant" : "SSH authentication"}
+      title={isGrant ? "Request a grant" : isSudo ? "Sudo authorization" : "SSH authentication"}
       icon={isGrant ? <ShieldCheck className="size-5" /> : <KeyRound className="size-5" />}
       meta={meta}
       actions={<>
@@ -149,6 +150,7 @@ export function AuthenticationCardView({
           {!request.echo && <Button variant="outline" size="icon" aria-label={shown ? "Hide answer" : "Show answer"} aria-pressed={shown} disabled={busy} onClick={() => setShown(value => !value)}>{shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>}
           </div>
           {request.kind === "password" && <p className="text-muted-foreground">Used for this connection only. Save a password for this device in the host’s settings.</p>}
+          {isSudo && <p className="text-muted-foreground">Used for this sudo command only. Lunport does not save or share it with the AI client.</p>}
           </>
         )}
         {error && <p role="alert" className="text-destructive">{error}</p>}
@@ -177,7 +179,7 @@ export function AuthenticationCardView({
             ) : <p>Server context: Unknown</p>}
           </section>
           <div>
-            <p className="mb-1 text-muted-foreground">Server prompt · {revealHidden(request.kind)}</p>
+            <p className="mb-1 text-muted-foreground">{isSudo ? "Sudo request" : `Server prompt · ${revealHidden(request.kind)}`}</p>
             <pre className="whitespace-pre-wrap break-all font-sans">{revealHidden(request.text)}</pre>
           </div>
           </>

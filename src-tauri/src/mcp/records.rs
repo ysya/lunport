@@ -1,12 +1,10 @@
 //! Records execution service shared by the OS-authenticated broker and native UI.
 use super::*;
 use crate::session::{
-    auth::{KeyStore, Owner},
+    auth::{KeyStore, Owner, Reply},
     connect::{CancelToken, Connector, HostKeyConfirmer, HostKeyDecision, HostKeyQuestion},
-    protocol::{AiAsker, HostQuery, Unreviewed},
+    protocol::{AiAsker, HostQuery, QuestionKind, Unreviewed},
 };
-#[cfg(test)]
-use crate::session::{auth::Reply, protocol::QuestionKind};
 use crate::ssh::{
     AuthMethod, AuthSource, ConnectError, Ended, HostKeyPolicy, Session, SshEngine, Target,
 };
@@ -486,8 +484,70 @@ pub(super) fn execute_context(
     cancel: &CancelToken,
     owner: &dyn Owner,
     approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
+    context: RequestContext,
+    authorize: &(dyn Fn(&McpPolicy, &str) -> Result<(), String> + Sync),
+) -> Result<Value, String> {
+    execute_command_context(runtime, connector, alias, command, timeout, cancel, owner, approve, context, authorize, false)
+}
+
+pub(super) fn execute_sudo_context(
+    runtime: &McpRuntime,
+    connector: &Connector<'_>,
+    alias: &str,
+    command: &str,
+    timeout: u64,
+    cancel: &CancelToken,
+    owner: &dyn Owner,
+    approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
+    context: RequestContext,
+    authorize: &(dyn Fn(&McpPolicy, &str) -> Result<(), String> + Sync),
+) -> Result<Value, String> {
+    execute_command_context(runtime, connector, alias, command, timeout, cancel, owner, approve, context, authorize, true)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn sudo_command(command: &str, marker: &str) -> String {
+    let script = format!("exec </dev/null\n{command}");
+    format!("sudo -S -p {} -- /bin/sh -c {}", shell_quote(marker), shell_quote(&script))
+}
+
+#[cfg(all(test, unix))]
+mod sudo_command_tests {
+    use super::sudo_command;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn quotes_the_approved_shell_text_and_closes_command_input() {
+        let temporary = tempfile::tempdir().unwrap();
+        let fake_sudo = temporary.path().join("sudo");
+        std::fs::write(&fake_sudo, "#!/bin/sh\n[ \"$1\" = -S ] || exit 10\nshift\n[ \"$1\" = -p ] || exit 11\nshift 2\n[ \"$1\" = -- ] || exit 12\nshift\nexec \"$@\"\n").unwrap();
+        std::fs::set_permissions(&fake_sudo, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", temporary.path().display());
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(sudo_command("printf '%s' \"a'b\"; read line || printf ':eof'", "LUNPORT_SUDO_TEST:"))
+            .env("PATH", path)
+            .output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"a'b:eof");
+    }
+}
+
+fn execute_command_context(
+    runtime: &McpRuntime,
+    connector: &Connector<'_>,
+    alias: &str,
+    command: &str,
+    timeout: u64,
+    cancel: &CancelToken,
+    owner: &dyn Owner,
+    approve: &(dyn Fn(&McpPendingRequest) -> ApprovalDecision + Sync),
     mut context: RequestContext,
     authorize: &(dyn Fn(&McpPolicy, &str) -> Result<(), String> + Sync),
+    sudo: bool,
 ) -> Result<Value, String> {
     if !display_safe_command(command) {
         return Err("Command is empty, unsafe to display, or exceeds 16384 bytes.".into());
@@ -540,7 +600,7 @@ pub(super) fn execute_context(
         id: context.id.clone(),
     };
     let request = McpPendingRequest {
-        host_proposal: None,
+        host_proposal: sudo.then(|| McpHostProposal { kind: "sudo_exec".into(), settings: Vec::new() }),
         id: context.id.clone(),
         alias: destination.alias.clone(),
         host_id: Some(host_id.clone()),
@@ -584,7 +644,7 @@ pub(super) fn execute_context(
     let mut decision = None;
     let declines = Declines::default();
     let owner = NotingOwner { inner: owner, declines: &declines };
-    let confirmer = ClientConfirmer::new(connector.confirmer, asker(&context, mode, Unreviewed::Command));
+    let confirmer = ClientConfirmer::new(connector.confirmer, AiAsker { client: client_label(&context), unreviewed: if sudo { None } else { (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Command) } });
     let result = std::thread::scope(|scope| {
         // Revoke/disable and disconnect wake native authentication and approval while the worker waits.
         scope.spawn(|| {
@@ -603,7 +663,7 @@ pub(super) fn execute_context(
             if !policy.enabled || authorize(&policy, &host_id).is_err() {
                 return Err("MCP request was denied by host policy".into());
             }
-            if mode == ApprovalMode::Ask {
+            if mode == ApprovalMode::Ask || sudo {
                 let decided = approve(&request);
                 decision = Some(decided);
                 match decided {
@@ -647,6 +707,14 @@ pub(super) fn execute_context(
                 connected.session.close();
                 return Err(error);
             }
+            let sudo_setup = if sudo {
+                let mut nonce = [0u8; 16];
+                getrandom::fill(&mut nonce).map_err(|_| "Could not prepare sudo authentication.")?;
+                let marker = format!("LUNPORT_SUDO_{}:", nonce.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+                let actual = sudo_command(command, &marker);
+                let hop = connected.target.hops.last().ok_or("No destination.")?.reference();
+                Some((marker, actual, hop))
+            } else { None };
             let over = AtomicBool::new(false);
             let output = std::thread::scope(|scope| {
                 scope.spawn(|| {
@@ -659,10 +727,15 @@ pub(super) fn execute_context(
                     }
                 });
                 let _stop = Stop(&over);
-                let output =
-                    connected
-                        .session
-                        .exec(command, Duration::from_secs(timeout), 128 * 1024);
+                let output = if let Some((marker, actual, hop)) = &sudo_setup {
+                    let ask = || match owner.ask_at(&hop, QuestionKind::Sudo, "Password for the approved sudo command", false, None) {
+                        Reply::Answer(secret) => Some(secret),
+                        _ => None,
+                    };
+                    connected.session.exec_with_prompt(actual, marker, Duration::from_secs(timeout), 128 * 1024, &ask)
+                } else {
+                    connected.session.exec(command, Duration::from_secs(timeout), 128 * 1024)
+                };
                 over.store(true, Ordering::SeqCst);
                 output
             });
@@ -684,7 +757,7 @@ pub(super) fn execute_context(
     let value = result.as_ref().ok();
     let review = if !allowed {
         None
-    } else if mode == ApprovalMode::AutoLog {
+    } else if mode == ApprovalMode::AutoLog && !sudo {
         Some(McpReview::AutoLog)
     } else {
         decision.and_then(review_of)
@@ -697,7 +770,7 @@ pub(super) fn execute_context(
     runtime.record(McpAuditEntry {
         id: context.id,
         alias: destination.alias.clone(),
-        command: command.into(),
+        command: if sudo { format!("sudo: {command}") } else { command.into() },
         client: "mcp".into(),
         host_id: Some(host_id),
         mode,
@@ -892,6 +965,7 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "get_host"
             | "get_effective_config"
             | "ssh_exec"
+            | "ssh_sudo_exec"
             | "scp_upload"
             | "scp_download"
             | "create_host"
@@ -1076,7 +1150,11 @@ pub(crate) fn dispatch(
             permissions::ensure_record(&policy, &records, &host.host.id)?;
             metadata(&records, &host)
         }
-        "ssh_exec" => {
+        "ssh_exec" | "ssh_sudo_exec" => {
+            let sudo = method == "ssh_sudo_exec";
+            if sudo && params.as_object().is_none_or(|object| object.keys().any(|key| !matches!(key.as_str(), "alias" | "command" | "timeout_seconds"))) {
+                return Err("ssh_sudo_exec accepts only alias, command and timeout_seconds; never send a password.".into());
+            }
             let alias = string_param(params, "alias")?;
             let command = params
                 .get("command")
@@ -1090,7 +1168,7 @@ pub(crate) fn dispatch(
                     .ok_or("timeout_seconds must be an integer from 1 to 300")?,
             };
             let owner = crate::session::auth_window::NativeOwner {
-                ai: Some(asker(&context, policy.approval_mode, Unreviewed::Command)),
+                ai: Some(if sudo { AiAsker { client: client_label(&context), unreviewed: None } } else { asker(&context, policy.approval_mode, Unreviewed::Command) }),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -1098,7 +1176,8 @@ pub(crate) fn dispatch(
                 request_id: context.id.clone(),
                 cancel: cancel.clone(),
             };
-            execute_context(
+            let execute = if sudo { execute_sudo_context } else { execute_context };
+            execute(
                 &state.mcp,
                 connector,
                 alias,
@@ -2495,7 +2574,70 @@ mod cancellation_tests {
             Err("run was renamed to ssh_exec".into())
         );
         assert!(validate_method("ssh_exec").is_ok());
+        assert!(validate_method("ssh_sudo_exec").is_ok());
         assert!(validate_method("get_effective_config").is_ok());
+    }
+
+    #[test]
+    fn sudo_requires_approval_even_when_other_commands_use_auto_log() {
+        use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
+        use crate::ssh::fake::{default_server_key, FakeEngine};
+        use crate::sync::testkit::MemKeychain;
+        let runtime = McpRuntime::default();
+        {
+            let mut policy = runtime.policy.lock().unwrap();
+            policy.enabled = true;
+            policy.approval_mode = ApprovalMode::AutoLog;
+            policy.allowed_hosts.insert("id-web".into());
+        }
+        let engine = FakeEngine::new();
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key());
+        let keys = FakeKeys::new();
+        let keychain = MemKeychain::default();
+        let confirmer = FakeConfirmer::default();
+        let connector = Connector { grants: crate::session::grants::GrantGates::for_tests(), engine: &engine, directory: &directory, keys: &keys, keychain: &keychain, confirmer: &confirmer };
+        let owner = FakeOwner::default();
+        let request = |pending: &McpPendingRequest| {
+            assert_eq!(pending.host_proposal.as_ref().unwrap().kind, "sudo_exec");
+            assert_eq!(pending.command, "printf authorized");
+            ApprovalDecision::Deny
+        };
+        let result = execute_sudo_context(&runtime, &connector, "id-web", "printf authorized", 60, &CancelToken::default(), &owner, &request, RequestContext::default(), &ensure_allowed);
+        assert_eq!(result, Err("MCP request was denied".into()));
+        assert!(engine.events().is_empty());
+        assert_eq!(runtime.status().recent[0].review, Some(McpReview::Refused));
+    }
+
+    #[test]
+    fn approved_sudo_runs_once_with_a_private_prompt_channel() {
+        use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
+        use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent};
+        use crate::sync::testkit::MemKeychain;
+        let runtime = McpRuntime::default();
+        {
+            let mut policy = runtime.policy.lock().unwrap();
+            policy.enabled = true;
+            policy.approval_mode = ApprovalMode::AutoLog;
+            policy.allowed_hosts.insert("id-web".into());
+        }
+        let engine = FakeEngine::new();
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key());
+        let keys = FakeKeys::new();
+        let keychain = MemKeychain::default();
+        let confirmer = FakeConfirmer::default();
+        let connector = Connector { grants: crate::session::grants::GrantGates::for_tests(), engine: &engine, directory: &directory, keys: &keys, keychain: &keychain, confirmer: &confirmer };
+        let result = execute_sudo_context(&runtime, &connector, "id-web", "printf authorized", 60, &CancelToken::default(), &FakeOwner::default(), &|_| ApprovalDecision::Allow, RequestContext::default(), &ensure_allowed).unwrap();
+        assert_eq!(result["exit_code"], 0);
+        let execs: Vec<_> = engine.events().into_iter().filter(|event| matches!(event, FakeEvent::ExecWithPrompt { .. })).collect();
+        assert_eq!(execs.len(), 1);
+        if let FakeEvent::ExecWithPrompt { command, marker, .. } = &execs[0] {
+            assert!(command.starts_with("sudo -S -p "));
+            assert!(command.contains("printf authorized"));
+            assert!(command.contains(marker));
+            assert!(!command.contains("secret-example"));
+        }
+        assert_eq!(runtime.status().recent[0].review, Some(McpReview::Approved));
+        assert_eq!(runtime.status().recent[0].mode, ApprovalMode::AutoLog);
     }
 }
 

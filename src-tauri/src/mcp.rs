@@ -711,7 +711,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. ssh_sudo_exec always asks the person to approve one command, even in Auto-log, and asks for a sudo password only in Lunport's native window when needed. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -763,6 +763,22 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "alias": { "type": "string", "description": "Exact AI-approved Lunport host alias" },
                     "command": { "type": "string", "description": "Exact remote shell command shown to the user for approval" },
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300, "default": 60 }
+                },
+                "required": ["alias", "command"],
+                "additionalProperties": false
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true }
+        },
+        {
+            "name": "ssh_sudo_exec",
+            "title": "Run one sudo command with native approval",
+            "description": "Run one remote shell command as root with sudo. The user must approve the exact command in Lunport even in Auto-log. If sudo requires a password, only Lunport's native window asks for it; never pass a password in tool arguments. The agent cannot interact with the command's terminal. Output from the PTY is merged into stdout.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "alias": { "type": "string", "description": "Exact AI-approved Lunport host ID or alias" },
+                    "command": { "type": "string", "description": "Shell command to run with sudo, without a sudo prefix" },
                     "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300, "default": 60 }
                 },
                 "required": ["alias", "command"],
@@ -846,6 +862,15 @@ mod tests {
             .unwrap();
         assert_eq!(run["annotations"]["readOnlyHint"], false);
         assert_eq!(run["annotations"]["destructiveHint"], true);
+    }
+
+    #[test]
+    fn sudo_tool_requires_a_command_and_cannot_accept_a_password() {
+        let tools = tool_definitions();
+        let sudo = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "ssh_sudo_exec").expect("sudo tool is listed");
+        assert_eq!(sudo["inputSchema"]["required"], json!(["alias", "command"]));
+        assert!(sudo["inputSchema"]["properties"].get("password").is_none());
+        assert_eq!(sudo["annotations"]["destructiveHint"], true);
     }
 
     #[test]

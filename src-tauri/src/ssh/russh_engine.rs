@@ -1138,6 +1138,15 @@ impl Session for RusshSession {
         self.runtime.handle().block_on(exec_on(destination, command, timeout, output_cap))
     }
 
+    fn exec_with_prompt(&self, command: &str, prompt_marker: &str, timeout: Duration, output_cap: usize, answer: &dyn Fn() -> Option<Secret>) -> Result<ExecResult, SessionError> {
+        if !self.is_alive() { return Err(SessionError::Closed); }
+        if prompt_marker.is_empty() || prompt_marker.len() > 128 || !prompt_marker.is_ascii() {
+            return Err(SessionError::Channel("Invalid authentication prompt marker.".into()));
+        }
+        let destination = self.connection.destination()?;
+        self.runtime.handle().block_on(exec_with_prompt_on(destination, command, prompt_marker.as_bytes(), timeout, output_cap, answer))
+    }
+
     fn scp_upload(&self, remote_path: &str, name: &str, size: u64, source: &mut dyn Read, timeout: Duration) -> Result<u64, SessionError> {
         if !self.is_alive() { return Err(SessionError::Closed); }
         let destination = self.connection.destination()?;
@@ -1248,6 +1257,82 @@ async fn exec_on(destination: &Established, command: &str, timeout: Duration, ou
         Ended::Disconnected
     };
     Ok(result)
+}
+
+async fn exec_with_prompt_on(destination: &Established, command: &str, marker: &[u8], timeout: Duration, output_cap: usize, answer: &dyn Fn() -> Option<Secret>) -> Result<ExecResult, SessionError> {
+    let mut deadline = Instant::now() + timeout.min(LONGEST_TIMEOUT);
+    let mut channel = open_channel(destination, CHANNEL_SETUP_LIMIT.max(timeout)).await?;
+    // Disable terminal echo before any answer can be written to the PTY.
+    sent(channel.request_pty(true, "dumb", 80, 24, 0, 0, &[(russh::Pty::ECHO, 0)])).await?;
+    sent(channel.exec(true, command)).await?;
+    let mut result = ExecResult { ended: Ended::Disconnected, exit_code: None, signal: None, stdout: Vec::new(), stderr: Vec::new(), truncated: false };
+    let mut answered = false;
+    let mut sent_secret: Option<Secret> = None;
+    loop {
+        let message = match tokio::time::timeout_at(deadline, channel.wait()).await {
+            Err(_) => {
+                let _ = sent(channel.close()).await;
+                result.ended = Ended::TimedOut;
+                return Ok(redact_prompt_answer(result, sent_secret.as_ref()));
+            }
+            Ok(None) => break,
+            Ok(Some(message)) => message,
+        };
+        match message {
+            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, ext: 1 } => {
+                result.stdout.extend_from_slice(&data);
+                if let Some(at) = result.stdout.windows(marker.len()).position(|window| window == marker) {
+                    result.stdout.drain(at..at + marker.len());
+                    if answered {
+                        let _ = sent(channel.close()).await;
+                        return Err(SessionError::Channel("The remote command requested another password; it was stopped.".into()));
+                    }
+                    if result.stdout.len() > output_cap { return Ok(redact_prompt_answer(cut_off(&channel, result).await, sent_secret.as_ref())); }
+                    let Some(secret) = answer() else {
+                        let _ = sent(channel.close()).await;
+                        return Err(SessionError::Channel("Authentication was canceled.".into()));
+                    };
+                    if secret.as_bytes().contains(&b'\n') || secret.as_bytes().contains(&b'\r') || secret.as_bytes().contains(&0) {
+                        let _ = sent(channel.close()).await;
+                        return Err(SessionError::Channel("The password contains an unsupported control character.".into()));
+                    }
+                    let mut input = zeroize::Zeroizing::new(secret.as_bytes().to_vec());
+                    input.push(b'\n');
+                    let sent_answer = sent(channel.data_bytes(input.to_vec())).await;
+                    if let Err(error) = sent_answer { let _ = sent(channel.close()).await; return Err(error); }
+                    sent_secret = Some(secret);
+                    let _ = sent(channel.eof()).await;
+                    answered = true;
+                    deadline = Instant::now() + timeout.min(LONGEST_TIMEOUT);
+                }
+                if result.stdout.len() > output_cap { return Ok(redact_prompt_answer(cut_off(&channel, result).await, sent_secret.as_ref())); }
+            }
+            ChannelMsg::ExitStatus { exit_status } => result.exit_code = Some(exit_status),
+            ChannelMsg::ExitSignal { signal_name: signal, .. } => result.signal = Some(signal_name(&signal)),
+            ChannelMsg::Failure => {
+                let _ = sent(channel.close()).await;
+                return Err(SessionError::Channel("the server refused to run the command".into()));
+            }
+            _ => {}
+        }
+    }
+    result.ended = if result.signal.is_some() { Ended::Signaled } else if result.exit_code.is_some() { Ended::Exited } else { Ended::Disconnected };
+    Ok(redact_prompt_answer(result, sent_secret.as_ref()))
+}
+
+fn redact_prompt_answer(mut result: ExecResult, secret: Option<&Secret>) -> ExecResult {
+    let Some(needle) = secret.map(|value| value.as_bytes()).filter(|value| !value.is_empty()) else { return result };
+    for output in [&mut result.stdout, &mut result.stderr] {
+        let mut cleaned = Vec::with_capacity(output.len());
+        let mut from = 0;
+        while let Some(at) = output[from..].windows(needle.len()).position(|window| window == needle).map(|at| at + from) {
+            cleaned.extend_from_slice(&output[from..at]);
+            from = at + needle.len();
+        }
+        cleaned.extend_from_slice(&output[from..]);
+        *output = cleaned;
+    }
+    result
 }
 
 fn scp_bad(message: &str) -> SessionError { SessionError::Channel(message.into()) }
