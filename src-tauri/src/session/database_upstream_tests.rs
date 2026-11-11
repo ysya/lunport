@@ -12,8 +12,8 @@ use crate::session::database_ports::{DatabasePorts, NotReady, Prepared};
 use crate::session::databases::DatabasePhase;
 use crate::session::protocol::QuestionKind;
 use crate::session::testing::FakeOwner;
-use crate::sync::databases::tests::state;
-use crate::sync::databases::DatabaseEnvironment;
+use crate::sync::databases::tests::{state, ROUTE_HOST};
+use crate::sync::databases::{DatabaseEnvironment, DatabaseNetwork};
 use crate::sync::transports::PamCheck;
 use futures_util::FutureExt;
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
@@ -25,7 +25,9 @@ const HOUR: Duration = Duration::from_secs(3600);
 /// What the person answers in the Request-a-grant window: thirty minutes, and why.
 const ANSWER: &str = "30\nCheck unpaid orders";
 const OPERATE: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
-const PUBLIC_IP: &str = "198.51.100.5";
+/// The addresses of the instance the tests dial: the public one, and the private one that only a host of the library reaches.
+const PUBLIC_IP: &str = "203.0.113.10";
+const PRIVATE_IP: &str = "198.51.100.10";
 
 /// Google's PAM as the tests script it: the grants the account holds on prod-operate. A requested grant is active at once, dated by the
 /// test's clock.
@@ -133,6 +135,7 @@ impl SqlAdmin for Admin {
         }
         Ok(ConnectSettings {
             public_ip: Some(PUBLIC_IP.parse().unwrap()),
+            private_ip: Some(PRIVATE_IP.parse().unwrap()),
             server_ca_pem: self.authority().pem(),
             dns_name: Some(dns_name(&at.instance)),
             database_version: "POSTGRES_16".into(),
@@ -187,7 +190,7 @@ struct Cloud {
     active: Arc<Mutex<Option<String>>>,
     owner: Arc<FakeOwner>,
     remembered: Arc<Mutex<Vec<(String, String, u32)>>>,
-    dialled: Arc<Mutex<Vec<(IpAddr, ServerName<'static>)>>>,
+    dialled: Arc<Mutex<Vec<(SocketAddr, ServerName<'static>)>>>,
     /// How many of the next dials Cloud SQL refuses.
     refusing: Arc<Mutex<usize>>,
     received: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -228,8 +231,8 @@ impl Cloud {
             remember: Arc::new(move |name: &str, justification: &str, secs: u32| {
                 remembered.lock().unwrap().push((name.to_string(), justification.to_string(), secs));
             }),
-            dial: Arc::new(move |ip: IpAddr, _config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
-                dialled.lock().unwrap().push((ip, name));
+            dial: Arc::new(move |address: SocketAddr, _config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
+                dialled.lock().unwrap().push((address, name));
                 let refused = {
                     let mut left = refusing.lock().unwrap();
                     let refused = *left > 0;
@@ -268,6 +271,16 @@ fn guarded() -> SavedDatabase {
         pam: Some(PamCheck { entitlements: vec!["prod-operate".into()], location: "global".into(), duration_secs: 1800, justification: None }),
         ..orders()
     }
+}
+
+/// `orders()` reached over its private IP, through a host of the library.
+fn routed() -> SavedDatabase {
+    SavedDatabase { network: DatabaseNetwork::Private, via_host: Some(ROUTE_HOST.into()), ..orders() }
+}
+
+/// Where a dial to the instance at `ip` is expected to go: Cloud SQL takes its TLS connections on port 3307.
+fn instance_at(ip: &str) -> SocketAddr {
+    format!("{ip}:3307").parse().unwrap()
 }
 
 /// The database user a connection got ready as, or why it could not.
@@ -338,7 +351,7 @@ fn a_grant_that_ended_drops_the_cached_certificate_and_asks_again() {
     open.round_trip(b"select 1");
     assert!(cloud.owner.asked().is_empty(), "the grant was held");
     assert_eq!(cloud.certificates(), 1);
-    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-pg")).unwrap())], "the instance, by its name");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), ServerName::try_from(dns_name("orders-pg")).unwrap())], "the instance, by its name");
     // The grant ends; the certificate, good for an hour, would still be.
     *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ENDED", t0() - 10 * MINUTE)];
     cloud.clock.at(21 * MINUTE);
@@ -443,6 +456,41 @@ fn a_failed_dial_is_followed_by_a_new_certificate() {
     App::signed_in(port).round_trip(b"select 1");
     assert_eq!(cloud.certificates(), 2);
     assert_eq!(cloud.dialled.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_database_reached_through_a_host_is_dialled_at_the_instances_private_address() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    let port = running(&ports, &routed());
+    App::signed_in(port).round_trip(b"select 1");
+    // Port 3307 of the private address, and the certificate is still checked against the instance's name, not the address.
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PRIVATE_IP), ServerName::try_from(dns_name("orders-pg")).unwrap())]);
+    assert_eq!(cloud.certificates(), 1);
+}
+
+#[test]
+fn a_database_saved_anew_over_another_route_is_dialled_at_the_address_of_its_new_one() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let name = || ServerName::try_from(dns_name("orders-pg")).unwrap();
+    let public = upstream.prepare(&orders(), &cancel).unwrap();
+    let _dialling = upstream.connect(ID, Some(public.material));
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), name())]);
+    // Saved anew to go through a host, it is not served what was had for its public address, fresh as that is.
+    let through_a_host = upstream.prepare(&routed(), &cancel).unwrap();
+    assert_ne!(through_a_host.material, public.material);
+    assert_eq!(cloud.certificates(), 2);
+    let _dialling = upstream.connect(ID, Some(through_a_host.material));
+    // And back to its public address, as it was.
+    let public_again = upstream.prepare(&orders(), &cancel).unwrap();
+    assert_eq!(cloud.certificates(), 3);
+    let _dialling = upstream.connect(ID, Some(public_again.material));
+    assert_eq!(
+        *cloud.dialled.lock().unwrap(),
+        vec![(instance_at(PUBLIC_IP), name()), (instance_at(PRIVATE_IP), name()), (instance_at(PUBLIC_IP), name())]
+    );
 }
 
 #[test]
@@ -560,7 +608,7 @@ fn a_prepare_that_finishes_after_the_database_changed_leaves_nothing_for_it() {
     // The new database's connections dial the dev instance: the stale fetch left nothing for them.
     cloud.dialled.lock().unwrap().clear();
     let _dialling = upstream.connect(ID, None);
-    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
 }
 
 #[test]

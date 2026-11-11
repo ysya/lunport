@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -36,8 +36,8 @@ const GRANT_RECHECK: Duration = Duration::from_secs(5 * 60);
 
 /// Makes the owner that asks the person on behalf of a connection that `cancel` cancels.
 type MakeOwner = Arc<dyn Fn(&CancelToken) -> Box<dyn Owner + Send> + Send + Sync>;
-/// Dials an instance: its public address, the TLS configuration of the connection, and the name its certificate must be made out to.
-type Dialer = Arc<dyn Fn(IpAddr, Arc<ClientConfig>, ServerName<'static>) -> BoxFuture<'static, io::Result<BoxStream>> + Send + Sync>;
+/// Dials an instance: the address to dial, the TLS configuration of the connection, and the name its certificate must be made out to.
+type Dialer = Arc<dyn Fn(SocketAddr, Arc<ClientConfig>, ServerName<'static>) -> BoxFuture<'static, io::Result<BoxStream>> + Send + Sync>;
 
 /// How the app's ports reach Cloud SQL. The grant a database asks for is requested through the gates hosts use, so that a host and a
 /// database that need the same grant ask the person once; the connection material comes from the Cloud SQL Admin API. Both are kept for a
@@ -117,6 +117,8 @@ struct Dial {
     iam_user: String,
     /// When the certificate stops being useful (`EphemeralCert::expires_at`).
     expires_at: SystemTime,
+    /// The address the connections dial, on port `cloudsql_tls::PORT`: the instance's public one, or its private one for a database
+    /// reached through a host (`Material::ip`).
     ip: IpAddr,
     config: Arc<ClientConfig>,
     name: ServerName<'static>,
@@ -159,8 +161,8 @@ impl CloudSqlUpstream {
                     Ok::<_, AppError>(())
                 });
             }),
-            dial: Arc::new(|ip: IpAddr, config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
-                Box::pin(async move { cloudsql_tls::dial(ip, config, name).await.map(|stream| Box::new(stream) as BoxStream) })
+            dial: Arc::new(|address: SocketAddr, config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
+                Box::pin(async move { cloudsql_tls::dial(address, config, name).await.map(|stream| Box::new(stream) as BoxStream) })
             }),
             routes: Mutex::default(),
             generations: AtomicU64::new(1),
@@ -280,7 +282,7 @@ impl Upstream for CloudSqlUpstream {
             Some((dial.generation, dial.ip, Arc::clone(&dial.config), dial.name.clone()))
         });
         match target {
-            Some((generation, ip, config, name)) => Dialling { material: Some(generation), stream: (self.dial)(ip, config, name) },
+            Some((generation, ip, config, name)) => Dialling { material: Some(generation), stream: (self.dial)(SocketAddr::new(ip, cloudsql_tls::PORT), config, name) },
             None => Dialling {
                 material: None,
                 stream: Box::pin(async { Err(io::Error::new(io::ErrorKind::NotFound, "no certificate is ready for it. Connect again.")) }),
