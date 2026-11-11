@@ -14,7 +14,7 @@ use super::connect::CancelToken;
 use super::directory::refusal_sentence;
 use super::grants::{self, ask_and_request, current_grant, pause, request_active_grant, GateKey, GrantGates, ACTIVE_WITHIN, POLL_EVERY};
 use super::protocol::GrantPrompt;
-use crate::gcp::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey, InstanceRef, SqlAdmin};
+use crate::gcp::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey, InstanceRef, SqlAdmin, POSTGRES_VERSION_PREFIX};
 use crate::gcp::pam::{Entitlement, EntitlementName};
 use crate::gcp::rest::{GcpClient, GcpError};
 use crate::sync::databases::SavedDatabase;
@@ -150,13 +150,20 @@ impl Attempts<'_> {
 
 /// The material for a connection to `db`: its connect settings, a new key and a certificate Cloud SQL signs for that key. `recent_grant`
 /// (`GrantState::Held`) says the grant it relies on was given moments ago, and a 403 is then tried again as `grace` allows. An instance
-/// without a public address is refused: Lunport connects over the public one. Blocks on the Cloud SQL Admin API, on making the key and
-/// while it waits to try again, so it runs on a blocking thread.
+/// that is not PostgreSQL, one in another region than the database names (as Google's Go connector checks it; an answer that says no
+/// region is not refused for it) and one without a public address (Lunport connects over the public one) are refused before a certificate
+/// is asked for. Blocks on the Cloud SQL Admin API, on making the key and while it waits to try again, so it runs on a blocking thread.
 pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_grant: bool, grace: Grace, cancel: &CancelToken) -> Result<Material, String> {
     let at = InstanceRef { project: db.project.clone(), region: db.region.clone(), instance: db.instance.clone() };
     let account = db.account.as_deref();
     let mut attempts = Attempts { recent_grant, grace, refused_since: None, cancel };
     let settings = attempts.run(|| sql.connect_settings(account, &at))?;
+    if !settings.database_version.starts_with(POSTGRES_VERSION_PREFIX) {
+        return Err(format!("{} is not a PostgreSQL instance.", db.connection_name()));
+    }
+    if !settings.region.is_empty() && settings.region != db.region {
+        return Err(format!("{} is in {}, not {}.", db.connection_name(), settings.region, db.region));
+    }
     let Some(ip) = settings.public_ip else {
         return Err(format!("{} has no public IP. Lunport connects over public IP in this release.", db.connection_name()));
     };
@@ -321,6 +328,7 @@ mod tests {
             server_ca_pem: "-----BEGIN CERTIFICATE-----\nc2VydmVyLWNh\n-----END CERTIFICATE-----\n".into(),
             dns_name: Some("a1b2c3.asia-east1.sql.goog".into()),
             database_version: "POSTGRES_16".into(),
+            region: "asia-east1".into(),
         }
     }
 
@@ -747,6 +755,27 @@ mod tests {
         let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
         assert_eq!(error, "acme-prod-123456:asia-east1:orders-pg has no public IP. Lunport connects over public IP in this release.");
         assert_eq!(admin.certificates_asked(), 0, "no certificate is asked for an instance that cannot be dialled");
+    }
+
+    #[test]
+    fn an_instance_that_is_not_postgresql_is_refused_with_a_sentence() {
+        for version in ["MYSQL_8_0", "SQLSERVER_2022_STANDARD", "POSTGRES", ""] {
+            let admin = Admin::answering(vec![Ok(ConnectSettings { database_version: version.into(), ..settings() })], vec![Ok(certificate(ACCOUNT))]);
+            let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
+            assert_eq!(error, "acme-prod-123456:asia-east1:orders-pg is not a PostgreSQL instance.", "{version:?}");
+            assert_eq!(admin.certificates_asked(), 0, "no certificate is asked for an instance Lunport does not connect to");
+        }
+    }
+
+    #[test]
+    fn an_instance_in_another_region_than_the_saved_one_is_refused_with_a_sentence() {
+        let admin = Admin::answering(vec![Ok(ConnectSettings { region: "europe-west1".into(), ..settings() })], vec![Ok(certificate(ACCOUNT))]);
+        let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
+        assert_eq!(error, "acme-prod-123456:asia-east1:orders-pg is in europe-west1, not asia-east1.");
+        assert_eq!(admin.certificates_asked(), 0);
+        // An answer that says no region is not refused for it: nothing tells where the instance is.
+        let admin = Admin::answering(vec![Ok(ConnectSettings { region: String::new(), ..settings() })], vec![Ok(certificate(ACCOUNT))]);
+        assert!(fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).is_ok());
     }
 
     #[test]

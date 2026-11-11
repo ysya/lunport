@@ -319,7 +319,13 @@ mod tests {
     }
 
     fn settings(server_ca_pem: String) -> ConnectSettings {
-        ConnectSettings { public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), server_ca_pem, dns_name: Some(DNS_NAME.into()), database_version: "POSTGRES_16".into() }
+        ConnectSettings {
+            public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            server_ca_pem,
+            dns_name: Some(DNS_NAME.into()),
+            database_version: "POSTGRES_16".into(),
+            region: "asia-east1".into(),
+        }
     }
 
     fn identity(dns_name: Option<&str>) -> ServerIdentity {

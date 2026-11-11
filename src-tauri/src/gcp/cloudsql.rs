@@ -1,9 +1,9 @@
 //! The Cloud SQL Admin API (`sqladmin.googleapis.com`, v1) as a database connection uses it. Three calls: an instance's connect settings (its
-//! public address, the certificate authority behind its server certificate and the name that certificate is made out to); a client
-//! certificate that Cloud SQL signs for a key made for the connection and stamps with the caller's access token, which is what lets the
-//! instance sign the caller in with Google IAM instead of a password; and a project's PostgreSQL instances, for the form that adds a
-//! database. Every call carries the bearer token of a `TokenSource`, every failure is a `GcpError` sentence, and the `SqlAdmin` trait lets
-//! the code that connects script the answers.
+//! public address, its engine and region, the certificate authority behind its server certificate and the name that certificate is made
+//! out to); a client certificate that Cloud SQL signs for a key made for the connection and stamps with the caller's access token, which
+//! is what lets the instance sign the caller in with Google IAM instead of a password; and a project's PostgreSQL instances, for the form
+//! that adds a database. Every call carries the bearer token of a `TokenSource`, every failure is a `GcpError` sentence, and the `SqlAdmin`
+//! trait lets the code that connects script the answers.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -31,6 +31,8 @@ const REFUSAL_CHARS: usize = 256;
 const KEY_BITS: usize = 2048;
 /// The database flag that lets an instance sign in Google accounts when it is `on`.
 const IAM_FLAG: &str = "cloudsql.iam_authentication";
+/// What the `databaseVersion` of a PostgreSQL instance starts with (`POSTGRES_16`).
+pub const POSTGRES_VERSION_PREFIX: &str = "POSTGRES_";
 
 /// A Cloud SQL instance by the parts of its connection name, `project:region:instance`. The Admin API finds an instance by its project and
 /// name alone; the region is there to name the connection in sentences.
@@ -53,6 +55,8 @@ pub struct ConnectSettings {
     pub dns_name: Option<String>,
     /// The engine and version, such as `POSTGRES_16`; empty when Cloud SQL leaves it out.
     pub database_version: String,
+    /// The region the instance is in, such as `asia-east1`; empty when Cloud SQL leaves it out.
+    pub region: String,
 }
 
 /// A client certificate Cloud SQL signed for an `EphemeralKey`. The access token is inside it, so the text is as secret as the token:
@@ -206,7 +210,13 @@ impl SqlAdmin for RestSqlAdmin {
             .map(|address| address.parse::<IpAddr>().map_err(|_| GcpError::Malformed("the connect settings carry an address that is not an IP address".to_string())))
             .transpose()?;
         let dns_name = dns_name(settings.dns_names.as_deref().unwrap_or_default(), settings.dns_name.as_deref());
-        Ok(ConnectSettings { public_ip, server_ca_pem, dns_name, database_version: settings.database_version.unwrap_or_default() })
+        Ok(ConnectSettings {
+            public_ip,
+            server_ca_pem,
+            dns_name,
+            database_version: settings.database_version.unwrap_or_default(),
+            region: settings.region.unwrap_or_default(),
+        })
     }
 
     fn ephemeral_cert(&self, account: Option<&str>, at: &InstanceRef, key: &EphemeralKey) -> Result<EphemeralCert, GcpError> {
@@ -340,6 +350,7 @@ fn dns_name(names: &[DnsNameMapping], legacy: Option<&str>) -> Option<String> {
 struct ConnectSettingsAnswer {
     server_ca_cert: Option<SslCert>,
     ip_addresses: Option<Vec<IpMapping>>,
+    region: Option<String>,
     database_version: Option<String>,
     dns_name: Option<String>,
     dns_names: Option<Vec<DnsNameMapping>>,
@@ -410,7 +421,7 @@ struct DatabaseFlag {
 impl InstanceAnswer {
     /// The instance as the form lists it; `None` for one that is not PostgreSQL (its `databaseVersion` does not start with `POSTGRES_`).
     fn postgres_summary(self) -> Option<InstanceSummary> {
-        let database_version = self.database_version.filter(|version| version.starts_with("POSTGRES_"))?;
+        let database_version = self.database_version.filter(|version| version.starts_with(POSTGRES_VERSION_PREFIX))?;
         let has_address = |kind: &str| self.ip_addresses.iter().flatten().any(|mapping| mapping.kind.as_deref() == Some(kind));
         let iam_authentication = self
             .settings

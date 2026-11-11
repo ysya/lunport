@@ -131,6 +131,7 @@ impl SqlAdmin for Admin {
             server_ca_pem: self.authority().pem(),
             dns_name: Some(dns_name(&at.instance)),
             database_version: "POSTGRES_16".into(),
+            region: at.region.clone(),
         })
     }
 

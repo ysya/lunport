@@ -163,6 +163,7 @@ fn connect_settings_reads_the_public_ip_ca_and_dns_name() {
             // The name of `dnsNames` wins over the legacy `dnsName`, with its trailing dot trimmed.
             dns_name: Some("1a2b3c4d5e6f.asia-east1.sql.goog".into()),
             database_version: "POSTGRES_16".into(),
+            region: "asia-east1".into(),
         }
     );
 }
