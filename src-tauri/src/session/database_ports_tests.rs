@@ -204,8 +204,8 @@ const FIRST_MATERIAL: u64 = 1001;
 /// counted.
 #[derive(Default)]
 pub(crate) struct FakeUpstream {
-    /// `prepare` fails with this sentence.
-    pub refusing: Mutex<Option<String>>,
+    /// `prepare` fails with this.
+    pub refusing: Mutex<Option<NotReady>>,
     /// `prepare` waits until its connection is cancelled, as a question nobody answers does.
     pub waiting: AtomicBool,
     pub answer: Mutex<Answer>,
@@ -237,7 +237,7 @@ impl FakeUpstream {
 }
 
 impl Upstream for FakeUpstream {
-    fn prepare(&self, _db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, String> {
+    fn prepare(&self, _db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, NotReady> {
         let material = FIRST_MATERIAL + self.prepared.fetch_add(1, Ordering::SeqCst) as u64;
         if self.waiting.load(Ordering::SeqCst) {
             let end = Instant::now() + LIMIT;
@@ -247,10 +247,10 @@ impl Upstream for FakeUpstream {
             if cancel.is_cancelled() {
                 self.cancelled.fetch_add(1, Ordering::SeqCst);
             }
-            return Err("The connection was cancelled.".into());
+            return Err(NotReady::Failed("The connection was cancelled.".into()));
         }
         match self.refusing.lock().unwrap().clone() {
-            Some(sentence) => Err(sentence),
+            Some(not_ready) => Err(not_ready),
             None => Ok(Prepared { iam_user: IAM_USER.into(), material }),
         }
     }
@@ -554,17 +554,25 @@ fn a_password_request_from_cloud_sql_becomes_a_clear_error() {
 }
 
 #[test]
-fn a_failed_prepare_is_refused_with_its_sentence() {
+fn a_failed_prepare_is_refused_with_its_sentence_under_the_sqlstate_of_its_kind() {
     let upstream = fake();
-    *upstream.refusing.lock().unwrap() = Some(EXPIRED.into());
     let ports = DatabasePorts::new(upstream.clone());
     let port = running(&ports, &orders());
-    let mut app = App::connect(port);
-    app.startup(&[("user", "frank"), ("database", "orders")]);
-    app.asked_for_password();
-    app.password(PASSWORD);
-    assert_eq!(app.error(), ("28000".to_string(), EXPIRED.to_string()));
-    assert!(app.closed());
+    let refused = |not_ready: NotReady| {
+        *upstream.refusing.lock().unwrap() = Some(not_ready);
+        let mut app = App::connect(port);
+        app.startup(&[("user", "frank"), ("database", "orders")]);
+        app.asked_for_password();
+        app.password(PASSWORD);
+        let error = app.error();
+        assert!(app.closed());
+        error
+    };
+    // A sign-in or a grant that was refused.
+    assert_eq!(refused(NotReady::Refused(EXPIRED.into())), ("28000".to_string(), EXPIRED.to_string()));
+    // Google or the instance that could not be reached or used.
+    let unknown = "Cloud SQL Admin refused the request: Cloud SQL has no instance acme-prod-123456:asia-east1:orders-pg.";
+    assert_eq!(refused(NotReady::Failed(unknown.into())), ("08006".to_string(), unknown.to_string()));
     assert_eq!(upstream.dialled.load(Ordering::SeqCst), 0);
 }
 
@@ -761,7 +769,7 @@ fn open_connections_survive_a_failed_refresh() {
     let mut open = App::signed_in(port);
     open.round_trip(b"begin");
     // The gcloud sign-in expires: a new connection cannot get a certificate.
-    *upstream.refusing.lock().unwrap() = Some(EXPIRED.into());
+    *upstream.refusing.lock().unwrap() = Some(NotReady::Refused(EXPIRED.into()));
     let mut new = App::connect(port);
     new.startup(&[("user", "frank"), ("database", "orders")]);
     new.asked_for_password();

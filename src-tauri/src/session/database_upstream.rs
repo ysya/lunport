@@ -18,7 +18,7 @@ use super::auth_window::{NativeOwner, TauriAuthSurface};
 use super::broker::Broker;
 use super::connect::CancelToken;
 use super::database_access::{fetch_material, grant_state, obtain_grant, Grace, GrantState};
-use super::database_ports::{locked, BoxStream, Dialling, Prepared, Upstream};
+use super::database_ports::{locked, BoxStream, Dialling, NotReady, Prepared, Upstream};
 use super::grants::GrantGates;
 use super::tunnels::snapshot;
 use crate::error::AppError;
@@ -181,7 +181,7 @@ impl CloudSqlUpstream {
     /// Whether the grant `db` asks for is held for `account`; PAM is asked when the last check no longer stands. When none is, the material
     /// had under the grant that ended goes, and the person is asked for a grant in Lunport's window. Answers whether the grant was given
     /// moments ago.
-    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken) -> Result<bool, String> {
+    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken) -> Result<bool, NotReady> {
         if db.pam.is_none() {
             return Ok(false);
         }
@@ -201,7 +201,8 @@ impl CloudSqlUpstream {
                     kept.grant = None;
                     kept.dial = None;
                 }
-                self.request_grant(db, cancel)?;
+                // However the request ended, the grant was not had: the connection's grant is refused.
+                self.request_grant(db, cancel).map_err(NotReady::Refused)?;
                 Ok(true)
             }
         }
@@ -222,7 +223,7 @@ impl CloudSqlUpstream {
     /// before its certificate stops being useful and fetched anew after that (`recent_grant`: the grant it relies on was given moments
     /// ago). Also answers whether the new certificate is for another account than the last one although `account` reads the same: the
     /// token source's credentials changed under it, and the grant was checked for the other account.
-    fn material(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, recent_grant: bool, cancel: &CancelToken) -> Result<(String, u64, bool), String> {
+    fn material(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, recent_grant: bool, cancel: &CancelToken) -> Result<(String, u64, bool), NotReady> {
         let _fetching = locked(&route.fetching);
         let usable = |dial: &&Dial| dial.for_account == *account && (self.now)() + REFRESH_AHEAD < dial.expires_at;
         if let Some(dial) = locked(&route.kept).dial.as_ref().filter(usable) {
@@ -230,7 +231,7 @@ impl CloudSqlUpstream {
         }
         let material = fetch_material(self.sql.as_ref(), db, recent_grant, Grace::default(), cancel)?;
         let identity = ServerIdentity { dns_name: material.settings.dns_name.clone(), project: db.project.clone(), instance: db.instance.clone() };
-        let config = client_config(&material.settings, &material.cert, &material.key, &identity)?;
+        let config = client_config(&material.settings, &material.cert, &material.key, &identity).map_err(NotReady::Failed)?;
         let mut kept = locked(&route.kept);
         let other_account = kept.account.as_ref().is_some_and(|before| *before != material.cert.account);
         if other_account {
@@ -252,7 +253,7 @@ impl CloudSqlUpstream {
 }
 
 impl Upstream for CloudSqlUpstream {
-    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, String> {
+    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, NotReady> {
         let route = self.route(db);
         // The account the connection signs in as: the database's own, else gcloud's active one, which the person can switch at any time.
         let account = db.account.clone().or_else(|| (self.active_account)());

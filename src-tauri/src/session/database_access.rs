@@ -11,6 +11,7 @@ use std::time::{Instant, SystemTime};
 
 use super::auth::Owner;
 use super::connect::CancelToken;
+use super::database_ports::NotReady;
 use super::directory::refusal_sentence;
 use super::grants::{self, ask_and_request, current_grant, pause, request_active_grant, GateKey, GrantGates, ACTIVE_WITHIN, POLL_EVERY};
 use super::protocol::GrantPrompt;
@@ -38,10 +39,10 @@ pub(crate) enum GrantState {
 
 /// Whether `db` asks for a grant and one is in flight at `now`, tested as a host's connection tests it: the first of the entitlements
 /// that holds a grant in flight decides. Blocks on a PAM call for each entitlement it looks at, so it runs on a blocking thread. The
-/// error is Google's sentence (`sentence`).
-pub(crate) fn grant_state(gcp: &dyn GcpClient, db: &SavedDatabase, now: SystemTime) -> Result<GrantState, String> {
+/// error is Google's sentence (`sentence`), of the kind `grant_failure` gives it.
+pub(crate) fn grant_state(gcp: &dyn GcpClient, db: &SavedDatabase, now: SystemTime) -> Result<GrantState, NotReady> {
     let Some(pam) = &db.pam else { return Ok(GrantState::NotNeeded) };
-    match current_grant(gcp, db.account.as_deref(), &db.project, pam, now).map_err(|error| sentence(&error))? {
+    match current_grant(gcp, db.account.as_deref(), &db.project, pam, now).map_err(|error| grant_failure(&error))? {
         Some(current) => Ok(GrantState::Held { recent: current.recent, until: current.until }),
         None => Ok(GrantState::Needed),
     }
@@ -124,12 +125,12 @@ struct Attempts<'a> {
 impl Attempts<'_> {
     /// Runs `call` until it works. A 403 right after a grant is tried again every `grace.step` until `grace.span` has passed since the
     /// first refusal: Google may not have applied the grant yet. Any other failure (a 401 says the token is no good, which no grant
-    /// explains), a 403 long after the grant and a 403 that outlasts the grace end it with their sentence; a cancelled connection ends it
-    /// with `grants::CANCELLED`.
-    fn run<T>(&mut self, mut call: impl FnMut() -> Result<T, GcpError>) -> Result<T, String> {
+    /// explains), a 403 long after the grant and a 403 that outlasts the grace end it with their sentence, of the kind `admin_failure`
+    /// gives it; a cancelled connection ends it with `grants::CANCELLED`.
+    fn run<T>(&mut self, mut call: impl FnMut() -> Result<T, GcpError>) -> Result<T, NotReady> {
         loop {
             if self.cancel.is_cancelled() {
-                return Err(grants::CANCELLED.to_string());
+                return Err(NotReady::Failed(grants::CANCELLED.to_string()));
             }
             let error = match call() {
                 Ok(value) => return Ok(value),
@@ -138,12 +139,15 @@ impl Attempts<'_> {
             let too_soon = self.recent_grant && matches!(error, GcpError::Denied { status: 403, .. });
             if too_soon && self.refused_since.get_or_insert_with(Instant::now).elapsed() < self.grace.span {
                 if !pause(self.cancel, self.grace.step) {
-                    return Err(grants::CANCELLED.to_string());
+                    return Err(NotReady::Failed(grants::CANCELLED.to_string()));
                 }
                 continue;
             }
-            let text = sentence(&error);
-            return Err(if too_soon { format!("{}; the grant became active moments ago, and Google may not have applied it yet.", text.trim_end_matches('.')) } else { text });
+            if too_soon {
+                let text = sentence(&error);
+                return Err(NotReady::Refused(format!("{}; the grant became active moments ago, and Google may not have applied it yet.", text.trim_end_matches('.'))));
+            }
+            return Err(admin_failure(&error));
         }
     }
 }
@@ -153,21 +157,21 @@ impl Attempts<'_> {
 /// that is not PostgreSQL, one in another region than the database names (as Google's Go connector checks it; an answer that says no
 /// region is not refused for it) and one without a public address (Lunport connects over the public one) are refused before a certificate
 /// is asked for. Blocks on the Cloud SQL Admin API, on making the key and while it waits to try again, so it runs on a blocking thread.
-pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_grant: bool, grace: Grace, cancel: &CancelToken) -> Result<Material, String> {
+pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_grant: bool, grace: Grace, cancel: &CancelToken) -> Result<Material, NotReady> {
     let at = InstanceRef { project: db.project.clone(), region: db.region.clone(), instance: db.instance.clone() };
     let account = db.account.as_deref();
     let mut attempts = Attempts { recent_grant, grace, refused_since: None, cancel };
     let settings = attempts.run(|| sql.connect_settings(account, &at))?;
     if !settings.database_version.starts_with(POSTGRES_VERSION_PREFIX) {
-        return Err(format!("{} is not a PostgreSQL instance.", db.connection_name()));
+        return Err(NotReady::Failed(format!("{} is not a PostgreSQL instance.", db.connection_name())));
     }
     if !settings.region.is_empty() && settings.region != db.region {
-        return Err(format!("{} is in {}, not {}.", db.connection_name(), settings.region, db.region));
+        return Err(NotReady::Failed(format!("{} is in {}, not {}.", db.connection_name(), settings.region, db.region)));
     }
     let Some(ip) = settings.public_ip else {
-        return Err(format!("{} has no public IP. Lunport connects over public IP in this release.", db.connection_name()));
+        return Err(NotReady::Failed(format!("{} has no public IP. Lunport connects over public IP in this release.", db.connection_name())));
     };
-    let key = EphemeralKey::generate()?;
+    let key = EphemeralKey::generate().map_err(NotReady::Failed)?;
     let cert = attempts.run(|| sql.ephemeral_cert(account, &at, &key))?;
     let user = iam_user(&cert.account);
     Ok(Material { settings, ip, cert, key, iam_user: user })
@@ -182,6 +186,26 @@ pub(crate) fn iam_user(account: &str) -> String {
 /// `gcloud auth login` to run, as they do for a host.
 pub(crate) fn sentence(error: &GcpError) -> String {
     error.to_string()
+}
+
+/// How a failed call to the Cloud SQL Admin API refuses a connection, with its sentence: the Google sign-in and the account's permission
+/// (a `401`, a `403`) are a refused sign-in; whatever else kept the call from working (the network, the API not enabled in the project,
+/// no such instance, an answer that could not be read) is a failure to connect.
+fn admin_failure(error: &GcpError) -> NotReady {
+    match error {
+        GcpError::Auth(_) | GcpError::Denied { .. } => NotReady::Refused(sentence(error)),
+        GcpError::Http { .. } | GcpError::Refused { .. } | GcpError::Network(_) | GcpError::Malformed(_) => NotReady::Failed(sentence(error)),
+    }
+}
+
+/// How a failed look at the grant refuses a connection, with its sentence: the network, an unexpected status and an answer that could not
+/// be read are a failure to connect; the Google sign-in, the account's permission and Privileged Access Manager's own refusal refuse the
+/// grant.
+fn grant_failure(error: &GcpError) -> NotReady {
+    match error {
+        GcpError::Network(_) | GcpError::Http { .. } | GcpError::Malformed(_) => NotReady::Failed(sentence(error)),
+        GcpError::Auth(_) | GcpError::Denied { .. } | GcpError::Refused { .. } => NotReady::Refused(sentence(error)),
+    }
 }
 
 #[cfg(test)]
@@ -710,7 +734,7 @@ mod tests {
     fn a_denied_certificate_long_after_the_grant_is_reported_at_once() {
         let admin = Admin::answering(vec![Ok(settings())], vec![Err(denied()), Ok(certificate(ACCOUNT))]);
         let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
-        assert_eq!(error, "frank@example.com may not call the Cloud SQL Admin API (HTTP 403).");
+        assert_eq!(error, NotReady::Refused("frank@example.com may not call the Cloud SQL Admin API (HTTP 403).".into()), "an account that may not connect");
         assert_eq!(admin.certificates_asked(), 1, "not asked again");
     }
 
@@ -721,7 +745,7 @@ mod tests {
         let started = Instant::now();
         let error = fetch_material(&admin, &guarded(), true, grace, &CancelToken::default()).unwrap_err();
         assert!(started.elapsed() >= grace.span, "tried for the whole grace");
-        assert_eq!(error, "frank@example.com may not call the Cloud SQL Admin API (HTTP 403); the grant became active moments ago, and Google may not have applied it yet.");
+        assert_eq!(error, NotReady::Refused("frank@example.com may not call the Cloud SQL Admin API (HTTP 403); the grant became active moments ago, and Google may not have applied it yet.".into()));
         assert!(admin.certificates_asked() > 1, "and tried again meanwhile");
     }
 
@@ -730,7 +754,7 @@ mod tests {
     #[test]
     fn a_401_right_after_a_grant_is_reported_at_once() {
         let unauthorized = || GcpError::Denied { api: "Cloud SQL Admin", status: 401, account: ACCOUNT.into() };
-        let sentence_of_it = "frank@example.com may not call the Cloud SQL Admin API (HTTP 401).";
+        let sentence_of_it = NotReady::Refused("frank@example.com may not call the Cloud SQL Admin API (HTTP 401).".into());
         let admin = Admin::answering(vec![Ok(settings())], vec![Err(unauthorized()), Ok(certificate(ACCOUNT))]);
         assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), sentence_of_it);
         assert_eq!(admin.certificates_asked(), 1, "the certificate is not asked for again");
@@ -741,9 +765,11 @@ mod tests {
 
     #[test]
     fn only_a_403_is_retried_even_right_after_a_grant() {
+        // The network, a server error and the API's own refusal (an instance it does not have, the API not enabled) are failures to
+        // connect, not refused sign-ins.
         for error in [GcpError::Network("timed out".into()), GcpError::Http { api: "Cloud SQL Admin", status: 500 }, GcpError::Refused { api: "Cloud SQL Admin", message: "Cloud SQL has no instance acme-prod-123456:asia-east1:orders-pg.".into() }] {
             let admin = Admin::answering(vec![Ok(settings())], vec![Err(error.clone())]);
-            assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), error.to_string());
+            assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), NotReady::Failed(error.to_string()));
             assert_eq!(admin.certificates_asked(), 1, "{error}");
         }
     }
@@ -753,7 +779,7 @@ mod tests {
         let private = ConnectSettings { public_ip: None, ..settings() };
         let admin = Admin::answering(vec![Ok(private)], vec![Ok(certificate(ACCOUNT))]);
         let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
-        assert_eq!(error, "acme-prod-123456:asia-east1:orders-pg has no public IP. Lunport connects over public IP in this release.");
+        assert_eq!(error, NotReady::Failed("acme-prod-123456:asia-east1:orders-pg has no public IP. Lunport connects over public IP in this release.".into()));
         assert_eq!(admin.certificates_asked(), 0, "no certificate is asked for an instance that cannot be dialled");
     }
 
@@ -762,7 +788,7 @@ mod tests {
         for version in ["MYSQL_8_0", "SQLSERVER_2022_STANDARD", "POSTGRES", ""] {
             let admin = Admin::answering(vec![Ok(ConnectSettings { database_version: version.into(), ..settings() })], vec![Ok(certificate(ACCOUNT))]);
             let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
-            assert_eq!(error, "acme-prod-123456:asia-east1:orders-pg is not a PostgreSQL instance.", "{version:?}");
+            assert_eq!(error, NotReady::Failed("acme-prod-123456:asia-east1:orders-pg is not a PostgreSQL instance.".into()), "{version:?}");
             assert_eq!(admin.certificates_asked(), 0, "no certificate is asked for an instance Lunport does not connect to");
         }
     }
@@ -771,7 +797,7 @@ mod tests {
     fn an_instance_in_another_region_than_the_saved_one_is_refused_with_a_sentence() {
         let admin = Admin::answering(vec![Ok(ConnectSettings { region: "europe-west1".into(), ..settings() })], vec![Ok(certificate(ACCOUNT))]);
         let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
-        assert_eq!(error, "acme-prod-123456:asia-east1:orders-pg is in europe-west1, not asia-east1.");
+        assert_eq!(error, NotReady::Failed("acme-prod-123456:asia-east1:orders-pg is in europe-west1, not asia-east1.".into()));
         assert_eq!(admin.certificates_asked(), 0);
         // An answer that says no region is not refused for it: nothing tells where the instance is.
         let admin = Admin::answering(vec![Ok(ConnectSettings { region: String::new(), ..settings() })], vec![Ok(certificate(ACCOUNT))]);
@@ -783,7 +809,7 @@ mod tests {
         let admin = Admin::answering(vec![Ok(settings())], vec![Err(denied())]);
         let cancel = CancelToken::default();
         cancel.cancel();
-        assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &cancel).unwrap_err(), CANCELLED);
+        assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &cancel).unwrap_err(), NotReady::Failed(CANCELLED.into()));
         assert!(admin.calls().is_empty());
         // Cancelled while it is waiting to try again.
         let cancel = CancelToken::default();
@@ -798,7 +824,7 @@ mod tests {
             fetching.join().unwrap()
         })
         .unwrap_err();
-        assert_eq!(error, CANCELLED);
+        assert_eq!(error, NotReady::Failed(CANCELLED.into()));
     }
 
     #[test]
@@ -806,17 +832,25 @@ mod tests {
         let sentence_of_it = "Google sign-in for frank@example.com has expired or was revoked; run `gcloud auth login frank@example.com` and connect again.";
         assert_eq!(sentence(&expired()), sentence_of_it);
         assert!(sentence(&expired()).contains("gcloud auth login frank@example.com"));
-        // Every call that can meet the expired sign-in says so.
-        assert_eq!(grant_state(&Google::default().broken_by(expired()), &guarded(), now()), Err(sentence_of_it.to_string()));
+        // Every call that can meet the expired sign-in says so, and refuses the sign-in.
+        assert_eq!(grant_state(&Google::default().broken_by(expired()), &guarded(), now()), Err(NotReady::Refused(sentence_of_it.to_string())));
         let (gates, memory) = (GrantGates::default(), Memory::default());
         let owner = FakeOwner::typing(&[ANSWER]);
         assert_eq!(obtain(&gates, &Google::default().broken_by(expired()), &owner, &state(), &memory), Err(sentence_of_it.to_string()));
         let admin = Admin::answering(vec![Err(expired())], vec![Ok(certificate(ACCOUNT))]);
-        assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), sentence_of_it);
+        assert_eq!(fetch_material(&admin, &guarded(), true, fast(), &CancelToken::default()).unwrap_err(), NotReady::Refused(sentence_of_it.to_string()));
         assert_eq!(admin.calls().len(), 1, "a sign-in that has to be redone is not retried");
         // Any other error keeps its own words.
         assert_eq!(sentence(&denied()), denied().to_string());
         assert_eq!(sentence(&GcpError::Network("timed out".into())), "Google's API could not be reached: timed out.");
+    }
+
+    #[test]
+    fn a_grant_that_cannot_be_checked_for_the_network_is_a_failure_to_connect_and_one_pam_refuses_is_refused() {
+        let unreachable = Google::default().broken_by(GcpError::Network("timed out".into()));
+        assert_eq!(grant_state(&unreachable, &guarded(), now()), Err(NotReady::Failed("Google's API could not be reached: timed out.".into())));
+        let denied = GcpError::Denied { api: "Privileged Access Manager", status: 403, account: ACCOUNT.into() };
+        assert_eq!(grant_state(&Google::default().broken_by(denied.clone()), &guarded(), now()), Err(NotReady::Refused(denied.to_string())));
     }
 
     #[test]

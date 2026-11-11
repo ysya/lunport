@@ -8,7 +8,7 @@ use crate::gcp::pam::{duration_text, rfc3339, Grant};
 use crate::gcp::rest::GcpError;
 use crate::session::auth::Reply;
 use crate::session::database_ports::tests::{cancel_request, fake_cloud_sql, orders, running, t0, wait_until, Answer, App, Clock, CONNECTION, IAM_USER, ID, LIMIT, PASSWORD};
-use crate::session::database_ports::{DatabasePorts, Prepared};
+use crate::session::database_ports::{DatabasePorts, NotReady, Prepared};
 use crate::session::databases::DatabasePhase;
 use crate::session::protocol::QuestionKind;
 use crate::session::testing::FakeOwner;
@@ -111,6 +111,8 @@ struct Admin {
     certificates: AtomicUsize,
     holding: AtomicBool,
     released: AtomicBool,
+    /// The connect settings fail with this.
+    failing: Mutex<Option<GcpError>>,
 }
 
 impl Admin {
@@ -126,6 +128,9 @@ impl Admin {
 impl SqlAdmin for Admin {
     fn connect_settings(&self, _: Option<&str>, at: &InstanceRef) -> Result<ConnectSettings, GcpError> {
         self.settings.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.failing.lock().unwrap().clone() {
+            return Err(error);
+        }
         Ok(ConnectSettings {
             public_ip: Some(PUBLIC_IP.parse().unwrap()),
             server_ca_pem: self.authority().pem(),
@@ -266,7 +271,7 @@ fn guarded() -> SavedDatabase {
 }
 
 /// The database user a connection got ready as, or why it could not.
-fn user(prepared: Result<Prepared, String>) -> Result<String, String> {
+fn user(prepared: Result<Prepared, NotReady>) -> Result<String, NotReady> {
     prepared.map(|prepared| prepared.iam_user)
 }
 
@@ -438,6 +443,28 @@ fn a_failed_dial_is_followed_by_a_new_certificate() {
     App::signed_in(port).round_trip(b"select 1");
     assert_eq!(cloud.certificates(), 2);
     assert_eq!(cloud.dialled.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn an_app_is_told_a_connection_google_could_not_get_ready_from_a_refused_sign_in() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    let port = running(&ports, &orders());
+    let refused = |error: GcpError| {
+        *cloud.admin.failing.lock().unwrap() = Some(error);
+        let mut app = App::connect(port);
+        app.startup(&[("user", "frank"), ("database", "orders")]);
+        app.asked_for_password();
+        app.password(PASSWORD);
+        app.error()
+    };
+    // No such instance: a connection failure.
+    let unknown = GcpError::Refused { api: "Cloud SQL Admin", message: format!("Cloud SQL has no instance {CONNECTION}.") };
+    assert_eq!(refused(unknown), ("08006".to_string(), format!("Cloud SQL Admin refused the request: Cloud SQL has no instance {CONNECTION}.")));
+    // An account that may not connect: a refused sign-in.
+    let denied = GcpError::Denied { api: "Cloud SQL Admin", status: 403, account: IAM_USER.into() };
+    assert_eq!(refused(denied), ("28000".to_string(), "frank@example.com may not call the Cloud SQL Admin API (HTTP 403).".to_string()));
+    assert!(cloud.dialled.lock().unwrap().is_empty(), "Cloud SQL was not dialled");
 }
 
 #[test]

@@ -145,9 +145,9 @@ pub type BoxStream = Box<dyn Duplex>;
 /// Where a port's connections reach Cloud SQL from.
 pub(crate) trait Upstream: Send + Sync {
     /// Gets what a connection to `db` needs (the grant it asks for, the connection material) and answers the database user the connection
-    /// signs in as with the material it got; an error is the sentence the app is refused with. It blocks (Google's APIs, a question that
-    /// waits for the person), so the port calls it on a blocking thread. `cancel` is set when the port stops.
-    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, String>;
+    /// signs in as with the material it got; an error is what the app is refused with. It blocks (Google's APIs, a question that waits for
+    /// the person), so the port calls it on a blocking thread. `cancel` is set when the port stops.
+    fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, NotReady>;
     /// Dials the instance of the database `db_id` with the material numbered `material`, the one `prepare` got for the connection, and
     /// with none when that material is gone: the user it signs in as goes with that material's certificate. A cancel request, which signs
     /// in as nobody, passes `None` and dials with the material the database's connections have now.
@@ -158,6 +158,35 @@ pub(crate) trait Upstream: Send + Sync {
     fn forget(&self, db_id: &str, material: u64);
     /// The database `db_id` stopped, or was deleted: everything kept for it goes, its certificate and the key that was made for it too.
     fn release(&self, db_id: &str);
+}
+
+/// Why a connection could not be got ready (`Upstream::prepare`): the sentence the app is refused with, under the SQLSTATE of its kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NotReady {
+    /// The sign-in or the grant was refused: a Google sign-in that expired, an account that may not connect, a grant that is missing or
+    /// was declined. The app is told `28000` (invalid_authorization_specification).
+    Refused(String),
+    /// Google or the instance could not be reached or used: the network, the Cloud SQL Admin API (not enabled, no such instance, an
+    /// answer it could not read), an instance Lunport does not connect to (no public IP, not PostgreSQL, in another region). The app is
+    /// told `08006` (connection_failure).
+    Failed(String),
+}
+
+impl NotReady {
+    /// The SQLSTATE the app is refused with.
+    pub(crate) fn sqlstate(&self) -> &'static str {
+        match self {
+            NotReady::Refused(_) => "28000",
+            NotReady::Failed(_) => "08006",
+        }
+    }
+
+    /// The sentence the app is refused with.
+    pub(crate) fn sentence(&self) -> &str {
+        match self {
+            NotReady::Refused(sentence) | NotReady::Failed(sentence) => sentence,
+        }
+    }
 }
 
 /// What a connection to a database got ready with.
@@ -995,8 +1024,8 @@ async fn serve_app(port: Arc<Port>, mut app: TcpStream, upstream: Arc<dyn Upstre
     let ready = tokio::task::spawn_blocking(move || preparing.prepare(&db, &quit).map(|prepared| (prepared, reading.locks_as_prod())));
     let (prepared, prod) = match ready.await {
         Ok(Ok(ready)) => ready,
-        Ok(Err(sentence)) => return refuse(&mut app, "28000", &cut(&sentence)).await,
-        Err(_) => return refuse(&mut app, "28000", "Lunport could not get the connection ready.").await,
+        Ok(Err(not_ready)) => return refuse(&mut app, not_ready.sqlstate(), &cut(not_ready.sentence())).await,
+        Err(_) => return refuse(&mut app, "08006", "Lunport could not get the connection ready.").await,
     };
     // Whether the session carries the lock is decided here, and the port follows the connection from here on.
     let registered = port.register(prod);
