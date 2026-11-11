@@ -386,12 +386,9 @@ pub(crate) fn publish_local(state: &SyncStateV3, now: u64) -> Result<Option<Sync
     Ok((next != *state).then_some(next))
 }
 
-/// Leaving a library for another keeps every database of the library and this device's own as this device's own records, all of them
-/// (a removed one does not come back). A first publication, an adoption and a replacement keep them the same way (`initial_projection`),
-/// for the publish step to move into the new library. A database reached through a host follows it: when an adoption or a replacement
-/// gives the host a new id (`host_ids`: old → new), `via_host` takes it. One whose host the map gives no new id keeps the route it has,
-/// as without a map (a first publication keeps every host's id). The version is raised only when one stays, to what they need.
-pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: Option<&BTreeMap<String, String>>, now: u64) -> Result<(), String> {
+/// The databases leaving keeps of `before`, by record id: this device's own and the library's rows, the library's row winning, and none
+/// the library removed.
+fn kept_on_leave(before: &SyncStateV3) -> BTreeMap<String, SavedDatabase> {
     let mut kept = BTreeMap::new();
     for row in before.local.databases.values().chain(library_rows(before)) {
         if row.record.deleted {
@@ -400,6 +397,23 @@ pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids:
             kept.insert(row.record.id.clone(), database);
         }
     }
+    kept
+}
+
+/// The hosts that the databases leaving keeps are reached through (`route_host`), this device's own and the library's rows alike: an
+/// adoption or a replacement follows them to the ids it gives them (`adoption::merge::route_host_ids`), as it follows the hosts that
+/// routes and grant memory name.
+pub(crate) fn route_hosts(state: &SyncStateV3) -> BTreeSet<String> {
+    kept_on_leave(state).into_values().filter_map(|database| database.route_host().map(str::to_owned)).collect()
+}
+
+/// Leaving a library for another keeps every database of the library and this device's own as this device's own records, all of them
+/// (a removed one does not come back). A first publication, an adoption and a replacement keep them the same way (`initial_projection`),
+/// for the publish step to move into the new library. A database reached through a host follows it: when an adoption or a replacement
+/// gives the host a new id (`host_ids`: old → new), `via_host` takes it. One whose host the map gives no new id keeps the route it has,
+/// as without a map (a first publication keeps every host's id). The version is raised only when one stays, to what they need.
+pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: Option<&BTreeMap<String, String>>, now: u64) -> Result<(), String> {
+    let kept = kept_on_leave(before);
     next.local.databases.clear();
     for (id, mut database) in kept {
         if let Some(moved) = database.via_host.as_ref().and_then(|host| host_ids?.get(host)) {

@@ -448,7 +448,8 @@ pub(super) fn owned_collections(
     Ok(owned)
 }
 /// The ids this merge gives the hosts that routes and grant memory name on the source (old → new): this device's own routes and, in a
-/// replacement, the replaced library's too (`transports::view`). They follow their hosts as this device's own
+/// replacement, the replaced library's too (`transports::view`), and the hosts its saved databases are reached through, this device's
+/// own and the library's (`databases::route_hosts`). They follow their hosts as this device's own
 /// until the publish step moves them into the library. Hosts are read from the rows `history` rewrites, not from the
 /// source's own tables, so a route lands on exactly the id the merge writes for its host.
 pub(super) fn route_host_ids(
@@ -463,8 +464,8 @@ pub(super) fn route_host_ids(
 }
 /// `route_host_ids` for `source` and the rows `history` rewrites (`original`). The merge writes those rows under their new ids in
 /// order, so the last row of a host identity is what the merged library holds for it. A host is followed when exactly one of its
-/// identities ends live there: a host deleted there does not survive the merge, and an id live in two scopes names no one host. What
-/// names no followed host goes.
+/// identities ends live there: a host deleted there does not survive the merge, and an id live in two scopes names no one host. A route
+/// or grant memory that names no followed host goes; a database keeps the route it has (`databases::preserve_on_leave`).
 pub(super) fn followed_host_ids(
     source: &SyncStateV3,
     original: &[(Identity, Data)],
@@ -487,6 +488,7 @@ pub(super) fn followed_host_ids(
         .into_iter()
         .map(|route| route.host_id)
         .chain(source.local.transport_grants.keys().cloned())
+        .chain(crate::sync::databases::route_hosts(source))
         .collect();
     let mut host_ids = BTreeMap::new();
     for id in followed {

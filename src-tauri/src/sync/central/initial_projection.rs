@@ -24,7 +24,7 @@ pub(in crate::sync) struct Candidate {
     manifest: String,
     observed: u64,
     reconciliation: bool,
-    /// The ids an adoption or a replacement gives the hosts that routes and grant memory name (old → new,
+    /// The ids an adoption or a replacement gives the hosts that routes, grant memory and saved databases name (old → new,
     /// `adoption::merge::route_host_ids`); `None` for a first publication, which keeps every host's id.
     host_ids: Option<BTreeMap<String, String>>,
 }
@@ -248,7 +248,8 @@ impl Candidate {
             host_ids: None,
         })
     }
-    /// `host_ids`: the ids the merge gives the hosts that routes and grant memory name (`adoption::merge::route_host_ids`).
+    /// `host_ids`: the ids the merge gives the hosts that routes, grant memory and saved databases name
+    /// (`adoption::merge::route_host_ids`).
     pub(super) fn adopt(
         source: &SyncStateV3,
         read: &super::active_read::VerifiedLibrary,
