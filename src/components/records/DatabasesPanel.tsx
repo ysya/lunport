@@ -124,8 +124,7 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
 
 /**
  * The question Stop asks before it stops a database that has connections open through its port, which close with it: open while `row` is
- * the database asked about. Cancel, Escape and a click outside close it, except while a change is under way. No hooks: exported for the
- * tests.
+ * the database asked about. Cancel and Escape close it, except while a change is under way. No hooks: exported for the tests.
  */
 export function StopDatabaseDialog({ row, busy, onCancel, onStop }: { row: DatabaseView | null; busy: boolean; onCancel: () => void; onStop: (row: DatabaseView) => void }) {
   return <AlertDialog open={row !== null} onOpenChange={(open) => { if (!open && !busy) onCancel(); }}><AlertDialogContent>
