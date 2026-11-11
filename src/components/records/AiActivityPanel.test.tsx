@@ -40,9 +40,12 @@ function render(entries: McpAuditEntry[], props: Partial<ViewProps> = {}) {
 }
 /** The text a person reads: no tags, entities decoded. */
 const text = (html: string) => html.replace(/<[^>]*>/g, "").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-/** The opening tag of the button whose text starts with `label`. */
+/** The markup of the button whose text is `label`, from its opening tag to the label. Throws when the page has no such button, so a
+ *  check that a button is not disabled cannot pass because the button is missing. */
 const buttonBefore = (html: string, label: string) => {
-  const before = html.slice(0, html.indexOf(`${label}</button>`));
+  const at = html.indexOf(`${label}</button>`);
+  if (at < 0) throw Error(`missing ${label}`);
+  const before = html.slice(0, at);
   return before.slice(before.lastIndexOf("<button"));
 };
 const expandedAll = (entries: McpAuditEntry[]) => new Set(auditRows(entries).map(row => row.key));
