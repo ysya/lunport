@@ -41,8 +41,9 @@ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 /// How long a connection may stay idle before the system probes it with TCP keepalive, as Google's Go connector sets it, and how long it
 /// waits between probes where the time between them can be set.
 const KEEPALIVE: Duration = Duration::from_secs(30);
-/// The server name for an instance without a usable DNS name. The `.invalid` top-level domain never names a host, so no certificate is
-/// made out to it and only the common name can let a certificate through.
+/// What the server certificate of an instance without a usable DNS name is checked against. The `.invalid` top-level domain never names
+/// a host, so no certificate is made out to it and only the common name can let a certificate through. It is never sent: such a connection
+/// sends no server name at all (`client_config`).
 const NO_DNS_NAME: &str = "cloudsql.invalid";
 const UNREADABLE_SERVER_CA: &str = "The server certificate authority from Cloud SQL could not be read.";
 /// The parser's own words are never repeated for the client certificate: they could quote it, and it carries the access token.
@@ -60,7 +61,8 @@ pub struct ServerIdentity {
 /// The TLS configuration for a connection to the instance: TLS 1.3 only, with the aws-lc-rs provider named (this build has both of
 /// rustls's providers, so rustls cannot choose one by itself), `cert` and `key` as the client's identity, and the server checked against
 /// `settings.server_ca_pem` alone. A session is never resumed: the access token rides in the client certificate, so every connection
-/// shows the certificate it was given rather than one an earlier session showed.
+/// shows the certificate it was given rather than one an earlier session showed. An instance without a usable DNS name is sent no server
+/// name, as the Go connector sends it none.
 pub fn client_config(settings: &ConnectSettings, cert: &EphemeralCert, key: &EphemeralKey, identity: &ServerIdentity) -> Result<Arc<ClientConfig>, String> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let verifier = InstanceVerifier::new(&settings.server_ca_pem, identity, &provider)?;
@@ -72,14 +74,19 @@ pub fn client_config(settings: &ConnectSettings, cert: &EphemeralCert, key: &Eph
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_client_cert_resolver(Arc::new(client_cert));
     config.resumption = Resumption::disabled();
+    config.enable_sni = dns_name(identity).is_some();
     Ok(Arc::new(config))
 }
 
 /// The name the server certificate must be made out to: the instance's DNS name without its trailing dot, or `cloudsql.invalid` when the
 /// instance has none or it is not a valid DNS name.
 pub fn server_name(identity: &ServerIdentity) -> ServerName<'static> {
-    let dns_name = identity.dns_name.as_deref().map(|name| name.strip_suffix('.').unwrap_or(name)).and_then(|name| DnsName::try_from(name.to_string()).ok());
-    ServerName::DnsName(dns_name.unwrap_or_else(|| DnsName::try_from(NO_DNS_NAME).expect("cloudsql.invalid is a valid DNS name")))
+    ServerName::DnsName(dns_name(identity).unwrap_or_else(|| DnsName::try_from(NO_DNS_NAME).expect("cloudsql.invalid is a valid DNS name")))
+}
+
+/// The instance's DNS name without its trailing dot, when it has one that is a valid DNS name.
+fn dns_name(identity: &ServerIdentity) -> Option<DnsName<'static>> {
+    identity.dns_name.as_deref().map(|name| name.strip_suffix('.').unwrap_or(name)).and_then(|name| DnsName::try_from(name.to_string()).ok())
 }
 
 /// Opens the TLS connection to the instance at `ip`: TCP to port 3307 within 10 seconds, then the handshake within 10 more. In TLS 1.3 the
@@ -324,6 +331,8 @@ mod tests {
         client_chain: Vec<CertificateDer<'static>>,
         version: Option<ProtocolVersion>,
         alpn: Option<Vec<u8>>,
+        /// The server name the client sent (SNI), if it sent one.
+        server_name: Option<String>,
     }
 
     /// A TLS server on 127.0.0.1 that speaks `versions`, presents `cert` and signs with its `key`, and requires a client certificate from
@@ -370,6 +379,7 @@ mod tests {
                     client_chain: connection.peer_certificates().map(<[_]>::to_vec).unwrap_or_default(),
                     version: connection.protocol_version(),
                     alpn: connection.alpn_protocol().map(<[u8]>::to_vec),
+                    server_name: connection.server_name().map(str::to_string),
                 })
             };
             let _ = report.send(outcome.await);
@@ -416,6 +426,25 @@ mod tests {
         let mut stream = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(None)).await.expect("the common name is the instance's");
         assert_eq!(&round_trip(&mut stream).await, b"pong");
         assert!(seen.await.unwrap().is_ok(), "the server took the connection");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_server_name_is_sent_only_for_a_dns_name() {
+        let (server_ca, client_ca) = (authority("Server CA"), authority("Client CA"));
+        let sent = |seen: io::Result<Seen>| seen.expect("the server took the connection").server_name;
+        // The instance's DNS name is the server name, as the certificate is checked against it.
+        let (address, seen) = serve(server_cert(&server_ca, Some(DNS_NAME), "server"), &client_ca, &[&rustls::version::TLS13]).await;
+        let mut stream = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(Some(DNS_NAME))).await.expect("the certificate names the DNS name");
+        assert_eq!(&round_trip(&mut stream).await, b"pong");
+        assert_eq!(sent(seen.await.unwrap()).as_deref(), Some(DNS_NAME));
+        // Without a usable one, `cloudsql.invalid` is only what the certificate is checked against: no server name is sent, as the Go
+        // connector sends none.
+        for unusable in [None, Some("not a name")] {
+            let (address, seen) = serve(server_cert(&server_ca, None, INSTANCE_CN), &client_ca, &[&rustls::version::TLS13]).await;
+            let mut stream = connect(address, server_ca.pem(), &ephemeral_cert(&client_ca), &identity(unusable)).await.expect("the common name is the instance's");
+            assert_eq!(&round_trip(&mut stream).await, b"pong");
+            assert_eq!(sent(seen.await.unwrap()), None, "{unusable:?}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
