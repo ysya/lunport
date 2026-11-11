@@ -11,7 +11,7 @@ use crate::session::database_ports::tests::{cancel_request, fake_cloud_sql, orde
 use crate::session::database_ports::{DatabasePorts, NotReady, Prepared};
 use crate::session::databases::{DatabasePhase, DatabaseStep};
 use crate::session::protocol::{AiAsker, QuestionKind};
-use crate::session::testing::FakeOwner;
+use crate::session::testing::{FakeOwner, Gate};
 use crate::ssh::forward::{ForwardKind, ForwardSpec, ForwardStatus, Forwarder};
 use crate::ssh::{DisconnectReason, ExecResult, Pty, Session, SessionError, ShellChannel};
 use crate::sync::databases::tests::{state, ROUTE_HOST};
@@ -284,6 +284,8 @@ struct FakeLink {
     opened: Mutex<Vec<String>>,
     /// The AI client each open was asked in the name of, in order (`None`: the person's).
     askers: Mutex<Vec<Option<AiAsker>>>,
+    /// A gate the next open waits at before it answers, until the test lets it go.
+    holding: Mutex<Option<Arc<Gate>>>,
     failures: Mutex<VecDeque<String>>,
     /// Whether an open cancels the connection it is for before it answers, as a port that stops meanwhile does.
     cancels: AtomicBool,
@@ -300,6 +302,7 @@ impl FakeLink {
         FakeLink {
             opened: Mutex::default(),
             askers: Mutex::default(),
+            holding: Mutex::default(),
             failures: Mutex::default(),
             cancels: AtomicBool::new(false),
             asks: Mutex::default(),
@@ -323,6 +326,10 @@ impl HostLink for FakeLink {
     fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<Box<dyn Session>, String> {
         self.opened.lock().unwrap().push(host_id.to_string());
         self.askers.lock().unwrap().push(ai.cloned());
+        let holding = self.holding.lock().unwrap().take();
+        if let Some(gate) = holding {
+            gate.pass();
+        }
         let asks = *self.asks.lock().unwrap();
         if let Some(kind) = asks {
             owner.ask(kind, "web-1 asks", false, None);
@@ -778,6 +785,37 @@ fn a_failed_open_names_the_host() {
     let error = user(upstream.prepare(&routed(), &CancelToken::default())).unwrap_err();
     assert_eq!(error, NotReady::Failed("Could not connect through web-1: Permission denied (publickey).".into()));
     assert_eq!(cloud.certificates(), 0, "no certificate is fetched for a connection that cannot get through");
+}
+
+#[test]
+fn connections_that_waited_behind_a_failed_open_take_its_failure() {
+    let cloud = Cloud::new(FakeOwner::default());
+    // The first open holds until the test lets it go, and then fails.
+    let gate = Gate::closed();
+    *cloud.link.holding.lock().unwrap() = Some(Arc::clone(&gate));
+    cloud.link.failures.lock().unwrap().push_back("Permission denied (publickey).".into());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let queued = || locked(&upstream.routes).get(ID).map_or(0, |route| route.queued.load(Ordering::SeqCst));
+    let (both_queued, first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| user(upstream.prepare(&routed(), &cancel)));
+        let second = scope.spawn(|| user(upstream.prepare(&routed(), &cancel)));
+        // One of them opens and holds there; the other queues behind it.
+        let end = Instant::now() + Duration::from_secs(10);
+        while !(gate.entered() == 1 && queued() == 2) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let both_queued = gate.entered() == 1 && queued() == 2;
+        gate.release();
+        (both_queued, first.join().unwrap(), second.join().unwrap())
+    });
+    assert!(both_queued, "both connections came to the path while the first open held");
+    let refused = NotReady::Failed("Could not connect through web-1: Permission denied (publickey).".into());
+    assert_eq!((first, second), (Err(refused.clone()), Err(refused)), "the same sentence for both");
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string()], "one open for both");
+    // A connection that comes after both were refused opens again.
+    assert_eq!(user(upstream.prepare(&routed(), &cancel)), Ok(IAM_USER.to_string()));
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string(); 2]);
 }
 
 #[test]

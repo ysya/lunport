@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::future::BoxFuture;
@@ -95,11 +95,24 @@ struct Route {
     fetching: Mutex<()>,
     kept: Mutex<Kept>,
     /// Held by a connection through a host from the moment it looks at the path until its forward is had: connections that start together
-    /// share one session and one forward, and the path a connection got ready on is the one its forward goes on.
-    opening: Mutex<()>,
+    /// share one session and one forward, and the path a connection got ready on is the one its forward goes on. It keeps the last open of
+    /// the path that failed: the connections that waited behind that open take its failure as theirs.
+    opening: Mutex<Option<FailedOpen>>,
+    /// How many opens of the path have ended, counted under `opening` as each ends. A connection reads it before it waits for `opening`, so
+    /// an open that fails with a higher number is one it waited behind.
+    opened: AtomicU64,
     /// The session to the host the database is reached through, with its forward to the instance, while it lives. It is taken out, which
     /// closes it, when the database stops or is saved anew.
     path: Mutex<Option<HostPath>>,
+    /// How many connections read `opened` and came to `opening` (the tests wait for one to queue behind an open).
+    #[cfg(test)]
+    queued: std::sync::atomic::AtomicUsize,
+}
+
+/// An open of a route's path that failed: its number, as `Route::opened` counted it when it ended, and the failure.
+struct FailedOpen {
+    number: u64,
+    failure: NotReady,
 }
 
 /// What was had for a database, kept for its next connections.
@@ -208,7 +221,7 @@ impl CloudSqlUpstream {
         if let Some(route) = routes.get(&db.id).filter(|route| route.database == *db) {
             return Arc::clone(route);
         }
-        let route = Arc::new(Route { database: db.clone(), fetching: Mutex::new(()), kept: Mutex::default(), opening: Mutex::new(()), path: Mutex::new(None) });
+        let route = Arc::new(Route { database: db.clone(), fetching: Mutex::new(()), kept: Mutex::default(), opening: Mutex::new(None), opened: AtomicU64::new(0), path: Mutex::new(None), #[cfg(test)] queued: Default::default() });
         if let Some(before) = routes.insert(db.id.clone(), Arc::clone(&route)) {
             drop(locked(&before.path).take());
         }
@@ -293,18 +306,51 @@ impl CloudSqlUpstream {
         Ok((material.iam_user.clone(), generation, material.ip, other_account))
     }
 
-    /// The alias of `host`, the host `db` is reached through, with `route`'s path to it live: the live one is kept, and a dead one is replaced
-    /// by a session the link opens now (dropping the dead one closes it). The caller holds `route.opening`. It blocks for as long as the
-    /// connect takes, the questions the host's login asks of the person included: they are asked in `ai`'s name when an AI client's request
-    /// starts the database, and `step` is told `DatabaseStep::Grant` while the host's own grant is asked for.
-    fn path(&self, db: &SavedDatabase, route: &Route, host: &str, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<String, NotReady> {
+    /// Makes `route`'s path to `host`, the host `db` is reached through, live, and answers the host's alias together with `route.opening`,
+    /// which the caller holds until its forward is had. The live path is kept, and a dead one is replaced by a session the link opens now
+    /// (dropping the dead one closes it). A connection that waited for `opening` while an open of the path was on its way takes that open's
+    /// failure when it failed, and opens nothing: the person is not asked once more for each connection that waited, and an unreachable
+    /// host does not hold each of them for a connect timeout in turn. One that comes after the failure opens anew. It blocks for as long as
+    /// the connect takes, the questions the host's login asks of the person included: they are asked in `ai`'s name when an AI client's
+    /// request starts the database, and `step` is told `DatabaseStep::Grant` while the host's own grant is asked for.
+    fn path<'r>(
+        &self,
+        db: &SavedDatabase,
+        route: &'r Route,
+        host: &str,
+        cancel: &CancelToken,
+        ai: Option<&AiAsker>,
+        step: &(dyn Fn(DatabaseStep) + Sync),
+    ) -> Result<(MutexGuard<'r, Option<FailedOpen>>, String), NotReady> {
+        // The opens that had ended when this connection came: one that ends after it, failing, is one it waited behind.
+        let seen = route.opened.load(Ordering::SeqCst);
+        #[cfg(test)]
+        route.queued.fetch_add(1, Ordering::SeqCst);
+        let mut opening = locked(&route.opening);
         {
             let mut path = locked(&route.path);
             if let Some(live) = path.as_ref().filter(|path| path.alive()) {
-                return Ok(live.alias().to_string());
+                return Ok((opening, live.alias().to_string()));
             }
             drop(path.take());
         }
+        if let Some(failed) = opening.as_ref().filter(|failed| failed.number > seen) {
+            return Err(failed.failure.clone());
+        }
+        let opened = self.open_path(db, route, host, cancel, ai, step);
+        let number = route.opened.fetch_add(1, Ordering::SeqCst) + 1;
+        match opened {
+            Ok(alias) => Ok((opening, alias)),
+            Err(failure) => {
+                *opening = Some(FailedOpen { number, failure: failure.clone() });
+                Err(failure)
+            }
+        }
+    }
+
+    /// Opens a session to `host` as `route`'s path, as `path` does when none is live, and answers the host's alias. The caller holds
+    /// `route.opening`.
+    fn open_path(&self, db: &SavedDatabase, route: &Route, host: &str, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<String, NotReady> {
         let library = (self.library)().map_err(NotReady::Failed)?;
         let Ok(view) = repo::get_host(&library, host) else {
             return Err(NotReady::Failed(format!(
@@ -357,8 +403,7 @@ impl CloudSqlUpstream {
             let through = match db.route_host() {
                 Some(host) => {
                     step(DatabaseStep::Connect);
-                    let opening = locked(&route.opening);
-                    Some((opening, self.path(db, &route, host, cancel, ai, step)?))
+                    Some(self.path(db, &route, host, cancel, ai, step)?)
                 }
                 None => None,
             };
