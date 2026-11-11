@@ -72,7 +72,7 @@ pub struct LocalState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pam_records: BTreeMap<String, LocalRecord>,
     /// Saved databases kept on this device (`database:` Meta records) while the library does not use central sync; there they are the
-    /// account's rows. Needs `DATABASE_STATE_VERSION`.
+    /// account's rows. Needs `DATABASE_STATE_VERSION`, and `DATABASE_ROUTE_STATE_VERSION` once one is reached through a host.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub databases: BTreeMap<String, LocalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -162,7 +162,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
             .map(DecodedState::V2)
             .map_err(state_decode_error),
         STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
-        | TRANSPORT_STATE_VERSION | TRANSPORT_SYNC_STATE_VERSION | PAM_STATE_VERSION | DATABASE_STATE_VERSION => {
+        | TRANSPORT_STATE_VERSION | TRANSPORT_SYNC_STATE_VERSION | PAM_STATE_VERSION | DATABASE_STATE_VERSION | DATABASE_ROUTE_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -319,6 +319,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             | TRANSPORT_SYNC_STATE_VERSION
             | PAM_STATE_VERSION
             | DATABASE_STATE_VERSION
+            | DATABASE_ROUTE_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -415,7 +416,9 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             return Err(state_invalid("pam", &row.record.id, "invalid access grant metadata"));
         }
     }
-    if !state.local.databases.is_empty() && state.version < crate::sync::databases::STATE_VERSION {
+    // A database reached through a host needs the route version.
+    let local_databases: Vec<_> = state.local.databases.values().filter_map(|row| crate::sync::databases::decode(&row.record)).collect();
+    if !state.local.databases.is_empty() && state.version < crate::sync::databases::version_for(&local_databases) {
         return Err(state_invalid("database", "local", "invalid database state version"));
     }
     for (key, row) in &state.local.databases {
@@ -530,12 +533,13 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                         return Err(state_invalid("pam", "account", "invalid access grant state version"));
                     }
                 }
-                // A library's saved database, tombstones included, needs the version a Lunport that cannot publish it does not open.
+                // A library's saved database, tombstones included, needs the version a Lunport that cannot publish it does not open:
+                // the route version for one reached through a host, which a tombstone is not.
                 RecordKind::Meta if crate::sync::databases::is_id(&record.id) => {
                     if !crate::sync::databases::valid(record) {
                         return Err(state_invalid("database", &record.id, "invalid database metadata"));
                     }
-                    if state.version < crate::sync::databases::STATE_VERSION {
+                    if state.version < crate::sync::databases::version_for(crate::sync::databases::decode(record).as_ref()) {
                         return Err(state_invalid("database", "account", "invalid database state version"));
                     }
                 }

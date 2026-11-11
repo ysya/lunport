@@ -20,7 +20,11 @@ const ACCOUNT: &str = "Enter the Google account as an email address.";
 const DEFAULT_DATABASE: &str = "Enter the database to open, such as postgres.";
 const LOCAL_PORT: &str = "Choose a local port from 1024 to 65535.";
 const IDENTITY: &str = "Invalid database identity.";
+const ROUTE: &str = "Invalid database route.";
 const STALE: &str = "This database changed on another device. Refresh and try again.";
+
+/// The library host that `through_host` databases are reached through.
+pub(crate) const ROUTE_HOST: &str = "0123456789abcdef";
 
 pub(crate) fn state() -> SyncStateV3 {
     serde_json::from_value(json!({"version":4,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap()
@@ -37,11 +41,17 @@ pub(crate) fn database(id: &str) -> SavedDatabase {
         instance: "orders-pg".into(),
         environment: DatabaseEnvironment::Prod,
         network: DatabaseNetwork::Public,
+        via_host: None,
         account: Some("frank@example.com".into()),
         default_database: "postgres".into(),
         pam: None,
         local_port: Some(6543),
     }
+}
+
+/// `database(id)` reached over its private IP, through the library host `ROUTE_HOST`.
+pub(crate) fn through_host(id: &str) -> SavedDatabase {
+    SavedDatabase { network: DatabaseNetwork::Private, via_host: Some(ROUTE_HOST.into()), ..database(id) }
 }
 
 /// `state` with `database` saved on this device alone, as Lunport saved it before its library used central sync, whatever the library
@@ -50,7 +60,7 @@ pub(crate) fn saved_on_this_device(state: &SyncStateV3, database: &SavedDatabase
     let wire = wire_id(&database.id);
     let mut next = state.clone();
     next.local.databases.insert(record_key(RecordKind::Meta, &wire), row_of(state, &wire, Some(payload_of(database)), 1, None, false).unwrap());
-    next.version = next.version.max(STATE_VERSION);
+    next.version = next.version.max(state_version(&next));
     next
 }
 
@@ -60,7 +70,14 @@ fn library_row(state: &mut SyncStateV3, database: &SavedDatabase) {
     let wire = wire_id(&database.id);
     let row = row_of(state, &wire, Some(payload_of(database)), 1, None, false).unwrap();
     state.account.as_mut().unwrap().records.insert(record_key(RecordKind::Meta, &wire), row);
-    state.version = state.version.max(STATE_VERSION);
+    state.version = state.version.max(state_version(state));
+}
+
+/// A central library that holds `database` as its row.
+fn library_of(database: &SavedDatabase) -> SyncStateV3 {
+    let mut library = in_central_mode(state());
+    library_row(&mut library, database);
+    library
 }
 
 /// `database(ID)` after `change`.
@@ -390,8 +407,8 @@ fn a_database_decodes_without_its_optional_fields_and_refuses_unknown_ones() {
     let minimal = json!({"id":ID,"name":"Orders","engine":"postgres","project":"acme-prod-123456","region":"asia-east1","instance":"orders-pg",
         "environment":"prod","network":"public","default_database":"postgres"});
     let decoded: SavedDatabase = serde_json::from_value(minimal.clone()).unwrap();
-    assert_eq!((decoded.account, decoded.pam, decoded.local_port), (None, None, None));
-    for (field, value) in [("password", json!("secret")), ("engine", json!("mysql")), ("environment", json!("production")), ("network", json!("private"))] {
+    assert_eq!((decoded.via_host, decoded.account, decoded.pam, decoded.local_port), (None, None, None, None));
+    for (field, value) in [("password", json!("secret")), ("engine", json!("mysql")), ("environment", json!("production")), ("network", json!("vpn"))] {
         let mut other = minimal.clone();
         other[field] = value;
         assert!(serde_json::from_value::<SavedDatabase>(other).is_err(), "{field}");
@@ -400,7 +417,7 @@ fn a_database_decodes_without_its_optional_fields_and_refuses_unknown_ones() {
     missing.as_object_mut().unwrap().remove("default_database");
     assert!(serde_json::from_value::<SavedDatabase>(missing).is_err(), "the database to open is required");
     assert_eq!(serde_json::to_value(DatabaseEngine::Postgres).unwrap(), "postgres");
-    assert_eq!(serde_json::to_value(DatabaseNetwork::Public).unwrap(), "public");
+    assert_eq!(serde_json::to_value([DatabaseNetwork::Public, DatabaseNetwork::Private]).unwrap(), json!(["public", "private"]));
     let environments = [DatabaseEnvironment::Dev, DatabaseEnvironment::Staging, DatabaseEnvironment::Prod];
     assert_eq!(serde_json::to_value(environments).unwrap(), json!(["dev", "staging", "prod"]));
 }
@@ -415,6 +432,106 @@ fn a_database_names_its_connection_and_knows_when_it_is_prod() {
     }
     let dev = SavedDatabase { project: "acme-dev-654321".into(), instance: "orders-dev".into(), ..prod };
     assert_eq!(dev.connection_name(), "acme-dev-654321:asia-east1:orders-dev");
+}
+
+// ---- The route: over the public IP, or through a host of the library ----
+
+/// A database on its public IP is written exactly as a release that knew no other route wrote it: `"network":"public"` and no
+/// `via_host`, its record too; and what such a release wrote reads back without one.
+#[test]
+fn a_public_database_serializes_as_before() {
+    let public = database(ID);
+    let written = serde_json::to_value(&public).unwrap();
+    assert_eq!(written["network"], "public");
+    assert!(!written.as_object().unwrap().contains_key("via_host"), "{written}");
+    let stored = set(&state(), ID, None, Some(public.clone()), 1).unwrap().local.databases[KEY].record.payload.clone();
+    assert!(!stored["database"].as_object().unwrap().contains_key("via_host"), "{stored}");
+    let older = json!({"id":ID,"name":"Orders","engine":"postgres","project":"acme-prod-123456","region":"asia-east1","instance":"orders-pg",
+        "environment":"prod","network":"public","account":"frank@example.com","default_database":"postgres","pam":null,"local_port":6543});
+    let read: SavedDatabase = serde_json::from_value(older).unwrap();
+    assert_eq!(read.via_host, None);
+    assert_eq!(read, public);
+    assert_eq!(read.route_host(), None);
+}
+
+#[test]
+fn a_database_through_a_host_round_trips() {
+    let routed = through_host(ID);
+    let text = serde_json::to_string(&routed).unwrap();
+    assert!(text.contains(r#""network":"private","via_host":"0123456789abcdef""#), "{text}");
+    assert_eq!(serde_json::from_str::<SavedDatabase>(&text).unwrap(), routed);
+    assert_eq!(routed.validate(), Ok(()));
+    assert_eq!(routed.route_host(), Some("0123456789abcdef"));
+    let saved = set(&state(), ID, None, Some(routed.clone()), 1).unwrap();
+    assert_eq!(view(&reload(&saved))[0].database, routed, "its record keeps the route");
+}
+
+#[test]
+fn an_inconsistent_route_is_refused() {
+    let cases = [(DatabaseNetwork::Private, None), (DatabaseNetwork::Public, Some(ROUTE_HOST)), (DatabaseNetwork::Private, Some("web-1"))];
+    for (network, via_host) in cases {
+        let bad = changed(|d| (d.network, d.via_host) = (network, via_host.map(String::from)));
+        assert_eq!(bad.validate(), Err(ROUTE.to_string()), "{bad:?}");
+        assert_eq!(set(&state(), ID, None, Some(bad), 1), Err(repo::invalid("database", ID, ROUTE)), "a save runs the same check");
+    }
+    let mut stored = set(&state(), ID, None, Some(database(ID)), 1).unwrap().local.databases[KEY].record.clone();
+    stored.payload["database"]["via_host"] = json!(ROUTE_HOST);
+    assert!(!valid(&stored) && decode(&stored).is_none(), "a stored record is held to it as well");
+}
+
+#[test]
+fn version_for_needs_the_route_version_only_for_a_host_route() {
+    assert_eq!((STATE_VERSION, ROUTE_STATE_VERSION), (12, 13));
+    let (public, private) = (database(ID), through_host(OTHER));
+    assert_eq!(version_for([] as [&SavedDatabase; 0]), 12);
+    assert_eq!(version_for([&public]), 12);
+    assert_eq!(version_for([&public, &private]), 13);
+}
+
+/// The version a state needs: what every database it holds needs, this device's own and the library's rows (`state_version`), or the
+/// library's rows alone (`library_version`).
+#[test]
+fn the_state_needs_the_route_version_where_a_database_through_a_host_is() {
+    let own = saved_on_this_device(&in_central_mode(state()), &through_host(ID));
+    assert_eq!((state_version(&own), library_version(&own)), (13, 12));
+    let mut library = in_central_mode(state());
+    library_row(&mut library, &through_host(ID));
+    assert_eq!((state_version(&library), library_version(&library)), (13, 13));
+    let public = saved_on_this_device(&library_of(&database(OTHER)), &database(THIRD));
+    assert_eq!((state_version(&public), library_version(&public)), (12, 12));
+    assert_eq!((state_version(&state()), library_version(&state())), (12, 12), "a state without databases needs no more");
+}
+
+#[test]
+fn a_local_database_through_a_host_needs_the_route_version() {
+    let routed = set(&state(), ID, None, Some(through_host(ID)), 1).unwrap();
+    assert!(routed.local.databases.contains_key(KEY));
+    assert_eq!(routed.version, ROUTE_STATE_VERSION, "the save raises it");
+    validate_state(&routed).unwrap();
+    let mut older = routed;
+    older.version = STATE_VERSION;
+    assert_eq!(validate_state(&older), Err(RecordValidationError::Invalid { field: "database", id: "local".into(), reason: "invalid database state version".into() }));
+    assert!(decode_state(&serde_json::to_string(&older).unwrap()).is_err(), "a release that knows only version 12 never meets the record");
+    let public = set(&state(), ID, None, Some(database(ID)), 1).unwrap();
+    assert_eq!(public.version, STATE_VERSION);
+    validate_state(&public).unwrap();
+}
+
+#[test]
+fn an_account_database_through_a_host_needs_the_route_version() {
+    let library = set(&in_central_mode(state()), ID, None, Some(through_host(ID)), 1).unwrap();
+    assert!(library.local.databases.is_empty() && library.account.as_ref().unwrap().records.contains_key(KEY));
+    assert_eq!(library.version, ROUTE_STATE_VERSION, "the save raises it");
+    validate_state(&library).unwrap();
+    let mut older = library.clone();
+    older.version = STATE_VERSION;
+    assert_eq!(validate_state(&older), Err(RecordValidationError::Invalid { field: "database", id: "account".into(), reason: "invalid database state version".into() }));
+    let public = set(&in_central_mode(state()), ID, None, Some(database(ID)), 1).unwrap();
+    assert_eq!(public.version, STATE_VERSION);
+    validate_state(&public).unwrap();
+    let mut removed = set(&library, ID, Some(&through_host(ID)), None, 2).unwrap();
+    removed.version = STATE_VERSION;
+    validate_state(&removed).expect("a tombstone names no host: it needs the version of saved databases only");
 }
 
 // ---- Central sync: the Catalog, the publish step and leaving ----
@@ -526,12 +643,36 @@ fn leaving_keeps_every_database_as_this_devices_own() {
     let before = [OTHER, THIRD].iter().fold(library, |state, id| saved_on_this_device(&state, &database(id)));
     let mut left = before.clone();
     (left.account, left.local.central, left.local.databases) = (None, None, Default::default());
-    preserve_on_leave(&before, &mut left, 4).unwrap();
+    preserve_on_leave(&before, &mut left, None, 4).unwrap();
     assert_eq!(ids(&left), [ID, THIRD], "the library's databases and this device's own stay, a removed one does not come back");
     assert!(left.local.databases.values().all(|row| !row.dirty && valid(&row.record)));
     assert_eq!(left.version, STATE_VERSION);
     validate_state(&left).unwrap();
     let mut nothing = state();
-    preserve_on_leave(&state(), &mut nothing, 4).unwrap();
+    preserve_on_leave(&state(), &mut nothing, None, 4).unwrap();
     assert!(nothing.local.databases.is_empty() && nothing.version == 4, "no database, no version raised");
+}
+
+/// A database reached through a host follows the host to the id an adoption or a replacement gives it (`host_ids`: old → new). One
+/// whose host the map names no new id for keeps the route it has, and without a map every route stays as it is. Either way every
+/// database stays, at the version it needs.
+#[test]
+fn leaving_keeps_a_database_following_its_host() {
+    const MOVED: &str = "fedcba9876543210";
+    let unmapped = SavedDatabase { via_host: Some("00000000000000aa".into()), ..through_host(OTHER) };
+    let mut library = set(&in_central_mode(state()), ID, None, Some(through_host(ID)), 1).unwrap();
+    library = set(&library, OTHER, None, Some(unmapped.clone()), 2).unwrap();
+    let before = saved_on_this_device(&library, &database(THIRD));
+    let leave = |host_ids: Option<&BTreeMap<String, String>>| {
+        let mut left = before.clone();
+        (left.account, left.local.central, left.local.databases, left.version) = (None, None, Default::default(), state().version);
+        preserve_on_leave(&before, &mut left, host_ids, 4).unwrap();
+        assert_eq!(left.version, ROUTE_STATE_VERSION);
+        validate_state(&left).unwrap();
+        view(&left).into_iter().map(|row| row.database).collect::<Vec<_>>()
+    };
+    let host_ids = BTreeMap::from([(ROUTE_HOST.to_string(), MOVED.to_string())]);
+    let followed = SavedDatabase { via_host: Some(MOVED.into()), ..through_host(ID) };
+    assert_eq!(leave(Some(&host_ids)), [followed, unmapped.clone(), database(THIRD)]);
+    assert_eq!(leave(None), [through_host(ID), unmapped, database(THIRD)]);
 }
