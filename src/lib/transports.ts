@@ -111,18 +111,11 @@ export const SIGN_IN_URL_EVENT = "gcp://sign-in-url";
 /** The Access tab's overview: the places Lunport looks and every entitlement it found or a route names, read now. */
 export const listPamOverview = () => tauriInvoke<PamOverview>("gcp_pam_overview");
 export const pamOverviewKey = ["gcp", "pam-overview"] as const;
-/**
- * The Access tab's overview: read when the tab shows, every minute while it stays open, and when the window becomes visible again.
- * As with `pamStatusQuery`, it is not retried (the next minute reads it again), and it is read even when the webview thinks it is
- * offline, since the backend says in its own sentence when Google cannot be reached.
- */
+/** The Access tab's overview: read when the tab shows, and kept as a grant read is (`pamStatusOptions`). */
 export const pamOverviewQuery = queryOptions({
   queryKey: pamOverviewKey,
   queryFn: listPamOverview,
-  refetchInterval: 60_000,
-  refetchOnWindowFocus: true,
-  retry: false,
-  networkMode: "always",
+  ...pamStatusOptions,
 });
 /** Requests a grant on the entitlement `name` as `account` (none: gcloud's active account) and waits for it, or for its approver. */
 export const requestEntitlementGrant = (account: string | null, name: string, justification: string, durationSecs: number) =>
