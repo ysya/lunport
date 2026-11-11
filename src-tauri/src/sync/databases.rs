@@ -8,8 +8,9 @@
 //! device kept alone into the library once it uses central sync (`publish_local`), as it moves routes. Either way the records need
 //! `STATE_VERSION`, which an older Lunport refuses to open.
 //!
-//! The library holds a database without the justification of a grant request: that is remembered on the device that asked, and never
-//! syncs, so every write leaves it out (`payload_of`) and a Catalog that carries one is refused, as one with such a route is.
+//! A justification is never stored on a database record: every write leaves it out (`payload_of`), and a Catalog that carries one is
+//! refused, as one with such a route is. The justification of a grant request goes to the entitlement's grant memory (`pam_records`),
+//! which syncs in a library that uses central sync.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -381,7 +382,8 @@ pub(crate) fn catalog_rows(catalog: &Catalog) -> Vec<(String, serde_json::Value)
 }
 
 /// Whether the Catalog's databases are well-formed: at most `MAX_DATABASES`, each valid, ids unique, and none with the justification of
-/// a grant request (it is remembered on the device that asked, so a Catalog that carries one is refused when built and read).
+/// a grant request. A justification is never stored on a database record (it goes to the entitlement's grant memory, which syncs in a
+/// library that uses central sync), so a Catalog that carries one is refused when built and read.
 pub(crate) fn valid_catalog(catalog: &Catalog) -> bool {
     let mut ids = BTreeSet::new();
     catalog.databases.len() <= MAX_DATABASES

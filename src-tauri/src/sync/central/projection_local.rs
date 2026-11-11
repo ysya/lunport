@@ -74,7 +74,7 @@ pub fn public_rows(
     }
     for row in account.records.values() {
         match row.record.kind {
-            // Collections, the group order, tunnels and routes are read into the Catalog by `catalog_of`.
+            // Collections, the group order, tunnels, routes, PAM records and databases are read into the Catalog by `catalog_of`.
             RecordKind::Space => {}
             RecordKind::KeySlot => {
                 let id = row.record.id.clone();

@@ -380,9 +380,9 @@ const LOOKUP_DELAY_MS = 400;
 
 /**
  * The body and buttons of the New database / Edit database dialog, over `initial`. A saved database opens as it is saved, at its
- * connection name; a new one at the list of instances, offered to other apps (`opening`). The instances are read only while the list is shown. Google is asked about the account and project the
- * draft holds once typing in them has paused (`LOOKUP_DELAY_MS`), not about every start of a project id typed by hand; the dialog opens
- * with what it was given, without waiting.
+ * connection name; a new one at the list of instances, offered to other apps (`opening`). The instances are read only while the list is
+ * shown. Google is asked about the account and project the draft holds once typing in them has paused (`LOOKUP_DELAY_MS`), not about
+ * every start of a project id typed by hand; the dialog opens with what it was given, without waiting.
  */
 export function DatabaseEditor({ initial, existing, busy, error, onSave, onCancel, onDirty }: DatabaseEditorProps) {
   const [opened] = useState(() => opening(initial, existing));

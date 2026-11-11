@@ -38,7 +38,8 @@ pub enum GcpError {
     /// Any other unsuccessful status.
     Http { api: &'static str, status: u16 },
     /// The API refused what was asked, and said why in its own words: a `400` (a duration over the entitlement's maximum, a missing
-    /// justification), and for Cloud SQL also a `404` (no such instance) and the `403` that says its API is not enabled in the project.
+    /// justification), and for Cloud SQL also a `404` (no such instance or project) and the `403` that says its API is not enabled in the
+    /// project.
     /// The message may end in a period; the sentence made of it does not repeat it.
     Refused { api: &'static str, message: String },
     Network(String),
