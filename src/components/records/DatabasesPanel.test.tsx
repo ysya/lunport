@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseAccess, DatabaseRow, DatabasesPanel } from "./DatabasesPanel";
+import { DatabaseAccess, DatabaseRow, DatabasesPanel, StopDatabaseDialog } from "./DatabasesPanel";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
 import { recordOverview } from "./fixtures";
@@ -456,6 +456,57 @@ describe("a database another device changed while it runs here", () => {
     expect(text(promoted)).toMatch(/Orders\s+PROD/);
     // A port that does not lock as prod has no window to mark, whatever the record says.
     expect(text(render([row({ live: live("running", { writable_until_ms: AT + MINUTE }), environment: "dev" }, { pam: null })]))).not.toContain("Writes on");
+  });
+});
+
+describe("stopping a database", () => {
+  /** The panel over `rows` as a server render leaves it: its element tree, whose rows' callbacks a test can press. */
+  const panel = (rows: DatabaseView[]) => {
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, rows);
+    return renderHook(client, () => DatabasesPanel({ overview: recordOverview() }));
+  };
+  const toggleOf = (tree: ReactNode) => (elementsOf(tree, DatabaseRow)[0].props as unknown as { toggle: () => void }).toggle;
+
+  it("stops_at_once_when_no_connection_is_open", () => {
+    invoke.mockResolvedValue(undefined);
+    toggleOf(panel([row({ live: live("running", { connections: 0 }) }, { pam: null })]))();
+    expect(invoke.mock.calls).toEqual([["databases_stop", { id: ORDERS.id }]]);
+  });
+
+  it("asks_first_when_connections_are_open_and_stops_only_once_confirmed", () => {
+    invoke.mockResolvedValue(undefined);
+    const tree = panel([row({ live: live("running", { connections: 2 }) }, { pam: null })]);
+    toggleOf(tree)();
+    expect(invoke).not.toHaveBeenCalled();
+    // The question is on the page, closed until Stop opens it.
+    const asking = elementsOf(tree, StopDatabaseDialog);
+    expect(asking).toHaveLength(1);
+    expect((asking[0].props as unknown as { row: DatabaseView | null }).row).toBeNull();
+  });
+
+  it("the_question_names_the_database_and_how_many_connections_close", () => {
+    const [cancel, stop] = [vi.fn(), vi.fn()];
+    const running = row({ live: live("running", { connections: 2 }) }, { pam: null });
+    const dialog = StopDatabaseDialog({ row: running, busy: false, onCancel: cancel, onStop: stop });
+    expect((dialog.props as unknown as { open: boolean }).open).toBe(true);
+    expect(textIn(dialog)).toContain("Stop Orders?");
+    expect(textIn(dialog)).toContain("2 active connections will close.");
+    expect(textIn(StopDatabaseDialog({ row: row({ live: live("running", { connections: 1 }) }), busy: false, onCancel: cancel, onStop: stop }))).toContain("1 active connection will close.");
+    // A name's hidden characters show as codes.
+    expect(textIn(StopDatabaseDialog({ row: row({ live: live("running", { connections: 1 }) }, { name: "Ord\u202eers" }), busy: false, onCancel: cancel, onStop: stop }))).toContain("Stop Ord⟨U+202E⟩ers?");
+    // Stop database stops the database it asked about; Cancel stops nothing.
+    buttonsIn(dialog).find((button) => textIn(button) === "Stop database")!.props.onClick!();
+    expect(stop).toHaveBeenCalledExactlyOnceWith(running);
+    (dialog.props as unknown as { onOpenChange: (open: boolean) => void }).onOpenChange(false);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    // While a change is under way it stays, and its buttons are held.
+    const held = StopDatabaseDialog({ row: running, busy: true, onCancel: cancel, onStop: stop });
+    (held.props as unknown as { onOpenChange: (open: boolean) => void }).onOpenChange(false);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(buttonsIn(held).find((button) => textIn(button) === "Stop database")!.props.disabled).toBe(true);
+    // Closed, it asks nothing.
+    expect((StopDatabaseDialog({ row: null, busy: false, onCancel: cancel, onStop: stop }).props as unknown as { open: boolean }).open).toBe(false);
   });
 });
 

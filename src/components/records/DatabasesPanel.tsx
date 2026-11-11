@@ -122,6 +122,18 @@ export function DatabaseRow({ row, busy, toggle, requestGrant, ask, edit, detail
 }
 
 /**
+ * The question Stop asks before it stops a database that has connections open through its port, which close with it: open while `row` is
+ * the database asked about. Cancel, Escape and a click outside close it, except while a change is under way. No hooks: exported for the
+ * tests.
+ */
+export function StopDatabaseDialog({ row, busy, onCancel, onStop }: { row: DatabaseView | null; busy: boolean; onCancel: () => void; onStop: (row: DatabaseView) => void }) {
+  return <AlertDialog open={row !== null} onOpenChange={(open) => { if (!open && !busy) onCancel(); }}><AlertDialogContent>
+    <AlertDialogHeader><AlertDialogTitle>Stop {row && revealHidden(row.database.name)}?</AlertDialogTitle><AlertDialogDescription>{row && `${connectionsLine(row.live.connections)} will close.`}</AlertDialogDescription></AlertDialogHeader>
+    <AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (row) onStop(row); }}>Stop database</Button></AlertDialogFooter>
+  </AlertDialogContent></AlertDialog>;
+}
+
+/**
  * The connection details of a database that is offered on a port, with the database user its address names (`iamUserFor`): the database's
  * own account, else the one gcloud is signed in as. gcloud's accounts are read only for a database that names no account of its own, and
  * only while its details are open.
@@ -139,6 +151,8 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
   const flight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<DatabaseView | null>(null);
+  // The running database whose Stop asks first, because connections are open through its port.
+  const [stopping, setStopping] = useState<DatabaseView | null>(null);
   // The databases whose connection details are open: none until asked, and several may be, so that a lock that is on stays in view.
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
@@ -197,6 +211,18 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
     try { await deleteDatabase(row.database); }
     finally { setDeleting(null); }
   });
+  // Start starts at once. Stop asks first while connections are open through the port, since they close with it, and stops at once
+  // otherwise. The question closes once the stop is done, whether it worked or not.
+  const toggle = (row: DatabaseView) => {
+    if (databaseBusy(row) && row.live.connections > 0) setStopping(row);
+    else void action(() => databaseBusy(row) ? stopDatabase(row.database.id) : startDatabase(row.database.id));
+  };
+  const stop = (row: DatabaseView) => void action(async () => {
+    try { await stopDatabase(row.database.id); }
+    finally { setStopping(null); }
+  });
+  // The question counts the connections the list shows now, which may have changed since Stop was pressed.
+  const askedToStop = stopping && (rows.find((row) => row.database.id === stopping.database.id) ?? stopping);
   return <div className="databases-panel space-y-5">
     <PageHeader title="Databases" count={rows.length} description="Cloud SQL connections that Lunport signs in to for your other apps."
       actions={<Button id="new-database-button" onClick={() => edit(null)} disabled={busy || !!overview.account && overview.shared_writes_blocked}><Plus className="size-4" />New database</Button>} />
@@ -218,7 +244,7 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
           const open = offered && opened.has(id);
           return <Fragment key={id}>
             <DatabaseRow row={row} busy={busy}
-              toggle={() => void action(() => databaseBusy(row) ? stopDatabase(id) : startDatabase(id))}
+              toggle={() => toggle(row)}
               requestGrant={() => requestGrant(id)} ask={() => setDeleting(row)} edit={() => edit(row)}
               details={offered ? { open, toggle: () => toggleDetails(id) } : undefined} />
             {open && <tr className="border-b last:border-0"><td colSpan={4} className="px-4 pb-4"><div className="database-details"><DatabaseAccess row={row} /></div></td></tr>}
@@ -231,6 +257,7 @@ export function DatabasesPanel({ overview }: { overview: RecordOverview }) {
       {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} busy={busy} error={editorError} onSave={save} onCancel={closeEditor} onDirty={setDirty} />}
     </TaskDialogContent></Dialog>
     <AlertDialog open={discarding} onOpenChange={setDiscarding}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard database changes?</AlertDialogTitle><AlertDialogDescription>Your unsaved changes will be lost.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={discard}>Discard</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <StopDatabaseDialog row={askedToStop} busy={busy} onCancel={() => setStopping(null)} onStop={stop} />
     <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleting && revealHidden(deleting.database.name)}?</AlertDialogTitle><AlertDialogDescription>{deleting?.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>;
 }
