@@ -458,6 +458,10 @@ mod tests {
             self.inner.ask(kind, text, echo, deadline)
         }
 
+        fn answered_elsewhere(&self, kind: QuestionKind, reply: &Reply) {
+            self.inner.answered_elsewhere(kind, reply);
+        }
+
         fn host_key_notice(&self, text: &str) {
             self.inner.host_key_notice(text);
         }
@@ -559,6 +563,25 @@ mod tests {
         assert_eq!((first, second), (Err(gcloud_refusal()), Err(gcloud_refusal())));
         assert_eq!(person.inner.asked().len(), 1, "the waiter asked nothing");
         assert_eq!(google.created(), 0);
+    }
+
+    /// The person's no, or no answer, to the question the leading connection asked is told to the connection that waited on it, as its
+    /// own: they share the question, as a host's connections do. A client that was gone tells it nothing.
+    #[test]
+    fn a_declined_question_is_told_to_the_waiting_connection_as_its_own() {
+        let cases = [
+            (Reply::Cancelled, vec![(QuestionKind::Grant, "Cancelled")]),
+            (Reply::TimedOut, vec![(QuestionKind::Grant, "TimedOut")]),
+            (Reply::Gone, vec![]),
+        ];
+        for (reply, told) in cases {
+            let (gates, google, memory) = (GrantGates::default(), Google::default(), Memory::default());
+            let person = Person::new(FakeOwner::answering(vec![reply]), &gates, 1);
+            let (first, second) = two_connections(&gates, &google, &person, &memory);
+            assert_eq!((first, second), (Err(gcloud_refusal()), Err(gcloud_refusal())));
+            assert_eq!(person.inner.asked().len(), 1, "the waiter asked nothing");
+            assert_eq!(person.inner.told.lock().unwrap().clone(), told, "only the waiter is told, as its own");
+        }
     }
 
     /// Hosts and databases share a gate only while they name a grant the same way: by the account, the project, the location and the id of
