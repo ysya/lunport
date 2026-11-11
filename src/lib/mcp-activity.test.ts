@@ -7,7 +7,7 @@ import type { McpStopKind } from "@/bindings/McpStopKind";
 import type { McpWindow } from "@/bindings/McpWindow";
 import {
   actionKind, activityResult, activityTitle, dayLabel, durationLabel, groupByDay, hostKey, kindCounts, matchesFilters, NO_FILTERS,
-  observedClient, resultSentence, reviewLabel, reviewSentence, titleText,
+  namesHost, observedClient, resultSentence, reviewLabel, reviewSentence, titleText,
   type ActivityFilters, type ActivityKind,
 } from "./mcp-activity";
 import { fetchMcpActivity, mcpActivityKey, mergeActivity, type McpActivityData } from "./mcp";
@@ -346,6 +346,18 @@ describe("AI activity filters", () => {
     expect(observedClient(entry({ requested_by: [] }))).toBe("An unidentified AI client");
     expect(hostKey(entry())).toBe("0000000000000001");
     expect(hostKey(entry({ host_id: null, alias: "web-1" }))).toBe("alias:web-1");
+  });
+
+  it("an entry names no host only when it records neither a host id nor an alias", () => {
+    expect(namesHost(entry())).toBe(true);
+    expect(namesHost(entry({ outcome: "tunnel_started", command: "", tunnel: "Database" }))).toBe(true);
+    expect(namesHost(entry({ outcome: "scp_uploaded" }))).toBe(true);
+    expect(namesHost(entry({ outcome: "database_started", command: "", database: "orders-dev" }))).toBe(true);
+    // From before host ids were recorded: the alias is all it has. A host that was deleted still has its id.
+    expect(namesHost(entry({ host_id: null, alias: "web-1" }))).toBe(true);
+    expect(namesHost(entry({ host_id: "0000000000000009", alias: "" }))).toBe(true);
+    // A database on its public IP is reached through no host.
+    expect(namesHost(entry({ outcome: "database_started", command: "", host_id: null, alias: "", database: "orders-dev" }))).toBe(false);
   });
 });
 

@@ -229,6 +229,12 @@ export function hostKey(entry: McpAuditEntry): string {
   return entry.host_id ?? `alias:${entry.alias}`;
 }
 
+/** Whether the entry names a host, by its id or only by its alias. A database on its public IP is reached through none: its entry
+ * records no host id and an empty alias, so there is no host to filter by, show or give an id for. */
+export function namesHost(entry: McpAuditEntry): boolean {
+  return entry.host_id != null || entry.alias !== "";
+}
+
 const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
 /** The local day of `ms` as a heading: Today, Yesterday, else the date (with its year when it is another year's). */

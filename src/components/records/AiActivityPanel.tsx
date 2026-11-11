@@ -5,7 +5,7 @@ import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import { useMcpActivity, type McpActivityData } from "@/lib/mcp";
 import { auditRows } from "@/lib/mcp-audit-rows";
 import {
-  groupByDay, hostKey, kindCounts, matchesFilters, NO_FILTERS, observedClient,
+  groupByDay, hostKey, kindCounts, matchesFilters, namesHost, NO_FILTERS, observedClient,
   type ActionKind, type ActivityFilters, type ActivityKind,
 } from "@/lib/mcp-activity";
 import type { RecordOverview } from "@/lib/records";
@@ -82,7 +82,7 @@ export function AiActivityView({
       if (options.has(key)) return;
       options.set(key, { key, label: hosts.get(key)?.payload.alias ?? recorded });
     };
-    for (const entry of entries) add(hostKey(entry), entry.alias);
+    for (const entry of entries) if (namesHost(entry)) add(hostKey(entry), entry.alias);
     if (filters.host !== null) add(filters.host, filters.host.replace(/^alias:/, ""));
     return [...options.values()].sort(byLabel);
   }, [entries, hosts, filters.host]);
@@ -102,7 +102,7 @@ export function AiActivityView({
       : entries.length === 0 ? <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-14 text-center">
         <Bot className="size-7 text-muted-foreground" aria-hidden="true" />
         <h2 className="font-medium">No AI activity yet</h2>
-        <p className="max-w-sm text-sm text-muted-foreground">Commands, file transfers, tunnels, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.</p>
+        <p className="max-w-sm text-sm text-muted-foreground">Commands, file transfers, tunnels, databases, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.</p>
         <Button variant="outline" onClick={openAiSettings}>Set up AI access</Button>
       </div>
       : <>
