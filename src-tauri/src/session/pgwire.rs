@@ -120,6 +120,7 @@ pub async fn read_first<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<FirstMess
 
 impl Startup {
     /// A start-up message for protocol 3.0 with these parameters.
+    #[cfg(test)]
     pub fn new(params: Vec<(String, String)>) -> Startup {
         Startup { version: PROTOCOL_3, params }
     }
@@ -147,20 +148,24 @@ impl Startup {
     }
 
     /// The protocol version of the message: the major version in the high 16 bits, the minor version in the low ones.
+    #[cfg(test)]
     pub fn version(&self) -> u32 {
         self.version
     }
 
     /// The user the session signs in as: the last `user` parameter, which is the one the server takes.
+    #[cfg(test)]
     pub fn user(&self) -> Option<&str> {
         self.param("user")
     }
 
     /// The database the session opens: the last `database` parameter, which is the one the server takes.
+    #[cfg(test)]
     pub fn database(&self) -> Option<&str> {
         self.param("database")
     }
 
+    #[cfg(test)]
     fn param(&self, name: &str) -> Option<&str> {
         self.params.iter().rev().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
     }
