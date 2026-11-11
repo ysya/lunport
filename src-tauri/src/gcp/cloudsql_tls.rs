@@ -1,6 +1,6 @@
-//! The TLS connection to a Cloud SQL instance, made as Google's Go connector for Cloud SQL makes it: TLS 1.3 only, straight to the
-//! instance's address on port 3307 with TCP keepalive on, without ALPN, and with the client certificate Cloud SQL signed for the
-//! connection's key as the client's identity. PostgreSQL then runs inside the TLS as over plain TCP, with no SSLRequest of its own. The Go connector can also exchange a
+//! The TLS connection to a Cloud SQL instance, made as Google's Go connector for Cloud SQL makes it: TLS 1.3 only, to the instance's
+//! address on port 3307, straight or through the loopback end of an SSH forward that leads there, with TCP keepalive on, without ALPN, and
+//! with the client certificate Cloud SQL signed for the connection's key as the client's identity. PostgreSQL then runs inside the TLS as over plain TCP, with no SSLRequest of its own. The Go connector can also exchange a
 //! metadata frame with the instance, but only when its caller asks for that; it does not by default, and this module does not at all.
 //!
 //! The server certificate must chain to one of the certificate authorities in the instance's connect settings: any of them, since an

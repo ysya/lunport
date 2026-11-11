@@ -264,8 +264,8 @@ fn unlock_writes(ports: &DatabasePorts, id: &str, method: UnlockMethod, confirme
 }
 
 /// The app's session broker, started when it is not yet: its gates are the ones hosts ask for a grant through, and a database's grant
-/// goes through them as well.
-fn started_broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, String> {
+/// goes through them as well. A database reached through a host connects to that host with its connector.
+pub(super) fn started_broker(app: &tauri::AppHandle) -> Result<Arc<Broker>, String> {
     super::app::start(app);
     let broker = app.state::<AppState>().session.broker.lock().unwrap().clone();
     broker.ok_or_else(|| "Lunport's connection service is unavailable. Restart Lunport and try again.".to_string())
