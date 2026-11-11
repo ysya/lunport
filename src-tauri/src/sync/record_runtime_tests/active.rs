@@ -131,6 +131,33 @@ fn migration_activation_raises_the_version_for_grant_memory() {
     assert_eq!(saved.local.transport_grants.len(), 1);
 }
 
+/// A migration's candidate that carries a saved database is saved at state version 12 too.
+#[test]
+fn migration_activation_raises_the_version_for_saved_databases() {
+    use crate::sync::databases::{self, tests::database};
+    let f = Fixture::new();
+    activate_probe(
+        &mut f.runtime.core.lock().unwrap(),
+        StartupProbe::Legacy {
+            state: DecodedState::V2(Box::new(legacy_state())),
+        },
+    )
+    .unwrap();
+    let generation = f.runtime.core.lock().unwrap().generation;
+    let mut candidate = databases::set(&super::state(), "00000000000000d1", None, Some(database("00000000000000d1")), 1).unwrap();
+    candidate.version = super::state().version;
+    let env = f.env();
+    let _life = f.runtime.lifecycle.lock().unwrap();
+    let _vault = f.runtime.vault.lock().unwrap();
+    let _publication = f.runtime.format_publication.lock().unwrap();
+    commit_migration_candidate(&env, generation, candidate, None).unwrap();
+    let core = f.runtime.core.lock().unwrap();
+    assert_eq!(core.records.as_ref().unwrap().version, crate::sync::records_v3::DATABASE_STATE_VERSION);
+    let saved = serde_json::from_slice::<SyncStateV3>(&fs::read(&env.state_path).unwrap()).unwrap();
+    assert_eq!(saved.version, crate::sync::records_v3::DATABASE_STATE_VERSION);
+    assert_eq!(databases::view(&saved).len(), 1);
+}
+
 #[test]
 fn migration_failed_save_and_stale_generation_preserve_legacy_runtime_and_source() {
     let f = Fixture::new();
@@ -287,7 +314,7 @@ fn validation_failure_generation_overflow_and_pure_transform_error_never_publish
     let fixture = Fixture::active();
     let env = fixture.env();
     let (mut invalid, generation) = snapshot(&env).unwrap();
-    invalid.version = crate::sync::records_v3::PAM_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::DATABASE_STATE_VERSION + 1;
     assert!(commit_candidate(&env, generation, invalid).is_err());
     assert!(!env.state_path.exists());
     let original = snapshot(&env).unwrap();
@@ -383,7 +410,7 @@ fn unjoined_or_invalid_records_never_access_credentials() {
         .unwrap()
         .is_none());
     let mut invalid = super::state();
-    invalid.version = crate::sync::records_v3::PAM_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::DATABASE_STATE_VERSION + 1;
     assert!(read_account_keys(&invalid, &ForbiddenIo).is_err());
 }
 #[test]

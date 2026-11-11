@@ -32,7 +32,7 @@ pub const STATE_VERSION: u32 = records_v3::PAM_STATE_VERSION;
 pub const MAX_SCOPES: usize = 64;
 pub const MAX_REQUESTS: usize = 32;
 /// The refusal of a scope save that would leave the Catalog too large for one sync record.
-pub const NO_SCOPE_ROOM: &str = "This library has no room for more search scopes: together with routes and tunnels they would exceed what one sync record holds. Remove a scope, a route or a tunnel, then try again.";
+pub const NO_SCOPE_ROOM: &str = "This library has no room for more search scopes: together with routes, tunnels and databases they would exceed what one sync record holds. Remove a scope, a route, a tunnel or a database, then try again.";
 /// What a scope save says of a library whose writes are blocked, as a route save does.
 const SYNC_PAUSED: &str = transports::SYNC_PAUSED;
 

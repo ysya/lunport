@@ -19,7 +19,7 @@ use super::pam::{EntitlementInfo, Grant};
 const OSLOGIN_BASE: &str = "https://oslogin.googleapis.com";
 const PAM_BASE: &str = "https://privilegedaccessmanager.googleapis.com";
 const PAM_API: &str = "Privileged Access Manager";
-const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// A page of the grant search, which answers every grant the caller ever created on the entitlement (ended ones included) and may hold
 /// fewer than asked: every page is read, up to `GRANTS_PAGES`, so the one active grant of someone who requests one every day is found.
 const GRANTS_PAGE: i32 = 50;
@@ -32,12 +32,15 @@ const MAX_ENTITLEMENTS: usize = 500;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GcpError {
     Auth(AuthError),
-    /// `401` or `403`: the account may not call this API (or the token lacks the scope).
+    /// `401` or `403`: the account may not call this API (or the token lacks the scope). Cloud SQL's `403` that says its API is not
+    /// enabled in the project is a `Refused` instead, since no account or grant makes the call work until the project enables the API.
     Denied { api: &'static str, status: u16, account: String },
     /// Any other unsuccessful status.
     Http { api: &'static str, status: u16 },
-    /// `400`: the API refused what was asked, and said why in its own words (a duration over the entitlement's maximum, a missing
-    /// justification).
+    /// The API refused what was asked, and said why in its own words: a `400` (a duration over the entitlement's maximum, a missing
+    /// justification), and for Cloud SQL also a `404` (no such instance or project) and the `403` that says its API is not enabled in the
+    /// project.
+    /// The message may end in a period; the sentence made of it does not repeat it.
     Refused { api: &'static str, message: String },
     Network(String),
     /// The answer was not the JSON the API documents.
@@ -50,7 +53,8 @@ impl fmt::Display for GcpError {
             GcpError::Auth(error) => write!(f, "{error}"),
             GcpError::Denied { api, status, account } => write!(f, "{account} may not call the {api} API (HTTP {status})."),
             GcpError::Http { api, status } => write!(f, "The {api} API answered {status}."),
-            GcpError::Refused { api, message } => write!(f, "{api} refused the request: {message}."),
+            // A message that already ends in a period (the Cloud SQL sentences do) does not get a second one.
+            GcpError::Refused { api, message } => write!(f, "{api} refused the request: {}.", message.trim_end_matches('.')),
             GcpError::Network(text) => write!(f, "Google's API could not be reached: {text}."),
             GcpError::Malformed(text) => write!(f, "Google's API answered with something unexpected: {text}."),
         }
@@ -178,7 +182,7 @@ fn segment(account: &str) -> String {
     url::form_urlencoded::byte_serialize(account.as_bytes()).collect()
 }
 
-fn query(pairs: &[(&str, &str)]) -> String {
+pub(super) fn query(pairs: &[(&str, &str)]) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in pairs {
         serializer.append_pair(name, value);
@@ -187,7 +191,7 @@ fn query(pairs: &[(&str, &str)]) -> String {
 }
 
 /// A reqwest error without the URL it carries.
-fn describe(error: &reqwest::Error) -> String {
+pub(super) fn describe(error: &reqwest::Error) -> String {
     let text = error.to_string();
     text.split(" for url").next().unwrap_or(&text).trim_end_matches('.').to_string()
 }
@@ -558,6 +562,17 @@ mod tests {
         mock.assert();
         assert_eq!(error, GcpError::Refused { api: "Privileged Access Manager", message: "requested_duration exceeds the maximum".into() });
         assert_eq!(error.to_string(), "Privileged Access Manager refused the request: requested_duration exceeds the maximum.");
+    }
+
+    /// A refusal's message may already end in a period (the Cloud SQL sentences do): the sentence does not get a second one.
+    #[test]
+    fn a_refusal_that_ends_in_a_period_is_not_given_a_second_one() {
+        let sentence = |message: &str| GcpError::Refused { api: "Cloud SQL Admin", message: message.into() }.to_string();
+        assert_eq!(
+            sentence("Cloud SQL has no instance acme-dev-654321:asia-east1:orders-pg."),
+            "Cloud SQL Admin refused the request: Cloud SQL has no instance acme-dev-654321:asia-east1:orders-pg."
+        );
+        assert_eq!(sentence("requested_duration exceeds the maximum"), "Cloud SQL Admin refused the request: requested_duration exceeds the maximum.");
     }
 
     #[test]

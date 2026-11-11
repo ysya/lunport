@@ -8,8 +8,8 @@ import { tunnelRoute } from "@/lib/tunnels";
 /* The shared Catalog's row in Central conflicts: the items both devices changed, in plain
    words. Every other change of both devices merges on its own; a choice settles only these. */
 
-export const CATALOG_TITLE = "Tunnels, routes and collections";
-const COLLIDING = "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes and collections wait on this device.";
+export const CATALOG_TITLE = "Tunnels, routes, databases and collections";
+const COLLIDING = "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes, databases, search scopes, grant memory and collections wait on this device.";
 const WAITING = "Lunport combines both devices’ changes on the next sync.";
 export const CATALOG_CHOICE_NOTE = "Every other change from both devices stays. Previous versions are kept in an encrypted local recovery snapshot on this device.";
 export const catalogChoiceTitle = (choice: "local" | "remote") =>
@@ -33,6 +33,7 @@ export function collisionLabel(item: CatalogCollision, overview?: RecordOverview
       const scope = item.local ?? item.remote;
       return scope ? `Search scope ${revealHidden(`${parentLabel(scope.parent)} · ${scope.location}`)}` : "Search scope";
     }
+    case "database": return `Database ${quoted((item.local ?? item.remote)?.name ?? item.id)}`;
   }
 }
 
@@ -67,6 +68,19 @@ export function collisionValue(item: CatalogCollision, side: "local" | "remote",
     case "pam_scope": {
       const scope = item[side];
       return scope === null ? "Removed" : revealHidden(`${parentLabel(scope.parent)} · ${scope.location} · ${scope.account ?? "gcloud's active account"}`);
+    }
+    case "database": {
+      const database = item[side], other = item[side === "local" ? "remote" : "local"];
+      if (!database) return "Removed";
+      const name = other && other.name !== database.name ? `${quoted(database.name)} · ` : "";
+      return `${name}${[
+        `${revealHidden(`${database.project} / ${database.instance}`)} · ${revealHidden(database.region)}`,
+        database.environment,
+        `database ${revealHidden(database.default_database)}`,
+        database.account && `account ${revealHidden(database.account)}`,
+        database.pam && `PAM ${database.pam.entitlements.map(revealHidden).join(", ")}`,
+        database.local_port && `local port ${database.local_port}`,
+      ].filter(Boolean).join(", ")}`;
     }
   }
 }

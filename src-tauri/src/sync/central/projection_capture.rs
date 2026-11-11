@@ -45,22 +45,24 @@ pub(super) fn catalog_settled(state: &SyncStateV3, keys: &VaultKeys) -> Result<b
         && basis_of(replica, ledger, &opaque) == replica.current.get(&opaque))
 }
 
-/// The publish step as a pure transition: `state` with the routes saved on this
-/// device alone that the library takes made its rows (`transports::publish_local`), or `None` when none moves. It waits while the
-/// Catalog is not settled (`catalog_settled`): while the library's latest Catalog is not yet read into this device's rows, or is in
-/// conflict. The central dispatch saves what it returns before its capture.
+/// The publish step as a pure transition: `state` with what this device kept alone made the library's rows, or `None` when nothing
+/// moves. Three steps run in turn, each on the state the one before returned and each moving only what the library has room for: the
+/// routes (`transports::publish_local`), then the search scopes and grant memory (`pam_records::publish_local`), then the saved
+/// databases (`databases::publish_local`). What comes back holds every move of the three. It waits while the Catalog is not settled
+/// (`catalog_settled`): while the library's latest Catalog is not yet read into this device's rows, or is in conflict. The central
+/// dispatch saves what it returns before its capture.
 pub(super) fn move_local_routes(
     state: &SyncStateV3,
     keys: &VaultKeys,
     now: u64,
 ) -> Result<Option<SyncStateV3>, AppError> {
-    if state.local.transports.is_empty() && state.local.pam_records.is_empty() || !catalog_settled(state, keys)? {
+    if (state.local.transports.is_empty() && state.local.pam_records.is_empty() && state.local.databases.is_empty()) || !catalog_settled(state, keys)? {
         return Ok(None);
     }
-    // Search scopes and grant memory this device kept alone move in by the same step.
     let routed = crate::sync::transports::publish_local(state, now)?;
     let pam = crate::sync::pam_records::publish_local(routed.as_ref().unwrap_or(state), now).map_err(AppError::Other)?;
-    Ok(pam.or(routed))
+    let databases = crate::sync::databases::publish_local(pam.as_ref().or(routed.as_ref()).unwrap_or(state), now).map_err(AppError::Other)?;
+    Ok(databases.or(pam).or(routed))
 }
 
 pub fn public_candidate(
@@ -661,5 +663,47 @@ pub(super) mod tests {
         assert!(transports::publish_local(&conflicted, 300).unwrap().is_some(), "y could move");
         assert!(!catalog_settled(&conflicted, &keys).unwrap());
         assert_eq!(move_local_routes(&conflicted, &keys, 300).unwrap(), None);
+    }
+
+    /// A saved database kept on this device alone moves into the library by the routes' publish step once the library uses central sync
+    /// and its Catalog is settled; the capture after it publishes it, and a capture alone never takes it.
+    #[test]
+    fn a_local_database_moves_into_the_library_when_it_switches_to_central_sync() {
+        use crate::sync::databases::{self, tests::{database, saved_on_this_device}};
+        let (state, keys, _) = initial();
+        let saved = database("00000000000000d1");
+        let state = saved_on_this_device(&state, &saved);
+        let published = |state: &SyncStateV3| -> Vec<crate::sync::databases::SavedDatabase> {
+            let ledger = state.local.central_projection.as_ref().unwrap();
+            ledger
+                .public_changes(state, &keys)
+                .unwrap()
+                .into_iter()
+                .find_map(|change| match change.data {
+                    Data::Catalog(catalog) => Some(catalog.databases),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        assert!(databases::view(&state).is_empty(), "a central library reads its own rows");
+        assert!(published(&state).is_empty(), "a capture alone leaves it out");
+        // The library does not use central sync yet: nothing moves.
+        let mut waiting = state.clone();
+        waiting.local.central.as_mut().unwrap().control.cutover = false;
+        assert_eq!(move_local_routes(&waiting, &keys, 200).unwrap(), None);
+        // Once it does, and its Catalog is settled, the database is the library's.
+        assert!(catalog_settled(&state, &keys).unwrap());
+        let moved = move_local_routes(&state, &keys, 200).unwrap().expect("the Catalog is settled");
+        assert!(moved.local.databases.is_empty());
+        assert_eq!(databases::view(&moved).into_iter().map(|row| (row.database, row.synced)).collect::<Vec<_>>(), [(saved.clone(), true)]);
+        assert_eq!(published(&moved), [saved], "the capture after it publishes the database");
+        assert_eq!(moved.version, databases::STATE_VERSION);
+        // Not while the latest Catalog a pull staged is unread.
+        let mut staged = state.clone();
+        let mut catalog = staged.local.central_projection.as_ref().unwrap().catalog.clone();
+        catalog.collections.reverse();
+        super::super::projection_delta::tests::append(&mut staged, &keys, catalog_identity(), Data::Catalog(catalog));
+        assert!(!catalog_settled(&staged, &keys).unwrap());
+        assert_eq!(move_local_routes(&staged, &keys, 200).unwrap(), None);
     }
 }

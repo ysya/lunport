@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { text } from "@/components/keychain/test-markup";
+import type { SavedDatabase } from "@/bindings/SavedDatabase";
 import type { CatalogCollision, CatalogReview, CentralConflict } from "@/lib/central-sync";
 import type { TunnelRule } from "@/lib/tunnels";
 import { groupView, hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
@@ -20,6 +21,21 @@ const rule = (port: number, name = "Database"): TunnelRule => ({
   host_id: jump.id,
   forward: { kind: "local", bind_address: "127.0.0.1", port, target_host: "db.internal", target_port: 5432 },
 });
+const savedDatabase = (patch: Partial<SavedDatabase> = {}): SavedDatabase => ({
+  id: "00000000000000d1",
+  name: "Orders",
+  engine: "postgres",
+  project: "acme-prod-123456",
+  region: "asia-east1",
+  instance: "orders-pg",
+  environment: "prod",
+  network: "public",
+  account: "frank@example.com",
+  default_database: "postgres",
+  pam: null,
+  local_port: 6543,
+  ...patch,
+});
 const items: CatalogCollision[] = [
   { kind: "tunnel", id: "000000000000000b", local: rule(15432), remote: rule(15433) },
   { kind: "route", host_id: jump.id, local: hostTransport({ project: "acme-dev-654321", instance: "jumpbox", zone: "asia-east1-b" }, jump.id), remote: null },
@@ -34,7 +50,7 @@ describe("a Catalog conflict", () => {
   it("names each colliding item and its two versions in plain words", () => {
     const words = shown(review());
     for (const expected of [
-      "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes and collections wait on this device.",
+      "Another device changed the same items at the same time. When you choose, Lunport keeps every other change from both devices. Until then, changes to tunnels, routes, databases, search scopes, grant memory and collections wait on this device.",
       "Tunnel “Database”",
       "127.0.0.1:15432 → db.internal:5432 through prod-jump",
       "127.0.0.1:15433 → db.internal:5432 through prod-jump",
@@ -55,6 +71,33 @@ describe("a Catalog conflict", () => {
     expect(words).toContain("Search scope folder 123456789012 · global");
     expect(words).toContain("folder 123456789012 · global · ops@example.com");
     expect(words).toContain("Removed");
+  });
+
+  it("names a database both devices changed, and its two versions", () => {
+    const required = { entitlements: ["prod-operate", "prod-admin"], location: "global", duration_secs: 1800, justification: null };
+    const words = shown(review({
+      items: [
+        { kind: "database", id: "00000000000000d1", local: savedDatabase({ local_port: 6544 }), remote: savedDatabase({ pam: required, account: null, local_port: null }) },
+        { kind: "database", id: "00000000000000d2", local: null, remote: savedDatabase({ id: "00000000000000d2", name: "Billing", environment: "dev", default_database: "billing" }) },
+      ],
+    }));
+    for (const expected of [
+      "Database “Orders”",
+      "acme-prod-123456 / orders-pg · asia-east1, prod, database postgres, account frank@example.com, local port 6544",
+      "acme-prod-123456 / orders-pg · asia-east1, prod, database postgres, PAM prod-operate, prod-admin",
+      "Database “Billing”",
+      "acme-prod-123456 / orders-pg · asia-east1, dev, database billing, account frank@example.com, local port 6543",
+      "Removed",
+    ]) expect(words).toContain(expected);
+  });
+
+  it("names a database's two names only when they differ", () => {
+    const renamed = shown(review({ items: [{ kind: "database", id: "00000000000000d1", local: savedDatabase({ name: "Orders (eu)" }), remote: savedDatabase() }] }));
+    expect(renamed).toContain("Database “Orders (eu)”");
+    expect(renamed).toContain("“Orders (eu)” · acme-prod-123456 / orders-pg");
+    expect(renamed).toContain("“Orders” · acme-prod-123456 / orders-pg");
+    const gone = shown(review({ items: [{ kind: "database", id: "00000000000000d1", local: null, remote: savedDatabase() }] }));
+    expect(gone).toContain("Database “Orders”");
   });
 
   it("names a tunnel's two names only when they differ", () => {
@@ -123,7 +166,7 @@ describe("a conflict row", () => {
 
   it("draws the Catalog as its items, not as a record", () => {
     const words = row(conflict({ kind: "meta", name: "meta", local: { tunnels: [] }, remote: { tunnels: [] }, can_copy: false, catalog: review() }));
-    expect(words).toContain("Tunnels, routes and collections");
+    expect(words).toContain("Tunnels, routes, databases and collections");
     expect(words).toContain("Tunnel “Database”");
     expect(words).not.toContain("meta");
     expect(words).not.toContain("key material or library structure");

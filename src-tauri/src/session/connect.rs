@@ -8,12 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use super::auth::{label, printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
 use super::directory::{DirectoryError, GrantNeed, GrantReceipt, HostDirectory, Prepared};
-use super::grants::{Declined, Entry, GateKey, GrantGates, NoGrant};
-use super::protocol::{kinds, AiAsker, GrantAnswer, GrantPrompt, HostQuery, QuestionKind};
+use super::grants::{ask_and_request, pause, Declined, GateKey, Grace, GrantFailure, GrantGates};
+use super::protocol::{kinds, AiAsker, GrantPrompt, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
 use crate::sync::env::Keychain;
 
@@ -138,6 +138,17 @@ impl ConnectFailure {
     }
 }
 
+impl GrantFailure for ConnectFailure {
+    fn sentence(&self) -> String {
+        self.text.clone()
+    }
+
+    /// A connection that waited on another's grant request fails as a login that was refused.
+    fn waited_on(sentence: String) -> ConnectFailure {
+        ConnectFailure::new(kinds::AUTH, sentence)
+    }
+}
+
 /// What the broker connects with.
 pub struct Connector<'a> {
     pub engine: &'a dyn SshEngine,
@@ -149,46 +160,12 @@ pub struct Connector<'a> {
     pub grants: &'a GrantGates,
 }
 
-/// How long the person has to answer the Request-a-grant question: five minutes, the window's own limit.
-const GRANT_QUESTION_WAIT: Duration = Duration::from_secs(300);
-/// How long a connection waits for another connection's grant request to come out: the question, the request and the minute of
-/// polling for the grant to become active, with room.
-const GATE_WAIT: Duration = Duration::from_secs(7 * 60);
 /// What the terminal reads while IAP is given time to see a grant.
 const IAP_WAITING: &str = "IAP has not seen the grant yet; retrying for up to two minutes.";
-
-/// IAP's grace: for how long after a grant became active a tunnel refused with 4033 is tried again rather than
-/// reported (IAP can take about 1½ minutes to see a grant), and how long between tries.
-#[derive(Clone, Copy, Debug)]
-struct Grace {
-    span: Duration,
-    step: Duration,
-}
-
-impl Default for Grace {
-    fn default() -> Grace {
-        Grace { span: Duration::from_secs(120), step: Duration::from_secs(10) }
-    }
-}
 
 /// `time` as a clock time of this computer's day, `HH:MM`, for the sentence that says until when a grant is active.
 pub fn local_hhmm(time: SystemTime) -> String {
     chrono::DateTime::<chrono::Local>::from(time).format("%H:%M").to_string()
-}
-
-/// Waits `span`, looking at `cancel` every so often: `false` when the connection was cancelled meanwhile.
-fn pause(cancel: &CancelToken, span: Duration) -> bool {
-    let end = Instant::now() + span;
-    loop {
-        if cancel.is_cancelled() {
-            return false;
-        }
-        let now = Instant::now();
-        if now >= end {
-            return true;
-        }
-        std::thread::sleep((end - now).min(Duration::from_millis(250)));
-    }
 }
 
 /// The hop an error is about; `None` for an error about the whole chain.
@@ -430,27 +407,7 @@ impl Connector<'_> {
     /// The lead asks and requests; the others take the lead's outcome, and the person's no or no answer to the lead's question as their
     /// own.
     fn obtain_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<(), ConnectFailure> {
-        match self.grants.enter(GateKey::of(need), cancel, GATE_WAIT) {
-            Entry::Lead(lease) => {
-                let outcome = self.request_grant(need, owner, cancel);
-                // The others are told what went wrong, unless it was this connection going away: that is nothing to them, and the refusal
-                // (how to request a grant themselves) is.
-                let for_the_others = match &outcome {
-                    Ok(receipt) => Ok(receipt.clone()),
-                    Err(_) if cancel.is_cancelled() => Err(NoGrant::said(need.refusal_sentence())),
-                    Err((failure, declined)) => Err(NoGrant { sentence: failure.text.clone(), declined: *declined }),
-                };
-                lease.settle(for_the_others);
-                outcome.map(|_| ()).map_err(|(failure, _)| failure)
-            }
-            Entry::Outcome(Ok(_)) => Ok(()),
-            Entry::Outcome(Err(no_grant)) => {
-                if let Some(declined) = no_grant.declined {
-                    owner.answered_elsewhere(QuestionKind::Grant, &declined.reply());
-                }
-                Err(ConnectFailure::new(kinds::AUTH, no_grant.sentence))
-            }
-        }
+        self.grants.obtain(GateKey::of(need), owner, cancel, &need.refusal_sentence(), || self.request_grant(need, owner, cancel))
     }
 
     /// Asks the person for a justification and a duration (Lunport's Request-a-grant window, five minutes), requests the grant and waits
@@ -458,21 +415,12 @@ impl Connector<'_> {
     /// is not one end with the refusal that names the gcloud command, and with the person's no or no answer (`Declined`).
     fn request_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<GrantReceipt, (ConnectFailure, Option<Declined>)> {
         let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes: need.duration_secs / 60, justification: need.justification.clone() };
-        let answer = match owner.ask(QuestionKind::Grant, &prompt.to_text(), true, Some(Instant::now() + GRANT_QUESTION_WAIT)) {
-            Reply::Answer(text) => GrantAnswer::decode(&text).ok_or(None),
-            reply => Err(Declined::of(&reply)),
-        };
-        let answer = answer.map_err(|declined| (ConnectFailure::new(kinds::AUTH, need.refusal_sentence()), declined))?;
-        let receipt =
-            self.directory.request_grant(need, &answer.justification, answer.minutes * 60, cancel).map_err(|error| (directory_failure(error), None))?;
-        owner.host_key_notice(&format!(
-            "Requested a {}-minute {} grant on {}; active until {}.",
-            answer.minutes,
-            need.entitlement,
-            need.project,
-            local_hhmm(receipt.active_until)
-        ));
-        Ok(receipt)
+        ask_and_request(
+            owner,
+            &prompt,
+            || ConnectFailure::new(kinds::AUTH, need.refusal_sentence()),
+            |answer| self.directory.request_grant(need, &answer.justification, answer.minutes * 60, cancel).map_err(directory_failure),
+        )
     }
 
     /// The pinned key `pinned`, which the key the server presented was compared with, as the question about a changed key shows it: its

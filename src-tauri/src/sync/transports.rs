@@ -39,10 +39,11 @@ const MAX_ENTITLEMENTS: usize = 8;
 /// The most routes one library holds, as many as it holds tunnels. The central Catalog enforces it.
 pub const MAX_ROUTES: usize = 256;
 /// The refusal of a save that would leave the library's Catalog too large for one sync record.
-pub const NO_ROOM: &str = "This library has no room for more routes or tunnels: together they would exceed what one sync record holds. Remove a route or a tunnel, then try again.";
+pub const NO_ROOM: &str = "This library has no room for more routes, tunnels or databases: together they would exceed what one sync record holds. Remove a route, a tunnel or a database, then try again.";
 /// The refusal of a save whose displayed route is no longer the saved one: `set`'s compare-and-set (`RepositoryError::RouteChanged`).
 pub const ROUTE_CHANGED: &str = "The host's route changed while you were editing; reload and try again.";
-/// What the host editor says of a library whose writes are blocked. A route write refused for that reason reads the same (`refusal`).
+/// What the host editor says of a library whose writes are blocked. A write of a route, a tunnel or a saved database refused for that
+/// reason reads the same (`refusal`).
 pub const SYNC_PAUSED: &str = "Sync changes are paused while account data is reviewed.";
 
 /// A host's transport: which host, and how this device reaches it.
@@ -176,31 +177,38 @@ impl HostTransport {
             return Err("Enter the Google account as an email address.".into());
         }
         if let Some(pam) = pam {
-            if pam.entitlements.is_empty() {
-                return Err("Enter at least one PAM entitlement.".into());
-            }
-            if pam.entitlements.len() > MAX_ENTITLEMENTS {
-                return Err(format!("Enter at most {MAX_ENTITLEMENTS} PAM entitlements."));
-            }
-            if !pam.entitlements.iter().all(|entitlement| is_resource_name(entitlement)) {
-                return Err("Enter PAM entitlement ids such as prod-operate.".into());
-            }
-            if !is_resource_name(&pam.location) {
-                return Err("Enter the PAM location, such as global.".into());
-            }
-            if !is_grant_duration(pam.duration_secs) {
-                return Err("Enter a grant duration between 1 and 480 minutes.".into());
-            }
-            if pam.justification.as_deref().is_some_and(|text| !is_justification_line(text)) {
-                return Err("Keep the justification under 512 characters on one line.".into());
-            }
+            validate_pam(pam)?;
         }
         Ok(())
     }
 }
 
+/// One sentence about the first field of a grant requirement that is not acceptable, else `Ok`: the rules a host's route and a saved
+/// database share.
+pub(crate) fn validate_pam(pam: &PamCheck) -> Result<(), String> {
+    if pam.entitlements.is_empty() {
+        return Err("Enter at least one PAM entitlement.".into());
+    }
+    if pam.entitlements.len() > MAX_ENTITLEMENTS {
+        return Err(format!("Enter at most {MAX_ENTITLEMENTS} PAM entitlements."));
+    }
+    if !pam.entitlements.iter().all(|entitlement| is_resource_name(entitlement)) {
+        return Err("Enter PAM entitlement ids such as prod-operate.".into());
+    }
+    if !is_resource_name(&pam.location) {
+        return Err("Enter the PAM location, such as global.".into());
+    }
+    if !is_grant_duration(pam.duration_secs) {
+        return Err("Enter a grant duration between 1 and 480 minutes.".into());
+    }
+    if pam.justification.as_deref().is_some_and(|text| !is_justification_line(text)) {
+        return Err("Keep the justification under 512 characters on one line.".into());
+    }
+    Ok(())
+}
+
 /// A project id (`acme-dev-654321`: 6–30 characters, lowercase letters, digits and dashes, starting with a letter) or a project number.
-fn is_project(text: &str) -> bool {
+pub(crate) fn is_project(text: &str) -> bool {
     let number = (6..=20).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit());
     let id = (6..=30).contains(&text.len())
         && text.starts_with(|c: char| c.is_ascii_lowercase())
@@ -452,11 +460,13 @@ pub fn remove_route(state: &SyncStateV3, host_id: &str, now: u64) -> Result<Sync
     apply_route_change(state, host_id, &RouteChange { expected: get(state, host_id), kind: None }, now)
 }
 
-/// How a refused route write reads where it is shown, for the combined host save and for MCP's route tools: a library whose writes are
-/// blocked reads as the host editor's own sentence (`SYNC_PAUSED`), and every other refusal as it reads already. The compare-and-set and
-/// the room check are sentences themselves (`ROUTE_CHANGED`, `NO_ROOM`).
+/// How a refused write reads where it is shown: for the combined host save, MCP's route and tunnel tools, the Tunnels panel and saved
+/// databases. A validation refusal reads as its `reason`, the sentence it carries (the error itself prints as its debug form). A library
+/// whose writes are blocked reads as the host editor's own sentence (`SYNC_PAUSED`), and every other refusal as it prints: the room check
+/// and a route's compare-and-set are sentences themselves (`NO_ROOM`, `ROUTE_CHANGED`).
 pub fn refusal(error: RepositoryError) -> String {
     match error {
+        RepositoryError::Validation(records_v3::RecordValidationError::Invalid { reason, .. }) => reason,
         RepositoryError::ReadOnlyAccount => SYNC_PAUSED.to_string(),
         other => other.to_string(),
     }

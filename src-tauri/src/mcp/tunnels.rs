@@ -10,9 +10,9 @@ use crate::session::{
 use crate::ssh::forward::{ForwardKind, ForwardSpec};
 use crate::sync::{
     env::SyncEnv,
-    record_repository::{self as repo, RepositoryError},
+    record_repository as repo,
     record_runtime,
-    records_v3::{RecordValidationError, SyncStateV3},
+    records_v3::SyncStateV3,
     tunnel_rules::{self, TunnelRule},
 };
 
@@ -272,14 +272,6 @@ fn storage(state: &SyncStateV3) -> String {
     if state.account.is_some() { "Synced library" } else { "This device's library" }.into()
 }
 
-/// A refused tunnel save as a sentence: the reason a rule check gave, or the library's own sentence.
-fn refusal(error: RepositoryError) -> String {
-    match error {
-        RepositoryError::Validation(RecordValidationError::Invalid { reason, .. }) => reason,
-        other => crate::sync::transports::refusal(other),
-    }
-}
-
 /// The host a tunnel may go through: one the client may use, whose Group inheritance is sound.
 fn usable_host(policy: &McpPolicy, state: &SyncStateV3, name: &str) -> Result<repo::HostView, String> {
     let host = find_host(state, name)?;
@@ -433,7 +425,7 @@ fn save(
     let id = rule.id.clone();
     let keys = env.runtime.core.lock().unwrap().account_keys.clone();
     // What the save would refuse is refused before the window: a paused library, no room in the Catalog, too many tunnels.
-    tunnel_rules::set(state, keys.as_ref(), &id, before.as_ref(), after.clone(), env.now()).map_err(refusal)?;
+    tunnel_rules::set(state, keys.as_ref(), &id, before.as_ref(), after.clone(), env.now()).map_err(crate::sync::transports::refusal)?;
     let _active = active(runtime, &mut context, &host.host.id, cancel)?;
     live(runtime, policy.approval_mode, cancel)?;
     let request = request_for(&context, host, proposal, Vec::new());
@@ -462,7 +454,7 @@ fn save(
                 if current != before {
                     return Err(AppError::Other(TUNNEL_CHANGED.into()));
                 }
-                tunnel_rules::set(state, keys.as_ref(), &id, before.as_ref(), after.clone(), now).map_err(|e| AppError::Other(refusal(e)))
+                tunnel_rules::set(state, keys.as_ref(), &id, before.as_ref(), after.clone(), now).map_err(|e| AppError::Other(crate::sync::transports::refusal(e)))
             })
             .map(|_| ())
             .map_err(|e| e.to_string())

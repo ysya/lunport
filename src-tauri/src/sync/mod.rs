@@ -2,8 +2,8 @@
 //!
 //! - `records_v3`: the pure record model (hosts, groups, keys, the local state and its versions); `record_*`: the repository,
 //!   import, migration review, export, conflicts, keys and the Tauri commands around it; `central/`: Passkey accounts and
-//!   end-to-end encrypted multi-device sync (`sync/central/mod.rs` has its own map). `transports`, `tunnel_rules` and
-//!   `pam_records` are the records that ride along in the Catalog.
+//!   end-to-end encrypted multi-device sync (`sync/central/mod.rs` has its own map). `transports`, `tunnel_rules`, `pam_records`
+//!   and `databases` are the records that ride along in the Catalog.
 //! - `crypto`, `record`, `reconcile`: record encryption and the sealed-record encoding `AccountState` keeps.
 //! - `state`, `state_v2`, `slot_rules`: the formats of the retired Legacy workspace, kept to decode an old state file, its sealed
 //!   key material and its key-slot file names for the migration review and central's backup admission. Nothing writes them.
@@ -44,6 +44,7 @@ pub mod state;
 pub mod state_v2;
 #[cfg(test)]
 pub mod testkit;
+pub mod databases;
 pub mod pam_records;
 pub mod transports;
 pub mod tunnel_rules;

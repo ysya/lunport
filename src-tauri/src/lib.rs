@@ -24,6 +24,7 @@ pub mod macos_health;
 pub mod macos_install;
 pub mod mcp;
 mod mcp_setup;
+mod os_auth;
 mod process;
 mod prompt_window;
 mod quick_connect;
@@ -184,6 +185,9 @@ fn embedded_context() -> tauri::Context {
 }
 
 fn run_app(host: bool, start_hidden: bool) {
+    // The database ports hold two sockets for every connection, more files than a Mac lets an app open at first.
+    #[cfg(unix)]
+    session::database_ports::raise_open_file_limit();
     // The data of the identity before the rename has not moved to this version's data root (main.rs ran the migration): an earlier
     // Lunport still runs, or both roots hold data. Nothing may start that creates or writes the data root, diagnostics included; the
     // app shows only its window, which says why and how to go on (`identity_migration_status`).
@@ -415,6 +419,20 @@ fn run_app(host: bool, start_hidden: bool) {
             session::tunnels::tunnels_delete,
             session::tunnels::tunnels_start,
             session::tunnels::tunnels_stop,
+            session::databases::databases_list,
+            session::databases::databases_save,
+            session::databases::databases_delete,
+            session::databases::databases_start,
+            session::databases::databases_stop,
+            session::databases::databases_port_password,
+            session::databases::databases_rotate_port_password,
+            session::databases::databases_unlock_writes,
+            session::databases::databases_lock_writes,
+            session::databases::databases_reconnect_locked,
+            session::databases::databases_pam_status,
+            session::databases::databases_request_grant,
+            session::databases::databases_list_instances,
+            os_auth::os_unlock_method,
             session::transports::transports_oslogin_profile,
             session::transports::transports_pam_status,
             session::transports::transports_pam_request,

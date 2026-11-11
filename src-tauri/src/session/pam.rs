@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Serialize;
 use tauri::Manager;
 
+use super::grants::{ACTIVE_WITHIN, POLL_EVERY};
 use super::transports::{self as commands, PamStatusView, Standing};
 use crate::gcp::pam::{self, EntitlementInfo, EntitlementName};
 use crate::gcp::rest::GcpClient;
@@ -271,7 +272,8 @@ fn saved(app: &tauri::AppHandle) -> Result<(Vec<HostTransport>, Vec<PamScope>, V
     Ok((commands::live_routes(records)?, pam_records::scopes(records), pam_records::memories(records)))
 }
 
-fn checked_account(account: Option<&str>) -> Result<(), String> {
+/// Refuses an account that is not an email address: it names a directory under gcloud's config, so it is checked before any call is made.
+pub(super) fn checked_account(account: Option<&str>) -> Result<(), String> {
     if account.is_some_and(|account| !transports::is_email(account)) {
         return Err("Enter the Google account as an email address.".into());
     }
@@ -318,7 +320,7 @@ pub async fn gcp_pam_request(app: tauri::AppHandle, window: tauri::WebviewWindow
             .map(|_| ())
             .map_err(|error| error.to_string())
         };
-        commands::request_on(&*gcp, account.as_deref(), &name, &id, &justification, duration_secs, &remember, &|| false, Duration::from_secs(2), Duration::from_secs(60))
+        commands::request_on(&*gcp, account.as_deref(), &name, &id, &justification, duration_secs, &remember, &|| false, POLL_EVERY, ACTIVE_WITHIN)
     })
     .await
     .map_err(|error| error.to_string())?

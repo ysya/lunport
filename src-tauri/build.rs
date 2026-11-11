@@ -5,6 +5,9 @@ fn main() {
         println!("cargo:rerun-if-changed=src/native_alert.m");
         cc::Build::new().file("src/native_alert.m").flag("-fobjc-arc").compile("lunport_native_alert");
         println!("cargo:rustc-link-lib=framework=AppKit");
+        println!("cargo:rerun-if-changed=src/os_auth.m");
+        cc::Build::new().file("src/os_auth.m").flag("-fobjc-arc").compile("os_auth");
+        println!("cargo:rustc-link-lib=framework=LocalAuthentication");
         println!("cargo:rerun-if-changed=src/macos_credential_peer.c");
         cc::Build::new().file("src/macos_credential_peer.c").compile("lunport_credential_peer");
         println!("cargo:rustc-link-lib=framework=Security");

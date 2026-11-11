@@ -4,6 +4,7 @@ use super::payload::{
     catalog_fits, Catalog, Collection, GroupOrder, MAX_COLLECTIONS, MAX_GROUP_ORDERS, MAX_ORDERED_GROUPS, MAX_TUNNELS,
 };
 use crate::sync::{
+    databases::{SavedDatabase, MAX_DATABASES},
     pam_records::{GrantRequestMemory, PamScope},
     records_v3::HostScope,
     transports::HostTransport,
@@ -31,6 +32,8 @@ pub enum Collision {
     GroupOrder { scope: HostScope, local: Option<Vec<String>>, remote: Option<Vec<String>> },
     /// A Privileged Access Manager search scope.
     PamScope { id: String, local: Option<PamScope>, remote: Option<PamScope> },
+    /// A saved Cloud SQL database.
+    Database { id: String, local: Option<SavedDatabase>, remote: Option<SavedDatabase> },
 }
 
 #[derive(Debug)]
@@ -147,6 +150,16 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
         |id, local, remote| Collision::Tunnel { id, local, remote },
         &mut collisions,
     );
+    let databases = merge_list(
+        common.map(|c| c.databases.as_slice()),
+        &local.databases,
+        &remote.databases,
+        |d: &SavedDatabase| d.id.clone(),
+        |_: &String| false,
+        side,
+        |id, local, remote| Collision::Database { id, local, remote },
+        &mut collisions,
+    );
     let transports = merge_list(
         common.map(|c| c.transports.as_slice()),
         &local.transports,
@@ -194,7 +207,7 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
             .collect(),
         None => vec![],
     };
-    Merged { catalog: Catalog { collections, group_orders, tunnels, transports, pam_scopes, pam_requests }, collisions, new_routes }
+    Merged { catalog: Catalog { collections, group_orders, tunnels, transports, pam_scopes, pam_requests, databases }, collisions, new_routes }
 }
 
 /// Why a merged Catalog does not fit in the library's one record, even without this device's new routes.
@@ -202,6 +215,7 @@ pub fn merge(common: Option<&Catalog>, local: &Catalog, remote: &Catalog, keep: 
 pub enum Over {
     Tunnels(usize),
     Collections(usize),
+    Databases(usize),
     GroupOrders,
     Size,
 }
@@ -211,10 +225,11 @@ impl Over {
         let (held, remove) = match self {
             Self::Tunnels(n) => (format!("hold {n} tunnels; a library holds at most {MAX_TUNNELS}"), "some tunnels or routes"),
             Self::Collections(n) => (format!("hold {n} collections; a library holds at most {MAX_COLLECTIONS}"), "some collections"),
+            Self::Databases(n) => (format!("hold {n} databases; a library holds at most {MAX_DATABASES}"), "some databases"),
             Self::GroupOrders => (format!("order more groups than one library holds ({MAX_ORDERED_GROUPS})"), "some groups"),
             Self::Size => (
                 format!("are more than one library record holds ({} KB)", super::wire::MAX_PLAINTEXT_BYTES / 1024),
-                "some tunnels or routes",
+                "some tunnels, routes or databases",
             ),
         };
         format!("Together, both devices’ changes {held}. Remove {remove} on this device; Lunport combines both devices’ changes on the next sync.")
@@ -242,6 +257,9 @@ pub fn fit(merged: Merged) -> Result<Fitted, Over> {
     }
     if catalog.collections.len() > MAX_COLLECTIONS {
         return Err(Over::Collections(catalog.collections.len()));
+    }
+    if catalog.databases.len() > MAX_DATABASES {
+        return Err(Over::Databases(catalog.databases.len()));
     }
     if catalog.group_orders.len() > MAX_GROUP_ORDERS
         || catalog.group_orders.iter().map(|order| order.ids.len()).sum::<usize>() > MAX_ORDERED_GROUPS
@@ -365,7 +383,7 @@ pub(super) mod tests {
     /// added.
     fn colliding() -> (Catalog, Catalog, Catalog) {
         let x = "c".repeat(64);
-        let common = Catalog { pam_scopes: vec![], pam_requests: vec![],
+        let common = Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             collections: vec![collection(&x, "Team")],
             group_orders: vec![order(HostScope::Local, &[G1, G2, G3])],
             tunnels: vec![tunnel(A, 15432), tunnel(E, 15500)],
@@ -373,13 +391,13 @@ pub(super) mod tests {
         };
         let mut renamed = tunnel(E, 15500);
         renamed.name = "renamed-here".into();
-        let local = Catalog { pam_scopes: vec![], pam_requests: vec![],
+        let local = Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             collections: vec![collection(&x, "Work")],
             group_orders: vec![order(HostScope::Local, &[G3, G1, G2])],
             tunnels: vec![tunnel(A, 15433), renamed],
             transports: vec![route(H4, "asia-east1-a"), route(H5, "asia-east1-b")],
         };
-        let remote = Catalog { pam_scopes: vec![], pam_requests: vec![],
+        let remote = Catalog { pam_scopes: vec![], pam_requests: vec![], databases: vec![],
             collections: vec![collection(&x, "Clients")],
             group_orders: vec![order(HostScope::Local, &[G2, G3, G1])],
             tunnels: vec![tunnel(A, 15434), tunnel(E, 15501)],
@@ -557,7 +575,7 @@ pub(super) mod tests {
         assert_eq!(over, Over::Size);
         assert_eq!(
             over.sentence(),
-            "Together, both devices’ changes are more than one library record holds (64 KB). Remove some tunnels or routes on this device; Lunport combines both devices’ changes on the next sync."
+            "Together, both devices’ changes are more than one library record holds (64 KB). Remove some tunnels, routes or databases on this device; Lunport combines both devices’ changes on the next sync."
         );
     }
 
@@ -612,5 +630,79 @@ pub(super) mod tests {
         assert!(catalog_fits(&fitted.catalog));
         assert!((1..20).contains(&fitted.catalog.pam_requests.len()), "{}", fitted.catalog.pam_requests.len());
         assert_eq!(fitted.catalog.pam_requests.last().map(|m| m.name.as_str()), Some("projects/acme-prod-123456/locations/global/entitlements/e19"), "the first go first");
+    }
+
+    const DB1: &str = "00000000000000d1";
+    const DB2: &str = "00000000000000d2";
+    const DB3: &str = "00000000000000d3";
+
+    /// The prod database `id`, named `name`.
+    fn saved(id: &str, name: &str) -> SavedDatabase {
+        SavedDatabase { name: name.into(), ..crate::sync::databases::tests::database(id) }
+    }
+    fn names(databases: &[SavedDatabase]) -> Vec<(&str, &str)> {
+        databases.iter().map(|d| (d.id.as_str(), d.name.as_str())).collect()
+    }
+
+    /// Saved databases merge item by item as tunnels do: each device's own additions survive, the synced side's in its order and then
+    /// this device's.
+    #[test]
+    fn merging_two_catalogs_keeps_both_devices_databases() {
+        let common = Catalog { databases: vec![saved(DB1, "Orders")], ..Catalog::default() };
+        let mut local = common.clone();
+        local.databases.push(saved(DB2, "Billing"));
+        let mut remote = common.clone();
+        remote.databases.push(saved(DB3, "Reports"));
+        let merged = merge(Some(&common), &local, &remote, &none(), None);
+        assert_eq!(names(&merged.catalog.databases), [(DB1, "Orders"), (DB3, "Reports"), (DB2, "Billing")]);
+        assert!(merged.collisions.is_empty());
+        assert!(merged.catalog.validate().is_ok());
+        // One device's change to a database, and the same change on both, do not collide.
+        let mut renamed = common.clone();
+        renamed.databases[0].name = "Orders (eu)".into();
+        assert_eq!(names(&merge(Some(&common), &renamed, &common, &none(), None).catalog.databases), [(DB1, "Orders (eu)")], "this device's change");
+        assert_eq!(names(&merge(Some(&common), &common, &renamed, &none(), None).catalog.databases), [(DB1, "Orders (eu)")], "the synced side's change");
+        let same = merge(Some(&common), &renamed, &renamed, &none(), None);
+        assert_eq!(names(&same.catalog.databases), [(DB1, "Orders (eu)")]);
+        assert!(same.collisions.is_empty());
+    }
+
+    #[test]
+    fn a_database_both_devices_changed_differently_is_reviewed_and_a_side_settles_it() {
+        let common = Catalog { databases: vec![saved(DB1, "Orders"), saved(DB2, "Billing")], ..Catalog::default() };
+        let (mut local, mut remote) = (common.clone(), common.clone());
+        local.databases[0].name = "Orders (here)".into();
+        remote.databases[0].name = "Orders (there)".into();
+        local.databases.remove(1); // this device removed Billing, the synced side changed it
+        remote.databases[1].local_port = Some(7000);
+        let open = merge(Some(&common), &local, &remote, &none(), None);
+        for expected in [
+            Collision::Database { id: DB1.into(), local: Some(saved(DB1, "Orders (here)")), remote: Some(saved(DB1, "Orders (there)")) },
+            Collision::Database { id: DB2.into(), local: None, remote: Some(remote.databases[1].clone()) },
+        ] {
+            assert!(open.collisions.contains(&expected), "{expected:?} in {:?}", open.collisions);
+        }
+        assert_eq!(open.collisions.len(), 2);
+        assert_eq!(names(&open.catalog.databases), [(DB1, "Orders (there)"), (DB2, "Billing")], "unresolved, the synced versions stay");
+        let mine = merge(Some(&common), &local, &remote, &none(), Some(Side::Local));
+        assert!(mine.collisions.is_empty());
+        assert_eq!(names(&mine.catalog.databases), [(DB1, "Orders (here)")]);
+        let theirs = merge(Some(&common), &local, &remote, &none(), Some(Side::Remote));
+        assert!(theirs.collisions.is_empty());
+        assert_eq!(names(&theirs.catalog.databases), [(DB1, "Orders (there)"), (DB2, "Billing")]);
+        // Without the common version every difference collides.
+        let unknown = merge(None, &local, &remote, &none(), None);
+        assert_eq!(unknown.collisions.len(), 2);
+    }
+
+    #[test]
+    fn too_many_databases_is_over_with_their_count() {
+        let databases = (0..262).map(|n| saved(&format!("{n:016x}"), "Orders")).collect();
+        let over = fit(unmerged(Catalog { databases, ..Catalog::default() })).err().unwrap();
+        assert_eq!(over, Over::Databases(262));
+        assert_eq!(
+            over.sentence(),
+            "Together, both devices’ changes hold 262 databases; a library holds at most 256. Remove some databases on this device; Lunport combines both devices’ changes on the next sync."
+        );
     }
 }

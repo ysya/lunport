@@ -690,6 +690,22 @@ fn a_refused_route_write_reads_as_a_sentence() {
     assert_eq!(refusal(apply_route_change(&saved, HOST, &change, 2).unwrap_err()), ROUTE_CHANGED);
 }
 
+/// A refused write reads as one sentence wherever it is shown, for routes, tunnels and saved databases alike. Of a `RepositoryError` only a
+/// validation refusal carries its sentence, as its `reason`: the error prints as its debug form, `NoRoom` and `RouteChanged` apart, which are
+/// sentences themselves. A library whose writes are blocked reads as the host editor's own.
+#[test]
+fn the_librarys_own_refusals_read_as_sentences() {
+    assert_eq!(refusal(RepositoryError::NoRoom), NO_ROOM);
+    assert_eq!(refusal(RepositoryError::RouteChanged), ROUTE_CHANGED);
+    assert_eq!(refusal(RepositoryError::ReadOnlyAccount), SYNC_PAUSED);
+    let stale = "This tunnel changed on another device. Refresh and try again.";
+    assert_eq!(refusal(repo::invalid("tunnel", A, stale)), stale);
+    let mut bad_project = iap(A);
+    let TransportKind::GcpIap { project, .. } = &mut bad_project.kind;
+    *project = "Eng".into();
+    assert_eq!(refusal(set(&state(), A, None, Some(bad_project), 1).unwrap_err()), "Enter the Google Cloud project id.");
+}
+
 /// Final review (minor): a route an earlier release saved kept the justification of its last grant request, and the host editor sends
 /// the route back as it displayed it. The library's row leaves the justification out, as the Catalog does, so the route read back after
 /// the save is the one saved, not one the next projection changes under the editor.

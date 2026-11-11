@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::Manager;
 
+use super::grants::{ACTIVE_WITHIN, POLL_EVERY};
 use crate::connection_probe::{BUSY, CHECKS};
 use crate::gcp::auth;
 use crate::gcp::iap::{self, IapError};
@@ -24,7 +25,7 @@ use crate::ssh::IapTarget;
 use crate::state::AppState;
 use crate::sync::record_repository as repo;
 use crate::sync::records_v3::{self, SyncStateV3};
-use crate::sync::transports::{self, HostTransport, TransportKind};
+use crate::sync::transports::{self, HostTransport, PamCheck, TransportKind};
 
 /// What the editor's **Use OS Login username** button learns: the account asked, its POSIX username (none when the project has no OS
 /// Login account for it yet) and, for the host's key, whether OS Login already has it.
@@ -119,11 +120,17 @@ impl Standing {
     }
 }
 
-/// The grant state of `transport`, over every entitlement it lists: a connection passes while any holds a grant, so the entitlement whose
-/// grant lasts longest is named, with its end; else one that is activating; else none, or the API's sentence when a search failed and
-/// no entitlement answered with a grant.
+/// The grant state of `transport`, over every entitlement it lists (`pam_status_for`).
 pub fn pam_status(gcp: &dyn GcpClient, transport: &HostTransport) -> PamStatusView {
     let TransportKind::GcpIap { project, account, pam, .. } = &transport.kind;
+    pam_status_for(gcp, account.as_deref(), project, pam.as_ref())
+}
+
+/// The grant state of whatever asks for the grants `pam` names in `project` (a host's route, a saved database), as `account` holds them
+/// (`None`: gcloud's active account), over every entitlement `pam` lists: a connection passes while any holds a grant, so the entitlement
+/// whose grant lasts longest is named, with its end; else one that is activating; else none, or the API's sentence when a search failed
+/// and no entitlement answered with a grant. With no `pam` nothing is asked for and the state is none.
+pub(crate) fn pam_status_for(gcp: &dyn GcpClient, account: Option<&str>, project: &str, pam: Option<&PamCheck>) -> PamStatusView {
     let Some(pam) = pam else { return PamStatusView::none() };
     let now = SystemTime::now();
     // The longest-lasting active grant, the first activating one, the first refusal.
@@ -132,7 +139,7 @@ pub fn pam_status(gcp: &dyn GcpClient, transport: &HostTransport) -> PamStatusVi
     let mut awaiting: Option<String> = None;
     let mut refused: Option<String> = None;
     for entitlement in &pam.entitlements {
-        match gcp.grants(account.as_deref(), &pam::EntitlementName::in_project(project, &pam.location, entitlement).full()) {
+        match gcp.grants(account, &pam::EntitlementName::in_project(project, &pam.location, entitlement).full()) {
             Ok(grants) => match Standing::of(&grants, now) {
                 Standing::Active(until) => {
                     if active.as_ref().is_none_or(|(_, best)| until > *best) {
@@ -180,7 +187,7 @@ pub(crate) fn live_routes(records: &SyncStateV3) -> Result<Vec<HostTransport>, S
 /// (or, for an entitlement an approver approves, for it to wait for the approver) and answers its state. `pam_request_with` takes the
 /// polling and the wait.
 pub fn pam_request(gcp: &dyn GcpClient, remember: &dyn Fn(&str, &str, u32) -> Result<(), String>, transport: &HostTransport, justification: &str, duration_secs: u32, entitlement: Option<&str>) -> Result<PamStatusView, String> {
-    pam_request_with(gcp, remember, transport, justification, duration_secs, entitlement, &|| false, Duration::from_secs(2), Duration::from_secs(60))
+    pam_request_with(gcp, remember, transport, justification, duration_secs, entitlement, &|| false, POLL_EVERY, ACTIVE_WITHIN)
 }
 
 #[allow(clippy::too_many_arguments)]

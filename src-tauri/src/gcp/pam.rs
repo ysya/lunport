@@ -21,11 +21,17 @@ pub struct Grant {
 }
 
 impl Grant {
+    /// How long the grant was requested for: the API's `requestedDuration` (`1800s`, with a fraction at times). `None` when it gives none,
+    /// or something that is not a length.
+    pub fn requested_length(&self) -> Option<Duration> {
+        let seconds: f64 = self.requested_duration.as_deref()?.strip_suffix('s')?.parse().ok().filter(|seconds: &f64| seconds.is_finite())?;
+        Duration::try_from_secs_f64(seconds.max(0.0)).ok()
+    }
+
     /// When access ends: the grant time plus the requested duration; `None` until access was given.
     pub fn until(&self) -> Option<SystemTime> {
         let granted = parse_rfc3339(self.access_grant_time.as_deref()?)?;
-        let seconds: f64 = self.requested_duration.as_deref()?.strip_suffix('s')?.parse().ok()?;
-        Some(granted + Duration::from_secs_f64(seconds.max(0.0)))
+        granted.checked_add(self.requested_length()?)
     }
 
     /// Whether nothing more will happen to the grant without a person: every state but `ACTIVATING`, `ACTIVE` and `SCHEDULED`
@@ -104,11 +110,15 @@ pub fn granted_at(grant: &Grant, now: SystemTime) -> Option<SystemTime> {
     }
 }
 
-/// When an active grant's access began and ends: from its own times, else from `now` and the duration that was asked for.
+/// When an active grant's access began and ends: from its own times, else from `now` and the length the grant was requested for (a grant
+/// still activating has no time yet, and another device or gcloud may have requested it for another length than the one `duration_secs`
+/// names), else from `now` and `duration_secs`, the length asked for by whoever looks. A length that takes the end past any time the clock
+/// can hold counts as `duration_secs` too.
 pub fn active_span(grant: &Grant, now: SystemTime, duration_secs: u32) -> (SystemTime, SystemTime) {
     let began = granted_at(grant, now).unwrap_or(now);
-    let length = grant.until().and_then(|until| until.duration_since(began).ok()).unwrap_or(Duration::from_secs(u64::from(duration_secs)));
-    (began, began + length)
+    let asked = Duration::from_secs(u64::from(duration_secs));
+    let length = grant.until().and_then(|until| until.duration_since(began).ok()).or_else(|| grant.requested_length()).unwrap_or(asked);
+    (began, began.checked_add(length).unwrap_or(began + asked))
 }
 
 /// Where a grant lives: the caller's account (or gcloud's active one) and the entitlement's full name
@@ -426,6 +436,50 @@ mod tests {
         assert_eq!((grants[1].state.as_str(), grants[1].requested_duration.as_deref(), grants[1].access_grant_time.as_deref()), ("ACTIVE", Some("3600s"), Some("2026-10-25T10:00:00.123456Z")));
         assert_eq!(grants[0].access_grant_time, None);
         assert!(parse_grants(&json!({})).is_empty());
+    }
+
+    /// The length a grant was requested for is what it lasts, when its own times do not say: a grant still activating is not dated yet, and
+    /// what it was requested for may differ from the length whoever looks asks for.
+    #[test]
+    fn a_grant_that_is_not_dated_yet_lasts_as_long_as_it_was_requested_for() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let asked = |state: &str, text: Option<&str>| Grant { requested_duration: text.map(str::to_string), ..grant(state, None) };
+        let minutes = |count: u64| Duration::from_secs(count * 60);
+        // Its own length first: fifteen minutes, not the thirty of the default.
+        assert_eq!(active_span(&asked("ACTIVATING", Some("900s")), now, 1800), (now, now + minutes(15)));
+        assert_eq!(active_span(&asked("ACTIVE", Some("900s")), now, 1800), (now, now + minutes(15)), "an active grant PAM did not date");
+        // Then the length asked for, when the grant says none or says it in a form that is not a length.
+        for unsaid in [None, Some(""), Some("900"), Some("soon"), Some("infs"), Some("NaNs")] {
+            assert_eq!(active_span(&asked("ACTIVATING", unsaid), now, 1800), (now, now + minutes(30)), "{unsaid:?}");
+        }
+        // A grant with its own times keeps them, whatever length it was asked for.
+        let dated = Grant { access_grant_time: Some("2027-01-15T07:50:00Z".into()), requested_duration: Some("900s".into()), ..grant("ACTIVE", None) };
+        assert_eq!(active_span(&dated, now, 3600), (now - minutes(10), now + minutes(5)));
+    }
+
+    #[test]
+    fn a_requested_length_past_what_the_clock_holds_lasts_as_long_as_the_length_asked_for() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        // A length a `Duration` holds, but that takes the end of access past any time the clock can hold.
+        let endless = Grant { requested_duration: Some("1e19s".into()), ..grant("ACTIVATING", None) };
+        assert!(endless.requested_length().is_some());
+        assert_eq!(active_span(&endless, now, 1800), (now, now + Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn the_requested_length_reads_the_apis_duration_and_nothing_else() {
+        let asked = |text: Option<&str>| Grant { requested_duration: text.map(str::to_string), ..grant("ACTIVE", None) };
+        assert_eq!(asked(Some("1800s")).requested_length(), Some(Duration::from_secs(1800)));
+        assert_eq!(asked(Some("90.5s")).requested_length(), Some(Duration::from_millis(90_500)));
+        assert_eq!(asked(Some("0s")).requested_length(), Some(Duration::ZERO));
+        for unreadable in [None, Some(""), Some("s"), Some("1800"), Some("30m"), Some("infs"), Some("NaNs"), Some("1e999s")] {
+            assert_eq!(asked(unreadable).requested_length(), None, "{unreadable:?}");
+        }
+        // A length no grant has cannot take the end of access out of range or panic.
+        let dated = |text: &str| Grant { access_grant_time: Some("2027-01-15T08:00:00Z".into()), requested_duration: Some(text.into()), ..grant("ACTIVE", None) };
+        assert_eq!(dated("1800s").until(), Some(UNIX_EPOCH + Duration::from_secs(1_800_001_800)));
+        assert_eq!(dated("infs").until(), None);
+        assert_eq!(dated("1e30s").until(), None);
     }
 
     #[test]
