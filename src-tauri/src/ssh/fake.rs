@@ -100,6 +100,7 @@ pub enum FakeEvent {
     /// A successful connect: the alias of every hop, jumps first.
     Connect { aliases: Vec<String> },
     Exec { command: String, timeout: Duration, output_cap: usize },
+    ExecWithPrompt { command: String, marker: String, timeout: Duration, output_cap: usize },
     ShellOpened { term: String, cols: u16, rows: u16 },
     ShellInput(Vec<u8>),
     WindowChange { cols: u16, rows: u16 },
@@ -719,6 +720,12 @@ impl Session for FakeSession {
             truncated: false,
         });
         Ok(capped(result, output_cap))
+    }
+
+    fn exec_with_prompt(&self, command: &str, prompt_marker: &str, timeout: Duration, output_cap: usize, _answer: &dyn Fn() -> Option<super::types::Secret>) -> Result<ExecResult, SessionError> {
+        if !self.is_alive() { return Err(SessionError::Closed); }
+        self.shared.record(FakeEvent::ExecWithPrompt { command: command.into(), marker: prompt_marker.into(), timeout, output_cap });
+        Ok(ExecResult { ended: Ended::Exited, exit_code: Some(0), signal: None, stdout: Vec::new(), stderr: Vec::new(), truncated: false })
     }
 
     fn is_alive(&self) -> bool {

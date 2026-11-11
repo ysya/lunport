@@ -110,6 +110,12 @@ const PROPOSAL_WORDS: Record<string, ProposalWords> = {
     button: "Download file", hostLine: hostId,
     note: "The AI client cannot approve this request. Requests expire after 120 seconds.",
   },
+  sudo_exec: {
+    title: "Run this sudo command?",
+    description: "Lunport will run this shell text once as root with sudo after you approve it. If sudo asks for a password, enter it in Lunport's separate authorization window. The AI client cannot answer for you.",
+    button: "Run with sudo", hostLine: hostId,
+    note: "Review the full command and target. Requests expire after 120 seconds; a changed route requires fresh approval.",
+  },
 };
 
 export function McpApprovalCardView({ request, busy, armed, expired = false, onAnswer }: McpApprovalCardViewProps) {
@@ -119,6 +125,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
   const proposal = request.host_proposal;
   const words = proposal ? PROPOSAL_WORDS[proposal.kind] ?? PROPOSAL_WORDS.create_host : null;
   const transfer = proposal?.kind === "scp_upload" || proposal?.kind === "scp_download";
+  const sudo = proposal?.kind === "sudo_exec";
 
   return (
     <>
@@ -139,10 +146,10 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
               <p>Host: {revealHidden(request.alias)} · {words ? words.hostLine(request) : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
               <p>Resolved: {endpoint}</p>
             </>}
-          {(!proposal || transfer) && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
+          {(!proposal || transfer || sudo) && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
           <McpAttribution requestedBy={request.requested_by} requesterId={request.requester_id} clientInfo={request.client_info} />
         </div>
-        {proposal ? (
+        {proposal && !sudo ? (
           <dl className="space-y-2 rounded-lg border p-3 text-xs">
             {proposal.settings.map(([label, value]) => (
               <div key={label} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">

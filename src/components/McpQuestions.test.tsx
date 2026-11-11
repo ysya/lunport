@@ -35,6 +35,15 @@ function disabled(html: string, label: string) {
 }
 
 describe("MCP command review", () => {
+  it("distinguishes a one-shot sudo request from an ordinary command", () => {
+    const sudo = { ...request, command: "systemctl restart web-1", host_proposal: { kind: "sudo_exec", settings: [] as [string, string][] } };
+    const html = renderReview({ request: sudo });
+    expect(html).toContain("Run this sudo command?");
+    expect(html).toContain("systemctl restart web-1");
+    expect(html).toContain("Route: jump-id → stable-host");
+    expect(html).toContain("Run with sudo");
+    expect(renderReview()).not.toContain("Run this sudo command?");
+  });
   it("shows transfer paths and direction in the Ask review", () => {
     const transfer = { ...request, command: "", host_proposal: { kind: "scp_upload", settings: [
       ["Local file", "/tmp/report.txt"], ["Remote path", "/srv/report.txt"],
@@ -85,6 +94,12 @@ describe("MCP command review", () => {
 });
 
 describe("native authentication rendering", () => {
+  it("labels a sudo password as a one-time privilege prompt", () => {
+    const html = renderAuth({ request: { ...question, kind: "sudo", text: "Password for approved sudo command" } });
+    expect(html).toContain("Sudo authorization");
+    expect(html).toContain('aria-label="Sudo password"');
+    expect(html).not.toContain("Save a password");
+  });
   it("escapes server challenge and separates trusted request/hop context, with Cancel default focus", () => {
     const html = renderAuth();
     expect(html).toContain("&lt;script&gt;server challenge&lt;/script&gt;");

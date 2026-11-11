@@ -386,6 +386,7 @@ fn records_tool_inventory_is_explicit() {
             "list_hosts",
             "get_host",
             "ssh_exec",
+            "ssh_sudo_exec",
             "create_host",
             "verify_host_key",
             "update_host",
