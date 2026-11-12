@@ -183,6 +183,21 @@ export function RecordsWorkspace({
     setInspectedId(null);
     setSelectedHostId(null);
   };
+  const reorderGroups = (ids: string[]) => {
+    if (reordering) return;
+    setReordering(true);
+    const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const order = overview.group_order ?? { ids: [], revision: null, blocked: false, sync_enabled: false };
+    void setRecordGroupOrder(order, ids).then((incoming) => {
+      accept(incoming);
+      requestAnimationFrame(() => {
+        if (origin?.isConnected && document.activeElement === document.body) origin.focus({ preventScroll: true });
+      });
+    }).catch((error: unknown) => {
+      toast.error("Could not reorder groups", { description: error instanceof Error ? error.message : String(error) });
+      reload();
+    }).finally(() => setReordering(false));
+  };
   const groupContext =
     panel === "hosts" && filter.kind === "group"
       ? selectGroup(overview.groups, filter.id)
@@ -336,26 +351,8 @@ export function RecordsWorkspace({
         <LibraryNavigation
           overview={overview}
           panel={panel}
-          filter={filter}
           navigate={(next) => { setActiveTerminal(null); setPanel(next); }}
           changeFilter={(next) => { setActiveTerminal(null); changeFilter(next); }}
-          createGroup={createGroup}
-          reordering={reordering}
-          reorder={(ids) => {
-            if (reordering) return;
-            setReordering(true);
-            const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-            const order = overview.group_order ?? { ids: [], revision: null, blocked: false, sync_enabled: false };
-            void setRecordGroupOrder(order, ids).then((incoming) => {
-              accept(incoming);
-              requestAnimationFrame(() => {
-                if (origin?.isConnected && document.activeElement === document.body) origin.focus({preventScroll:true});
-              });
-            }).catch((error: unknown) => {
-              toast.error("Could not reorder groups", { description: error instanceof Error ? error.message : String(error) });
-              reload();
-            }).finally(() => setReordering(false));
-          }}
         />
       </div>
       <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col" inert={settingsOpen} aria-hidden={settingsOpen || undefined}>
@@ -487,6 +484,8 @@ export function RecordsWorkspace({
               selectGroup={(id) => requestSelection({ kind: "group", id })}
               create={createHost}
               createGroup={createGroup}
+              reorder={reorderGroups}
+              reordering={reordering}
               disabled={editorBusy}
               organizeDisabled={dirty || editorBusy}
               accept={accept}
