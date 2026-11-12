@@ -7,12 +7,12 @@ use crate::gcp::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey, Instanc
 use crate::gcp::oslogin::LoginProfile;
 use crate::gcp::pam::{duration_text, rfc3339, Grant};
 use crate::gcp::rest::GcpError;
-use crate::session::database_ports::tests::{t0, wait_until, App, Clock, FakeUpstream};
+use crate::session::database_ports::tests::{runs, t0, wait_until, App, Clock, FakeUpstream};
 use crate::session::database_ports::WRITABLE_WINDOW;
 use crate::session::transports::pam_status;
 use crate::sync::{
     databases::{
-        tests::{database, state},
+        tests::{database, state, through_host, ROUTE_HOST},
         DatabaseEnvironment,
     },
     record_runtime, records_v3,
@@ -111,7 +111,8 @@ fn a_running_database_is_listed_with_its_port_and_one_deleted_elsewhere_to_be_st
     let saved = databases::set(&state(), ORDERS, None, Some(database(ORDERS)), 10).unwrap();
     // Started on a port the system picks; the record keeps its own.
     let started = SavedDatabase { local_port: Some(0), ..database(ORDERS) };
-    ports.start(&started, Zeroizing::new("c2VjcmV0LXBvcnQtcGFzc3dvcmQtMDEy".into()), CancelToken::default(), Box::new(())).unwrap();
+    ports.start(&started, Zeroizing::new("c2VjcmV0LXBvcnQtcGFzc3dvcmQtMDEy".into()), CancelToken::default(), Box::new(()), None).unwrap();
+    runs(&ports, ORDERS);
     let listed = views(&saved, &ports);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].database, database(ORDERS), "the record as it is saved");
@@ -160,13 +161,33 @@ fn what_connecting_or_locking_reads_marks_a_running_database_changed() {
 }
 
 #[test]
+fn a_changed_route_asks_for_a_restart() {
+    let running = through_host(ORDERS);
+    // Saved elsewhere to connect through another host of the library.
+    let other_host = SavedDatabase { via_host: Some("00000000000000ff".into()), ..running.clone() };
+    assert!(changed_for_port(&running, &other_host), "only the host it connects through differs");
+    assert!(changed_for_port(&running, &database(ORDERS)), "back on its public IP");
+    assert!(changed_for_port(&database(ORDERS), &running), "through a host now");
+    assert!(!changed_for_port(&running, &through_host(ORDERS)));
+}
+
+#[test]
+fn start_refuses_a_database_that_changed() {
+    let saved = guarded();
+    let older = SavedDatabase { pam: None, ..saved.clone() };
+    assert_eq!(unchanged(&saved, Some(&older)), Err("The database changed while the request was open; read it again and retry.".to_string()));
+    assert_eq!(unchanged(&saved, Some(&saved)), Ok(()));
+    assert_eq!(unchanged(&saved, None), Ok(()), "the page starts the database as it is saved");
+}
+
+#[test]
 fn a_running_database_saved_anew_elsewhere_is_marked_changed_and_shown_as_it_locks() {
     let ports = DatabasePorts::new(Arc::new(FakeUpstream::default()));
     // A port the system leaves free, saved with the database, so that the port runs exactly what is saved.
     let free = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
     let orders = SavedDatabase { local_port: Some(free), ..database(ORDERS) };
     let saved = databases::set(&state(), ORDERS, None, Some(orders.clone()), 10).unwrap();
-    ports.start(&orders, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    ports.start(&orders, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(()), None).unwrap();
     let listed = views(&saved, &ports);
     assert!(!listed[0].changed, "it runs what is saved");
     assert_eq!(listed[0].environment, DatabaseEnvironment::Prod);
@@ -187,7 +208,7 @@ fn a_running_database_saved_anew_elsewhere_is_marked_changed_and_shown_as_it_loc
     assert!(!listed[0].changed);
     assert_eq!(listed[0].environment, DatabaseEnvironment::Dev);
     // A dev database that runs and is saved as prod elsewhere is shown as prod at once.
-    ports.start(&dev, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    ports.start(&dev, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(()), None).unwrap();
     let listed = views(&saved, &ports);
     assert!(listed[0].changed);
     assert_eq!(listed[0].environment, DatabaseEnvironment::Prod);
@@ -207,13 +228,27 @@ fn a_view_serializes_with_snake_case_phases_and_null_gaps() {
         environment: DatabaseEnvironment::Prod,
     };
     let value = serde_json::to_value(&view).unwrap();
-    assert_eq!(value["live"], json!({"phase": "stopped", "port": null, "connections": 0, "writable_until_ms": null, "error": null}));
+    let gaps = json!({"phase": "stopped", "port": null, "connections": 0, "writable_until_ms": null, "error": null, "step": null, "address": null});
+    assert_eq!(value["live"], gaps);
     assert_eq!(value["database"], serde_json::to_value(database(ORDERS)).unwrap());
     assert_eq!((value["synced"].clone(), value["blocked"].clone(), value["removed"].clone()), (json!(false), json!(false), json!(false)));
     assert_eq!((value["changed"].clone(), value["environment"].clone()), (json!(false), json!("prod")));
     let phases = [DatabasePhase::Stopped, DatabasePhase::Starting, DatabasePhase::Running, DatabasePhase::Stopping, DatabasePhase::Error];
     let written: Vec<_> = phases.iter().map(|phase| serde_json::to_value(phase).unwrap()).collect();
     assert_eq!(written, vec![json!("stopped"), json!("starting"), json!("running"), json!("stopping"), json!("error")]);
+    let steps = [DatabaseStep::Grant, DatabaseStep::Connect, DatabaseStep::Certificate];
+    let written: Vec<_> = steps.iter().map(|step| serde_json::to_value(step).unwrap()).collect();
+    assert_eq!(written, vec![json!("grant"), json!("connect"), json!("certificate")]);
+    // A start that failed at its certificate, through a host whose instance address was fetched.
+    let failed = DatabaseLive {
+        phase: DatabasePhase::Error,
+        error: Some("Could not connect through web-1: Connection refused.".into()),
+        step: Some(DatabaseStep::Certificate),
+        address: Some("198.51.100.10:3307".into()),
+        ..DatabaseLive::default()
+    };
+    assert_eq!(serde_json::to_value(&failed).unwrap()["step"], json!("certificate"));
+    assert_eq!(serde_json::to_value(&failed).unwrap()["address"], json!("198.51.100.10:3307"));
 }
 
 #[test]
@@ -294,8 +329,8 @@ fn rotated(ports: &DatabasePorts, keychain: &MemKeychain) -> Result<String, Stri
 /// Starts `Orders` as `databases_start` does, on a port the system picks, with the password the keychain keeps for it.
 fn started(ports: &DatabasePorts, keychain: &MemKeychain) -> u16 {
     let running = SavedDatabase { local_port: Some(0), ..database(ORDERS) };
-    ports.start(&running, ensure_password(keychain, ORDERS).unwrap(), CancelToken::default(), Box::new(())).unwrap();
-    ports.live(ORDERS).port.expect("a running port has a port")
+    ports.start(&running, ensure_password(keychain, ORDERS).unwrap(), CancelToken::default(), Box::new(()), None).unwrap();
+    runs(ports, ORDERS).port.expect("a running port has a port")
 }
 
 /// An app signed in to `port` with `password`.
@@ -512,7 +547,7 @@ fn a_running_database_is_not_deleted_and_keeps_its_password() {
     let (ports, keychain) = (DatabasePorts::new(Arc::new(FakeUpstream::default())), MemKeychain::default());
     let saved = save(&d.env(), SavedDatabase { id: String::new(), ..database(ORDERS) }, None).unwrap();
     let running = SavedDatabase { local_port: Some(0), ..saved.clone() };
-    ports.start(&running, ensure_password(&keychain, &saved.id).unwrap(), CancelToken::default(), Box::new(())).unwrap();
+    ports.start(&running, ensure_password(&keychain, &saved.id).unwrap(), CancelToken::default(), Box::new(()), None).unwrap();
     let delete_it = || delete_database(&ports, &keychain, &saved.id, || delete(&d.env(), saved.clone()));
     assert_eq!(delete_it(), Err("Stop Orders before you change it.".to_string()));
     assert!(keychain.entry(&password_account(&saved.id)).is_some(), "the password its port asks for stays");
@@ -545,7 +580,8 @@ const STAY_LOCKED: &str = "Writes stay locked.";
 fn running_on(clock: &Clock, database: SavedDatabase) -> DatabasePorts {
     let ports = DatabasePorts::new(Arc::new(FakeUpstream::default())).timed_by(clock.clocks(), Duration::from_millis(10));
     let started = SavedDatabase { local_port: Some(0), ..database };
-    ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+    ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(()), None).unwrap();
+    runs(&ports, &started.id);
     ports
 }
 
@@ -622,7 +658,8 @@ fn a_database_started_again_while_the_person_confirms_stays_locked() {
     let ports = running_on(&clock, database(ORDERS));
     let start_again = || {
         let started = SavedDatabase { local_port: Some(0), ..database(ORDERS) };
-        ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(())).unwrap();
+        ports.start(&started, Zeroizing::new(STORED.into()), CancelToken::default(), Box::new(()), None).unwrap();
+        runs(&ports, ORDERS);
     };
     let stop = || {
         ports.stop(ORDERS);
@@ -788,6 +825,16 @@ fn a_grant_is_neither_read_nor_requested_for_a_database_that_is_not_saved() {
     // Another database's identity finds nothing either.
     assert_eq!(saved(&library_of(guarded()), ANALYTICS), Err(GONE.to_string()));
     assert_eq!(saved(&library_of(guarded()), ORDERS), Ok(guarded()));
+}
+
+#[test]
+fn the_grant_of_a_databases_host_is_asked_for_only_when_the_database_goes_through_one() {
+    // Through a host of the library: that host is the one asked about.
+    assert_eq!(route_host(&library_of(through_host(ORDERS)), ORDERS), Ok(ROUTE_HOST.to_string()));
+    // On its public address there is no host, and a database that is not saved has none to name: refused before anybody is asked.
+    assert_eq!(route_host(&library_of(database(ORDERS)), ORDERS), Err("This database does not connect through a host.".to_string()));
+    assert_eq!(route_host(&state(), ORDERS), Err(GONE.to_string()));
+    assert_eq!(route_host(&library_of(through_host(ORDERS)), ANALYTICS), Err(GONE.to_string()));
 }
 
 // ---- Listing instances ----

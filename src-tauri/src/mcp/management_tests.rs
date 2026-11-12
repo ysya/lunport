@@ -399,7 +399,13 @@ fn records_tool_inventory_is_explicit() {
             "start_tunnel",
             "stop_tunnel",
             "scp_upload",
-            "scp_download"
+            "scp_download",
+            "list_databases",
+            "create_database",
+            "update_database",
+            "delete_database",
+            "start_database",
+            "stop_database"
         ]
     );
 }

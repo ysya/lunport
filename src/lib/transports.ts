@@ -262,6 +262,23 @@ export function transportFor(overview: RecordOverview, hostId: string | null): H
 }
 
 /**
+ * The host a connection to `hostId` dials first, as the backend chains jump hosts (`record_repository::route_indices`): the host
+ * itself, or else its first jump host's own first hop. It is the only hop an IAP route applies to. `null` when the chain cannot be
+ * followed: a host this computer has not got, or jump hosts that go round in a circle (the backend refuses both).
+ */
+export function firstHop(overview: RecordOverview, hostId: string): string | null {
+  const seen = new Set<string>();
+  let host = overview.hosts.find((candidate) => candidate.id === hostId);
+  while (host && !seen.has(host.id)) {
+    seen.add(host.id);
+    const jump: string | undefined = host.effective_payload.jump[0];
+    if (jump === undefined) return host.id;
+    host = overview.hosts.find((candidate) => candidate.id === jump);
+  }
+  return null;
+}
+
+/**
  * Whether the route of `hostId` syncs wherever the host does, or stays on this computer. A route says so itself (`transport_sync`); for a
  * host with no route yet, a new host included, it is whether a route saved now would sync, which is where the library uses central sync.
  */

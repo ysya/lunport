@@ -910,6 +910,23 @@ fn saved_databases_another_device_published_reach_a_device_saved_at_any_older_ve
     }
 }
 
+/// A database reached through a host needs the route version (13): a device saved at any older version, the version of saved databases
+/// included, receives one another device published, and the round saves the state at the route version.
+#[test]
+fn a_database_through_a_host_another_device_published_raises_the_route_version() {
+    use crate::sync::databases::{self, tests::through_host};
+    for previous in CENTRAL_STATE_VERSION..databases::ROUTE_STATE_VERSION {
+        let f = fixture_at(previous);
+        round::sync_once(&f.d.env()).unwrap();
+        assert_eq!(state(&f.d).version, previous, "from version {previous}");
+        remote_catalog(&f, |catalog| catalog.databases.push(through_host("00000000000000d1")));
+        round::sync_once(&f.d.env()).unwrap();
+        let after = state(&f.d);
+        assert_eq!(databases::view(&after).into_iter().map(|row| row.database).collect::<Vec<_>>(), vec![through_host("00000000000000d1")], "from version {previous}");
+        assert_eq!(after.version, databases::ROUTE_STATE_VERSION, "from version {previous}");
+    }
+}
+
 /// The databases' version is the newest, so it decides what a delta may raise the state to when the same Catalog also brings the library's
 /// first search scope and route rows, which need versions 11 and 10.
 #[test]

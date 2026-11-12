@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Copy, LoaderCircle, Lock, LockOpen, RotateCw } from "lucide-react";
 import { toast } from "sonner";
@@ -21,21 +21,25 @@ import {
   databaseDetailsId,
   databasePassword,
   databasePort,
+  jdbcUrl,
   lockDatabaseWrites,
   reconnectLockedConnections,
   rotateDatabasePassword,
+  routeParts,
   runDatabaseAction,
   unlockDatabaseWrites,
   unlockMethod,
   writableLeft,
   writableSecondsLeft,
   type DatabaseView,
+  type RoutePartState,
+  type RouteSummary,
 } from "@/lib/databases";
 
 /*
- * What other apps need to connect to a database that is offered on a local port, and the write lock of a prod one: the address with
- * its Copy URL, Copy password and Rotate password, and for prod the lock itself, Reconnect now and the seconds left. The password is never
- * drawn: it goes from the keychain to the clipboard when a button asks for it.
+ * What other apps need to connect to a database that is offered on a local port, and the write lock of a prod one: the way to the
+ * instance, the address with its Copy URL and Copy JDBC URL, Copy password and Rotate password, and for prod the lock itself, Reconnect
+ * now and the seconds left. The password is never drawn: it goes from the keychain to the clipboard when a button asks for it.
  *
  * `DatabaseAccessCard` keeps the state and does the work; `DatabaseAccessView` is the card without hooks, so that the tests can press it.
  */
@@ -121,13 +125,14 @@ export function WritesOnMarker({ until }: { until: number }) {
 }
 
 /** The change under way. Until it ends every control of the card is held. */
-export type Step = "url" | "password" | "rotate" | "unlock" | "lock" | "reconnect";
+export type Step = "url" | "jdbc" | "password" | "rotate" | "unlock" | "lock" | "reconnect";
 /** The question the card asks before it acts: before it rotates the password, and where the system cannot ask, before it unlocks writes. */
 export type Question = "rotate" | "unlock";
 
 /** What the card's controls do. The ones that change something answer when they are done. */
 export type AccessActions = {
   copyUrl: () => Promise<void>;
+  copyJdbcUrl: () => Promise<void>;
   copyPassword: () => Promise<void>;
   /** Opens a question, or closes the one that is open. */
   ask: (question: Question | null) => void;
@@ -145,6 +150,10 @@ export type DatabaseAccessViewProps = {
   view: DatabaseView;
   /** The address apps connect to (`connectionUrl`). */
   url: string;
+  /** The address JDBC apps connect to (`jdbcUrl`): the same port and user as `url`; none without a port to name. */
+  jdbc: string | null;
+  /** The way to the instance: the host the database goes through, and whether the way to it begins with IAP. */
+  route: RouteSummary;
   /** The time now, in milliseconds since the Unix epoch, which the countdown is worked out from. */
   now: number;
   pending: Step | null;
@@ -157,6 +166,28 @@ export type DatabaseAccessViewProps = {
 /** One labelled group of the card. */
 const group = "space-y-1.5";
 const groupLabel = "text-xs font-medium text-muted-foreground";
+
+/** How a part of the way is coloured by how far a start got along it. */
+const PART_COLOURS: Record<RoutePartState, string> = { done: "text-success", active: "text-primary", failed: "text-destructive", idle: "text-muted-foreground" };
+
+/** The way to the instance, part after part (`routeParts`), each in the colour of its state. */
+function routeLine({ view, route }: DatabaseAccessViewProps) {
+  return (
+    <div className={group}>
+      <p className={groupLabel}>Route</p>
+      <p className="text-xs break-words">
+        {routeParts(view.database, view.live, route).map((part, index) => (
+          <Fragment key={index}>
+            {index > 0 && " → "}
+            <span className={PART_COLOURS[part.state]} data-state={part.state}>
+              {revealHidden(part.label)}
+            </span>
+          </Fragment>
+        ))}
+      </p>
+    </div>
+  );
+}
 
 /**
  * The lock of a prod database. It can be unlocked only while the database runs, so the button is held in every other phase; the backend
@@ -214,12 +245,13 @@ function writeLock({ view, now, pending, actions }: DatabaseAccessViewProps) {
  * reads as locked even before the list is read again. While a change is under way every control is held.
  */
 export function DatabaseAccessView(props: DatabaseAccessViewProps) {
-  const { view, url, pending, error, asking, actions } = props;
+  const { view, url, jdbc, pending, error, asking, actions } = props;
   const { database } = view;
   const name = revealHidden(database.name);
   const busy = pending !== null;
   return (
     <section id={databaseDetailsId(database.id)} aria-label={`Local connection to ${name}`} className="space-y-4 rounded-lg border bg-muted/30 p-4">
+      {routeLine(props)}
       <div className={group}>
         <p className={groupLabel}>Connection URL</p>
         <div className="flex flex-wrap items-center gap-2">
@@ -227,6 +259,10 @@ export function DatabaseAccessView(props: DatabaseAccessViewProps) {
           <Button variant="outline" size="sm" disabled={busy} onClick={actions.copyUrl}>
             <Copy />
             Copy URL
+          </Button>
+          <Button variant="outline" size="sm" disabled={busy || jdbc === null} onClick={actions.copyJdbcUrl}>
+            <Copy />
+            Copy JDBC URL
           </Button>
         </div>
       </div>
@@ -281,12 +317,13 @@ export function DatabaseAccessView(props: DatabaseAccessViewProps) {
 }
 
 /**
- * The connection details and write lock of the database `view` shows, with the database user the address names (`iamUser`). It keeps
- * what is under way, the sentence the last change failed with, and the question being asked. One change runs at a time; whatever came of
- * it the list is read again, so that the lock follows at once, and the sentence a change failed with is the backend's own, shown in the
- * card as the page shows the failure of its other changes. The countdown moves every second, from the time at each render.
+ * The connection details and write lock of the database `view` shows, with the database user the addresses name (`iamUser`) and the way
+ * to the instance (`route`). It keeps what is under way, the sentence the last change failed with, and the question being asked. One
+ * change runs at a time; whatever came of it the list is read again, so that the lock follows at once, and the sentence a change failed
+ * with is the backend's own, shown in the card as the page shows the failure of its other changes. The countdown moves every second, from
+ * the time at each render.
  */
-export function DatabaseAccessCard({ view, iamUser }: { view: DatabaseView; iamUser: string }) {
+export function DatabaseAccessCard({ view, iamUser, route }: { view: DatabaseView; iamUser: string; route: RouteSummary }) {
   const client = useQueryClient();
   const now = useRenderTime();
   const [pending, setPending] = useState<Step | null>(null);
@@ -294,7 +331,9 @@ export function DatabaseAccessCard({ view, iamUser }: { view: DatabaseView; iamU
   const [asking, setAsking] = useState<Question | null>(null);
   const flight = useRef(false);
   const id = view.database.id;
-  const url = connectionUrl({ ...view.database, local_port: databasePort(view) }, iamUser);
+  const port = databasePort(view);
+  const url = connectionUrl({ ...view.database, local_port: port }, iamUser);
+  const jdbc = port === null ? null : jdbcUrl(view.database, port, iamUser);
   const act = async (step: Step, run: () => Promise<void>) => {
     if (flight.current) return;
     flight.current = true;
@@ -309,6 +348,12 @@ export function DatabaseAccessCard({ view, iamUser }: { view: DatabaseView; iamU
       act("url", async () => {
         await toClipboard(url, COPY_FAILED);
         toast.success("URL copied.");
+      }),
+    copyJdbcUrl: () =>
+      act("jdbc", async () => {
+        if (jdbc === null) return;
+        await toClipboard(jdbc, COPY_FAILED);
+        toast.success("JDBC URL copied.");
       }),
     copyPassword: () =>
       act("password", async () => {
@@ -332,5 +377,5 @@ export function DatabaseAccessCard({ view, iamUser }: { view: DatabaseView; iamU
         toast.success(reconnectLine(await reconnectLockedConnections(id)));
       }),
   };
-  return <DatabaseAccessView view={view} url={url} now={now} pending={pending} error={error} asking={asking} actions={actions} />;
+  return <DatabaseAccessView view={view} url={url} jdbc={jdbc} route={route} now={now} pending={pending} error={error} asking={asking} actions={actions} />;
 }

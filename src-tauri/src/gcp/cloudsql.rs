@@ -1,9 +1,9 @@
 //! The Cloud SQL Admin API (`sqladmin.googleapis.com`, v1) as a database connection uses it. Three calls: an instance's connect settings (its
-//! public address, its engine and region, the certificate authority behind its server certificate and the name that certificate is made
-//! out to); a client certificate that Cloud SQL signs for a key made for the connection and stamps with the caller's access token, which
-//! is what lets the instance sign the caller in with Google IAM instead of a password; and a project's PostgreSQL instances, for the form
-//! that adds a database. Every call carries the bearer token of a `TokenSource`, every failure is a `GcpError` sentence, and the `SqlAdmin`
-//! trait lets the code that connects script the answers.
+//! public and private addresses, its engine and region, the certificate authority behind its server certificate and the name that
+//! certificate is made out to); a client certificate that Cloud SQL signs for a key made for the connection and stamps with the caller's
+//! access token, which is what lets the instance sign the caller in with Google IAM instead of a password; and a project's PostgreSQL
+//! instances, for the form that adds a database. Every call carries the bearer token of a `TokenSource`, every failure is a `GcpError`
+//! sentence, and the `SqlAdmin` trait lets the code that connects script the answers.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -48,6 +48,9 @@ pub struct InstanceRef {
 pub struct ConnectSettings {
     /// The instance's public address; `None` when it has none (a private-only instance).
     pub public_ip: Option<IpAddr>,
+    /// The instance's private address, which only a machine on the instance's network reaches; `None` when it has none (a public-only
+    /// instance).
+    pub private_ip: Option<IpAddr>,
     /// `serverCaCert.cert` as Cloud SQL sent it. It can hold several PEM certificates, and the connection trusts all of them.
     pub server_ca_pem: String,
     /// The name the server certificate is made out to, without the trailing dot of a DNS name: the first name Cloud SQL lists, else the
@@ -132,7 +135,7 @@ impl EphemeralKey {
 /// as for `TokenSource`. The calls block on network round trips (and on the token source), so they are made from a blocking context,
 /// `spawn_blocking` or a worker thread, never on an async task's own thread, as the token source's are.
 pub trait SqlAdmin: Send + Sync {
-    /// The instance's public address, server certificate authority and DNS name.
+    /// The instance's public and private addresses, server certificate authority and DNS name.
     fn connect_settings(&self, account: Option<&str>, at: &InstanceRef) -> Result<ConnectSettings, GcpError>;
     /// Has Cloud SQL sign a client certificate for `key`, with the caller's access token inside it: that is what lets the instance sign the
     /// caller in with Google IAM. The certificate's `expires_at` is capped at the token's end, after which the instance no longer signs
@@ -200,18 +203,13 @@ impl SqlAdmin for RestSqlAdmin {
             .and_then(|cert| cert.cert)
             .filter(|pem| !pem.trim().is_empty())
             .ok_or_else(|| GcpError::Malformed("the connect settings came without a server certificate".to_string()))?;
-        let public_ip = settings
-            .ip_addresses
-            .iter()
-            .flatten()
-            .find(|mapping| mapping.kind.as_deref() == Some("PRIMARY"))
-            .and_then(|mapping| mapping.ip_address.as_deref())
-            .filter(|address| !address.is_empty())
-            .map(|address| address.parse::<IpAddr>().map_err(|_| GcpError::Malformed("the connect settings carry an address that is not an IP address".to_string())))
-            .transpose()?;
+        let addresses = settings.ip_addresses.as_deref().unwrap_or_default();
+        let public_ip = address_of(addresses, "PRIMARY")?;
+        let private_ip = address_of(addresses, "PRIVATE")?;
         let dns_name = dns_name(settings.dns_names.as_deref().unwrap_or_default(), settings.dns_name.as_deref());
         Ok(ConnectSettings {
             public_ip,
+            private_ip,
             server_ca_pem,
             dns_name,
             database_version: settings.database_version.unwrap_or_default(),
@@ -326,6 +324,18 @@ fn refusal_words(message: &str, token: &str) -> Option<String> {
     let cut: String = one_line.chars().filter(|c| !c.is_control()).take(REFUSAL_CHARS).collect();
     let cut = cut.trim_end();
     (!cut.is_empty()).then(|| cut.to_string())
+}
+
+/// The address of the first entry of `mappings` that is of `kind` (`PRIMARY` is the instance's public address, `PRIVATE` its private one).
+/// `None` when no entry is, or the one that is carries no address; an address that is not an IP address is malformed.
+fn address_of(mappings: &[IpMapping], kind: &str) -> Result<Option<IpAddr>, GcpError> {
+    mappings
+        .iter()
+        .find(|mapping| mapping.kind.as_deref() == Some(kind))
+        .and_then(|mapping| mapping.ip_address.as_deref())
+        .filter(|address| !address.is_empty())
+        .map(|address| address.parse::<IpAddr>().map_err(|_| GcpError::Malformed("the connect settings carry an address that is not an IP address".to_string())))
+        .transpose()
 }
 
 /// The name the server certificate is made out to: the first non-empty name of `dnsNames`, else the legacy `dnsName`, with one trailing dot

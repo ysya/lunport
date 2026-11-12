@@ -979,6 +979,12 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "delete_tunnel"
             | "start_tunnel"
             | "stop_tunnel"
+            | "list_databases"
+            | "create_database"
+            | "update_database"
+            | "delete_database"
+            | "start_database"
+            | "stop_database"
     ) {
         Ok(())
     } else {
@@ -1104,6 +1110,70 @@ pub(crate) fn dispatch(
         .map_err(|e| e.to_string())?,
         "stop_tunnel" => crate::sync::engine::with_env(app, |env| {
             super::tunnels::stop(env, &state.mcp, &state.session.tunnels, params, context, cancel)
+        })
+        .map_err(|e| e.to_string())?,
+        "list_databases" => crate::sync::engine::with_env(app, |env| super::databases::list(env, &state.mcp, &state.session.databases))
+            .map_err(|e| e.to_string())?,
+        "create_database" | "update_database" => crate::sync::engine::with_env(app, |env| {
+            let tool = if method == "create_database" { super::databases::create } else { super::databases::update };
+            tool(env, &state.mcp, &state.session.databases, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "delete_database" => crate::sync::engine::with_env(app, |env| {
+            // The port password goes from the keychain the Databases page keeps it in, as the page's delete takes it.
+            super::databases::delete(env, &state.mcp, &state.session.databases, &crate::sync::env::OsKeychain, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "start_database" => crate::sync::engine::with_env(app, |env| {
+            // Lunport's native windows for what verifying the route host's server keys may ask (a jump host's login, a grant), naming
+            // the AI client.
+            let owner = crate::session::auth_window::NativeOwner {
+                ai: Some(asker(&context, policy.approval_mode, Unreviewed::Database)),
+                hub: state.session.auth_questions.clone(),
+                surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
+                    app: app.clone(),
+                }),
+                request_id: context.id.clone(),
+                cancel: cancel.clone(),
+            };
+            super::databases::start(
+                env,
+                &state.mcp,
+                &state.session.databases,
+                connector,
+                &owner,
+                params,
+                context,
+                cancel,
+                &|request| {
+                    state
+                        .mcp
+                        .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                            crate::show_main_window(app);
+                            let _ = app.emit("mcp://approval-requested", request);
+                        })
+                },
+                &super::databases::starter(app),
+                super::databases::START_WAIT,
+            )
+        })
+        .map_err(|e| e.to_string())?,
+        "stop_database" => crate::sync::engine::with_env(app, |env| {
+            super::databases::stop(env, &state.mcp, &state.session.databases, params, context, cancel)
         })
         .map_err(|e| e.to_string())?,
         "verify_host_key" => {

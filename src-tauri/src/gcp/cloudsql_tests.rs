@@ -158,6 +158,7 @@ fn connect_settings_reads_the_public_ip_ca_and_dns_name() {
         settings,
         ConnectSettings {
             public_ip: Some("203.0.113.10".parse().unwrap()),
+            private_ip: Some("198.51.100.5".parse().unwrap()),
             // Both certificates, byte for byte: the TLS side trusts every one of them.
             server_ca_pem: SERVER_CA.to_string(),
             // The name of `dnsNames` wins over the legacy `dnsName`, with its trailing dot trimmed.
@@ -201,6 +202,37 @@ fn connect_settings_without_a_public_ip_reports_none() {
     assert_eq!(settings.server_ca_pem, SERVER_CA, "the rest is read all the same");
     body.as_object_mut().unwrap().remove("ipAddresses");
     assert_eq!(read_settings(body).unwrap().public_ip, None);
+}
+
+#[test]
+fn connect_settings_reads_the_private_address() {
+    let with = |addresses: serde_json::Value| {
+        let mut body = settings_json();
+        body["ipAddresses"] = addresses;
+        read_settings(body)
+    };
+    // An instance with both addresses has both read.
+    let both = with(json!([{ "type": "PRIMARY", "ipAddress": "203.0.113.10" }, { "type": "PRIVATE", "ipAddress": "198.51.100.10" }])).unwrap();
+    assert_eq!(both.public_ip, Some("203.0.113.10".parse().unwrap()));
+    assert_eq!(both.private_ip, Some("198.51.100.10".parse().unwrap()));
+    // A private-only instance: its replica's outgoing address is neither of them.
+    let private_only = with(json!([{ "type": "PRIVATE", "ipAddress": "198.51.100.10" }, { "type": "OUTGOING", "ipAddress": "203.0.113.77" }])).unwrap();
+    assert_eq!(private_only.public_ip, None);
+    assert_eq!(private_only.private_ip, Some("198.51.100.10".parse().unwrap()));
+    // A public-only instance has no private address: its list leaves one out or names one without an address, or there is no list at all.
+    let left_out = json!([{ "type": "PRIMARY", "ipAddress": "203.0.113.10" }]);
+    let without_address = json!([{ "type": "PRIMARY", "ipAddress": "203.0.113.10" }, { "type": "PRIVATE", "ipAddress": "" }, { "type": "PRIVATE" }]);
+    for addresses in [left_out, without_address] {
+        let public_only = with(addresses.clone()).unwrap();
+        assert_eq!(public_only.public_ip, Some("203.0.113.10".parse().unwrap()), "{addresses}");
+        assert_eq!(public_only.private_ip, None, "{addresses}");
+    }
+    let mut no_list = settings_json();
+    no_list.as_object_mut().unwrap().remove("ipAddresses");
+    assert_eq!(read_settings(no_list).unwrap().private_ip, None);
+    // A private address that is not an address is as malformed as a public one.
+    let odd = with(json!([{ "type": "PRIMARY", "ipAddress": "203.0.113.10" }, { "type": "PRIVATE", "ipAddress": "not-an-ip" }]));
+    assert_eq!(odd.unwrap_err(), GcpError::Malformed("the connect settings carry an address that is not an IP address".into()));
 }
 
 #[test]

@@ -40,9 +40,12 @@ function render(entries: McpAuditEntry[], props: Partial<ViewProps> = {}) {
 }
 /** The text a person reads: no tags, entities decoded. */
 const text = (html: string) => html.replace(/<[^>]*>/g, "").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-/** The opening tag of the button whose text starts with `label`. */
+/** The markup of the button whose text is `label`, from its opening tag to the label. Throws when the page has no such button, so a
+ *  check that a button is not disabled cannot pass because the button is missing. */
 const buttonBefore = (html: string, label: string) => {
-  const before = html.slice(0, html.indexOf(`${label}</button>`));
+  const at = html.indexOf(`${label}</button>`);
+  if (at < 0) throw Error(`missing ${label}`);
+  const before = html.slice(0, at);
   return before.slice(before.lastIndexOf("<button"));
 };
 const expandedAll = (entries: McpAuditEntry[]) => new Set(auditRows(entries).map(row => row.key));
@@ -112,7 +115,7 @@ describe("AI activity page", () => {
   it("empty, no-match and load-failure states", () => {
     const empty = text(render([]));
     expect(empty).toContain("No AI activity yet");
-    expect(empty).toContain("Commands, file transfers, tunnels, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.");
+    expect(empty).toContain("Commands, file transfers, tunnels, databases, host and route changes and server key checks that AI clients ask Lunport for appear here with their results.");
     expect(empty).not.toContain("each request");
     expect(empty).toContain("Set up AI access");
     const none = text(render(timeline, { filters: { ...NO_FILTERS, kind: "error" } }));
@@ -176,5 +179,121 @@ describe("AI activity page", () => {
     expect(html).not.toContain("Invalid Date");
     expect(html).not.toContain("1970");
     expect(html).not.toContain("<time");
+  });
+});
+
+describe("AI activity page for databases", () => {
+  const database = (patch: Partial<McpAuditEntry>) => entry({ command: "", database: "orders-dev", ...patch });
+  const entries = [
+    database({ id: "started", outcome: "database_started" }),
+    database({ id: "created", outcome: "database_created", host_id: null, alias: "", database: "billing-dev", mode: "ask", review: "approved" }),
+    database({ id: "starting", outcome: "database_starting", database: "ledger-dev" }),
+    database({
+      id: "kept", outcome: "database_not_deleted", database: "audit-dev", mode: "ask", review: "refused",
+      stop: { kind: "refused", window: "approval", reason: "MCP request was denied" },
+    }),
+    entry({ id: "ran" }),
+  ];
+
+  it("offers Databases as an action, after Tunnels", () => {
+    const html = render(entries);
+    expect(html).toMatch(/<option value="database"[^>]*>Databases<\/option>/);
+    expect(html.indexOf(">Tunnels</option>")).toBeGreaterThan(0);
+    expect(html.indexOf(">Databases</option>")).toBeGreaterThan(html.indexOf(">Tunnels</option>"));
+    expect(html.indexOf(">Databases</option>")).toBeLessThan(html.indexOf(">Host and route changes</option>"));
+  });
+
+  it("titles each request by the database and the host it went through, and says how it went", () => {
+    const page = text(render(entries));
+    expect(page).toContain("Started database orders-dev through web-1");
+    expect(page).toContain("Database started");
+    expect(page).toContain("Created database billing-dev");
+    expect(page).not.toContain("Created database billing-dev through");
+    expect(page).toContain("Database created");
+    expect(page).toContain("Starting database ledger-dev through web-1");
+    expect(page).toContain("Still connecting");
+    expect(page).toContain("Proposed deleting database audit-dev through web-1");
+    expect(page).toContain("Refused by you");
+    // The command among them keeps its own title.
+    expect(page).toContain("Ran a command on web-1");
+    for (const chip of ["All 5", "Succeeded 3", "Not run 1"]) expect(page).toContain(chip);
+  });
+
+  it("shows how a database request was reviewed and where to look when it was still connecting", () => {
+    const page = text(render(entries, { expanded: expandedAll(entries) }));
+    expect(page).toContain("Auto-log: started without per-database review.");
+    expect(page).toContain("You approved it in Lunport’s window.");
+    expect(page).toContain("Still connecting when Lunport answered; the Databases page shows how it went.");
+    expect(page).toContain("database_started");
+  });
+
+  it("lists only database requests under the Databases action", () => {
+    const page = text(render(entries, { filters: { ...NO_FILTERS, action: "database" } }));
+    expect(page).toContain("Started database orders-dev through web-1");
+    expect(page).toContain("Created database billing-dev");
+    expect(page).not.toContain("Ran a command on web-1");
+    expect(render(entries, { filters: { ...NO_FILTERS, action: "database" } })).toMatch(/<option value="database" selected="">Databases<\/option>/);
+    expect(text(render(entries, { filters: { ...NO_FILTERS, action: "tunnel" } }))).toContain("No activity matches these filters");
+  });
+
+  // A database on its public IP is reached through no host: its entry records no host id and no alias.
+  const publicIp = database({ id: "public", outcome: "database_started", host_id: null, alias: "", database: "billing-dev" });
+  const throughHost = database({ id: "through", outcome: "database_started", database: "orders-dev" });
+  const hostOptions = (html: string) => [...html.match(/<select aria-label="Host"[\s\S]*?<\/select>/)![0].matchAll(/<option[^>]*>([^<]*)<\/option>/g)].map(match => match[1]);
+
+  it("offers no blank host for a database on its public IP", () => {
+    expect(hostOptions(render([publicIp]))).toEqual(["All hosts"]);
+    expect(hostOptions(render([publicIp, throughHost]))).toEqual(["All hosts", "web-1"]);
+    expect(hostOptions(render([publicIp, throughHost, entry({ id: "ran" })]))).toEqual(["All hosts", "web-1"]);
+  });
+
+  it("shows a database on its public IP without a host to show, or an id to read", () => {
+    const html = render([publicIp], { expanded: expandedAll([publicIp]) });
+    const page = text(html);
+    expect(page).toContain("Started database billing-dev");
+    expect(page).toContain("Request ID");
+    expect(page).not.toContain("Show host");
+    expect(page).not.toContain("This host is no longer in your library.");
+    expect(page).not.toContain("Host ID");
+    expect(page).not.toContain("Not recorded");
+    // The control is left out, not disabled, and no empty row of controls is left under the details.
+    expect(html).not.toContain('disabled=""');
+    expect(html).not.toContain('<div class="flex flex-wrap gap-2"></div>');
+  });
+
+  it("still offers Show host, the host's id and the host's filter for a database through a host", () => {
+    const html = render([throughHost], { expanded: expandedAll([throughHost]) });
+    expect(text(html)).toContain("Host ID0000000000000001");
+    expect(buttonBefore(html, "Show host")).not.toContain('disabled=""');
+    expect(text(html)).not.toContain("This host is no longer in your library.");
+    const onlyWeb1 = render([publicIp, throughHost], { filters: { ...NO_FILTERS, host: "0000000000000001" } });
+    expect(text(onlyWeb1)).toContain("Started database orders-dev through web-1");
+    expect(text(onlyWeb1)).not.toContain("billing-dev");
+    expect(onlyWeb1).toMatch(/<option value="0000000000000001" selected="">web-1<\/option>/);
+    expect(text(render([publicIp, throughHost]))).toContain("billing-dev");
+  });
+
+  it("keeps the host rows of every entry that names a host, even only by its alias", () => {
+    const command = entry({ id: "ran" });
+    const html = render([command], { expanded: expandedAll([command]) });
+    expect(text(html)).toContain("Host ID0000000000000001");
+    expect(buttonBefore(html, "Show host")).not.toContain('disabled=""');
+    const gone = [database({ id: "gone", outcome: "database_started", host_id: "0000000000000009", alias: "old-web" })];
+    const goneHtml = render(gone, { expanded: expandedAll(gone) });
+    expect(buttonBefore(goneHtml, "Show host")).toContain('disabled=""');
+    expect(goneHtml).toContain("This host is no longer in your library.");
+    const legacy = [entry({ id: "legacy", host_id: null, alias: "old-web" })];
+    const legacyHtml = render(legacy, { expanded: expandedAll(legacy) });
+    expect(text(legacyHtml)).toContain("Host IDNot recorded");
+    expect(buttonBefore(legacyHtml, "Show host")).toContain('disabled=""');
+    expect(hostOptions(legacyHtml)).toEqual(["All hosts", "old-web"]);
+  });
+
+  it("reveals hidden characters in a database's name", () => {
+    const hidden = String.fromCharCode(0x202e);
+    const named = [database({ id: "hidden", outcome: "database_started", database: `orders${hidden}-dev` })];
+    const html = render(named, { expanded: expandedAll(named) });
+    expect(html).not.toContain(hidden);
+    expect(html).toContain("Started database orders\u27e8U+202E\u27e9-dev through ");
   });
 });

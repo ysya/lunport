@@ -194,3 +194,73 @@ describe("AI edit proposals", () => {
     expect(start).toMatch(/<button[^>]*autofocus=""[^>]*>Deny</);
   });
 });
+
+describe("AI database proposals", () => {
+  const SAVE_NOTE = "Saved databases hold no passwords: the port password stays in this computer's keychain. Requests expire after 120 seconds; changed settings require fresh approval.";
+  /** A database request as Lunport raises it: the database's name is the alias, the route host (if any) is only an id. */
+  const proposal = (kind: string, settings: [string, string][], over: Partial<McpPendingRequest> = {}): McpPendingRequest => ({
+    ...request, command: "", alias: "orders-dev", host_id: "stable-host", hostname: null, user: null, port: null, route: [],
+    host_proposal: { kind, settings }, ...over,
+  });
+  /** The text a person reads: no tags, entities decoded. */
+  const text = (html: string) => html.replace(/<[^>]*>/g, "").replace(/&#x27;/g, "'").replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const rows: [string, string][] = [
+    ["Name", "orders-dev"], ["Connection name", "acme-dev-654321:us-central1:orders-dev"], ["Route", "Through web-1 (stable-host)"], ["Local port", "127.0.0.1:6543"],
+  ];
+
+  it.each([
+    ["create_database", "Add this database?", "Review this database before saving. Saving does not start it, request a grant or connect. The MCP client cannot approve this request.", "Add database", SAVE_NOTE],
+    ["update_database", "Change this database?", "Review what would change before saving. Saving does not start the database or connect. The MCP client cannot approve this request.", "Save database", SAVE_NOTE],
+    ["delete_database", "Delete this database?", "The saved database is removed from this library, with its port password on this computer. The MCP client cannot approve this request.", "Delete database",
+      "Devices that run this database keep it running until it is stopped there. Requests expire after 120 seconds."],
+    ["start_database", "Start this database?", "Lunport will open this database's local port, requesting the grants it needs and connecting through its host. Apps still need the port password, which the MCP client never gets. The MCP client cannot approve this request.", "Start database",
+      "Requests expire after 120 seconds; a changed database requires fresh approval."],
+  ])("words a %s request and names the database instead of a host", (kind, title, description, button, note) => {
+    const html = renderReview({ request: proposal(kind, rows) });
+    const page = text(html);
+    expect(page).toContain(title);
+    expect(page).toContain(description);
+    expect(page).toContain(note);
+    expect(html).toContain("<p>Database: orders-dev</p>");
+    for (const [, value] of rows) expect(page).toContain(value);
+    // The database's line replaces the host's two lines and nothing else changes.
+    expect(page).not.toContain("Host:");
+    expect(page).not.toContain("Resolved:");
+    expect(page).not.toContain("Route:");
+    expect(page).not.toContain("Remote command");
+    expect(page).not.toContain("New record");
+    expect(page).not.toContain("Add this SSH host?");
+    expect(page).not.toContain("Passwords and private keys are not accepted");
+    expect(page).toContain("Observed requester");
+    expect(page).toContain("Self-reported client");
+    expect(disabled(html, button)).toBe(false);
+    expect(disabled(html, "Deny")).toBe(false);
+    expect(html).toMatch(/<button[^>]*autofocus=""[^>]*>Deny</);
+    expect(disabled(renderReview({ request: proposal(kind, rows), armed: false }), button)).toBe(true);
+    expect(disabled(renderReview({ request: proposal(kind, rows), expired: true }), button)).toBe(true);
+    expect(text(renderReview({ request: proposal(kind, rows), expired: true }))).toContain("This request expired.");
+  });
+
+  it("names the database the same way whether or not it goes through a host", () => {
+    const publicIp = renderReview({ request: proposal("start_database", rows, { host_id: null }) });
+    expect(publicIp).toContain("<p>Database: orders-dev</p>");
+    expect(publicIp).not.toContain("Legacy alias");
+    expect(text(publicIp)).not.toContain("Host:");
+  });
+
+  it("reveals hidden characters in the database's name", () => {
+    const hidden = String.fromCharCode(0x202e);
+    const html = renderReview({ request: proposal("create_database", rows, { alias: `orders${hidden}-dev` }) });
+    expect(html).toContain("<p>Database: orders\u27e8U+202E\u27e9-dev</p>");
+    expect(html).not.toContain(hidden);
+  });
+
+  it("still names the host and where it resolves for a command, a host, a tunnel and a transfer", () => {
+    const other = (kind: string) => ({ ...request, command: "", host_proposal: { kind, settings: [] as [string, string][] } });
+    for (const html of [renderReview(), ...["create_host", "update_host", "create_tunnel", "start_tunnel", "scp_upload"].map(kind => renderReview({ request: other(kind) }))]) {
+      expect(html).toContain("Host: ");
+      expect(html).toContain("Resolved: ");
+      expect(html).not.toContain("Database: ");
+    }
+  });
+});

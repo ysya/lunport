@@ -378,9 +378,9 @@ fn save_active_with_authority(
         // verifies that exact source below.
         // So does one that brings the library's first search scopes or grant memory: the version they need, and
         // the routes' when the library also holds routes, is never above it. The library's first saved databases need the newest
-        // version, so they are checked first.
+        // versions, so they are checked first: the route version once one of them is reached through a host.
         let needed = if crate::sync::databases::has_library_rows(state) {
-            Some(crate::sync::databases::STATE_VERSION)
+            Some(crate::sync::databases::library_version(state))
         } else if crate::sync::pam_records::has_library_rows(state) {
             Some(crate::sync::pam_records::STATE_VERSION)
         } else if crate::sync::transports::has_library_rows(state) {
@@ -745,7 +745,7 @@ fn persist_candidate(
     if crate::sync::transports::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::transports::STATE_VERSION); }
     if crate::sync::transports::needs_sync_version(&candidate) { candidate.version = candidate.version.max(crate::sync::transports::SYNC_STATE_VERSION); }
     if crate::sync::pam_records::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::pam_records::STATE_VERSION); }
-    if crate::sync::databases::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::databases::STATE_VERSION); }
+    if crate::sync::databases::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::databases::state_version(&candidate)); }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }
@@ -930,7 +930,7 @@ pub fn commit_migration_candidate(
     if crate::sync::transports::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::transports::STATE_VERSION); }
     if crate::sync::transports::needs_sync_version(&candidate) { candidate.version = candidate.version.max(crate::sync::transports::SYNC_STATE_VERSION); }
     if crate::sync::pam_records::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::pam_records::STATE_VERSION); }
-    if crate::sync::databases::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::databases::STATE_VERSION); }
+    if crate::sync::databases::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::databases::state_version(&candidate)); }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }

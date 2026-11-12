@@ -197,7 +197,7 @@ export function RecordsWorkspace({
     via,
   });
   const createHost = () => requestSelection(newHost());
-  // The editor is a dialog over any panel, so the Google Cloud page's New IAP host needs no panel switch.
+  // The editor is a dialog over any panel, so the New IAP host of the Google Cloud page and of the database editor needs no panel switch.
   const createIapHost = () => requestSelection(newHost("iap"));
   const createGroup = () =>
     requestSelection({
@@ -526,7 +526,7 @@ export function RecordsWorkspace({
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} syncStatus={central.data} openSync={() => setPanel("account")} />}
               {panel === "tunnels" && <TunnelsPanel overview={overview} />}
-              {panel === "databases" && <DatabasesPanel overview={overview} />}
+              {panel === "databases" && <DatabasesPanel overview={overview} createIapHost={createIapHost} />}
               {panel === "activity" && <AiActivityPanel overview={overview} showHost={showHost} openAiSettings={() => openSettings("ai")} />}
               {panel === "transports" && <GoogleCloudPanel overview={overview} accept={accept} createIapHost={createIapHost} editHost={editHost} />}
               {panel === "account" && (

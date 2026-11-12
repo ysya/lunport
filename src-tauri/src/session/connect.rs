@@ -257,6 +257,19 @@ impl Connector<'_> {
         Err(ConnectFailure::cancelled())
     }
 
+    /// Gets, ahead of a connection to the saved host `query` names, the Privileged Access Manager grant its route needs: the host is
+    /// resolved and its route checked as a connect does first, and when no grant is in flight the person is asked and the grant requested
+    /// and waited for through the same gates, so that a connection that needs the same grant meanwhile asks nobody twice. A route that
+    /// needs no grant, or whose grant is held, asks nothing. Nothing is connected. Like `connect` it blocks, for as long as the person
+    /// takes to answer and then for the request: it runs on a plain thread or a blocking one, never in async code.
+    pub fn request_route_grant(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken) -> Result<(), ConnectFailure> {
+        if cancel.is_cancelled() {
+            return Err(ConnectFailure::cancelled());
+        }
+        let target = self.directory.resolve(query).map_err(directory_failure)?;
+        self.prepare_granted(&target, owner, cancel).map(drop)
+    }
+
     /// `connect` with the bound on the rounds given (`round_limit` is the one `connect` uses) and IAP's grace given (`Grace::default()`
     /// is the real one): the net and the grace are tested with smaller ones.
     fn connect_within(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken, rounds: fn(&Target) -> usize, grace: Grace) -> Result<Connected, ConnectFailure> {
@@ -665,6 +678,12 @@ mod tests {
         fn connect_with_grace(&self, directory: &dyn HostDirectory, query: &HostQuery, owner: &dyn Owner, grace: Grace) -> Result<Connected, ConnectFailure> {
             let connector = Connector { engine: &self.engine, directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer, grants: &self.grants };
             connector.connect_within(query, owner, &self.cancel, round_limit, grace)
+        }
+
+        /// Asks for the grant the route of `query` needs ahead of a connection, with another directory than the world's.
+        fn request_route_grant_through(&self, directory: &dyn HostDirectory, query: &HostQuery, owner: &dyn Owner) -> Result<(), ConnectFailure> {
+            let connector = Connector { engine: &self.engine, directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer, grants: &self.grants };
+            connector.request_route_grant(query, owner, &self.cancel)
         }
 
         fn connects(&self) -> usize {
@@ -2194,6 +2213,96 @@ mod tests {
         assert_eq!(error, failure(kinds::AUTH, sentence));
         assert_eq!(world.engine.attempts(), 0, "nothing was connected");
         assert!(world.owner.asked().is_empty(), "nobody was asked for anything");
+    }
+
+    /// The grant a route needs can be asked for before anything connects: the person is asked what a connection would ask them, the
+    /// grant is requested and told to the terminal, the route is checked again, and no session is opened.
+    #[test]
+    fn request_route_grant_asks_once_when_the_route_needs_a_grant() {
+        let world = world(FakeEngine::new(), pinned_password_web()).typing(&["45\nrestart app-api after the deploy"]);
+        let directory = Preparing::needing(&world.directory, need(), vec![]);
+        world.request_route_grant_through(&directory, &web(), &world.owner).expect("the grant is active once it was requested");
+        let asked = world.owner.asked();
+        assert_eq!(asked.len(), 1, "asked once");
+        assert_eq!(asked[0].kind, QuestionKind::Grant);
+        let prompt = GrantPrompt::from_text(&asked[0].text).expect("the question carries the prompt");
+        assert_eq!((prompt.project.as_str(), prompt.entitlement.as_str(), prompt.minutes, prompt.justification.as_deref()), ("acme-prod-123456", "prod-operate", 30, Some("restart app-api")));
+        assert_eq!(directory.requested(), [("restart app-api after the deploy".to_string(), 45 * 60)], "requested once, as the person answered");
+        let notices = locked(&world.owner.notices).clone();
+        assert!(notices.len() == 1 && notices[0].starts_with("Requested a 45-minute prod-operate grant on acme-prod-123456; active until "), "{notices:?}");
+        assert_eq!(locked(&directory.prepared).len(), 2, "checked again once the grant is active");
+        assert_eq!(world.engine.attempts(), 0, "nothing was connected");
+    }
+
+    /// A route that asks for no grant, and one whose grant is held (one given moments ago too), leave nothing to ask for.
+    #[test]
+    fn request_route_grant_is_quiet_when_no_grant_is_needed() {
+        for prepared in [Prepared::default(), Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) }] {
+            let world = world(FakeEngine::new(), pinned_password_web());
+            let directory = Preparing::answering(&world.directory, Ok(prepared));
+            world.request_route_grant_through(&directory, &web(), &world.owner).expect("there is nothing to get");
+            assert!(world.owner.asked().is_empty(), "nobody was asked");
+            assert!(locked(&world.owner.notices).is_empty(), "nothing was said");
+            assert!(directory.requested().is_empty(), "nothing was requested");
+            assert_eq!(locked(&directory.prepared).len(), 1, "the route was checked once");
+            assert_eq!(world.engine.attempts(), 0, "nothing was connected");
+        }
+    }
+
+    /// The person's no, or no answer, ends it with the refusal that names the gcloud command and requests nothing; a request Google
+    /// refuses ends with its sentence, as for a connection.
+    #[test]
+    fn request_route_grant_fails_as_a_connection_does_when_the_grant_is_not_given() {
+        for reply in [Reply::Cancelled, Reply::TimedOut] {
+            let world = world(FakeEngine::new(), pinned_password_web());
+            let owner = FakeOwner::answering(vec![reply]);
+            let directory = Preparing::needing(&world.directory, need(), vec![]);
+            assert_eq!(world.request_route_grant_through(&directory, &web(), &owner).err(), Some(failure(kinds::AUTH, &need().refusal_sentence())));
+            assert!(directory.requested().is_empty(), "nothing was requested");
+        }
+        let world = world(FakeEngine::new(), pinned_password_web()).typing(&["30\nrestart app-api"]);
+        let sentence = "The prod-operate grant did not become active (state: DENIED).";
+        let directory = Preparing::needing(&world.directory, need(), vec![Err(DirectoryError::Denied(sentence.into()))]);
+        assert_eq!(world.request_route_grant_through(&directory, &web(), &world.owner).err(), Some(failure(kinds::AUTH, sentence)));
+        assert!(locked(&world.owner.notices).is_empty(), "nothing to tell: no grant was had");
+    }
+
+    #[test]
+    fn request_route_grant_for_a_host_that_is_not_saved_fails_with_the_directorys_sentence() {
+        let world = world(FakeEngine::new(), pinned_password_web());
+        let error = world.request_route_grant_through(&world.directory, &HostQuery::Id("id-gone".into()), &world.owner).err().expect("fails");
+        assert_eq!(error, failure(kinds::HOST, "No saved host has the id id-gone."));
+        assert!(world.owner.asked().is_empty(), "nobody was asked");
+    }
+
+    #[test]
+    fn request_route_grant_does_nothing_once_cancelled() {
+        let world = world(FakeEngine::new(), pinned_password_web());
+        let directory = Preparing::needing(&world.directory, need(), vec![]);
+        world.cancel.cancel();
+        assert_eq!(world.request_route_grant_through(&directory, &web(), &world.owner).err(), Some(failure(CANCELLED, "The connection was cancelled.")));
+        assert!(locked(&directory.prepared).is_empty(), "the route was not even checked");
+        assert!(world.owner.asked().is_empty(), "nobody was asked");
+    }
+
+    /// The request goes through the gates a connection does, so a request and a connection that need the same grant ask the person once.
+    #[test]
+    fn a_route_grant_request_and_a_connection_needing_the_same_grant_ask_once() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password();
+        let directory = Preparing::needing(&world.directory, need(), vec![]);
+        let owner = Held::answering(vec![Reply::Answer(zeroize::Zeroizing::new("30\nrestart app-api".to_string()))]);
+        let (connection, request, lined) = std::thread::scope(|scope| {
+            let connection = scope.spawn(|| world.connect_through(&directory, &web(), &owner));
+            let request = scope.spawn(|| world.request_route_grant_through(&directory, &web(), &owner));
+            let lined = lined_up(|| world.grants.waiting() == 1);
+            owner.release();
+            (connection.join().unwrap(), request.join().unwrap(), lined)
+        });
+        assert!(lined, "the second lined up behind the question");
+        assert!(connection.is_ok() && request.is_ok(), "{:?} / {:?}", connection.err(), request.err());
+        assert_eq!(owner.inner.asked().len(), 1, "one question for both");
+        assert_eq!(directory.requested().len(), 1, "one request for both");
+        assert_eq!(world.engine.attempts(), 1, "only the connection connected");
     }
 
     /// A PAM grant given moments ago passes the check, but IAP can take about 1½ minutes to see it and refuses with

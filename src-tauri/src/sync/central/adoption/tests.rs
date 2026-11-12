@@ -2419,6 +2419,62 @@ fn adoption_rekeys_local_routes_to_the_adopted_host_ids() {
     });
 }
 
+/// An adoption carries a database reached through a host to the id the merge gives that host, though no route and no grant memory
+/// name the host. The database stays this device's own, under the host's new id, until the publish step moves it into the library,
+/// and the device that published the library receives it with that route.
+#[test]
+fn an_adoption_carries_a_database_route_host_without_a_route_of_its_own() {
+    use crate::sync::{
+        databases::{self, tests::database, DatabaseNetwork, SavedDatabase},
+        records_v3::HostScope,
+        transports,
+    };
+    let f = fixture(true);
+    let host = "a".repeat(16);
+    let saved = SavedDatabase { network: DatabaseNetwork::Private, via_host: Some(host.clone()), ..database("00000000000000d1") };
+    crate::sync::record_commands::edit_records(&f.peer.env(), |s, now| {
+        databases::set(s, &saved.id, None, Some(saved.clone()), now).map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let before = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+    assert!(
+        transports::view(&before).is_empty() && before.local.transport_grants.is_empty(),
+        "no route and no grant memory name the host"
+    );
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        let operation = load(&f.peer.env()).unwrap().unwrap().state.operation;
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let adopted = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        // The id the merge wrote for the host, read back from the adopted library.
+        let new_id = merged_host_id(&adopted, "peer-local-host");
+        assert_eq!(new_id, merge::adopted_host_id(&operation, &HostScope::Local, &host).unwrap());
+        let carried = SavedDatabase { via_host: Some(new_id.clone()), ..saved.clone() };
+        let kept: Vec<_> = adopted.local.databases.values().filter_map(|row| databases::decode(&row.record)).collect();
+        assert_eq!(kept, [carried.clone()], "this device's own until the publish step moves it in, under the host's new id");
+        assert!(
+            crate::sync::record_repository::get_host(&adopted, &new_id).is_ok(),
+            "the library has the host the route names"
+        );
+        assert_eq!(adopted.version, databases::ROUTE_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&adopted).unwrap();
+        // The next round's publish step makes it the library's and its capture publishes it; the device that published the library
+        // receives it.
+        super::super::round::sync_once(&f.peer.env()).unwrap();
+        let published = record_runtime::snapshot(&f.peer.env()).unwrap().0;
+        assert_eq!(
+            databases::view(&published).into_iter().map(|row| (row.database, row.synced)).collect::<Vec<_>>(),
+            [(carried.clone(), true)]
+        );
+        assert!(published.local.databases.is_empty());
+        super::super::round::sync_once(&f.first.env()).unwrap();
+        let first = record_runtime::snapshot(&f.first.env()).unwrap().0;
+        assert_eq!(databases::view(&first).into_iter().map(|row| row.database).collect::<Vec<_>>(), [carried]);
+    });
+}
+
 /// This device brings no routes, so the library's routes are no part of what its merge owns. A rebase on another device's
 /// Catalog edit carries them as they are instead of pausing the merge ("Imported collection names or ordering changed on another
 /// device"), and the adoption keeps them.
@@ -2584,6 +2640,43 @@ fn followed_host_ids_come_from_the_rows_the_merge_rewrites() {
     );
 }
 
+/// The hosts that the saved databases a leave keeps are reached through are followed too, though no route and no grant memory name
+/// them: this device's own databases and the library's rows alike. A database on its public IP names no host, and the host of a
+/// database the library removed is not followed for a copy this device kept of it.
+#[test]
+fn followed_host_ids_include_the_hosts_kept_databases_are_reached_through() {
+    use super::super::payload::{Data, Identity};
+    use crate::sync::{
+        databases::{self, tests::{database, saved_on_this_device}, DatabaseNetwork, SavedDatabase},
+        records_v3::HostScope,
+        transports::tests::in_central_mode,
+    };
+    let [own, shared, removed] = ["1", "2", "3"].map(|n| n.repeat(16));
+    let through = |id: &str, host: &str| SavedDatabase { network: DatabaseNetwork::Private, via_host: Some(host.into()), ..database(id) };
+    let live = |id: &str| {
+        let identity = Identity { kind: "host".into(), id: id.into(), scope: Some(HostScope::Local) };
+        let host = serde_json::from_value(json!({"schema":2,"alias":"host","hostname":"fixture.invalid","auth":"password"})).unwrap();
+        (identity, Data::Host(host))
+    };
+    let original = [live(&own), live(&shared), live(&removed)];
+    // The library holds a database through `shared` and removed one through `removed`; this device keeps a database through `own`,
+    // a copy of the removed one, and one on its public IP.
+    let gone = through("00000000000000d3", &removed);
+    let mut state = in_central_mode(databases::tests::state());
+    state = databases::set(&state, "00000000000000d2", None, Some(through("00000000000000d2", &shared)), 1).unwrap();
+    state = databases::set(&state, &gone.id, None, Some(gone.clone()), 1).unwrap();
+    state = databases::set(&state, &gone.id, Some(&gone), None, 2).unwrap();
+    for kept in [through("00000000000000d1", &own), gone, database("00000000000000d4")] {
+        state = saved_on_this_device(&state, &kept);
+    }
+    let operation = "7".repeat(32);
+    let adopted = |id: &str| (id.to_owned(), merge::adopted_host_id(&operation, &HostScope::Local, id).unwrap());
+    assert_eq!(
+        merge::followed_host_ids(&state, &original, &operation).unwrap(),
+        BTreeMap::from([adopted(&own), adopted(&shared)])
+    );
+}
+
 /// A replacement keeps the replaced library's routes. The route of a host that survives becomes this device's own, under the
 /// host's new id, for the publish step to move into the new library; a route whose host does not survive is gone. The merge itself
 /// brings no routes.
@@ -2639,6 +2732,52 @@ fn a_replacement_keeps_the_replaced_librarys_route_of_a_surviving_host_as_this_d
         assert_eq!(transports::get(&after, &gone), None, "its host did not survive");
         assert_eq!(transports::view(&after), vec![route]);
         assert_eq!(after.version, transports::SYNC_STATE_VERSION);
+        crate::sync::records_v3::validate_state(&after).unwrap();
+    });
+}
+
+/// A replacement carries the replaced library's database reached through a host that survives to the id the merge gives that host,
+/// though no route and no grant memory name it: the database becomes this device's own, under the host's new id.
+#[test]
+fn a_replacement_carries_the_replaced_librarys_database_to_its_route_hosts_new_id() {
+    use crate::sync::{
+        databases::{self, tests::database, DatabaseNetwork, SavedDatabase},
+        records_v3::HostScope,
+        transports,
+    };
+    // The replaced device's own host, which the replacement carries over.
+    let host = "9".repeat(16);
+    let saved = SavedDatabase { network: DatabaseNetwork::Private, via_host: Some(host.clone()), ..database("00000000000000d1") };
+    let f = replacement_fixture_with(false, |env| {
+        crate::sync::record_commands::edit_records(env, |s, now| {
+            databases::set(s, &saved.id, None, Some(saved.clone()), now).map_err(|e| AppError::Other(e.to_string()))
+        })
+        .unwrap();
+    });
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let env = f.peer.env();
+        let before = record_runtime::snapshot(&env).unwrap().0;
+        assert_eq!(
+            databases::view(&before).into_iter().map(|row| (row.database, row.synced)).collect::<Vec<_>>(),
+            [(saved.clone(), true)],
+            "the replaced library's"
+        );
+        assert!(
+            transports::view(&before).is_empty() && before.local.transport_grants.is_empty(),
+            "no route and no grant memory name the host"
+        );
+        let (scope, ticket) = prepared(&f);
+        let operation = load(&env).unwrap().unwrap().state.operation;
+        migration_flow::confirm(&env, &scope, &ticket).unwrap();
+        finish(&f, &scope);
+        let after = record_runtime::snapshot(&env).unwrap().0;
+        // The id the merge wrote for the host, read back from the reconciled library.
+        let moved = merged_host_id(&after, "old-local-edit");
+        assert_eq!(moved, merge::adopted_host_id(&operation, &HostScope::Local, &host).unwrap());
+        let kept: Vec<_> = after.local.databases.values().filter_map(|row| databases::decode(&row.record)).collect();
+        assert_eq!(kept, [SavedDatabase { via_host: Some(moved), ..saved.clone() }], "this device's own, under the host's new id");
+        assert_eq!(after.version, databases::ROUTE_STATE_VERSION);
         crate::sync::records_v3::validate_state(&after).unwrap();
     });
 }

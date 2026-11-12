@@ -1,5 +1,5 @@
-//! `CloudSqlUpstream` tried against a scripted Google, a certificate authority made for the test and a clock of the test's own, alone and
-//! behind a port that the apps connect to.
+//! `CloudSqlUpstream` tried against a scripted Google, a certificate authority made for the test, a clock of the test's own and scripted
+//! sessions to the library's hosts, alone and behind a port that the apps connect to.
 
 use super::*;
 use crate::gcp::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey, InstanceRef, InstanceSummary};
@@ -9,23 +9,33 @@ use crate::gcp::rest::GcpError;
 use crate::session::auth::Reply;
 use crate::session::database_ports::tests::{cancel_request, fake_cloud_sql, orders, running, t0, wait_until, Answer, App, Clock, CONNECTION, IAM_USER, ID, LIMIT, PASSWORD};
 use crate::session::database_ports::{DatabasePorts, NotReady, Prepared};
-use crate::session::databases::DatabasePhase;
-use crate::session::protocol::QuestionKind;
-use crate::session::testing::FakeOwner;
-use crate::sync::databases::tests::state;
-use crate::sync::databases::DatabaseEnvironment;
+use crate::session::databases::{DatabasePhase, DatabaseStep};
+use crate::session::protocol::{AiAsker, QuestionKind};
+use crate::session::testing::{FakeOwner, Gate};
+use crate::ssh::forward::{ForwardKind, ForwardSpec, ForwardStatus, Forwarder};
+use crate::ssh::{DisconnectReason, ExecResult, Pty, Session, SessionError, ShellChannel};
+use crate::sync::databases::tests::{state, ROUTE_HOST};
+use crate::sync::databases::{DatabaseEnvironment, DatabaseNetwork};
+use crate::sync::records_v3::{HostPayload, HostScope};
 use crate::sync::transports::PamCheck;
 use futures_util::FutureExt;
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use serde_json::json;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
+use zeroize::Zeroizing;
 
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3600);
 /// What the person answers in the Request-a-grant window: thirty minutes, and why.
 const ANSWER: &str = "30\nCheck unpaid orders";
 const OPERATE: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
-const PUBLIC_IP: &str = "198.51.100.5";
+/// The addresses of the instance the tests dial: the public one, and the private one that only a host of the library reaches.
+const PUBLIC_IP: &str = "203.0.113.10";
+const PRIVATE_IP: &str = "198.51.100.10";
+/// The port the forwards of the scripted sessions listen on.
+const FORWARD_PORT: u16 = 40123;
 
 /// Google's PAM as the tests script it: the grants the account holds on prod-operate. A requested grant is active at once, dated by the
 /// test's clock.
@@ -113,6 +123,8 @@ struct Admin {
     released: AtomicBool,
     /// The connect settings fail with this.
     failing: Mutex<Option<GcpError>>,
+    /// The connect settings carry no DNS name, as those of an instance may not.
+    nameless: AtomicBool,
 }
 
 impl Admin {
@@ -133,8 +145,9 @@ impl SqlAdmin for Admin {
         }
         Ok(ConnectSettings {
             public_ip: Some(PUBLIC_IP.parse().unwrap()),
+            private_ip: Some(PRIVATE_IP.parse().unwrap()),
             server_ca_pem: self.authority().pem(),
-            dns_name: Some(dns_name(&at.instance)),
+            dns_name: (!self.nameless.load(Ordering::SeqCst)).then(|| dns_name(&at.instance)),
             database_version: "POSTGRES_16".into(),
             region: at.region.clone(),
         })
@@ -178,7 +191,192 @@ impl Owner for Shared {
     }
 }
 
-/// Google, the clock and the person a `CloudSqlUpstream` is tried against, and what it dialled.
+/// What a test sees of a scripted session to a host of the library once the upstream owns the session: whether its connection is up,
+/// whether the upstream closed it, the forwards it was asked for, and what the status of its forward says.
+struct HostEnd {
+    alive: AtomicBool,
+    closed: AtomicBool,
+    forwards: Mutex<Vec<ForwardSpec>>,
+    /// Whether its forward's listener runs.
+    running: AtomicBool,
+    /// Whether the upstream stopped its forward.
+    stopped: AtomicBool,
+    /// The most recent connection error its forward reports.
+    forward_error: Mutex<Option<String>>,
+    /// The port its forward reports.
+    port: Mutex<u16>,
+    /// What it refuses a forward with.
+    refusal: Mutex<Option<SessionError>>,
+}
+
+impl HostEnd {
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    fn forwards(&self) -> Vec<ForwardSpec> {
+        self.forwards.lock().unwrap().clone()
+    }
+
+    /// The connection to the host is lost, as when the host goes away.
+    fn lose(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A session to a host of the library as the tests script it: `HostEnd` says what happens to it.
+struct Scripted(Arc<HostEnd>);
+
+impl Session for Scripted {
+    fn forward(&self, spec: &ForwardSpec) -> Result<Box<dyn Forwarder>, SessionError> {
+        self.0.forwards.lock().unwrap().push(spec.clone());
+        match self.0.refusal.lock().unwrap().clone() {
+            Some(refusal) => Err(refusal),
+            None => Ok(Box::new(ScriptedForward(Arc::clone(&self.0)))),
+        }
+    }
+
+    fn shell(&self, _: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
+        Err(SessionError::Channel("No shell is scripted.".into()))
+    }
+
+    fn exec(&self, _: &str, _: Duration, _: usize) -> Result<ExecResult, SessionError> {
+        Err(SessionError::Channel("No command is scripted.".into()))
+    }
+
+    fn is_alive(&self) -> bool {
+        self.0.alive.load(Ordering::SeqCst)
+    }
+
+    fn disconnect_reason(&self) -> Option<DisconnectReason> {
+        None
+    }
+
+    fn close(&self) {
+        self.0.alive.store(false, Ordering::SeqCst);
+        self.0.closed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The forward of a scripted session. It listens on nothing and carries nothing: it runs while its listener does, it is not stopped and
+/// its session lives, and reports the port and the error its `HostEnd` holds.
+struct ScriptedForward(Arc<HostEnd>);
+
+impl Forwarder for ScriptedForward {
+    fn status(&self) -> ForwardStatus {
+        let end = &self.0;
+        let running = end.running.load(Ordering::SeqCst) && !end.stopped() && end.alive.load(Ordering::SeqCst);
+        ForwardStatus { running, port: *end.port.lock().unwrap(), connections: 0, error: end.forward_error.lock().unwrap().clone() }
+    }
+
+    fn stop(&self) {
+        self.0.stopped.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The way to the library's hosts as the tests script it: every open is recorded with the host it names, and answered with the next
+/// failure scripted, else with a new scripted session that lives until it is closed or lost.
+struct FakeLink {
+    opened: Mutex<Vec<String>>,
+    /// The AI client each open was asked in the name of, in order (`None`: the person's).
+    askers: Mutex<Vec<Option<AiAsker>>>,
+    /// A gate the next open waits at before it answers, until the test lets it go.
+    holding: Mutex<Option<Arc<Gate>>>,
+    failures: Mutex<VecDeque<String>>,
+    /// Whether an open cancels the connection it is for before it answers, as a port that stops meanwhile does.
+    cancels: AtomicBool,
+    /// A question each open asks its owner before it answers, as the host's login asks for a grant or a password.
+    asks: Mutex<Option<QuestionKind>>,
+    /// What the forwards of the next sessions are refused with.
+    refusal: Mutex<Option<SessionError>>,
+    /// The far ends of the sessions it opened, in order.
+    ends: Mutex<Vec<Arc<HostEnd>>>,
+}
+
+impl FakeLink {
+    fn new() -> FakeLink {
+        FakeLink {
+            opened: Mutex::default(),
+            askers: Mutex::default(),
+            holding: Mutex::default(),
+            failures: Mutex::default(),
+            cancels: AtomicBool::new(false),
+            asks: Mutex::default(),
+            refusal: Mutex::default(),
+            ends: Mutex::default(),
+        }
+    }
+
+    /// The hosts it opened a session to, by their ids, in order.
+    fn opened(&self) -> Vec<String> {
+        self.opened.lock().unwrap().clone()
+    }
+
+    /// The far end of the session it opened `index`th, counted from 0.
+    fn end(&self, index: usize) -> Arc<HostEnd> {
+        Arc::clone(&self.ends.lock().unwrap()[index])
+    }
+}
+
+impl HostLink for FakeLink {
+    fn open(&self, host_id: &str, owner: &dyn Owner, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<Box<dyn Session>, String> {
+        self.opened.lock().unwrap().push(host_id.to_string());
+        self.askers.lock().unwrap().push(ai.cloned());
+        let holding = self.holding.lock().unwrap().take();
+        if let Some(gate) = holding {
+            gate.pass();
+        }
+        let asks = *self.asks.lock().unwrap();
+        if let Some(kind) = asks {
+            owner.ask(kind, "web-1 asks", false, None);
+        }
+        if self.cancels.load(Ordering::SeqCst) {
+            cancel.cancel();
+        }
+        if let Some(failure) = self.failures.lock().unwrap().pop_front() {
+            return Err(failure);
+        }
+        let end = Arc::new(HostEnd {
+            alive: AtomicBool::new(true),
+            closed: AtomicBool::new(false),
+            forwards: Mutex::default(),
+            running: AtomicBool::new(true),
+            stopped: AtomicBool::new(false),
+            forward_error: Mutex::default(),
+            port: Mutex::new(FORWARD_PORT),
+            refusal: Mutex::new(self.refusal.lock().unwrap().clone()),
+        });
+        self.ends.lock().unwrap().push(Arc::clone(&end));
+        Ok(Box::new(Scripted(end)))
+    }
+}
+
+/// Whether `done` holds within two seconds, looked at every 10 ms: a path closes its session, and stops a forward it no longer keeps, on a
+/// thread of its own.
+fn soon(done: impl Fn() -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(2);
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The library of the tests: `web-1`, saved as the host `ROUTE_HOST`, which `routed()` databases are reached through.
+fn library() -> SyncStateV3 {
+    let web: HostPayload = serde_json::from_value(json!({"schema": 2, "alias": "web-1", "hostname": "fixture.invalid", "auth": "password"})).unwrap();
+    repo::create_host(&state(), ROUTE_HOST, HostScope::Local, web, 1).unwrap()
+}
+
+/// Google, the clock, the person and the library's hosts a `CloudSqlUpstream` is tried against, and what it dialled.
 struct Cloud {
     clock: Clock,
     pam: Arc<Pam>,
@@ -187,9 +385,12 @@ struct Cloud {
     active: Arc<Mutex<Option<String>>>,
     owner: Arc<FakeOwner>,
     remembered: Arc<Mutex<Vec<(String, String, u32)>>>,
-    dialled: Arc<Mutex<Vec<(IpAddr, ServerName<'static>)>>>,
+    link: Arc<FakeLink>,
+    dialled: Arc<Mutex<Vec<(SocketAddr, ServerName<'static>)>>>,
     /// How many of the next dials Cloud SQL refuses.
     refusing: Arc<Mutex<usize>>,
+    /// What every dial fails with: its kind and its words.
+    failing: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
     received: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
@@ -204,8 +405,10 @@ impl Cloud {
             active: Arc::new(Mutex::new(Some(IAM_USER.into()))),
             owner: Arc::new(owner),
             remembered: Arc::default(),
+            link: Arc::new(FakeLink::new()),
             dialled: Arc::default(),
             refusing: Arc::default(),
+            failing: Arc::default(),
             received: Arc::default(),
         }
     }
@@ -216,20 +419,22 @@ impl Cloud {
         let clock = self.clock.clone();
         let active = Arc::clone(&self.active);
         let remembered = Arc::clone(&self.remembered);
-        let (dialled, refusing, received) = (Arc::clone(&self.dialled), Arc::clone(&self.refusing), Arc::clone(&self.received));
+        let (dialled, refusing, failing, received) = (Arc::clone(&self.dialled), Arc::clone(&self.refusing), Arc::clone(&self.failing), Arc::clone(&self.received));
         CloudSqlUpstream {
             gcp: self.pam.clone(),
             sql: self.admin.clone(),
             gates: Arc::new(GrantGates::default()),
-            make_owner: Arc::new(move |_: &CancelToken| -> Box<dyn Owner + Send> { Box::new(Shared(Arc::clone(&owner))) }),
+            make_owner: Arc::new(move |_: &CancelToken, _: Option<&AiAsker>| -> Box<dyn Owner + Send> { Box::new(Shared(Arc::clone(&owner))) }),
             now: Arc::new(move || clock.now()),
             active_account: Arc::new(move || active.lock().unwrap().clone()),
-            library: Arc::new(|| -> Result<SyncStateV3, String> { Ok(state()) }),
+            library: Arc::new(|| -> Result<SyncStateV3, String> { Ok(library()) }),
             remember: Arc::new(move |name: &str, justification: &str, secs: u32| {
                 remembered.lock().unwrap().push((name.to_string(), justification.to_string(), secs));
             }),
-            dial: Arc::new(move |ip: IpAddr, _config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
-                dialled.lock().unwrap().push((ip, name));
+            link: Arc::clone(&self.link) as Arc<dyn HostLink>,
+            dial: Arc::new(move |address: SocketAddr, _config: Arc<ClientConfig>, name: ServerName<'static>| -> BoxFuture<'static, io::Result<BoxStream>> {
+                dialled.lock().unwrap().push((address, name));
+                let failure = failing.lock().unwrap().clone();
                 let refused = {
                     let mut left = refusing.lock().unwrap();
                     let refused = *left > 0;
@@ -240,6 +445,9 @@ impl Cloud {
                 };
                 let received = Arc::clone(&received);
                 Box::pin(async move {
+                    if let Some((kind, words)) = failure {
+                        return Err(io::Error::new(kind, words));
+                    }
                     if refused {
                         return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "Cloud SQL refused the connection."));
                     }
@@ -268,6 +476,32 @@ fn guarded() -> SavedDatabase {
         pam: Some(PamCheck { entitlements: vec!["prod-operate".into()], location: "global".into(), duration_secs: 1800, justification: None }),
         ..orders()
     }
+}
+
+/// `orders()` reached over its private IP, through a host of the library.
+fn routed() -> SavedDatabase {
+    SavedDatabase { network: DatabaseNetwork::Private, via_host: Some(ROUTE_HOST.into()), ..orders() }
+}
+
+/// Where a dial to the instance at `ip` is expected to go: Cloud SQL takes its TLS connections on port 3307.
+fn instance_at(ip: &str) -> SocketAddr {
+    format!("{ip}:3307").parse().unwrap()
+}
+
+/// Where a dial through a host goes: the loopback end of the forward, at `port`.
+fn loopback(port: u16) -> SocketAddr {
+    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)
+}
+
+/// The forward a session to the host is asked for: from a port the system picks on 127.0.0.1 to Cloud SQL's port on the instance's private
+/// address.
+fn forward_to_the_instance() -> ForwardSpec {
+    ForwardSpec { kind: ForwardKind::Local, bind_address: "127.0.0.1".into(), port: 0, target_host: PRIVATE_IP.into(), target_port: 3307 }
+}
+
+/// The name the certificate of the instance of `orders()` is checked against.
+fn the_instances_name() -> ServerName<'static> {
+    ServerName::try_from(dns_name("orders-pg")).unwrap()
 }
 
 /// The database user a connection got ready as, or why it could not.
@@ -338,7 +572,7 @@ fn a_grant_that_ended_drops_the_cached_certificate_and_asks_again() {
     open.round_trip(b"select 1");
     assert!(cloud.owner.asked().is_empty(), "the grant was held");
     assert_eq!(cloud.certificates(), 1);
-    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-pg")).unwrap())], "the instance, by its name");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), ServerName::try_from(dns_name("orders-pg")).unwrap())], "the instance, by its name");
     // The grant ends; the certificate, good for an hour, would still be.
     *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ENDED", t0() - 10 * MINUTE)];
     cloud.clock.at(21 * MINUTE);
@@ -413,17 +647,30 @@ fn a_cancel_request_through_cloud_sql_uses_the_cached_certificate() {
     let cloud = Cloud::new(FakeOwner::default());
     let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
     let port = running(&ports, &orders());
-    // Before any connection there is no certificate: the request is dropped.
+    // Start fetched the certificate: a cancel request before any connection dials with it.
     let mut early = App::connect(port);
     early.send(&cancel_request());
     assert!(early.closed());
-    assert!(cloud.dialled.lock().unwrap().is_empty());
+    assert_eq!(*cloud.received.lock().unwrap(), vec![cancel_request()]);
     App::signed_in(port).round_trip(b"select pg_sleep(60)");
     let mut cancel = App::connect(port);
     cancel.send(&cancel_request());
     assert!(cancel.closed());
     assert_eq!(cloud.received.lock().unwrap().last(), Some(&cancel_request()));
     assert_eq!(cloud.certificates(), 1, "no certificate is fetched for a cancel request");
+    // Cloud SQL refuses a dial, which takes the certificate back: a cancel request then has none, and is dropped.
+    *cloud.refusing.lock().unwrap() = 1;
+    let mut refused = App::connect(port);
+    refused.startup(&[("user", "frank"), ("database", "orders")]);
+    refused.asked_for_password();
+    refused.password(PASSWORD);
+    assert_eq!(refused.error().0, "08006");
+    let dialled = cloud.dialled.lock().unwrap().len();
+    let mut dropped = App::connect(port);
+    dropped.send(&cancel_request());
+    assert!(dropped.closed());
+    assert_eq!(cloud.dialled.lock().unwrap().len(), dialled, "nothing was dialled");
+    assert_eq!(cloud.certificates(), 1);
 }
 
 #[test]
@@ -446,10 +693,347 @@ fn a_failed_dial_is_followed_by_a_new_certificate() {
 }
 
 #[test]
+fn a_host_route_dials_the_forward_on_loopback() {
+    let cloud = Cloud::new(FakeOwner::default());
+    // An instance without a DNS name: its certificate is checked against `project:instance`, however the connection reaches it.
+    cloud.admin.nameless.store(true, Ordering::SeqCst);
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    let port = running(&ports, &routed());
+    App::signed_in(port).round_trip(b"select 1");
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string()], "one session, to web-1 by its id");
+    // The session forwards a port of 127.0.0.1 to port 3307 of the instance's private address, and the connection dials that port. The
+    // certificate is still checked against the instance's name, not the address.
+    assert_eq!(cloud.link.end(0).forwards(), vec![forward_to_the_instance()]);
+    let identity = ServerIdentity { dns_name: None, project: "acme-prod-123456".into(), instance: "orders-pg".into() };
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(loopback(FORWARD_PORT), server_name(&identity))]);
+    assert_eq!(cloud.certificates(), 1);
+}
+
+#[test]
+fn a_database_saved_anew_over_another_route_is_dialled_at_the_address_of_its_new_one() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let name = the_instances_name;
+    let public = upstream.prepare(&orders(), &cancel).unwrap();
+    let _dialling = upstream.connect(ID, Some(public.material));
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), name())]);
+    // Saved anew to go through a host, it is not served what was had for its public address, fresh as that is: it reaches the private
+    // address through the host.
+    let through_a_host = upstream.prepare(&routed(), &cancel).unwrap();
+    assert_ne!(through_a_host.material, public.material);
+    assert_eq!(cloud.certificates(), 2);
+    let _dialling = upstream.connect(ID, Some(through_a_host.material));
+    assert_eq!(cloud.link.end(0).forwards(), vec![forward_to_the_instance()]);
+    // And back to its public address, as it was: the session to the host goes with the route it had.
+    let public_again = upstream.prepare(&orders(), &cancel).unwrap();
+    assert_eq!(cloud.certificates(), 3);
+    assert!(soon(|| cloud.link.end(0).closed()), "the session to the host is closed");
+    let _dialling = upstream.connect(ID, Some(public_again.material));
+    assert_eq!(
+        *cloud.dialled.lock().unwrap(),
+        vec![(instance_at(PUBLIC_IP), name()), (loopback(FORWARD_PORT), name()), (instance_at(PUBLIC_IP), name())]
+    );
+}
+
+#[test]
+fn a_public_route_opens_no_session() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let prepared = upstream.prepare(&orders(), &CancelToken::default()).unwrap();
+    let _dialling = upstream.connect(ID, Some(prepared.material));
+    assert!(cloud.link.opened().is_empty(), "no host was connected to");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), the_instances_name())]);
+}
+
+#[test]
+fn connections_share_one_session_while_it_lives() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    for _ in 0..2 {
+        let prepared = upstream.prepare(&routed(), &cancel).unwrap();
+        let _dialling = upstream.connect(ID, Some(prepared.material));
+    }
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string()], "one session");
+    assert_eq!(cloud.link.end(0).forwards(), vec![forward_to_the_instance()], "and one forward on it");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(loopback(FORWARD_PORT), the_instances_name()); 2]);
+    assert!(!cloud.link.end(0).closed());
+}
+
+#[test]
+fn a_dropped_session_is_opened_again_by_the_next_connection() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    upstream.prepare(&routed(), &cancel).unwrap();
+    cloud.link.end(0).lose();
+    let prepared = upstream.prepare(&routed(), &cancel).unwrap();
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string(); 2], "the next connection opens a second session");
+    assert!(soon(|| cloud.link.end(0).closed()), "and the first is closed");
+    assert_eq!(cloud.link.end(1).forwards(), vec![forward_to_the_instance()], "the forward goes on the second one");
+    let _dialling = upstream.connect(ID, Some(prepared.material));
+    assert_eq!(cloud.dialled.lock().unwrap().last(), Some(&(loopback(FORWARD_PORT), the_instances_name())));
+    assert_eq!(cloud.certificates(), 1, "the certificate stays: it was not the session's");
+}
+
+#[test]
+fn a_failed_open_names_the_host() {
+    let cloud = Cloud::new(FakeOwner::default());
+    cloud.link.failures.lock().unwrap().push_back("Permission denied (publickey).".into());
+    let upstream = cloud.upstream();
+    let error = user(upstream.prepare(&routed(), &CancelToken::default())).unwrap_err();
+    assert_eq!(error, NotReady::Failed("Could not connect through web-1: Permission denied (publickey).".into()));
+    assert_eq!(cloud.certificates(), 0, "no certificate is fetched for a connection that cannot get through");
+}
+
+#[test]
+fn connections_that_waited_behind_a_failed_open_take_its_failure() {
+    let cloud = Cloud::new(FakeOwner::default());
+    // The first open holds until the test lets it go, and then fails.
+    let gate = Gate::closed();
+    *cloud.link.holding.lock().unwrap() = Some(Arc::clone(&gate));
+    cloud.link.failures.lock().unwrap().push_back("Permission denied (publickey).".into());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let queued = || locked(&upstream.routes).get(ID).map_or(0, |route| route.queued.load(Ordering::SeqCst));
+    let (both_queued, first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| user(upstream.prepare(&routed(), &cancel)));
+        let second = scope.spawn(|| user(upstream.prepare(&routed(), &cancel)));
+        // One of them opens and holds there; the other queues behind it.
+        let end = Instant::now() + Duration::from_secs(10);
+        while !(gate.entered() == 1 && queued() == 2) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let both_queued = gate.entered() == 1 && queued() == 2;
+        gate.release();
+        (both_queued, first.join().unwrap(), second.join().unwrap())
+    });
+    assert!(both_queued, "both connections came to the path while the first open held");
+    let refused = NotReady::Failed("Could not connect through web-1: Permission denied (publickey).".into());
+    assert_eq!((first, second), (Err(refused.clone()), Err(refused)), "the same sentence for both");
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string()], "one open for both");
+    // A connection that comes after both were refused opens again.
+    assert_eq!(user(upstream.prepare(&routed(), &cancel)), Ok(IAM_USER.to_string()));
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string(); 2]);
+}
+
+#[test]
+fn a_route_host_missing_from_the_library_is_refused() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    // The host it was saved with has been deleted from the library since.
+    let orphaned = SavedDatabase { via_host: Some("00000000000000ff".into()), ..routed() };
+    let error = user(upstream.prepare(&orphaned, &CancelToken::default())).unwrap_err();
+    assert_eq!(error, NotReady::Failed("Orders connects through a host that is no longer in your library. Choose another host in its settings.".into()));
+    assert!(cloud.link.opened().is_empty(), "nothing was connected to");
+}
+
+#[test]
+fn a_session_opened_after_cancel_is_closed() {
+    let cloud = Cloud::new(FakeOwner::default());
+    // The port stops while the session opens: the connection is cancelled, and the session opens anyway.
+    cloud.link.cancels.store(true, Ordering::SeqCst);
+    let upstream = cloud.upstream();
+    let error = user(upstream.prepare(&routed(), &CancelToken::default())).unwrap_err();
+    assert_eq!(error, NotReady::Failed("The connection was cancelled.".into()));
+    assert!(soon(|| cloud.link.end(0).closed()), "the session is closed");
+    assert!(locked(&locked(&upstream.routes)[ID].path).is_none(), "and the route keeps no path");
+}
+
+#[test]
+fn release_closes_the_session() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    upstream.prepare(&routed(), &cancel).unwrap();
+    upstream.release(ID);
+    assert!(soon(|| cloud.link.end(0).closed()), "the session is closed");
+    assert!(cloud.link.end(0).stopped(), "after its forward was stopped");
+    upstream.prepare(&routed(), &cancel).unwrap();
+    assert_eq!(cloud.link.opened().len(), 2, "the next connection opens a new one");
+    assert!(!cloud.link.end(1).closed());
+}
+
+#[test]
+fn two_databases_through_one_host_open_a_session_each() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let billing = SavedDatabase { id: "00000000000000d2".into(), name: "Billing".into(), instance: "billing-pg".into(), ..routed() };
+    upstream.prepare(&routed(), &cancel).unwrap();
+    upstream.prepare(&billing, &cancel).unwrap();
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string(); 2], "a session each, both to web-1");
+    assert_eq!(cloud.link.end(0).forwards(), vec![forward_to_the_instance()]);
+    assert_eq!(cloud.link.end(1).forwards(), vec![forward_to_the_instance()]);
+    // One of them stops: the other's session stays.
+    upstream.release(ID);
+    assert!(soon(|| cloud.link.end(0).closed()));
+    assert!(!cloud.link.end(1).closed());
+}
+
+#[test]
+fn a_forward_that_cannot_open_names_the_instance_and_the_host() {
+    let cloud = Cloud::new(FakeOwner::default());
+    *cloud.link.refusal.lock().unwrap() = Some(SessionError::Channel("Could not listen on 127.0.0.1:0: Too many open files (os error 24)".into()));
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let error = user(upstream.prepare(&routed(), &cancel)).unwrap_err();
+    assert_eq!(
+        error,
+        NotReady::Failed(format!("Could not reach {CONNECTION} through web-1: SSH error: Could not listen on 127.0.0.1:0: Too many open files (os error 24)"))
+    );
+    // The session stays up; the next connection's forward opens, but on no port, and is not kept either.
+    let end = cloud.link.end(0);
+    *end.refusal.lock().unwrap() = None;
+    *end.port.lock().unwrap() = 0;
+    let error = user(upstream.prepare(&routed(), &cancel)).unwrap_err();
+    assert_eq!(error, NotReady::Failed(format!("Could not reach {CONNECTION} through web-1: No local port was opened for it.")));
+    assert!(soon(|| end.stopped()), "the forward without a port is stopped");
+    assert_eq!(cloud.link.opened().len(), 1, "on the one session");
+    assert!(!end.closed());
+}
+
+#[test]
+fn connect_without_an_open_path_asks_to_connect_again() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let prepared = upstream.prepare(&routed(), &CancelToken::default()).unwrap();
+    // The forward's listener ends before the connection dials it.
+    cloud.link.end(0).running.store(false, Ordering::SeqCst);
+    let dialling = upstream.connect(ID, Some(prepared.material));
+    assert_eq!(dialling.material, None, "the certificate was not dialled with, so it is not taken back");
+    let error = dialling.stream.now_or_never().expect("it fails at once").err().expect("it fails");
+    assert_eq!(error.to_string(), "the connection through the host is not open. Connect again.");
+    assert!(cloud.dialled.lock().unwrap().is_empty(), "nothing was dialled");
+}
+
+/// The error a connection through a host fails with when its dial fails with `kind` and `words`, while the path's forward reports
+/// `forward_error` as its latest.
+fn dial_error_through_the_host(kind: io::ErrorKind, words: &str, forward_error: Option<&str>) -> io::Error {
+    dial_error_through_the_host_after(kind, words, forward_error, |_| {})
+}
+
+/// `dial_error_through_the_host`, with `meanwhile` done to the session's far end after the connection looked up the forward and before its
+/// dial fails.
+fn dial_error_through_the_host_after(kind: io::ErrorKind, words: &str, forward_error: Option<&str>, meanwhile: impl FnOnce(&HostEnd)) -> io::Error {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let prepared = upstream.prepare(&routed(), &CancelToken::default()).unwrap();
+    *cloud.link.end(0).forward_error.lock().unwrap() = forward_error.map(str::to_string);
+    *cloud.failing.lock().unwrap() = Some((kind, words.to_string()));
+    let dialling = upstream.connect(ID, Some(prepared.material));
+    meanwhile(&cloud.link.end(0));
+    let error = dialling.stream.now_or_never().expect("it fails at once").err().expect("it fails");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(loopback(FORWARD_PORT), the_instances_name())]);
+    error
+}
+
+#[test]
+fn a_dial_through_a_host_whose_session_ended_says_the_connection_ended() {
+    // The session to the host is lost while the connection dials, and the forward says so in a tunnel's words.
+    let error = dial_error_through_the_host_after(io::ErrorKind::UnexpectedEof, "tls handshake eof", Some(crate::ssh::forward::SESSION_ENDED), HostEnd::lose);
+    assert_eq!(error.to_string(), "The connection through web-1 ended. Connect again.");
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    // The forward's listener stopped, and the dial timed out: the same.
+    let stopped = |end: &HostEnd| end.running.store(false, Ordering::SeqCst);
+    let error = dial_error_through_the_host_after(io::ErrorKind::TimedOut, "Cloud SQL did not answer within 10s.", None, stopped);
+    assert_eq!(error.to_string(), "The connection through web-1 ended. Connect again.");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_dial_through_a_host_is_never_given_the_forwards_tunnel_wording() {
+    // The forward turned a connection away at its limit once, and still reports it in a tunnel's words while it runs on.
+    let error = dial_error_through_the_host(io::ErrorKind::UnexpectedEof, "tls handshake eof", Some(crate::ssh::forward::AT_LIMIT));
+    assert_eq!(error.to_string(), format!("Cloud SQL at {PRIVATE_IP}:3307 did not answer through web-1."));
+    // Nor while the session still looks alive, a moment before the forward stops for its ended connection.
+    let error = dial_error_through_the_host(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 54)", Some(crate::ssh::forward::SESSION_ENDED));
+    assert_eq!(error.to_string(), "Connection reset by peer (os error 54)");
+}
+
+#[test]
+fn a_host_route_dial_error_names_the_host_not_the_loopback() {
+    // The host could not open the way to the instance, and the dial, which sees only the loopback end of the forward, gave up.
+    let words = format!("The TLS handshake with Cloud SQL at {} did not finish within 10s.", loopback(FORWARD_PORT));
+    let error = dial_error_through_the_host(io::ErrorKind::TimedOut, &words, Some("Channel open failure: connect failed"));
+    assert_eq!(error.to_string(), format!("web-1 could not reach {PRIVATE_IP}:3307: Channel open failure: connect failed"));
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "of the kind the dial failed with");
+}
+
+#[test]
+fn a_host_route_dial_error_without_a_forward_error_says_cloud_sql_did_not_answer() {
+    // The dial gave up at the loopback end of the forward, which its words name.
+    let words = format!("Cloud SQL did not answer at {} within 10s.", loopback(FORWARD_PORT));
+    let error = dial_error_through_the_host(io::ErrorKind::TimedOut, &words, None);
+    assert_eq!(error.to_string(), format!("Cloud SQL at {PRIVATE_IP}:3307 did not answer through web-1."));
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "of the kind the dial failed with");
+    // The forward ended the connection during the TLS handshake: not as Cloud SQL closing it.
+    let error = dial_error_through_the_host(io::ErrorKind::UnexpectedEof, "tls handshake eof", None);
+    assert_eq!(error.to_string(), format!("Cloud SQL at {PRIVATE_IP}:3307 did not answer through web-1."));
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+}
+
+#[test]
+fn a_tls_failure_through_a_host_keeps_its_reason() {
+    // The instance's certificate is not made out to the name it is checked against. The reason names no address, and it is what the person
+    // needs to see.
+    let error = dial_error_through_the_host(io::ErrorKind::InvalidData, "invalid peer certificate: NotValidForName", None);
+    assert_eq!(error.to_string(), "invalid peer certificate: NotValidForName");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_tls_failure_through_a_host_keeps_its_reason_over_an_earlier_forward_error() {
+    // An earlier connection the forward carried was reset, and the forward still reports it: it keeps its latest error. The dial now fails
+    // on the instance's certificate, which is this connection's reason.
+    let error = dial_error_through_the_host(io::ErrorKind::InvalidData, "invalid peer certificate: NotValidForName", Some("Connection reset by peer (os error 54)"));
+    assert_eq!(error.to_string(), "invalid peer certificate: NotValidForName");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_transport_error_through_a_host_is_said_with_the_forwards_error() {
+    // The dial ended without an answer of its own: the forward's error says why the host could not carry it.
+    for kind in [io::ErrorKind::UnexpectedEof, io::ErrorKind::TimedOut, io::ErrorKind::ConnectionReset, io::ErrorKind::ConnectionAborted, io::ErrorKind::BrokenPipe] {
+        let error = dial_error_through_the_host(kind, "the dial's own words", Some("Channel open failure: connect failed"));
+        assert_eq!(error.to_string(), format!("web-1 could not reach {PRIVATE_IP}:3307: Channel open failure: connect failed"), "{kind:?}");
+    }
+}
+
+#[test]
+fn a_refused_dial_through_a_host_keeps_its_reason() {
+    // The forward's listener went away after the connection looked it up.
+    let error = dial_error_through_the_host(io::ErrorKind::ConnectionRefused, "Connection refused (os error 61)", None);
+    assert_eq!(error.to_string(), "Connection refused (os error 61)");
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+}
+
+#[test]
+fn an_app_is_told_which_host_could_not_reach_the_instance() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    let port = running(&ports, &routed());
+    App::signed_in(port).round_trip(b"select 1");
+    // The host can no longer reach the instance. The forward closes each connection it takes, which the dial reads as an end of file in
+    // the TLS handshake; the app is not told that Cloud SQL closed it.
+    *cloud.link.end(0).forward_error.lock().unwrap() = Some("Channel open failure: connect failed".into());
+    *cloud.failing.lock().unwrap() = Some((io::ErrorKind::UnexpectedEof, "tls handshake eof".into()));
+    let mut app = App::connect(port);
+    app.startup(&[("user", "frank"), ("database", "orders")]);
+    app.asked_for_password();
+    app.password(PASSWORD);
+    let sentence = format!("Lunport could not reach {CONNECTION}: web-1 could not reach {PRIVATE_IP}:3307: Channel open failure: connect failed.");
+    assert_eq!(app.error(), ("08006".to_string(), sentence));
+}
+
+#[test]
 fn an_app_is_told_a_connection_google_could_not_get_ready_from_a_refused_sign_in() {
     let cloud = Cloud::new(FakeOwner::default());
     let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
     let port = running(&ports, &orders());
+    // The certificate Start fetched is due to be renewed: the next connection asks the Cloud SQL Admin API again.
+    cloud.clock.at(HOUR - REFRESH_AHEAD);
     let refused = |error: GcpError| {
         *cloud.admin.failing.lock().unwrap() = Some(error);
         let mut app = App::connect(port);
@@ -560,7 +1144,7 @@ fn a_prepare_that_finishes_after_the_database_changed_leaves_nothing_for_it() {
     // The new database's connections dial the dev instance: the stale fetch left nothing for them.
     cloud.dialled.lock().unwrap().clear();
     let _dialling = upstream.connect(ID, None);
-    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(PUBLIC_IP.parse().unwrap(), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(instance_at(PUBLIC_IP), ServerName::try_from(dns_name("orders-dev-pg")).unwrap())]);
 }
 
 #[test]
@@ -652,7 +1236,7 @@ fn a_grant_asked_for_on_the_page_and_by_a_connection_at_once_is_asked_for_once()
     let mut upstream = cloud.upstream();
     let (gates, owner) = (Arc::clone(&upstream.gates), Arc::clone(&cloud.owner));
     // Whoever leads is answered only once the other waits behind the question.
-    upstream.make_owner = Arc::new(move |_: &CancelToken| -> Box<dyn Owner + Send> {
+    upstream.make_owner = Arc::new(move |_: &CancelToken, _: Option<&AiAsker>| -> Box<dyn Owner + Send> {
         Box::new(Patient { inner: Arc::clone(&owner), gates: Arc::clone(&gates), followers: 1 })
     });
     let cancel = CancelToken::default();
@@ -666,4 +1250,117 @@ fn a_grant_asked_for_on_the_page_and_by_a_connection_at_once_is_asked_for_once()
     assert_eq!(cloud.owner.asked().len(), 1, "one question for both");
     assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 1, "one request for both");
     assert_eq!(cloud.remembered.lock().unwrap().len(), 1, "one memory for both");
+}
+
+// ---- Start opens the whole way ----
+
+/// The steps a warm-up of `db` reports, in order, and what it answered.
+fn warm_steps(upstream: &CloudSqlUpstream, db: &SavedDatabase) -> (Vec<DatabaseStep>, Result<(), NotReady>) {
+    let steps = Mutex::new(Vec::new());
+    let warmed = upstream.warm(db, &CancelToken::default(), None, &|step| steps.lock().unwrap().push(step));
+    (steps.into_inner().unwrap(), warmed)
+}
+
+#[test]
+fn warm_reports_each_step_in_order() {
+    let cloud = Cloud::new(FakeOwner::default());
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() - 10 * MINUTE)];
+    let upstream = cloud.upstream();
+    let guarded_through_a_host = SavedDatabase { pam: guarded().pam, ..routed() };
+    let (steps, warmed) = warm_steps(&upstream, &guarded_through_a_host);
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Grant, DatabaseStep::Connect, DatabaseStep::Certificate]);
+    // The whole way is open: the grant was checked, and the session, its forward and the certificate are kept for the connections.
+    assert_eq!(cloud.looked(), 1);
+    assert_eq!(cloud.link.opened(), vec![ROUTE_HOST.to_string()]);
+    assert_eq!(cloud.link.end(0).forwards(), vec![forward_to_the_instance()]);
+    assert_eq!(cloud.certificates(), 1);
+    let prepared = upstream.prepare(&guarded_through_a_host, &CancelToken::default()).unwrap();
+    let _dialling = upstream.connect(ID, Some(prepared.material));
+    assert_eq!((cloud.looked(), cloud.link.opened().len(), cloud.certificates()), (1, 1, 1), "the first connection opens nothing anew");
+    assert_eq!(*cloud.dialled.lock().unwrap(), vec![(loopback(FORWARD_PORT), the_instances_name())]);
+}
+
+#[test]
+fn warm_of_a_public_database_reports_the_certificate_only() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let (steps, warmed) = warm_steps(&upstream, &orders());
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Certificate]);
+    assert!(cloud.link.opened().is_empty() && cloud.looked() == 0, "no host and no grant");
+    assert_eq!(cloud.certificates(), 1);
+}
+
+#[test]
+fn a_grant_question_while_connecting_shows_the_grant_step() {
+    let cloud = Cloud::new(FakeOwner::default());
+    // web-1's own route asks for a grant while its session opens.
+    *cloud.link.asks.lock().unwrap() = Some(QuestionKind::Grant);
+    let upstream = cloud.upstream();
+    let (steps, warmed) = warm_steps(&upstream, &routed());
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Connect, DatabaseStep::Grant, DatabaseStep::Connect, DatabaseStep::Certificate]);
+    assert_eq!(cloud.owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), vec![QuestionKind::Grant], "the person was asked");
+    // The session is lost, and the next one asks for a password: that is no grant, and the step stays.
+    *cloud.link.asks.lock().unwrap() = Some(QuestionKind::Password);
+    cloud.link.end(0).lose();
+    let (steps, warmed) = warm_steps(&upstream, &routed());
+    assert_eq!(warmed, Ok(()));
+    assert_eq!(steps, vec![DatabaseStep::Connect, DatabaseStep::Certificate]);
+    assert_eq!(cloud.owner.asked().iter().map(|asked| asked.kind).collect::<Vec<_>>(), vec![QuestionKind::Grant, QuestionKind::Password]);
+}
+
+#[test]
+fn the_warm_up_asks_in_the_ai_clients_name() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let mut upstream = cloud.upstream();
+    let asked_for = Arc::new(Mutex::new(Vec::new()));
+    let (recording, owner) = (Arc::clone(&asked_for), Arc::clone(&cloud.owner));
+    upstream.make_owner = Arc::new(move |_: &CancelToken, ai: Option<&AiAsker>| -> Box<dyn Owner + Send> {
+        recording.lock().unwrap().push(ai.cloned());
+        Box::new(Shared(Arc::clone(&owner)))
+    });
+    let claude = AiAsker { client: "Claude".into(), unreviewed: None };
+    let cancel = CancelToken::default();
+    // The grant the database asks for: nobody answers, for the AI client's start or for an app's connection.
+    assert!(upstream.warm(&guarded(), &cancel, Some(&claude), &|_| {}).is_err());
+    assert!(upstream.prepare(&guarded(), &cancel).is_err());
+    // The session to the host: the start opens it, and an app's connection opens it again once it is lost. The link asks a server key in
+    // the same name as the owner asks the rest.
+    upstream.warm(&routed(), &cancel, Some(&claude), &|_| {}).unwrap();
+    cloud.link.end(0).lose();
+    upstream.prepare(&routed(), &cancel).unwrap();
+    assert_eq!(*asked_for.lock().unwrap(), vec![Some(claude.clone()), None, Some(claude.clone()), None]);
+    assert_eq!(*cloud.link.askers.lock().unwrap(), vec![Some(claude), None]);
+}
+
+#[test]
+fn instance_address_is_known_after_the_certificate() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    assert_eq!(upstream.instance_address(ID), None, "nothing is known before a certificate was fetched");
+    upstream.warm(&routed(), &CancelToken::default(), None, &|_| {}).unwrap();
+    assert_eq!(upstream.instance_address(ID), Some(format!("{PRIVATE_IP}:3307")));
+    upstream.release(ID);
+    assert_eq!(upstream.instance_address(ID), None, "nor once the database stopped");
+    // The row of a database that runs shows it, and the row of one that stopped does not.
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    running(&ports, &orders());
+    assert_eq!(ports.live(ID).address, Some(format!("{PUBLIC_IP}:3307")));
+    ports.stop(ID);
+    wait_until("the port stopped", || ports.live(ID).phase == DatabasePhase::Stopped);
+    assert_eq!(ports.live(ID).address, None);
+}
+
+#[test]
+fn a_start_that_cannot_reach_the_host_fails_at_connecting() {
+    let cloud = Cloud::new(FakeOwner::default());
+    cloud.link.failures.lock().unwrap().push_back("Connection refused.".into());
+    let ports = DatabasePorts::new(Arc::new(cloud.upstream()));
+    ports.start(&routed(), Zeroizing::new(PASSWORD.into()), CancelToken::default(), Box::new(()), None).unwrap();
+    wait_until("the start ended", || !ports.running(ID));
+    let live = ports.live(ID);
+    assert_eq!((live.phase, live.error.as_deref(), live.step), (DatabasePhase::Error, Some("Could not connect through web-1: Connection refused."), Some(DatabaseStep::Connect)));
+    assert_eq!(cloud.certificates(), 0, "no certificate is fetched for a database that cannot get through");
 }

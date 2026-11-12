@@ -4,6 +4,9 @@
 //! SQL signs), dials the instance over TLS, passes the app's start-up message on as the IAM database user, with Cloud SQL's read-only lock
 //! for a prod database, and relays the session.
 //!
+//! Start opens the whole way first (the grant, the session to the host a database is reached through, the certificate), with each step on
+//! the database's row, and the port runs once it is open; a start that cannot open it fails with the sentence of why, at its step.
+//!
 //! The lock stays with a session for as long as it lasts. Once the person unlocks writes, for `WRITABLE_WINDOW`, the new connections to a
 //! prod database come without it; the locked ones go on until their apps connect again. When the window ends, the connections that came
 //! without the lock close as soon as they are idle, and `CLOSE_UNLOCKED_WITHIN` after the window at the latest. A port runs the database
@@ -31,8 +34,9 @@ use zeroize::Zeroizing;
 
 use super::auth::{label, printable};
 use super::connect::CancelToken;
-use super::databases::{DatabaseLive, DatabasePhase};
+use super::databases::{DatabaseLive, DatabasePhase, DatabaseStep};
 use super::pgwire::{auth_cleartext, error_response, passwords_match, read_first, read_password, read_server_auth, FirstMessage, ReadyTracker, ServerAuth, Startup};
+use super::protocol::AiAsker;
 use crate::sync::databases::{DatabaseEnvironment, SavedDatabase};
 use crate::sync::env::Keychain;
 
@@ -77,6 +81,8 @@ const PASSWORD_BYTES: usize = 24;
 const ERROR_CHARS: usize = 512;
 const TOO_LONG: &str = "The connection settings are too long for Cloud SQL. Remove some options and connect again.";
 const UNAVAILABLE: &str = "Lunport's database service is unavailable. Restart Lunport and try again.";
+/// What a start fails with when its warm-up ended without a sentence of its own (it panicked).
+const NOT_OPENED: &str = "Lunport could not open the connection.";
 const ONLY_PROD: &str = "Only prod databases are locked.";
 const NOT_RUNNING: &str = "Start the database before you unlock writes.";
 /// What an unlock is refused with when the person did not confirm it, or confirmed it for a run of the database that has ended.
@@ -163,6 +169,20 @@ pub(crate) trait Upstream: Send + Sync {
     fn forget(&self, db_id: &str, material: u64);
     /// The database `db_id` stopped, or was deleted: everything kept for it goes, its certificate and the key that was made for it too.
     fn release(&self, db_id: &str);
+    /// Opens the whole way to `db` as its port starts, as `prepare` gets a connection ready, and keeps it for the connections: the grant
+    /// it asks for, the session to the host it is reached through, the connection material. Each step is told to `step` as it begins;
+    /// the questions on the way name `ai`, the AI client whose request starts the database (`None`: the person's). It blocks as `prepare`
+    /// does, so the port calls it on a blocking thread; `cancel` is set when the port stops. An upstream with nothing to open answers at
+    /// once.
+    fn warm(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<(), NotReady> {
+        let _ = (db, cancel, ai, step);
+        Ok(())
+    }
+    /// The address of the instance the connections to `db_id` reach, `ip:3307`, while the material they dial with is kept.
+    fn instance_address(&self, db_id: &str) -> Option<String> {
+        let _ = db_id;
+        None
+    }
 }
 
 /// Why a connection could not be got ready (`Upstream::prepare`): the sentence the app is refused with, under the SQLSTATE of its kind.
@@ -172,8 +192,9 @@ pub(crate) enum NotReady {
     /// was declined. The app is told `28000` (invalid_authorization_specification).
     Refused(String),
     /// Google or the instance could not be reached or used: the network, the Cloud SQL Admin API (not enabled, no such instance, an
-    /// answer it could not read), an instance Lunport does not connect to (no public IP, not PostgreSQL, in another region). The app is
-    /// told `08006` (connection_failure).
+    /// answer it could not read), an instance Lunport does not connect to (no public IP, no private IP for a database reached through a
+    /// host, not PostgreSQL, in another region), a host the database connects through that cannot be reached (no longer in the library,
+    /// a connection to it that fails, a forward on it that cannot open). The app is told `08006` (connection_failure).
     Failed(String),
 }
 
@@ -456,8 +477,11 @@ impl DatabasePorts {
     /// Starts `db`'s port: listens on 127.0.0.1 at its local port (0: one the system picks) and serves the apps that sign in with
     /// `password`. `quit` stops the port when it is cancelled (the broker cancels it when the app quits), and `hold` is kept until the port
     /// has stopped (the broker's registration of `quit`, which keeps the app from quitting without stopping the port). An address that
-    /// cannot be had leaves the port failed, with the sentence it answers.
-    pub fn start(&self, db: &SavedDatabase, password: Zeroizing<String>, quit: CancelToken, hold: Box<dyn Send>) -> Result<(), String> {
+    /// cannot be had leaves the port failed, with the sentence it answers. Once it listens, the port starts until the upstream has the whole
+    /// way to the instance open (`Upstream::warm`, for `ai`, on a blocking thread), showing each step: it runs then, and when the way cannot
+    /// be opened it stops as `stop` stops it and ends failed, with the sentence of why and the step it failed at. A port stopped meanwhile
+    /// ends stopped.
+    pub fn start(&self, db: &SavedDatabase, password: Zeroizing<String>, quit: CancelToken, hold: Box<dyn Send>, ai: Option<AiAsker>) -> Result<(), String> {
         let Some(number) = db.local_port else { return Err(NO_LOCAL_PORT.to_string()) };
         let upstream = Arc::clone(self.upstream.get().ok_or(UNAVAILABLE)?);
         let runtime = self.runtime()?;
@@ -481,7 +505,8 @@ impl DatabasePorts {
             }
         };
         port.listening(listener.local_addr().map_or(number, |address| address.port()));
-        runtime.spawn(serve(port, listener, upstream, self.sign_in_within, self.tick, hold));
+        runtime.spawn(serve(Arc::clone(&port), listener, Arc::clone(&upstream), self.sign_in_within, self.tick, hold));
+        runtime.spawn(warm_up(port, upstream, ai));
         Ok(())
     }
 
@@ -499,8 +524,15 @@ impl DatabasePorts {
         locked(&self.ports)[id].password()
     }
 
+    /// What this device runs for the database `id`, with the address of its instance while the upstream keeps it.
     pub fn live(&self, id: &str) -> DatabaseLive {
-        locked(&self.ports).get(id).map(|port| port.live()).unwrap_or_default()
+        let live = self.port(id).map(|port| port.live()).unwrap_or_default();
+        DatabaseLive { address: self.instance_address(id), ..live }
+    }
+
+    /// The address of the instance the database `id`'s connections reach, as the upstream knows it.
+    fn instance_address(&self, id: &str) -> Option<String> {
+        self.upstream.get()?.instance_address(id)
     }
 
     /// The database the port of `id` runs, as it was saved when the port started, while the port starts, runs or stops.
@@ -547,9 +579,12 @@ impl DatabasePorts {
     /// The databases that run here although `saved` does not list them any more, to be listed so that they can be stopped. One that does
     /// not run and is not saved is forgotten.
     pub(crate) fn unsaved(&self, saved: &dyn Fn(&str) -> bool) -> Vec<(SavedDatabase, DatabaseLive)> {
-        let mut ports = locked(&self.ports);
-        ports.retain(|id, port| saved(id) || port.busy());
-        ports.iter().filter(|(id, _)| !saved(id)).map(|(_, port)| (port.db.clone(), port.live())).collect()
+        let removed: Vec<Arc<Port>> = {
+            let mut ports = locked(&self.ports);
+            ports.retain(|id, port| saved(id) || port.busy());
+            ports.iter().filter(|(id, _)| !saved(id)).map(|(_, port)| Arc::clone(port)).collect()
+        };
+        removed.iter().map(|port| (port.db.clone(), DatabaseLive { address: self.instance_address(&port.db.id), ..port.live() })).collect()
     }
 }
 
@@ -590,10 +625,16 @@ struct Port {
     ticks: std::sync::atomic::AtomicUsize,
 }
 
+/// Where a port stands; by default, stopped.
+#[derive(Default)]
 struct PortState {
     phase: DatabasePhase,
     port: Option<u16>,
     error: Option<String>,
+    /// The step its start reported last: the row shows it while the port starts, and once its start failed.
+    step: Option<DatabaseStep>,
+    /// Why its start failed, from then until its listener and its connections are closed: it ends failed with this sentence, not stopped.
+    failure: Option<String>,
 }
 
 impl Port {
@@ -604,7 +645,7 @@ impl Port {
             password: Mutex::new(password),
             quit,
             woken: Notify::new(),
-            state: Mutex::new(PortState { phase: DatabasePhase::Starting, port: None, error: None }),
+            state: Mutex::new(PortState { phase: DatabasePhase::Starting, ..PortState::default() }),
             open: Mutex::new(0),
             clocks,
             writes: Mutex::default(),
@@ -613,11 +654,13 @@ impl Port {
         }
     }
 
+    /// Where it stands. The address of its instance is the upstream's to know (`DatabasePorts::live`).
     fn live(&self) -> DatabaseLive {
         let state = locked(&self.state);
         let connections = u32::try_from(*locked(&self.open)).unwrap_or(u32::MAX);
         let writable_until_ms = locked(&self.writes).open_until(self.clocks.now()).map(millis);
-        DatabaseLive { phase: state.phase, port: state.port, connections, writable_until_ms, error: state.error.clone() }
+        let step = state.step.filter(|_| matches!(state.phase, DatabasePhase::Starting | DatabasePhase::Error));
+        DatabaseLive { phase: state.phase, port: state.port, connections, writable_until_ms, error: state.error.clone(), step, address: None }
     }
 
     fn busy(&self) -> bool {
@@ -645,17 +688,45 @@ impl Port {
         }
     }
 
-    /// It listens on `port`; running, unless it was stopped meanwhile.
+    /// It listens on `port`, and starts until its warm-up has the whole way to the instance open (`warmed`) or cannot open it
+    /// (`warm_failed`).
     fn listening(&self, port: u16) {
+        locked(&self.state).port = Some(port);
+    }
+
+    /// Its warm-up reached `step`, which its row shows while it starts.
+    fn stepped(&self, step: DatabaseStep) {
         let mut state = locked(&self.state);
-        state.port = Some(port);
-        if state.phase == DatabasePhase::Starting {
-            state.phase = DatabasePhase::Running;
+        if state.phase == DatabasePhase::Starting && state.failure.is_none() {
+            state.step = Some(step);
         }
     }
 
+    /// Its warm-up has the whole way to the instance open: running, unless it was stopped meanwhile.
+    fn warmed(&self) {
+        let mut state = locked(&self.state);
+        if state.phase == DatabasePhase::Starting {
+            state.phase = DatabasePhase::Running;
+            state.step = None;
+        }
+    }
+
+    /// Its warm-up could not open the way, for `sentence`: it stops as `stop` stops it, and ends failed with the sentence and the step it
+    /// failed at (`ended`). A port that was stopped meanwhile, or whose app quits, ends stopped: its warm-up gave up for that.
+    fn warm_failed(&self, sentence: &str) {
+        {
+            let mut state = locked(&self.state);
+            if state.phase != DatabasePhase::Starting || self.quit.is_cancelled() {
+                return;
+            }
+            state.failure = Some(cut(sentence));
+        }
+        self.quit.cancel();
+        self.woken.notify_one();
+    }
+
     fn failed(&self, error: &str) {
-        *locked(&self.state) = PortState { phase: DatabasePhase::Error, port: None, error: Some(cut(error)) };
+        *locked(&self.state) = PortState { phase: DatabasePhase::Error, error: Some(cut(error)), ..PortState::default() };
         self.forget_password();
     }
 
@@ -687,8 +758,15 @@ impl Port {
         locked(&self.writes).until = None;
     }
 
-    fn stopped(&self) {
-        *locked(&self.state) = PortState { phase: DatabasePhase::Stopped, port: None, error: None };
+    /// Its listener and its connections are closed: failed, with the sentence and the step of its start, when its start failed (`warm_failed`);
+    /// stopped otherwise.
+    fn ended(&self) {
+        let mut state = locked(&self.state);
+        let ended = match state.failure.take() {
+            Some(failure) => PortState { phase: DatabasePhase::Error, error: Some(failure), step: state.step, ..PortState::default() },
+            None => PortState::default(),
+        };
+        *state = ended;
     }
 
     /// One of its slots, when one is free.
@@ -970,9 +1048,25 @@ fn answers(number: u16) -> bool {
         .any(|ip| std::net::TcpStream::connect_timeout(&SocketAddr::new(ip, number), PROBE_WITHIN).is_ok())
 }
 
-/// Runs a port: takes the apps that connect until the port stops or the app quits, and looks at its writable window every `tick`; then
-/// lets go of the address, closes every connection, lets go of what was kept for the database (its password, its certificate) and of
-/// `hold`.
+/// Opens the whole way to the port's database on a blocking thread (`Upstream::warm`, for `ai`), with each step it reaches on the port:
+/// the port runs once the way is open, and fails with the sentence of why it is not otherwise.
+async fn warm_up(port: Arc<Port>, upstream: Arc<dyn Upstream>, ai: Option<AiAsker>) {
+    let warming = Arc::clone(&port);
+    let warmed = tokio::task::spawn_blocking(move || {
+        let step = |step: DatabaseStep| warming.stepped(step);
+        upstream.warm(&warming.db, &warming.quit, ai.as_ref(), &step)
+    });
+    match warmed.await {
+        Ok(Ok(())) => port.warmed(),
+        Ok(Err(not_ready)) => port.warm_failed(not_ready.sentence()),
+        // It panicked: nothing it opened is counted on.
+        Err(_) => port.warm_failed(NOT_OPENED),
+    }
+}
+
+/// Runs a port: takes the apps that connect until the port stops, its start fails or the app quits, and looks at its writable window
+/// every `tick`; then lets go of the address, closes every connection, lets go of what was kept for the database (its password, its
+/// certificate, the session to its host) and of `hold`.
 async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstream>, sign_in_within: Duration, tick: Duration, hold: Box<dyn Send>) {
     let mut apps = JoinSet::new();
     let mut poll = tokio::time::interval(QUIT_POLL);
@@ -998,7 +1092,7 @@ async fn serve(port: Arc<Port>, listener: TcpListener, upstream: Arc<dyn Upstrea
     apps.shutdown().await;
     upstream.release(&port.db.id);
     port.forget_password();
-    port.stopped();
+    port.ended();
     drop(hold);
 }
 

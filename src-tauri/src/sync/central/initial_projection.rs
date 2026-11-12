@@ -24,7 +24,7 @@ pub(in crate::sync) struct Candidate {
     manifest: String,
     observed: u64,
     reconciliation: bool,
-    /// The ids an adoption or a replacement gives the hosts that routes and grant memory name (old → new,
+    /// The ids an adoption or a replacement gives the hosts that routes, grant memory and saved databases name (old → new,
     /// `adoption::merge::route_host_ids`); `None` for a first publication, which keeps every host's id.
     host_ids: Option<BTreeMap<String, String>>,
 }
@@ -47,11 +47,12 @@ impl Prepared {
 }
 /// The state version of an initial projection's candidate: central sync's, unless it holds what routes need, then the version of the
 /// library's route rows: the account's rows themselves, the routes this device keeps for the publish step to turn into such rows,
-/// or what its grant requests taught it. Saved databases, the library's or this device's own, need the newest version. The initial
+/// or what its grant requests taught it. Saved databases, the library's or this device's own, need the newest version: the route
+/// version once one is reached through a host, else the version of saved databases (`databases::state_version`). The initial
 /// publication requires exactly this version.
 pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
     if crate::sync::databases::has_data(candidate) {
-        crate::sync::databases::STATE_VERSION
+        crate::sync::databases::state_version(candidate)
     } else if crate::sync::pam_records::has_data(candidate) {
         crate::sync::pam_records::STATE_VERSION
     } else if transports::needs_sync_version(candidate) || transports::has_data(candidate) {
@@ -67,9 +68,10 @@ pub(in crate::sync) fn candidate_version(candidate: &SyncStateV3) -> u32 {
 ///   id, so it keeps both as they are. An adoption or a replacement gives the hosts new ids (`host_ids`): every route that applies on
 ///   the source, a replaced library's included, follows its host with its grant memory, and one whose host does not survive goes
 ///   (`transports::follow_hosts`).
-/// - Its search scopes, the memory of its grant requests per entitlement, and its saved databases. None names a host, so all of them
-///   stay whatever `host_ids` is: the ones of the library the source leaves as well as this device's own
-///   (`pam_records::preserve_on_leave`, `databases::preserve_on_leave`).
+/// - Its search scopes, the memory of its grant requests per entitlement, and its saved databases. All of them stay whatever
+///   `host_ids` is: the ones of the library the source leaves as well as this device's own (`pam_records::preserve_on_leave`,
+///   `databases::preserve_on_leave`). Scopes and memory name no host. A database reached through a host follows it to the id an
+///   adoption or a replacement gives it, and keeps its route when `host_ids` gives that host no new id.
 ///
 /// What the new library's Catalog already holds wins over the copy kept here, as a delta projection decides: its route for a host,
 /// and its scope, memory or database of the same id. The candidate gets the state version they need.
@@ -88,10 +90,11 @@ fn keep_routes(
             transports::follow_hosts(source, candidate, host_ids, now).map_err(|_| invalid())?
         }
     }
-    // Search scopes, grant memory and saved databases name no host: they stay as they are, for the publish step to move in. A row of
-    // the same id in the new library's account wins over the copy kept here (below).
+    // Search scopes and grant memory name no host: they stay as they are, for the publish step to move in. Saved databases stay too,
+    // a database reached through a host under the id its host gets here. A row of the same id in the new library's account wins over
+    // the copy kept here (below).
     crate::sync::pam_records::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
-    crate::sync::databases::preserve_on_leave(source, candidate, now).map_err(|_| invalid())?;
+    crate::sync::databases::preserve_on_leave(source, candidate, host_ids, now).map_err(|_| invalid())?;
     if let Some(account) = &candidate.account {
         candidate.local.pam_records.retain(|key, _| !account.records.contains_key(key));
         candidate.local.databases.retain(|key, _| !account.records.contains_key(key));
@@ -245,7 +248,8 @@ impl Candidate {
             host_ids: None,
         })
     }
-    /// `host_ids`: the ids the merge gives the hosts that routes and grant memory name (`adoption::merge::route_host_ids`).
+    /// `host_ids`: the ids the merge gives the hosts that routes, grant memory and saved databases name
+    /// (`adoption::merge::route_host_ids`).
     pub(super) fn adopt(
         source: &SyncStateV3,
         read: &super::active_read::VerifiedLibrary,
@@ -758,6 +762,50 @@ pub(in crate::sync) mod tests {
         assert!(candidate.local.databases.values().all(|row| !row.dirty));
         assert_eq!(databases::view(&candidate).into_iter().map(|row| row.database.id).collect::<Vec<_>>(), vec![held.id.clone()], "the new library's is the library's");
         assert_eq!(candidate.version, databases::STATE_VERSION);
+        records_v3::validate_state(&candidate).unwrap();
+    }
+
+    /// A database reached through a host needs the route version, whether this device keeps it for the publish step or the library
+    /// holds it: the version the initial publication requires.
+    #[test]
+    fn a_candidate_with_a_database_through_a_host_needs_the_route_version() {
+        use crate::sync::databases::{self, tests::through_host};
+        let (source, plan, keys, committed) = fixture_with_host(HOST, vec![]);
+        let source = databases::set(&source, "00000000000000d1", None, Some(through_host("00000000000000d1")), 2).unwrap();
+        let initial = Candidate::prepare(&source, &plan, committed, &keys, 100).unwrap();
+        assert_eq!(initial.shadow().version, records_v3::CENTRAL_STATE_VERSION, "the shadow keeps none");
+        let projected = finished(&initial, &keys);
+        assert!(databases::view(&projected).is_empty() && projected.local.databases.len() == 1, "this device's own until the publish step moves it in");
+        assert_eq!(candidate_version(&projected), records_v3::DATABASE_ROUTE_STATE_VERSION);
+        assert_eq!(projected.version, records_v3::DATABASE_ROUTE_STATE_VERSION);
+        records_v3::validate_state(&projected).unwrap();
+        let moved = databases::publish_local(&projected, 200).unwrap().expect("the library has room");
+        assert_eq!(databases::view(&moved).into_iter().map(|row| row.database).collect::<Vec<_>>(), [through_host("00000000000000d1")]);
+        assert_eq!(candidate_version(&moved), records_v3::DATABASE_ROUTE_STATE_VERSION, "the library's row needs it too");
+    }
+
+    /// An adoption or a replacement gives the hosts new ids: a database this device keeps follows its host to the new id, and one whose
+    /// host the merge gives no new id keeps the route it had.
+    #[test]
+    fn an_adoption_keeps_a_database_following_its_host() {
+        use crate::sync::{
+            databases::{self, tests::{through_host, ROUTE_HOST}, SavedDatabase},
+            transports::tests::in_central_mode,
+        };
+        let unmapped = SavedDatabase { via_host: Some("00000000000000aa".into()), ..through_host("00000000000000d2") };
+        let mut source = in_central_mode(databases::tests::state());
+        for saved in [through_host("00000000000000d1"), unmapped.clone()] {
+            source = databases::set(&source, &saved.id.clone(), None, Some(saved), 1).unwrap();
+        }
+        let mut candidate = source.clone();
+        candidate.account.as_mut().unwrap().records.retain(|_, row| !databases::is_id(&row.record.id));
+        candidate.version = records_v3::CENTRAL_STATE_VERSION;
+        let host_ids = BTreeMap::from([(ROUTE_HOST.to_string(), "fedcba9876543210".to_string())]);
+        keep_routes(&source, &mut candidate, Some(&host_ids), 50).unwrap();
+        let kept: Vec<_> = candidate.local.databases.values().filter_map(|row| databases::decode(&row.record)).collect();
+        let followed = SavedDatabase { via_host: Some("fedcba9876543210".into()), ..through_host("00000000000000d1") };
+        assert_eq!(kept, [followed, unmapped]);
+        assert_eq!(candidate.version, records_v3::DATABASE_ROUTE_STATE_VERSION);
         records_v3::validate_state(&candidate).unwrap();
     }
 

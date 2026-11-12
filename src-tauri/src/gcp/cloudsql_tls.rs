@@ -1,6 +1,6 @@
-//! The TLS connection to a Cloud SQL instance, made as Google's Go connector for Cloud SQL makes it: TLS 1.3 only, straight to the
-//! instance's address on port 3307 with TCP keepalive on, without ALPN, and with the client certificate Cloud SQL signed for the
-//! connection's key as the client's identity. PostgreSQL then runs inside the TLS as over plain TCP, with no SSLRequest of its own. The Go connector can also exchange a
+//! The TLS connection to a Cloud SQL instance, made as Google's Go connector for Cloud SQL makes it: TLS 1.3 only, to the instance's
+//! address on port 3307, straight or through the loopback end of an SSH forward that leads there, with TCP keepalive on, without ALPN, and
+//! with the client certificate Cloud SQL signed for the connection's key as the client's identity. PostgreSQL then runs inside the TLS as over plain TCP, with no SSLRequest of its own. The Go connector can also exchange a
 //! metadata frame with the instance, but only when its caller asks for that; it does not by default, and this module does not at all.
 //!
 //! The server certificate must chain to one of the certificate authorities in the instance's connect settings: any of them, since an
@@ -11,7 +11,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 use super::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey};
 
 /// The port an instance takes the Go connector's TLS connections on.
-const PORT: u16 = 3307;
+pub const PORT: u16 = 3307;
 /// How long the TCP connection may take to open, and then how long the TLS handshake may take.
 const TCP_LIMIT: Duration = Duration::from_secs(10);
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
@@ -89,14 +89,15 @@ fn dns_name(identity: &ServerIdentity) -> Option<DnsName<'static>> {
     identity.dns_name.as_deref().map(|name| name.strip_suffix('.').unwrap_or(name)).and_then(|name| DnsName::try_from(name.to_string()).ok())
 }
 
-/// Opens the TLS connection to the instance at `ip`: TCP to port 3307 within 10 seconds, then the handshake within 10 more. In TLS 1.3 the
+/// Opens the TLS connection to the instance at `address`, which is one of the instance's own on `PORT` or another that leads to it: TCP
+/// within 10 seconds, then the handshake within 10 more. The certificate is checked against `name`, not the address. In TLS 1.3 the
 /// client finishes its side of the handshake before the server has checked the client certificate, so an `Ok` stream does not mean Cloud
 /// SQL accepted the certificate: a refusal arrives as an alert, and the first read or write after it fails.
-pub async fn dial(ip: IpAddr, config: Arc<ClientConfig>, name: ServerName<'static>) -> io::Result<TlsStream<TcpStream>> {
-    dial_within(SocketAddr::new(ip, PORT), config, name, TCP_LIMIT, HANDSHAKE_LIMIT).await
+pub async fn dial(address: SocketAddr, config: Arc<ClientConfig>, name: ServerName<'static>) -> io::Result<TlsStream<TcpStream>> {
+    dial_within(address, config, name, TCP_LIMIT, HANDSHAKE_LIMIT).await
 }
 
-/// `dial` to any address, within the limits given (a test cannot listen on port 3307, and waits less).
+/// `dial` within the limits given (a test waits less than 10 seconds).
 async fn dial_within(address: SocketAddr, config: Arc<ClientConfig>, name: ServerName<'static>, tcp_limit: Duration, handshake_limit: Duration) -> io::Result<TlsStream<TcpStream>> {
     let socket = tokio::time::timeout(tcp_limit, TcpStream::connect(address))
         .await
@@ -254,7 +255,7 @@ mod tests {
     use rustls::server::WebPkiClientVerifier;
     use rustls::sign::SingleCertAndKey;
     use rustls::{ProtocolVersion, SupportedProtocolVersion};
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::OnceLock;
     use std::time::SystemTime;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -321,6 +322,7 @@ mod tests {
     fn settings(server_ca_pem: String) -> ConnectSettings {
         ConnectSettings {
             public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            private_ip: None,
             server_ca_pem,
             dns_name: Some(DNS_NAME.into()),
             database_version: "POSTGRES_16".into(),
@@ -524,6 +526,18 @@ mod tests {
         assert_eq!(seen.client_chain, chain, "the server saw the ephemeral certificate");
         assert_eq!(seen.version, Some(ProtocolVersion::TLSv1_3));
         assert_eq!(seen.alpn, None);
+    }
+
+    /// `dial` opens the connection at the address it is given, port included: the instance's own on port 3307, or any other that leads to it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dial_goes_to_the_address_it_is_given() {
+        let (server_ca, client_ca) = (authority("Server CA"), authority("Client CA"));
+        let (address, seen) = serve(server_cert(&server_ca, Some(DNS_NAME), "server"), &client_ca, &[&rustls::version::TLS13]).await;
+        assert_ne!(address.port(), PORT, "the server listens on a port of the system's choosing");
+        let config = client_config(&settings(server_ca.pem()), &ephemeral_cert(&client_ca), ephemeral_key(), &identity(Some(DNS_NAME))).expect("the configuration builds");
+        let mut stream = dial(address, config, server_name(&identity(Some(DNS_NAME)))).await.expect("the server at the address is reached");
+        assert_eq!(&round_trip(&mut stream).await, b"pong");
+        assert!(seen.await.unwrap().is_ok(), "the server took the connection");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

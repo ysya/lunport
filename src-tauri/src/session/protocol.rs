@@ -311,6 +311,8 @@ pub enum Unreviewed {
     Tunnel,
     /// `scp_upload` or `scp_download` transfers one file.
     Transfer,
+    /// `start_database` starts its database.
+    Database,
 }
 
 /// The longest grant the window lets a person ask for, in minutes, and the longest justification: the limits of the grant memory

@@ -22,6 +22,10 @@ region: string,
  */
 instance: string, environment: DatabaseEnvironment, network: DatabaseNetwork,
 /**
+ * The id of the library host a `Private` instance is reached through; `None`, and left out of the record, for a `Public` one.
+ */
+via_host?: string,
+/**
  * The Google account whose gcloud credentials are used; `None` for gcloud's active account.
  */
 account: string | null,

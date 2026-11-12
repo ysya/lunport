@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import type { CatalogCollision, CatalogReview } from "@/lib/central-sync";
+import { routeHost } from "@/lib/databases";
 import type { RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { iapTarget, parentLabel } from "@/lib/transports";
@@ -37,7 +38,10 @@ export function collisionLabel(item: CatalogCollision, overview?: RecordOverview
   }
 }
 
-/** One side's version of the item, or "Removed". */
+/**
+ * One side's version of the item, or "Removed". A database says, after where it is, the way it is reached: over its public IP, or through
+ * a host, named by its alias (by its id when the library at hand has not got it).
+ */
 export function collisionValue(item: CatalogCollision, side: "local" | "remote", overview?: RecordOverview): string {
   switch (item.kind) {
     case "tunnel": {
@@ -73,8 +77,10 @@ export function collisionValue(item: CatalogCollision, side: "local" | "remote",
       const database = item[side], other = item[side === "local" ? "remote" : "local"];
       if (!database) return "Removed";
       const name = other && other.name !== database.name ? `${quoted(database.name)} · ` : "";
+      const via = routeHost(database);
       return `${name}${[
         `${revealHidden(`${database.project} / ${database.instance}`)} · ${revealHidden(database.region)}`,
+        via === null ? "Public IP" : `Through ${revealHidden(hostName(via, overview))}`,
         database.environment,
         `database ${revealHidden(database.default_database)}`,
         database.account && `account ${revealHidden(database.account)}`,

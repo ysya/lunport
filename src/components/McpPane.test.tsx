@@ -46,6 +46,11 @@ describe("Records AI Access", () => {
     expect(html).toContain("Auto-log");
     expect(html).toContain(status.noninteractive_credentials_notice);
   });
+  it("says that Auto-log starts tunnels and databases without the approval window", () => {
+    expect(text(render())).toContain(
+      "Auto-log skips ordinary SSH command and file transfer review, and starts tunnels and databases without an approval window.",
+    );
+  });
 
   it("shows the audit persistence error above the activity summary", () => {
     const html = render();

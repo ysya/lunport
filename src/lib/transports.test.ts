@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { focusManager, QueryClient, QueryObserver } from "@tanstack/react-query";
 import { stubBackend } from "./test-ipc";
 import type { RecordOverview } from "./records";
-import { recordOverview } from "@/components/records/fixtures";
+import { hostPayload, hostView, recordOverview } from "@/components/records/fixtures";
 import {
   fetchOsLoginProfile,
+  firstHop,
   gcloudAccountsKey,
   gcloudAccountsQuery,
   grantHeld,
@@ -90,6 +91,32 @@ describe("transports", () => {
     expect(transportFor(overview, "0000000000000002")).toBeNull();
     expect(transportFor(overview, null)).toBeNull();
     expect(transportFor(recordOverview(), HOST)).toBeNull();
+  });
+
+  describe("firstHop", () => {
+    const [A, B, C] = ["00000000000000a1", "00000000000000a2", "00000000000000a3"];
+    /** A host that connects through the hosts of `jump`, in this order. */
+    const through = (id: string, jump: string[] = []) => hostView({ id, payload: hostPayload({ alias: `web-${id.slice(-1)}`, jump }) });
+
+    it("is_the_host_itself_when_it_has_no_jump_host", () => {
+      expect(firstHop(recordOverview({ hosts: [through(A)] }), A)).toBe(A);
+    });
+
+    it("follows_the_first_jump_host_down_to_the_host_that_has_none", () => {
+      const overview = recordOverview({ hosts: [through(A, [B, C]), through(B, [C]), through(C)] });
+      expect(firstHop(overview, A)).toBe(C);
+      expect(firstHop(overview, B)).toBe(C);
+      // Only the first jump host leads: the later ones are reached through it.
+      expect(firstHop(recordOverview({ hosts: [through(A, [B, C]), through(B), through(C)] }), A)).toBe(B);
+    });
+
+    it("is_null_for_a_loop_and_for_a_host_the_chain_does_not_have", () => {
+      expect(firstHop(recordOverview({ hosts: [through(A, [B]), through(B, [A])] }), A)).toBeNull();
+      expect(firstHop(recordOverview({ hosts: [through(A, [A])] }), A)).toBeNull();
+      expect(firstHop(recordOverview({ hosts: [through(A)] }), B)).toBeNull();
+      // A jump host this computer has not got ends the chain the same way.
+      expect(firstHop(recordOverview({ hosts: [through(A, [B])] }), A)).toBeNull();
+    });
   });
 
   it("starts a new route with the defaults", () => {

@@ -103,7 +103,8 @@ fn gate_key(db: &SavedDatabase, pam: &PamCheck, entitlement: &str) -> GateKey {
 #[derive(Debug)]
 pub(crate) struct Material {
     pub settings: ConnectSettings,
-    /// The instance's public address, which the connection dials (`settings.public_ip`, which an instance Lunport connects to has).
+    /// The address the connection dials: the instance's public address for a database on its public IP (`settings.public_ip`), its
+    /// private address for one reached through a host (`settings.private_ip`).
     pub ip: IpAddr,
     /// The client certificate Cloud SQL signed for `key`, with the account's access token inside it.
     pub cert: EphemeralCert,
@@ -155,8 +156,9 @@ impl Attempts<'_> {
 /// The material for a connection to `db`: its connect settings, a new key and a certificate Cloud SQL signs for that key. `recent_grant`
 /// (`GrantState::Held`) says the grant it relies on was given moments ago, and a 403 is then tried again as `grace` allows. An instance
 /// that is not PostgreSQL, one in another region than the database names (as Google's Go connector checks it; an answer that says no
-/// region is not refused for it) and one without a public address (Lunport connects over the public one) are refused before a certificate
-/// is asked for. Blocks on the Cloud SQL Admin API, on making the key and while it waits to try again, so it runs on a blocking thread.
+/// region is not refused for it) and one without the address its route dials (the public one, or the private one for a database reached
+/// through a host) are refused before a certificate is asked for. Blocks on the Cloud SQL Admin API, on making the key and while it waits
+/// to try again, so it runs on a blocking thread.
 pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_grant: bool, grace: Grace, cancel: &CancelToken) -> Result<Material, NotReady> {
     let at = InstanceRef { project: db.project.clone(), region: db.region.clone(), instance: db.instance.clone() };
     let account = db.account.as_deref();
@@ -168,8 +170,14 @@ pub(crate) fn fetch_material(sql: &dyn SqlAdmin, db: &SavedDatabase, recent_gran
     if !settings.region.is_empty() && settings.region != db.region {
         return Err(NotReady::Failed(format!("{} is in {}, not {}.", db.connection_name(), settings.region, db.region)));
     }
-    let Some(ip) = settings.public_ip else {
-        return Err(NotReady::Failed(format!("{} has no public IP. Lunport connects over public IP in this release.", db.connection_name())));
+    // The address the database's route dials. An instance without it is refused, and its other address is not dialled instead.
+    let ip = match db.route_host() {
+        Some(_) => settings
+            .private_ip
+            .ok_or_else(|| NotReady::Failed(format!("{} has no private IP, so Lunport cannot reach it through a host.", db.connection_name())))?,
+        None => settings
+            .public_ip
+            .ok_or_else(|| NotReady::Failed(format!("{} has no public IP. Choose a host to connect through in its settings.", db.connection_name())))?,
     };
     let key = EphemeralKey::generate().map_err(NotReady::Failed)?;
     let cert = attempts.run(|| sql.ephemeral_cert(account, &at, &key))?;
@@ -218,7 +226,7 @@ mod tests {
     use crate::session::directory::GrantNeed;
     use crate::session::protocol::{GrantPrompt, QuestionKind};
     use crate::session::testing::{grant_need, FakeOwner};
-    use crate::sync::databases::tests::{database, state};
+    use crate::sync::databases::tests::{database, state, through_host};
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -348,7 +356,8 @@ mod tests {
 
     fn settings() -> ConnectSettings {
         ConnectSettings {
-            public_ip: Some("198.51.100.5".parse().unwrap()),
+            public_ip: Some("203.0.113.10".parse().unwrap()),
+            private_ip: Some("198.51.100.10".parse().unwrap()),
             server_ca_pem: "-----BEGIN CERTIFICATE-----\nc2VydmVyLWNh\n-----END CERTIFICATE-----\n".into(),
             dns_name: Some("a1b2c3.asia-east1.sql.goog".into()),
             database_version: "POSTGRES_16".into(),
@@ -718,7 +727,7 @@ mod tests {
         let admin = Admin::working();
         let material = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).expect("the material is had");
         assert_eq!(material.settings, settings());
-        assert_eq!(Some(material.ip), settings().public_ip, "the address it dials");
+        assert_eq!(Some(material.ip), settings().public_ip, "the public address, though the instance has a private one too");
         assert_eq!(material.cert, certificate(ACCOUNT));
         assert_eq!(material.iam_user, ACCOUNT);
         assert_eq!(admin.calls(), vec![format!("settings {ACCOUNT} {CONNECTION}"), format!("cert {ACCOUNT} {CONNECTION}")]);
@@ -798,11 +807,31 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_without_a_public_ip_is_refused_with_a_sentence() {
-        let private = ConnectSettings { public_ip: None, ..settings() };
-        let admin = Admin::answering(vec![Ok(private)], vec![Ok(certificate(ACCOUNT))]);
+    fn a_host_route_gets_the_private_address() {
+        let admin = Admin::working();
+        let material = fetch_material(&admin, &through_host(ID), false, fast(), &CancelToken::default()).expect("the material is had");
+        assert_eq!(material.ip, "198.51.100.10".parse::<IpAddr>().unwrap(), "the private address, though the instance has a public one too");
+        assert_eq!(material.settings, settings());
+        assert_eq!(admin.certificates_asked(), 1);
+    }
+
+    #[test]
+    fn a_public_route_without_public_ip_says_to_choose_a_host() {
+        // The instance has a private address, which a database on its public IP does not dial.
+        let private_only = ConnectSettings { public_ip: None, ..settings() };
+        let admin = Admin::answering(vec![Ok(private_only)], vec![Ok(certificate(ACCOUNT))]);
         let error = fetch_material(&admin, &guarded(), false, fast(), &CancelToken::default()).unwrap_err();
-        assert_eq!(error, NotReady::Failed("acme-prod-123456:asia-east1:orders-pg has no public IP. Lunport connects over public IP in this release.".into()));
+        assert_eq!(error, NotReady::Failed("acme-prod-123456:asia-east1:orders-pg has no public IP. Choose a host to connect through in its settings.".into()));
+        assert_eq!(admin.certificates_asked(), 0, "no certificate is asked for an instance that cannot be dialled");
+    }
+
+    #[test]
+    fn a_host_route_without_private_ip_is_refused() {
+        // The instance has a public address, which a database reached through a host does not fall back to.
+        let public_only = ConnectSettings { private_ip: None, ..settings() };
+        let admin = Admin::answering(vec![Ok(public_only)], vec![Ok(certificate(ACCOUNT))]);
+        let error = fetch_material(&admin, &through_host(ID), false, fast(), &CancelToken::default()).unwrap_err();
+        assert_eq!(error, NotReady::Failed("acme-prod-123456:asia-east1:orders-pg has no private IP, so Lunport cannot reach it through a host.".into()));
         assert_eq!(admin.certificates_asked(), 0, "no certificate is asked for an instance that cannot be dialled");
     }
 

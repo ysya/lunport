@@ -158,6 +158,37 @@ fn migration_activation_raises_the_version_for_saved_databases() {
     assert_eq!(databases::view(&saved).len(), 1);
 }
 
+/// A migration's candidate that carries a database reached through a host is saved at the route version, which its record needs; one
+/// whose database is on its public IP stays at the version of saved databases.
+#[test]
+fn saving_a_database_through_a_host_raises_the_route_version() {
+    use crate::sync::databases::{self, tests::{database, through_host}};
+    use crate::sync::records_v3::{DATABASE_ROUTE_STATE_VERSION, DATABASE_STATE_VERSION};
+    for (saved, needed) in [(through_host("00000000000000d1"), DATABASE_ROUTE_STATE_VERSION), (database("00000000000000d1"), DATABASE_STATE_VERSION)] {
+        let f = Fixture::new();
+        activate_probe(
+            &mut f.runtime.core.lock().unwrap(),
+            StartupProbe::Legacy {
+                state: DecodedState::V2(Box::new(legacy_state())),
+            },
+        )
+        .unwrap();
+        let generation = f.runtime.core.lock().unwrap().generation;
+        let mut candidate = databases::set(&super::state(), &saved.id, None, Some(saved.clone()), 1).unwrap();
+        candidate.version = super::state().version;
+        let env = f.env();
+        let _life = f.runtime.lifecycle.lock().unwrap();
+        let _vault = f.runtime.vault.lock().unwrap();
+        let _publication = f.runtime.format_publication.lock().unwrap();
+        commit_migration_candidate(&env, generation, candidate, None).unwrap();
+        let core = f.runtime.core.lock().unwrap();
+        assert_eq!(core.records.as_ref().unwrap().version, needed, "in memory: {saved:?}");
+        let persisted = serde_json::from_slice::<SyncStateV3>(&fs::read(&env.state_path).unwrap()).unwrap();
+        assert_eq!(persisted.version, needed, "on disk: {saved:?}");
+        assert_eq!(databases::view(&persisted).into_iter().map(|row| row.database).collect::<Vec<_>>(), [saved]);
+    }
+}
+
 #[test]
 fn migration_failed_save_and_stale_generation_preserve_legacy_runtime_and_source() {
     let f = Fixture::new();
@@ -314,7 +345,7 @@ fn validation_failure_generation_overflow_and_pure_transform_error_never_publish
     let fixture = Fixture::active();
     let env = fixture.env();
     let (mut invalid, generation) = snapshot(&env).unwrap();
-    invalid.version = crate::sync::records_v3::DATABASE_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::DATABASE_ROUTE_STATE_VERSION + 1;
     assert!(commit_candidate(&env, generation, invalid).is_err());
     assert!(!env.state_path.exists());
     let original = snapshot(&env).unwrap();
@@ -410,7 +441,7 @@ fn unjoined_or_invalid_records_never_access_credentials() {
         .unwrap()
         .is_none());
     let mut invalid = super::state();
-    invalid.version = crate::sync::records_v3::DATABASE_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::DATABASE_ROUTE_STATE_VERSION + 1;
     assert!(read_account_keys(&invalid, &ForbiddenIo).is_err());
 }
 #[test]

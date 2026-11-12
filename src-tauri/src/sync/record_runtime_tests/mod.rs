@@ -251,7 +251,7 @@ fn invalid_state_save_preserves_existing_bytes_and_creates_no_other_files() {
     let path = temp.path().join("sync-state.json");
     fs::write(&path, b"source").unwrap();
     let mut invalid = state();
-    invalid.version = crate::sync::records_v3::DATABASE_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::DATABASE_ROUTE_STATE_VERSION + 1;
     assert!(save_active(&path, &invalid).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"source");
     assert_eq!(names(temp.path()), vec!["sync-state.json"]);
@@ -479,4 +479,23 @@ fn a_saved_database_promotes_the_state_version_when_persisted() {
     let StartupProbe::Records { state: reopened, .. } = probe_startup(&path, "unused") else { panic!("records") };
     assert_eq!(reopened.version, crate::sync::records_v3::DATABASE_STATE_VERSION);
     assert_eq!(databases::view(&reopened).len(), 1);
+}
+
+/// A database reached through a host needs the route version, the same way.
+#[test]
+fn a_database_through_a_host_promotes_the_route_version_when_persisted() {
+    use crate::sync::databases::{self, tests::through_host};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let previous = state();
+    save_active(&path, &previous).unwrap();
+    let mut core = crate::sync::runtime::SyncCore::default();
+    activate_probe(&mut core, StartupProbe::Records { state: Box::new(previous.clone()), fresh: false }).unwrap();
+    let mut candidate = databases::set(&previous, "00000000000000d1", None, Some(through_host("00000000000000d1")), 1).unwrap();
+    candidate.version = previous.version;
+    persist_candidate(&mut core, &path, candidate).unwrap();
+    assert_eq!(core.records.as_ref().unwrap().version, crate::sync::records_v3::DATABASE_ROUTE_STATE_VERSION);
+    let StartupProbe::Records { state: reopened, .. } = probe_startup(&path, "unused") else { panic!("records") };
+    assert_eq!(reopened.version, crate::sync::records_v3::DATABASE_ROUTE_STATE_VERSION);
+    assert_eq!(databases::view(&reopened).into_iter().map(|row| row.database).collect::<Vec<_>>(), [through_host("00000000000000d1")]);
 }

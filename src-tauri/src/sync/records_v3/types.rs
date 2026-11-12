@@ -23,6 +23,9 @@ pub const PAM_STATE_VERSION: u32 = 11;
 /// Saved databases exist (`database:` records), in `local.databases` or as the library's rows in `account.records`: an older Lunport
 /// refuses the state instead of meeting rows it cannot publish.
 pub const DATABASE_STATE_VERSION: u32 = 12;
+/// A saved database is reached through a host of the library (`network: private` with a `via_host`), local or the library's row: a
+/// Lunport that knows only `DATABASE_STATE_VERSION` cannot read such a record, so it refuses the state instead.
+pub const DATABASE_ROUTE_STATE_VERSION: u32 = 13;
 pub const MAX_JUMPS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import type { RecordHostView } from "@/lib/records";
 import {
-  actionKind, activityResult, activityTitle, durationLabel, observedClient, resultSentence, reviewLabel, reviewSentence,
+  actionKind, activityResult, activityTitle, durationLabel, namesHost, observedClient, resultSentence, reviewLabel, reviewSentence,
   type ActivityKind,
 } from "@/lib/mcp-activity";
 import { copyText } from "@/lib/clipboard";
@@ -67,6 +67,7 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
   const action = actionKind(entry);
   const command = action === "command";
   const transfer = action === "transfer";
+  const hostNamed = namesHost(entry);
   // The header toggles the details, unless the click selected text or was on the host's button.
   const toggleFromHeader = (event: MouseEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
@@ -115,7 +116,7 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
         {entry.at_ms > 0 && <><dt className="text-muted-foreground">Requested</dt><dd className="tabular-nums"><RecordedTime ms={entry.at_ms} /></dd></>}
         <dt className="text-muted-foreground">Completed</dt><dd className="tabular-nums"><RecordedTime ms={entry.completed_at_ms} /></dd>
         <dt className="text-muted-foreground">Request ID</dt><dd className="break-all font-mono">{revealHidden(entry.id)}</dd>
-        <dt className="text-muted-foreground">Host ID</dt><dd className="break-all font-mono">{entry.host_id ? revealHidden(entry.host_id) : "Not recorded"}</dd>
+        {hostNamed && <><dt className="text-muted-foreground">Host ID</dt><dd className="break-all font-mono">{entry.host_id ? revealHidden(entry.host_id) : "Not recorded"}</dd></>}
         {command && <>
           <dt className="text-muted-foreground">Termination</dt><dd>{entry.ended ? revealHidden(entry.ended) : "Not recorded"}</dd>
           <dt className="text-muted-foreground">Exit code</dt><dd>{entry.exit_code ?? "Not reported"}</dd>
@@ -124,15 +125,15 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
         <dt className="text-muted-foreground">Recorded outcome</dt><dd className="break-all">{revealHidden(entry.outcome)}</dd>
       </dl>
       <McpAttribution requestedBy={entry.requested_by} requesterId={entry.requester_id} clientInfo={entry.client_info} />
-      <div className="flex flex-wrap gap-2">
-        {host
+      {(hostNamed || entry.command) && <div className="flex flex-wrap gap-2">
+        {hostNamed && (host
           ? <Button size="sm" variant="outline" onClick={() => showHost(host.id)}><Server className="size-3.5" />Show host</Button>
           : <span title={HOST_GONE}>
             <Button size="sm" variant="outline" disabled aria-describedby={`${detailsId}-gone`}><Server className="size-3.5" />Show host</Button>
             <span id={`${detailsId}-gone`} className="sr-only">{HOST_GONE}</span>
-          </span>}
+          </span>)}
         {entry.command && <Button size="sm" variant="outline" onClick={copy}><Copy className="size-3.5" />{transfer ? "Copy transfer paths" : "Copy command"}</Button>}
-      </div>
+      </div>}
     </div>}
   </li>;
 }

@@ -6,7 +6,8 @@
 //! Catalog (`databases`), rebuilt from the Catalog by both projections. Otherwise (no account, or the older chain-mode account) it stays on
 //! this device in `local.databases`, and a library that uses central sync reads its own rows only; a publish step moves the databases a
 //! device kept alone into the library once it uses central sync (`publish_local`), as it moves routes. Either way the records need
-//! `STATE_VERSION`, which an older Lunport refuses to open.
+//! `STATE_VERSION`, which an older Lunport refuses to open, and `ROUTE_STATE_VERSION` once one is reached through a host of the library
+//! (`via_host`), which a Lunport that knows only `STATE_VERSION` cannot read.
 //!
 //! A justification is never stored on a database record: every write leaves it out (`payload_of`), and a Catalog that carries one is
 //! refused, as one with such a route is. The justification of a grant request goes to the entitlement's grant memory (`pam_records`),
@@ -26,6 +27,8 @@ use crate::gcp::pam::is_resource_id;
 pub const PREFIX: &str = "database:";
 /// The local state version of saved databases, local or the library's.
 pub const STATE_VERSION: u32 = records_v3::DATABASE_STATE_VERSION;
+/// The local state version once a saved database, local or the library's, is reached through a host (`SavedDatabase::route_host`).
+pub const ROUTE_STATE_VERSION: u32 = records_v3::DATABASE_ROUTE_STATE_VERSION;
 /// The most saved databases one library holds, as many as it holds tunnels and routes.
 pub const MAX_DATABASES: usize = 256;
 
@@ -49,7 +52,7 @@ pub enum DatabaseEnvironment {
     Prod,
 }
 
-/// How an instance is reached. One so far.
+/// How an instance is reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -57,6 +60,8 @@ pub enum DatabaseEnvironment {
 pub enum DatabaseNetwork {
     /// Over the instance's public IP address.
     Public,
+    /// Over the instance's private IP address, through a host saved in the library (`via_host`).
+    Private,
 }
 
 /// A Cloud SQL instance a person connects to: where it lives, which account signs in and whether a Privileged Access Manager grant is
@@ -77,6 +82,10 @@ pub struct SavedDatabase {
     pub instance: String,
     pub environment: DatabaseEnvironment,
     pub network: DatabaseNetwork,
+    /// The id of the library host a `Private` instance is reached through; `None`, and left out of the record, for a `Public` one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub via_host: Option<String>,
     /// The Google account whose gcloud credentials are used; `None` for gcloud's active account.
     #[serde(default)]
     pub account: Option<String>,
@@ -108,6 +117,14 @@ impl SavedDatabase {
         if !is_instance_name(&self.instance) {
             return Err("Enter the Cloud SQL instance name.".into());
         }
+        // Over the public IP with no host, or over the private IP through a host of the library.
+        let routed = match self.network {
+            DatabaseNetwork::Public => self.via_host.is_none(),
+            DatabaseNetwork::Private => self.via_host.as_deref().is_some_and(records_v3::is_host_id),
+        };
+        if !routed {
+            return Err("Invalid database route.".into());
+        }
         if self.account.as_deref().is_some_and(|account| !transports::is_email(account)) {
             return Err("Enter the Google account as an email address.".into());
         }
@@ -130,6 +147,24 @@ impl SavedDatabase {
 
     pub fn is_prod(&self) -> bool {
         self.environment == DatabaseEnvironment::Prod
+    }
+
+    /// The library host a connection goes through: `via_host` for a `Private` database, `None` for one on its public IP.
+    pub fn route_host(&self) -> Option<&str> {
+        match self.network {
+            DatabaseNetwork::Public => None,
+            DatabaseNetwork::Private => self.via_host.as_deref(),
+        }
+    }
+}
+
+/// The local state version `databases` need: `ROUTE_STATE_VERSION` when one is reached through a host (`route_host`), else
+/// `STATE_VERSION`.
+pub fn version_for<'a>(databases: impl IntoIterator<Item = &'a SavedDatabase>) -> u32 {
+    if databases.into_iter().any(|database| database.route_host().is_some()) {
+        ROUTE_STATE_VERSION
+    } else {
+        STATE_VERSION
     }
 }
 
@@ -219,7 +254,7 @@ pub fn view(state: &SyncStateV3) -> Vec<Stored> {
     rows(state).into_iter().filter_map(|row| Some(Stored { database: decode(&row.record)?, synced, blocked })).collect()
 }
 
-/// Whether the state holds any saved database, tombstones included, anywhere: they need `STATE_VERSION`.
+/// Whether the state holds any saved database, tombstones included, anywhere: they need `STATE_VERSION` at least (`state_version`).
 pub fn has_data(state: &SyncStateV3) -> bool {
     !state.local.databases.is_empty() || has_library_rows(state)
 }
@@ -227,6 +262,22 @@ pub fn has_data(state: &SyncStateV3) -> bool {
 /// Whether the account holds library rows of saved databases (tombstones included).
 pub fn has_library_rows(state: &SyncStateV3) -> bool {
     library_rows(state).next().is_some()
+}
+
+/// The local state version the databases of `rows` need (`version_for`). A tombstone holds none, so it needs `STATE_VERSION`.
+fn version_of<'a>(rows: impl IntoIterator<Item = &'a LocalRecord>) -> u32 {
+    let databases: Vec<SavedDatabase> = rows.into_iter().filter_map(|row| decode(&row.record)).collect();
+    version_for(&databases)
+}
+
+/// The local state version every saved database the state holds needs, this device's own and the library's rows alike.
+pub fn state_version(state: &SyncStateV3) -> u32 {
+    version_of(state.local.databases.values().chain(library_rows(state)))
+}
+
+/// The local state version the library's rows of saved databases need.
+pub fn library_version(state: &SyncStateV3) -> u32 {
+    version_of(library_rows(state))
 }
 
 const IN_ACCOUNT: &str = "a library that uses central sync keeps its rows in the account";
@@ -241,7 +292,8 @@ fn row_of(state: &SyncStateV3, wire: &str, payload: Option<serde_json::Value>, n
 }
 
 /// Writes the record `wire` (a live payload, or a tombstone for `None`): the account's dirty row in a library that uses central sync,
-/// else this device's own (where a removal simply forgets it). The version is raised to `STATE_VERSION`.
+/// else this device's own (where a removal simply forgets it). The version is raised to `STATE_VERSION`, and to what the databases
+/// need once written (`state_version`).
 fn write(state: &SyncStateV3, wire: &str, payload: Option<serde_json::Value>, now: u64) -> Result<SyncStateV3, RepositoryError> {
     let key = record_key(RecordKind::Meta, wire);
     let central = transports::central_library(state);
@@ -260,6 +312,7 @@ fn write(state: &SyncStateV3, wire: &str, payload: Option<serde_json::Value>, no
     } else {
         next.local.databases.insert(key, row);
     }
+    next.version = next.version.max(state_version(&next));
     Ok(next)
 }
 
@@ -267,8 +320,8 @@ fn write(state: &SyncStateV3, wire: &str, payload: Option<serde_json::Value>, no
 /// relies on. A new database is refused past `MAX_DATABASES`. In a library that uses central sync the database is the library's: a
 /// library whose writes are blocked refuses it (`RepositoryError::ReadOnlyAccount`), the account's row is written (a removal is a dirty
 /// tombstone) and a save must leave the Catalog room (`RepositoryError::NoRoom`). Otherwise the database is kept on this device. The
-/// version is raised to `STATE_VERSION`; removing a database that is not there changes nothing. A justification the saved database
-/// carries is not stored (`without_justification`).
+/// version is raised to `STATE_VERSION`, or to `ROUTE_STATE_VERSION` once a database is reached through a host; removing a database that
+/// is not there changes nothing. A justification the saved database carries is not stored (`without_justification`).
 pub fn set(state: &SyncStateV3, id: &str, expected: Option<&SavedDatabase>, database: Option<SavedDatabase>, now: u64) -> Result<SyncStateV3, RepositoryError> {
     let wire = wire_id(id);
     if !is_id(&wire) {
@@ -333,25 +386,44 @@ pub(crate) fn publish_local(state: &SyncStateV3, now: u64) -> Result<Option<Sync
     Ok((next != *state).then_some(next))
 }
 
-/// Leaving a library for another keeps every database of the library and this device's own as this device's own records: none names a
-/// host, so all of them stay (a removed one does not come back). A first publication, an adoption and a replacement keep them the same
-/// way (`initial_projection`), for the publish step to move into the new library. The version is raised only when one stays.
-pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, now: u64) -> Result<(), String> {
+/// The databases leaving keeps of `before`, by record id: this device's own and the library's rows, the library's row winning, and none
+/// the library removed.
+fn kept_on_leave(before: &SyncStateV3) -> BTreeMap<String, SavedDatabase> {
     let mut kept = BTreeMap::new();
     for row in before.local.databases.values().chain(library_rows(before)) {
         if row.record.deleted {
             kept.remove(&row.record.id);
-        } else if valid(&row.record) {
-            kept.insert(row.record.id.clone(), row.record.payload.clone());
+        } else if let Some(database) = decode(&row.record).filter(|_| valid(&row.record)) {
+            kept.insert(row.record.id.clone(), database);
         }
     }
+    kept
+}
+
+/// The hosts that the databases leaving keeps are reached through (`route_host`), this device's own and the library's rows alike: an
+/// adoption or a replacement follows them to the ids it gives them (`adoption::merge::route_host_ids`), as it follows the hosts that
+/// routes and grant memory name.
+pub(crate) fn route_hosts(state: &SyncStateV3) -> BTreeSet<String> {
+    kept_on_leave(state).into_values().filter_map(|database| database.route_host().map(str::to_owned)).collect()
+}
+
+/// Leaving a library for another keeps every database of the library and this device's own as this device's own records, all of them
+/// (a removed one does not come back). A first publication, an adoption and a replacement keep them the same way (`initial_projection`),
+/// for the publish step to move into the new library. A database reached through a host follows it: when an adoption or a replacement
+/// gives the host a new id (`host_ids`: old → new), `via_host` takes it. One whose host the map gives no new id keeps the route it has,
+/// as without a map (a first publication keeps every host's id). The version is raised only when one stays, to what they need.
+pub fn preserve_on_leave(before: &SyncStateV3, next: &mut SyncStateV3, host_ids: Option<&BTreeMap<String, String>>, now: u64) -> Result<(), String> {
+    let kept = kept_on_leave(before);
     next.local.databases.clear();
-    for (id, payload) in kept {
-        let row = row_of(next, &id, Some(payload), now, None, false).map_err(transports::refusal)?;
+    for (id, mut database) in kept {
+        if let Some(moved) = database.via_host.as_ref().and_then(|host| host_ids?.get(host)) {
+            database.via_host = Some(moved.clone());
+        }
+        let row = row_of(next, &id, Some(payload_of(&database)), now, None, false).map_err(transports::refusal)?;
         next.local.databases.insert(record_key(RecordKind::Meta, &id), row);
     }
     if !next.local.databases.is_empty() {
-        next.version = next.version.max(STATE_VERSION);
+        next.version = next.version.max(state_version(next));
     }
     Ok(())
 }

@@ -47,6 +47,11 @@ impl ForwardSpec {
     }
 }
 
+/// The latest error of a forward whose SSH connection ended, which stops it.
+pub const SESSION_ENDED: &str = "The SSH connection ended. Start the tunnel again to reconnect.";
+/// The latest error of a forward that turned a connection away because it carries as many as it can at once. It goes on running.
+pub const AT_LIMIT: &str = "The tunnel has reached its concurrent connection limit.";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]

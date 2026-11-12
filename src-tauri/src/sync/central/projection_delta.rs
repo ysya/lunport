@@ -259,10 +259,10 @@ pub(super) fn catalog(
         receipt,
         observed,
     )?;
-    // Saved databases take the same path. Only the ones the library now holds retire this device's own: one the Catalog holds no entry
-    // for stays here, for the publish step to move in.
+    // Saved databases take the same path, and need the route version when one is reached through a host. Only the ones the library
+    // now holds retire this device's own: one the Catalog holds no entry for stays here, for the publish step to move in.
     replace_rows(
-        Rider { is_id: crate::sync::databases::is_id, kept: &mut state.local.databases, needs: crate::sync::databases::STATE_VERSION },
+        Rider { is_id: crate::sync::databases::is_id, kept: &mut state.local.databases, needs: crate::sync::databases::version_for(&value.databases) },
         crate::sync::databases::catalog_rows(value),
         account,
         &mut state.version,
@@ -1065,6 +1065,24 @@ pub(super) mod tests {
             !gone.account.as_ref().unwrap().records.contains_key(&record_key(RecordKind::Meta, &databases::wire_id(&first.id))),
             "a Catalog without them removes the rows, tombstones included"
         );
+    }
+
+    /// A Catalog that holds a database reached through a host raises the state to the route version through both projections, and the
+    /// capture builds the database back into the Catalog it would publish, route and all.
+    #[test]
+    fn a_catalog_with_a_database_through_a_host_raises_the_route_version() {
+        use crate::sync::databases::{self, tests::{database, through_host}};
+        let (public, routed) = (database("00000000000000d1"), through_host("00000000000000d2"));
+        let catalog = Catalog { databases: vec![routed.clone(), public.clone()], ..Catalog::default() };
+        for next in [project_initial(&cache_with_host(HOST), &catalog), project_delta(&cache_with_host(HOST), &catalog)] {
+            assert_eq!(databases::view(&next).into_iter().map(|row| row.database).collect::<Vec<_>>(), vec![public.clone(), routed.clone()]);
+            assert_eq!(next.version, records_v3::DATABASE_ROUTE_STATE_VERSION);
+            records_v3::validate_state(&next).unwrap();
+            let built = super::super::catalog_of(&next, &next.local.central_projection.as_ref().unwrap().catalog).unwrap();
+            assert_eq!(built.databases, vec![routed.clone(), public.clone()], "in the order the library published");
+        }
+        let public_only = project_delta(&cache_with_host(HOST), &Catalog { databases: vec![public.clone()], ..Catalog::default() });
+        assert_eq!(public_only.version, databases::STATE_VERSION, "a database on its public IP needs no more");
     }
 
     /// Like routes, only the databases the library now holds retire this device's own: one the Catalog holds no entry for stays here,

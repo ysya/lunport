@@ -17,4 +17,8 @@ stop: McpStop | null,
 /**
  * The tunnel's name, for a tunnel request (`alias` is its host's).
  */
-tunnel: string | null, };
+tunnel: string | null,
+/**
+ * The database's name, for a database request (`alias` is the host it is reached through, empty for one on its public IP).
+ */
+database?: string | null, };

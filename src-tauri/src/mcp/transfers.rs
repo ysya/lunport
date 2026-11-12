@@ -433,6 +433,7 @@ pub(super) fn execute_context(
         review,
         stop,
         tunnel: None,
+        database: None,
     });
     match result {
         Ok(mut value) => {
