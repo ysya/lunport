@@ -46,6 +46,22 @@ describe("Hosts browsing", () => {
     expect(tagged).toContain('aria-label="Browse tags" aria-current="page"');
     expect(tagged).toContain('data-host-id="' + host.id + '"');
   });
+  it("shows multiple ancestor groups as navigable breadcrumbs", () => {
+    const grandchild = groupView({
+      id: "0000000000000012",
+      payload: { schema: 1, name: "Database", parent_id: child.id, defaults: {} },
+    });
+    const html = render(
+      { kind: "group", id: grandchild.id },
+      recordOverview({ groups: [parent, child, grandchild] }),
+    );
+    expect(html).toContain('aria-label="Go to group Operations"');
+    expect(html).toContain('aria-label="Go to group API"');
+    expect(html).toContain('aria-current="location">Database</span>');
+    expect(html.indexOf('aria-label="Go to group Operations"')).toBeLessThan(
+      html.indexOf('aria-label="Go to group API"'),
+    );
+  });
   it("keeps group cards available for pointer ordering", () => {
     const html = renderToStaticMarkup(<RecordHostList overview={overview} selectedId={null} select={vi.fn()}
       filter={{ kind: "groups" }} changeFilter={vi.fn()} reorder={vi.fn()} />);

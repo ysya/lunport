@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent, type ReactElement } from "react";
+import { Fragment, useEffect, useRef, useState, type PointerEvent, type ReactElement } from "react";
 import {
   AlertCircle,
   Check,
@@ -47,6 +47,7 @@ import { HostContextMenu } from "./HostContextMenu";
 import {
   buildRecordTree,
   affectedRecords,
+  groupAncestors,
   groupPath,
   type GroupNode,
   type ScopeRoot,
@@ -170,6 +171,9 @@ export function RecordHostList({
         : [];
   const currentGroup =
     filter.kind === "group" ? uniqueGroup(overview.groups, filter.id) : null;
+  const groupAncestry = currentGroup
+    ? groupAncestors(overview, currentGroup.id, currentGroup.scope)
+    : null;
   const title =
     filter.kind === "group"
       ? (currentGroup?.payload.name ?? "Unavailable group")
@@ -343,9 +347,18 @@ export function RecordHostList({
               Hosts
             </button>
             <span>/</span>
-            <span>{filter.kind === "group" ? "Groups" : "Tags"}</span>
+            {filter.kind === "group" ? <>
+              <button type="button" onClick={() => changeFilter?.({ kind: "groups" })}>Groups</button>
+              {[...(groupAncestry?.groups ?? [])].reverse().map((group) => <Fragment key={group.id}>
+                <span>/</span>
+                {group.id === filter.id
+                  ? <span aria-current="location">{revealHidden(group.payload.name)}</span>
+                  : <button type="button" aria-label={`Go to group ${revealHidden(group.payload.name)}`}
+                    onClick={() => changeFilter?.({ kind: "group", id: group.id })}>{revealHidden(group.payload.name)}</button>}
+              </Fragment>)}
+            </> : <span>Tags</span>}
           </div> : undefined}
-        description={filter.kind === "attention" ? "Review connection settings and keys before connecting." : currentGroup ? revealHidden(groupPath(overview, currentGroup.id, currentGroup.scope)) : undefined}
+        description={filter.kind === "attention" ? "Review connection settings and keys before connecting." : groupAncestry?.error ? revealHidden(`Needs review: ${groupAncestry.error}`) : undefined}
         actions={<>
           {changeFilter && attention > 0 && filter.kind !== "attention" && (
             <Button variant="ghost" size="sm" className="library-attention-shortcut"
