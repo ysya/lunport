@@ -38,3 +38,16 @@ describe("the preferred terminal", () => {
     expect(useSettingsStore.getState()).toMatchObject({ terminalId: "lunport", theme: "dark" });
   });
 });
+
+describe("terminal close confirmation", () => {
+  it("defaults to asking and keeps a later choice across reloads", async () => {
+    storage({ terminalId: "lunport" });
+    const { useSettingsStore: first } = await import("./settings");
+    expect(first.getState().confirmTerminalClose).toBe(true);
+
+    first.getState().setConfirmTerminalClose(false);
+    vi.resetModules();
+    const { useSettingsStore: restored } = await import("./settings");
+    expect(restored.getState().confirmTerminalClose).toBe(false);
+  });
+});

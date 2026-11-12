@@ -629,6 +629,8 @@ function ConnectionPane({ recordOverview }: { recordOverview: RecordOverview }) 
   const setTerminalFontSize = useSettingsStore((s) => s.setTerminalFontSize);
   const cursorBlink = useSettingsStore((s) => s.terminalCursorBlink !== false);
   const setCursorBlink = useSettingsStore((s) => s.setTerminalCursorBlink);
+  const confirmTerminalClose = useSettingsStore((s) => s.confirmTerminalClose !== false);
+  const setConfirmTerminalClose = useSettingsStore((s) => s.setConfirmTerminalClose);
 
   const supportsNewTab = terminalSupportsNewTab(terminalId, terminals.data ?? []);
 
@@ -677,7 +679,7 @@ function ConnectionPane({ recordOverview }: { recordOverview: RecordOverview }) 
         </SettingsRow>
       </SettingsGroup>
     </Section>
-    <Section title="In-app terminal" description="Colors follow Appearance. Search with ⌘F / Ctrl+F, switch sessions with Ctrl+Tab, and zoom with ⌘ / Ctrl + or −. Closing a running session asks for confirmation.">
+    <Section title="In-app terminal" description="Colors follow Appearance. Search with ⌘F / Ctrl+F, switch sessions with Ctrl+Tab, and zoom with ⌘ / Ctrl + or −.">
       <SettingsGroup>
         <SettingsRow id="set-terminal-font" label="Terminal text size" description="Applies to all in-app terminal tabs without reconnecting.">
           <Select value={String(terminalFontSize)} onValueChange={(value) => setTerminalFontSize(Number(value))}>
@@ -686,6 +688,7 @@ function ConnectionPane({ recordOverview }: { recordOverview: RecordOverview }) 
           </Select>
         </SettingsRow>
         <SettingsRow id="set-terminal-cursor" label="Blink cursor" description="Reduced-motion preferences take priority."><Switch id="set-terminal-cursor" checked={cursorBlink} onCheckedChange={setCursorBlink} /></SettingsRow>
+        <SettingsRow id="set-terminal-close-confirmation" label="Confirm before closing a terminal" description="Ask before ending a connected or connecting in-app session."><Switch id="set-terminal-close-confirmation" checked={confirmTerminalClose} onCheckedChange={setConfirmTerminalClose} /></SettingsRow>
       </SettingsGroup>
       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Switching tabs keeps SSH connected. Closing a tab, reloading the workspace, quitting or installing an update ends its session. Reconnect starts a new shell.</p>
     </Section>

@@ -50,6 +50,9 @@ interface SettingsState {
   setTerminalFontSize: (size: number) => void;
   terminalCursorBlink: boolean;
   setTerminalCursorBlink: (enabled: boolean) => void;
+  /** Ask before closing an open or connecting in-app terminal tab. */
+  confirmTerminalClose: boolean;
+  setConfirmTerminalClose: (enabled: boolean) => void;
   /** Root font-size in px (the whole UI is rem-based and scales with it). */
   fontSize: number;
   setFontSize: (px: number) => void;
@@ -108,6 +111,8 @@ export const useSettingsStore = create<SettingsState>()(
       setTerminalFontSize: (size) => set({ terminalFontSize: clampTerminalFontSize(size) }),
       terminalCursorBlink: true,
       setTerminalCursorBlink: (terminalCursorBlink) => set({ terminalCursorBlink }),
+      confirmTerminalClose: true,
+      setConfirmTerminalClose: (confirmTerminalClose) => set({ confirmTerminalClose }),
       fontSize: DEFAULT_FONT_SIZE,
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
       motion: "system",
