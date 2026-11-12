@@ -18,7 +18,7 @@ The Files window transfers one regular file at a time. Links and other special f
 
 **Settings** opens as a full-window page with category navigation and search. Use **Back** or **Escape** to return to your workspace; host selection, scroll position and terminal sessions are preserved. **⌘F / Ctrl+F** focuses settings search while the page is open. An unapplied SSH config path draft still requires confirmation before leaving.
 
-In **Hosts → Groups**, drag a Group card within its current level to reorder it. Its order menu also offers **Move up / Move down**; with the Group focused, use **Alt+↑ / Alt+↓** (Option on macOS). **Groups → ⋯ → Sort groups by name** restores name sorting. Sorting preserves nesting and connection defaults, and newly added Groups follow manually ordered peers. With an account, order syncs to your computers; concurrent offline reorders converge through the existing sync rules. Older 1.2.0 clients continue using name sorting while retaining the additional encrypted metadata.
+In **Hosts → Groups**, drag a Group card within its current level to reorder it. With the Group focused, use **Alt+↑ / Alt+↓** (Option on macOS) for keyboard ordering. **Groups → ⋯ → Sort groups by name** restores name sorting. Sorting preserves nesting and connection defaults, and newly added Groups follow manually ordered peers. With an account, order syncs to your computers; concurrent offline reorders converge through the existing sync rules. Older 1.2.0 clients continue using name sorting while retaining the additional encrypted metadata.
 
 ## Appearance and color themes
 

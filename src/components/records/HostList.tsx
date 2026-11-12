@@ -10,8 +10,6 @@ import {
   FolderPlus,
   FolderOpen,
   Hash,
-  ArrowUp,
-  ArrowDown,
   ArrowDownAZ,
   LoaderCircle,
   MoreHorizontal,
@@ -293,14 +291,6 @@ export function RecordHostList({
           </button>
           {selectGroup && <button type="button" className="library-group-edit" aria-label={`Edit group ${name}`}
             disabled={disabled} onClick={() => selectGroup(node.group.id)}><MoreHorizontal className="size-4" /></button>}
-          {reorder && <DropdownMenu>
-            <DropdownMenuTrigger asChild><button type="button" className="library-group-edit"
-              aria-label={`Order group ${name}`} disabled={!orderEnabled}><ArrowUp className="size-4" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={!orderEnabled || index === 0} onSelect={() => move(node.group.id, index, -1)}><ArrowUp />Move up</DropdownMenuItem>
-              <DropdownMenuItem disabled={!orderEnabled || index === nodes.length - 1} onSelect={() => move(node.group.id, index, 1)}><ArrowDown />Move down</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>}
         </div>;
       })}
     </div>;
