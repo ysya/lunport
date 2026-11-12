@@ -4,6 +4,7 @@ import { LoaderCircle, Plus } from "lucide-react";
 import { RadioGroup } from "radix-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -28,7 +29,8 @@ import {
   type SavedDatabase,
 } from "@/lib/databases";
 import { isProjectId, newPamCheck } from "@/lib/transports";
-import { RecordField, selectClass } from "./form";
+import { RecordField } from "./form";
+import { groupPath, recordHostSearchText } from "./group-tree";
 import { choice, EntitlementsInput, EntitlementSuggestions, GoogleAccountField, segmented } from "./IapRouteFields";
 
 /*
@@ -105,12 +107,6 @@ const throughHost = (draft: DatabaseDraft, host: string | undefined): DatabaseDr
 const chosenHost = (draft: DatabaseDraft): string | null => routeHost(draft) || null;
 /** Whether `draft` is over its private IP and goes through no host yet, which it cannot be saved as. */
 const hostless = (draft: DatabaseDraft) => draft.network === "private" && chosenHost(draft) === null;
-
-/** The value of the Route field's Public IP; every other value is a host's identity. */
-const PUBLIC_ROUTE = "public";
-
-/** `draft` the way the Route field's `value` says: over its public IP, or through that host. */
-const withRoute = (draft: DatabaseDraft, value: string): DatabaseDraft => (value === PUBLIC_ROUTE ? overPublicIp(draft) : throughHost(draft, value));
 
 /**
  * `draft` at the instance picked from the list, which starts again from the database `postgres` and goes the way the instance is
@@ -356,102 +352,127 @@ export function DatabaseEditorView(props: DatabaseEditorViewProps) {
                 </p>
               </RecordField>
             )}
-            <RecordField label="Route">
-              <select className={selectClass} value={draft.network === "public" ? PUBLIC_ROUTE : (host ?? "")} onChange={(event) => onDraft(withRoute(draft, event.target.value))}>
-                {missing && (
-                  <option value="" disabled>
-                    Choose a host
-                  </option>
-                )}
-                {unavailable && (
-                  <option value={host} disabled>
-                    {HOST_UNAVAILABLE}
-                  </option>
-                )}
-                <option value={PUBLIC_ROUTE}>Public IP</option>
-                {hosts.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {`Through ${revealHidden(candidate.alias)}`}
-                  </option>
-                ))}
-              </select>
-              {missing && candidates.length === 0 && (
-                <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => createIapHost()}>
-                  <Plus />
-                  New IAP host
-                </Button>
-              )}
-            </RecordField>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <RecordField label="Name">
-                <Input value={draft.name} maxLength={128} required placeholder="Orders" onChange={(event) => patch({ name: event.target.value })} />
-              </RecordField>
-              <RecordField label="Default database">
-                <Input value={draft.default_database} maxLength={63} required placeholder="postgres" onChange={(event) => patch({ default_database: event.target.value })} />
-              </RecordField>
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm font-medium">Environment</p>
-              <RadioGroup.Root
-                aria-label="Environment"
-                value={draft.environment}
-                onValueChange={(environment) => patch({ environment: environment as DatabaseEnvironment })}
-                className={segmented}
-              >
-                {environments.map(([value, label]) => (
-                  <RadioGroup.Item key={value} value={value} className={choice}>
-                    {label}
-                  </RadioGroup.Item>
-                ))}
-              </RadioGroup.Root>
-              {draft.environment === null && <p className="text-xs text-muted-foreground">Choose Dev, Staging or Prod.</p>}
-              <p className="text-xs text-muted-foreground">Prod is marked in red, and connections through the local port open read-only.</p>
-            </div>
-            <div className="space-y-3 rounded-lg border p-3">
-              <label className="flex items-start gap-3 text-sm">
-                <Switch className="mt-0.5" checked={draft.pam !== null} onCheckedChange={(on) => onDraft(withPam(draft, on))} />
-                <span>
-                  Requires a PAM grant
-                  <span className="block text-xs text-muted-foreground">When no grant is active, connecting asks for one first.</span>
-                </span>
-              </label>
-              {draft.pam && (
-                <RecordField label="Entitlements">
-                  <EntitlementsInput value={draft.pam.entitlements} disabled={busy} onChange={(entitlements) => onDraft(withEntitlements(draft, entitlements))} />
-                  <EntitlementSuggestions
-                    account={lookup.account}
-                    project={lookup.project}
-                    pam={draft.pam}
-                    disabled={busy}
-                    onAdd={(id) => onDraft(withEntitlements(draft, [...(draft.pam?.entitlements ?? []), id]))}
-                  />
+            {located(draft) && <>
+              <div className="border-t pt-4">
+                <h3 className="text-sm font-medium">Connection</h3>
+                <p className="text-xs text-muted-foreground">Name this connection and choose how Lunport reaches it.</p>
+              </div>
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Route</p>
+                <RadioGroup.Root aria-label="Route" value={draft.network} disabled={busy}
+                  onValueChange={(network) => onDraft(network === "public" ? overPublicIp(draft) : throughHost(draft, host ?? undefined))}
+                  className={segmented}>
+                  <RadioGroup.Item value="public" className={choice}>Public IP</RadioGroup.Item>
+                  <RadioGroup.Item value="private" className={choice}>Through a host</RadioGroup.Item>
+                </RadioGroup.Root>
+                {draft.network === "private" && <div className="space-y-2">
+                  <p className={cn("text-xs", unavailable ? "text-warning" : "text-muted-foreground")}>
+                    {unavailable ? HOST_UNAVAILABLE : host ? `Selected host: ${revealHidden(hosts.find((candidate) => candidate.id === host)?.alias ?? "")}` : "Choose a host to connect through."}
+                  </p>
+                  <Command className="h-auto rounded-lg border bg-background">
+                    <CommandInput aria-label="Search route hosts" placeholder="Search hosts by name, address or Group…" disabled={busy} />
+                    <CommandList className="max-h-60">
+                      <CommandEmpty>No matching hosts.</CommandEmpty>
+                      {[
+                        { label: "Suggested for this project", hosts: hosts.filter((candidate) => candidates.some((suggested) => suggested.id === candidate.id)) },
+                        { label: "All other hosts", hosts: hosts.filter((candidate) => !candidates.some((suggested) => suggested.id === candidate.id)) },
+                      ].map((section) => section.hosts.length > 0 && <CommandGroup key={section.label} heading={section.label}>
+                        {section.hosts.map((candidate) => {
+                          const entry = overview.hosts.find((item) => item.id === candidate.id)!;
+                          const group = groupPath(overview, entry.payload.group_id, entry.scope);
+                          return <CommandItem key={candidate.id} value={recordHostSearchText(overview, entry)} data-checked={host === candidate.id} disabled={busy}
+                            onSelect={() => onDraft(throughHost(draft, candidate.id))}>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-medium">{revealHidden(candidate.alias)}</span>
+                              <span className="block truncate text-xs text-muted-foreground">{revealHidden([entry.effective_payload.hostname, group].filter(Boolean).join(" · "))}</span>
+                            </span>
+                          </CommandItem>;
+                        })}
+                      </CommandGroup>)}
+                    </CommandList>
+                  </Command>
+                  {missing && candidates.length === 0 && <Button type="button" variant="outline" size="sm" className="w-fit" onClick={createIapHost}>
+                    <Plus />New IAP host
+                  </Button>}
+                </div>}
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <RecordField label="Name">
+                  <Input value={draft.name} maxLength={128} required placeholder="Orders" onChange={(event) => patch({ name: event.target.value })} />
                 </RecordField>
-              )}
-            </div>
-            <div className="space-y-3 rounded-lg border p-3">
-              <label className="flex items-start gap-3 text-sm">
-                <Switch className="mt-0.5" checked={draft.local_port !== null} onCheckedChange={(on) => onDraft(withSharing(draft, on, used))} />
-                <span>
-                  Let other apps connect
-                  <span className="block text-xs text-muted-foreground">
-                    Other apps on this computer, such as psql, connect to 127.0.0.1 with a password Lunport makes and keeps in the keychain.
+                <RecordField label="Default database">
+                  <Input value={draft.default_database} maxLength={63} required placeholder="postgres" onChange={(event) => patch({ default_database: event.target.value })} />
+                </RecordField>
+              </div>
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Environment</p>
+                <RadioGroup.Root
+                  aria-label="Environment"
+                  value={draft.environment}
+                  onValueChange={(environment) => patch({ environment: environment as DatabaseEnvironment })}
+                  className={segmented}
+                >
+                  {environments.map(([value, label]) => (
+                    <RadioGroup.Item key={value} value={value} className={choice}>
+                      {label}
+                    </RadioGroup.Item>
+                  ))}
+                </RadioGroup.Root>
+                {draft.environment === null && <p className="text-xs text-muted-foreground">Choose Dev, Staging or Prod.</p>}
+                <p className="text-xs text-muted-foreground">Prod is marked in red, and connections through the local port open read-only.</p>
+              </div>
+              <div className="border-t pt-4">
+                <h3 className="text-sm font-medium">Local access</h3>
+              </div>
+              <div className="space-y-3 rounded-lg border p-3">
+                <label className="flex items-start gap-3 text-sm">
+                  <Switch className="mt-0.5" checked={draft.local_port !== null} onCheckedChange={(on) => onDraft(withSharing(draft, on, used))} />
+                  <span>
+                    Let other apps connect
+                    <span className="block text-xs text-muted-foreground">
+                      Other apps on this computer, such as psql, connect to 127.0.0.1 with a password Lunport makes and keeps in the keychain.
+                    </span>
                   </span>
-                </span>
-              </label>
-              {draft.local_port !== null && (
-                <RecordField label="Port on 127.0.0.1">
-                  {/* A cleared field shows nothing rather than a 0 to delete; the backend says what it thinks of the port. */}
-                  <Input
-                    className="max-w-32 font-mono"
-                    type="number"
-                    min={1024}
-                    max={65535}
-                    value={draft.local_port || ""}
-                    onChange={(event) => patch({ local_port: Number(event.target.value) })}
-                  />
-                </RecordField>
-              )}
-            </div>
+                </label>
+                {draft.local_port !== null && (
+                  <RecordField label="Port on 127.0.0.1">
+                    {/* A cleared field shows nothing rather than a 0 to delete; the backend says what it thinks of the port. */}
+                    <Input
+                      className="max-w-32 font-mono"
+                      type="number"
+                      min={1024}
+                      max={65535}
+                      value={draft.local_port || ""}
+                      onChange={(event) => patch({ local_port: Number(event.target.value) })}
+                    />
+                  </RecordField>
+                )}
+              </div>
+              <details open={draft.pam !== null} className="rounded-lg border p-3">
+                <summary className="cursor-pointer text-sm font-medium">Advanced access</summary>
+                <div className="mt-3 space-y-3">
+                  <label className="flex items-start gap-3 text-sm">
+                    <Switch className="mt-0.5" checked={draft.pam !== null} onCheckedChange={(on) => onDraft(withPam(draft, on))} />
+                    <span>
+                      Requires a PAM grant
+                      <span className="block text-xs text-muted-foreground">When no grant is active, connecting asks for one first.</span>
+                    </span>
+                  </label>
+                  {draft.pam && (
+                    <RecordField label="Entitlements">
+                      <EntitlementsInput value={draft.pam.entitlements} disabled={busy} onChange={(entitlements) => onDraft(withEntitlements(draft, entitlements))} />
+                      <EntitlementSuggestions
+                        account={lookup.account}
+                        project={lookup.project}
+                        pam={draft.pam}
+                        disabled={busy}
+                        onAdd={(id) => onDraft(withEntitlements(draft, [...(draft.pam?.entitlements ?? []), id]))}
+                      />
+                    </RecordField>
+                  )}
+                </div>
+              </details>
+            </>}
           </fieldset>
         </TaskDialogBody>
       </form>

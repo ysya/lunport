@@ -1,7 +1,7 @@
 import "./databases.css";
-import { Fragment, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
@@ -52,7 +52,7 @@ import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
 
 /**
- * A grant line of a database's row, from the grant `read` found: the line itself, in the warning color when the grant is missing or
+ * A grant line in a database's details, from the grant `read` found: the line itself, in the warning color when the grant is missing or
  * about to end, Request grant beside it when one can be requested, and under it what else it has to say (`databaseGrantLine`). `led`
  * leads the line, and `subject` is what the button names. A read that fails shows its error in place of whatever an earlier read found,
  * as a host's details pane does.
@@ -73,7 +73,7 @@ function GrantLine({ read, pam, subject, led = "", busy, request }: { read: UseQ
 }
 
 /**
- * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
+ * The grant a database needs, read while its details are shown and every minute through the database's `databasePamStatusQuery`.
  * Drawn only for a database with a grant check. A grant that is missing is in the warning color and comes with Request grant; one that
  * ends within five minutes is in the warning color too, and says that a new one can be requested when it ends, since PAM takes no request
  * while a grant is active.
@@ -85,32 +85,30 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
 
 /** The grant of the host a database is reached through, with the request that its button makes. */
 type RouteGrantRequest = RouteHostGrant & { request: () => void };
+const detailsPanelId = (id: string) => `${databaseDetailsId(id)}-panel`;
 
 /**
- * The grant the host a database is reached through needs, on its row beside the database's own and read the same way, through the
+ * The grant the host a database is reached through needs, beside the database's own and read the same way, through the
  * `pamStatusQuery` of the host's first hop: the host's details pane and the tunnels through it share that read. It says what the
  * database's line does, led by the host's alias, and comes with a Request grant of its own, since the host's grant is not the database's.
  * Drawn only for a host whose first hop has a route with a grant check (`routeHostGrant`).
  */
-function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & { busy: boolean }) {
+export function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & { busy: boolean }) {
   const read = useQuery(pamStatusQuery(hostId));
   return <GrantLine read={read} pam={pam} subject={alias} led={`${alias}: `} busy={busy} request={request} />;
 }
 
 /**
- * One saved database. Its name and its Edit button open the editor, and both are held back while its port starts, runs or stops, while a
- * change is under way, and while its library's writes are blocked. A database that runs here although its record is gone (deleted on
+ * One saved database. Its name and detail button select its details. A database that runs here although its record is gone (deleted on
  * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
- * removes it from the list. A row given `details` has a button that shows or hides its connection details, which the page draws under
- * the row; the row's bottom line is left out while they are open, so that the two read as one. A prod database whose writable window is
+ * removes it from the list. A row given `details` can select or close the details beside the list. A prod database whose writable window is
  * open says so in its Status, with the time left, whether its details are open or not. A database that runs here as it was saved before
  * another device changed it says that its port applies the change once it is started again, and its badge and its lock follow the
- * environment its port locks by (`row.environment`), which stays prod until then. A database reached through a host whose first hop's
- * route asks for a grant has a `routeGrant`, which the row draws as a grant line of its own under the database's. A database reached
+ * environment its port locks by (`row.environment`), which stays prod until then. A database reached
  * through a host names it after where it is, by `hostAlias`; one whose host is not in the library (no alias) says that the host is
  * unavailable, in the warning color. While a database starts its Status says the step its start is at. No hooks: exported for the tests.
  */
-export function DatabaseRow({ row, hostAlias, busy, toggle, requestGrant, ask, edit, details, routeGrant }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; requestGrant: () => void; ask: () => void; edit: () => void; details?: { open: boolean; toggle: () => void }; routeGrant?: RouteGrantRequest | null }) {
+export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
   const route = revealHidden(databaseRoute(database, hostAlias));
@@ -126,18 +124,16 @@ export function DatabaseRow({ row, hostAlias, busy, toggle, requestGrant, ask, e
     : live.phase === "starting" && live.step ? revealHidden(stepSentence(live.step, hostAlias))
     : row.blocked && !row.removed ? "Sync review needed"
     : "\u00a0";
-  return <tr className={cn("border-b last:border-0 hover:bg-muted/20", details?.open && "border-b-0")}>
+  return <tr className={cn("border-b last:border-0 hover:bg-muted/20", details?.open && "bg-primary/5")}>
     <td className="max-w-72 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
-        {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button className="min-w-0 truncate text-left font-medium hover:text-primary disabled:cursor-default" title={name} disabled={active || busy || row.blocked} onClick={edit}>{name}</button>}
+        {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button type="button" className="min-w-0 truncate text-left font-medium hover:text-primary" title={name} aria-expanded={details?.open} aria-controls={detailsPanelId(database.id)} onClick={details?.toggle}>{name}</button>}
         {!row.removed && <EnvironmentBadge environment={row.environment} />}
       </div>
       {row.removed ? <span className="mt-1 block text-xs text-warning">Deleted on another device. Stop this running database to remove it here.</span> : <>
         <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
         {unavailable && <span className="mt-1 block text-xs text-warning">{HOST_UNAVAILABLE}</span>}
         {row.changed && <span className="mt-1 block text-xs text-warning">The database changed on another device. Stop and start it again to apply it.</span>}
-        {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
-        {routeGrant && <RouteGrant {...routeGrant} busy={busy} />}
       </>}
       <span className="database-address-compact mt-1 truncate font-mono text-xs text-muted-foreground" title={address}>{address}</span>
     </td>
@@ -154,12 +150,8 @@ export function DatabaseRow({ row, hostAlias, busy, toggle, requestGrant, ask, e
       {row.environment === "prod" && live.writable_until_ms !== null && <WritesOnMarker until={live.writable_until_ms} />}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
-      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={databaseDetailsId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
+      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={detailsPanelId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
       {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} aria-label={`${verb} ${name}`} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{verb}</Button>}
-      {!row.removed && <>
-        <Button size="icon-sm" variant="ghost" aria-label={`Edit ${name}`} disabled={active || busy || row.blocked} onClick={edit}><PencilLine className="size-3.5" /></Button>
-        <Button size="icon-sm" variant="ghost" aria-label={`Delete ${name}`} disabled={active || busy || row.blocked} onClick={ask}><Trash2 className="size-3.5" /></Button>
-      </>}
     </div></td>
   </tr>;
 }
@@ -189,6 +181,9 @@ export function DatabaseAccess({ row, route }: { row: DatabaseView; route: Route
 export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOverview; createIapHost: () => void }) {
   const query = useQuery(databasesQuery);
   const client = useQueryClient();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLElement>(null);
+  const savedFocus = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const flight = useRef(false);
@@ -196,8 +191,9 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const [deleting, setDeleting] = useState<DatabaseView | null>(null);
   // The running database whose Stop asks first, because connections are open through its port.
   const [stopping, setStopping] = useState<DatabaseView | null>(null);
-  // The databases whose connection details are open: none until asked, and several may be, so that a lock that is on stays in view.
-  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
+  // The selected database has its connection details beside the list. Undefined selects the first row; null closes the details.
+  const [selectedId, setSelectedId] = useState<string | null | undefined>(undefined);
+  const [focusAfterSelection, setFocusAfterSelection] = useState<string | null>(null);
   // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
   // while the dialog is open. The opening keys the editor, so that one that is still mounted never shows the draft of an earlier opening.
   const [editing, setEditing] = useState<{ key: number; initial: DatabaseDraft; expected: SavedDatabase | null } | null>(null);
@@ -213,6 +209,18 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const rows = query.data ?? [];
   const needle = search.trim().toLowerCase();
   const visible = rows.filter((r) => `${r.database.name} ${r.database.project} ${r.database.region} ${r.database.instance}`.toLowerCase().includes(needle));
+  const selectable = visible.filter((row) => !row.removed);
+  const selected = selectedId === null ? null : selectable.find((row) => row.database.id === selectedId) ?? selectable[0] ?? null;
+  const selectedVia = selected ? routeHostGrant(overview, selected.database) : null;
+  useEffect(() => {
+    if (focusAfterSelection !== null && selected?.database.id === focusAfterSelection) {
+      if (workspaceRef.current && workspaceRef.current.clientWidth < 1100) {
+        detailRef.current?.focus();
+        detailRef.current?.scrollIntoView({ block: "start" });
+      }
+      setFocusAfterSelection(null);
+    }
+  }, [focusAfterSelection, selected?.database.id]);
   // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown: in the dialog for a
   // save, which stays open with what was typed, and on the page for the rest. A save that worked closes the dialog.
   const action = async (run: () => Promise<void>, inEditor = false) => {
@@ -245,8 +253,13 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     setDiscarding(false); setDirty(false); setEditing(null);
     then?.();
   };
-  const save = (next: SavedDatabase) => { if (editing) void action(async () => { await saveDatabase(next, editing.expected); }, true); };
-  // The grant is read again too, so that the row shows what was requested.
+  const save = (next: SavedDatabase) => { if (editing) void action(async () => {
+    const saved = await saveDatabase(next, editing.expected);
+    setSearch("");
+    setSelectedId(saved.id);
+    savedFocus.current = saved.id;
+  }, true); };
+  // The grant is read again so that the selected details show what was requested.
   const requestGrant = (id: string) => void action(async () => {
     try { await requestDatabaseGrant(id); }
     finally { await client.invalidateQueries({ queryKey: databasePamStatusKey(id) }); }
@@ -256,11 +269,11 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     try { await requestRouteGrant(id); }
     finally { await client.invalidateQueries({ queryKey: pamStatusQuery(hostId).queryKey }); }
   });
-  const toggleDetails = (id: string) => setOpened((current) => {
-    const next = new Set(current);
-    if (!next.delete(id)) next.add(id);
-    return next;
-  });
+  const toggleDetails = (id: string) => {
+    const closing = selected?.database.id === id;
+    setSelectedId(closing ? null : id);
+    setFocusAfterSelection(closing ? null : id);
+  };
   // A delete can fail once the record is gone, and a dialog that stayed open would offer to delete it again: it closes either way, and
   // the failure is shown on the page beside the list that was read again.
   const remove = (row: DatabaseView) => void action(async () => {
@@ -280,7 +293,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   // The question counts the connections the list shows now, which may have changed since Stop was pressed.
   const askedToStop = stopping && (rows.find((row) => row.database.id === stopping.database.id) ?? stopping);
   return <div className="databases-panel space-y-5">
-    <PageHeader title="Databases" count={rows.length} description="Cloud SQL connections that Lunport signs in to for your other apps."
+    <PageHeader title="Cloud SQL" count={rows.length} description="Cloud SQL connections that Lunport signs in to for your other apps."
       actions={<Button id="new-database-button" onClick={() => edit(null)} disabled={busy || !!overview.account && overview.shared_writes_blocked}><Plus className="size-4" />New database</Button>} />
     <div className="flex flex-wrap items-center gap-3">
       <div className="relative min-w-48 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="databases-search" aria-label="Search databases" placeholder="Search databases or projects…" className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
@@ -291,27 +304,63 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
       <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-14 text-center">
         <Database className="size-7 text-muted-foreground" /><h2 className="font-medium">Your Cloud SQL databases, within reach</h2>
         <p className="max-w-sm text-sm text-muted-foreground">Save a PostgreSQL instance and Lunport offers it to your other apps on a local port, signed in with your Google account.</p>
-      </div> : <div className="overflow-x-auto rounded-lg border">
+      </div> : <div ref={workspaceRef} className={cn("database-workspace", selected && "has-details")}>
+      <div className="database-list overflow-x-auto rounded-lg border">
       <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Local address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{visible.map((row) => {
           const id = row.database.id;
-          // A database that is not offered on a port, or whose record is gone, has no details to give; if it loses its port while open, they close.
-          const offered = hasConnectionDetails(row);
-          const open = offered && opened.has(id);
-          const via = routeHostGrant(overview, row.database);
+          const open = selected?.database.id === id;
           const route = routeSummary(overview, row.database);
-          return <Fragment key={id}>
-            <DatabaseRow row={row} hostAlias={route.alias} busy={busy}
+          return <DatabaseRow key={id} row={row} hostAlias={route.alias} busy={busy}
               toggle={() => toggle(row)}
-              requestGrant={() => requestGrant(id)} ask={() => setDeleting(row)} edit={() => edit(row)}
-              routeGrant={via && { ...via, request: () => requestHostGrant(id, via.hostId) }}
-              details={offered ? { open, toggle: () => toggleDetails(id) } : undefined} />
-            {open && <tr className="border-b last:border-0"><td colSpan={4} className="px-4 pb-4"><div className="database-details"><DatabaseAccess row={row} route={route} /></div></td></tr>}
-          </Fragment>;
+              details={!row.removed ? { open, toggle: () => toggleDetails(id) } : undefined} />;
         })}</tbody></table>
       {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
+      </div>
+      {selected && <aside ref={detailRef} id={detailsPanelId(selected.database.id)} tabIndex={-1} className="database-detail space-y-4" aria-label="Database details">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <h2 className="break-words text-base font-semibold">{revealHidden(selected.database.name)}</h2>
+            <p className="text-xs text-muted-foreground">{revealHidden(databaseRoute(selected.database, routeSummary(overview, selected.database).alias))}</p>
+          </div>
+          <Button size="icon-sm" variant="ghost" aria-label="Close database details" onClick={() => setSelectedId(null)}><X className="size-4" /></Button>
+        </div>
+        {(selected.database.pam || selectedVia) && <section className="space-y-2 rounded-lg border p-3" aria-label="Access grants">
+          <h3 className="text-xs font-medium text-muted-foreground">Access grants</h3>
+          {selected.database.pam && <DatabaseGrant id={selected.database.id} name={selected.database.name} pam={selected.database.pam} busy={busy} request={() => requestGrant(selected.database.id)} />}
+          {selectedVia && <RouteGrant {...selectedVia} busy={busy} request={() => requestHostGrant(selected.database.id, selectedVia.hostId)} />}
+        </section>}
+        {selected.database.local_port !== null && (
+          selected.live.phase === "stopped" || selected.live.phase === "error"
+            ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-primary/5 p-3 text-sm">
+                <p>{selected.live.phase === "error" ? "Retry this database, then copy its connection URL and password." : "Start this database, then copy its connection URL and password."}</p>
+                <Button size="sm" disabled={busy} onClick={() => toggle(selected)}>{selected.live.phase === "error" ? "Retry" : "Start"}</Button>
+              </div>
+            : selected.live.phase === "running"
+              ? <p className="rounded-lg bg-primary/5 p-3 text-sm">Copy the connection URL and password to use this database.</p>
+              : null
+        )}
+        {hasConnectionDetails(selected)
+          ? <DatabaseAccess row={selected} route={routeSummary(overview, selected.database)} />
+          : <div id={databaseDetailsId(selected.database.id)} className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
+              {selected.removed ? "This database was deleted on another device. Stop it to remove it here." : "No local port is shared. Edit this database to let other apps connect."}
+            </div>}
+        {!selected.removed && <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" aria-label={`Edit ${revealHidden(selected.database.name)}`} disabled={databaseBusy(selected) || busy || selected.blocked} onClick={() => edit(selected)}><PencilLine className="size-3.5" />Edit</Button>
+          <Button variant="outline" size="sm" aria-label={`Delete ${revealHidden(selected.database.name)}`} disabled={databaseBusy(selected) || busy || selected.blocked} onClick={() => setDeleting(selected)}><Trash2 className="size-3.5" />Delete</Button>
+        </div>}
+      </aside>}
     </div>}
-    <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">
+    <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl" onCloseAutoFocus={(event) => {
+      const id = savedFocus.current;
+      savedFocus.current = null;
+      if (id === null || !workspaceRef.current || workspaceRef.current.clientWidth >= 1100) return;
+      if (detailRef.current?.id === detailsPanelId(id)) {
+        event.preventDefault();
+        detailRef.current.focus();
+        detailRef.current.scrollIntoView({ block: "start" });
+      } else setFocusAfterSelection(id);
+    }}>
       <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
       {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} overview={overview} busy={busy} error={editorError} onSave={save} onCancel={() => closeEditor()} createIapHost={() => closeEditor(createIapHost)} onDirty={setDirty} />}
     </TaskDialogContent></Dialog>

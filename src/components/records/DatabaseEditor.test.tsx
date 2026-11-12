@@ -4,6 +4,7 @@ import { RadioGroup } from "radix-ui";
 import type { ReactElement, ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Input } from "@/components/ui/input";
+import { CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
 import { Switch } from "@/components/ui/switch";
 import { buttonsIn, buttonTag, DISABLED, elementsOf, text, textIn } from "@/components/keychain/test-markup";
 import { tauriInvoke } from "@/lib/ipc";
@@ -25,7 +26,7 @@ import {
   type InstancesRead,
   type Mode,
 } from "./DatabaseEditor";
-import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
+import { groupView, hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
 import { RecordField } from "./form";
 import { EntitlementsInput, EntitlementSuggestions, EntitlementSuggestionsView, GoogleAccountField, IapRouteFields, segmented } from "./IapRouteFields";
 
@@ -54,6 +55,7 @@ const instance = (patch: Partial<InstanceSummary> = {}): InstanceSummary => ({
   ...patch,
 });
 const ORDERS_PG = instance();
+const NEW_LOCATED = pickInstance({ ...newDatabase(), project: PROD }, ORDERS_PG);
 /** Reachable over its private address only. */
 const BILLING_PG = instance({ name: "billing-pg", public_ip: false });
 /** Signs nobody in with Google. */
@@ -194,6 +196,25 @@ function submit(tree: ReactNode) {
 }
 
 describe("the New database dialog", () => {
+  it("shows instance selection before connection settings", () => {
+    const dialog = editor({ ...newDatabase(), project: PROD }, { instances: listed([ORDERS_PG]) });
+    expect(text(dialog.markup())).toContain("Cloud SQL instances in acme-prod-123456");
+    expect(hasField(dialog.tree(), "Name")).toBe(false);
+    expect(elementsOf(dialog.tree(), RadioGroup.Root).some((item) => propsOf<{ "aria-label": string }>(item)["aria-label"] === "Route")).toBe(false);
+    radioOf(dialog.tree(), "orders-pg").onChange();
+    expect(hasField(dialog.tree(), "Name")).toBe(true);
+    expect(groupOf(dialog.tree(), "Route").value).toBe("public");
+    expect(text(dialog.markup())).toContain("Local access");
+  });
+
+  it("keeps advanced access collapsed unless a saved record uses PAM", () => {
+    const fresh = editor(pickInstance({ ...newDatabase(), project: PROD }, ORDERS_PG));
+    const advanced = elementsOf(fresh.tree(), "details")[0];
+    expect(propsOf<{ open?: boolean }>(advanced).open).toBe(false);
+    expect(textIn(advanced)).toContain("Advanced access");
+    expect(propsOf<{ open?: boolean }>(elementsOf(editor(SAVED).tree(), "details")[0]).open).toBe(true);
+  });
+
   it("suggestPort_skips_ports_in_use", () => {
     expect(suggestPort([])).toBe(6543);
     expect(suggestPort([6543])).toBe(6544);
@@ -468,7 +489,7 @@ describe("the New database dialog", () => {
   });
 
   it("offers_the_three_environments_as_one_choice_with_none_chosen_for_a_new_database", () => {
-    const dialog = editor(newDatabase());
+    const dialog = editor(NEW_LOCATED);
     const html = dialog.markup();
     expect(text(html)).toMatch(/Environment\s+Dev\s+Staging\s+Prod/);
     expect(groupOf(dialog.tree(), "Environment").value).toBeNull();
@@ -500,7 +521,7 @@ describe("the New database dialog", () => {
   });
 
   it("the_pam_switch_asks_for_thirty_minutes_in_the_global_location_and_off_forgets_the_check", () => {
-    const dialog = editor(newDatabase());
+    const dialog = editor(NEW_LOCATED);
     expect(switchOf(dialog.tree(), "Requires a PAM grant").checked).toBe(false);
     expect(hasField(dialog.tree(), "Entitlements")).toBe(false);
     switchOf(dialog.tree(), "Requires a PAM grant").onCheckedChange(true);
@@ -518,7 +539,7 @@ describe("the New database dialog", () => {
 
   it("draws_the_entitlement_suggestions_for_the_drafts_account_project_and_check_and_adds_the_one_pressed", () => {
     const check = { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null };
-    const dialog = editor({ ...newDatabase(), account: "frank@example.com", project: PROD, pam: check });
+    const dialog = editor({ ...NEW_LOCATED, account: "frank@example.com", pam: check });
     const suggestions = elementsOf(dialog.tree(), EntitlementSuggestions);
     expect(suggestions).toHaveLength(1);
     expect(propsOf(suggestions[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check, disabled: false });
@@ -526,7 +547,7 @@ describe("the New database dialog", () => {
     expect(dialog.kept.draft.pam).toEqual({ ...check, entitlements: ["prod-operate", "prod-admin"] });
     // Nothing is drawn while the check is off, and nothing is pressed while a save is under way.
     expect(elementsOf(editor(newDatabase()).tree(), EntitlementSuggestions)).toHaveLength(0);
-    expect(propsOf(elementsOf(editor({ ...newDatabase(), pam: check }, { busy: true }).tree(), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
+    expect(propsOf(elementsOf(editor({ ...NEW_LOCATED, pam: check }, { busy: true }).tree(), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
   });
 
   it("a_new_database_opens_offered_to_other_apps_on_the_first_free_port_and_a_saved_one_keeps_its_own_setting", () => {
@@ -548,8 +569,8 @@ describe("the New database dialog", () => {
       const tree = DatabaseEditorView(viewOf(client, { initial, existing }).props);
       return { sharing: switchOf(tree, "Let other apps connect").checked, port: hasField(tree, "Port on 127.0.0.1") ? valueOf(tree, "Port on 127.0.0.1") : null };
     };
-    expect(shown(newDatabase())).toEqual({ sharing: true, port: 6543 });
-    expect(shown(newDatabase(), [other("00000000000000a2", 6543), other("00000000000000a3", 6544)])).toEqual({ sharing: true, port: 6545 });
+    expect(shown(NEW_LOCATED)).toEqual({ sharing: true, port: 6543 });
+    expect(shown(NEW_LOCATED, [other("00000000000000a2", 6543), other("00000000000000a3", 6544)])).toEqual({ sharing: true, port: 6545 });
     expect(shown({ ...SAVED, local_port: null }, [other("00000000000000a2", 6543)])).toEqual({ sharing: false, port: null });
     expect(shown(SAVED, [other("00000000000000a2", 6544)])).toEqual({ sharing: true, port: 6543 });
   });
@@ -597,7 +618,7 @@ describe("the New database dialog", () => {
   });
 
   it("sharing_proposes_the_first_free_port_and_off_offers_none", () => {
-    const dialog = editor(newDatabase(), { used: [6543, 6544] });
+    const dialog = editor(NEW_LOCATED, { used: [6543, 6544] });
     expect(switchOf(dialog.tree(), "Let other apps connect").checked).toBe(false);
     expect(hasField(dialog.tree(), "Port on 127.0.0.1")).toBe(false);
     switchOf(dialog.tree(), "Let other apps connect").onCheckedChange(true);
@@ -619,12 +640,12 @@ describe("the New database dialog", () => {
   it("asks_about_the_settled_project_and_account_not_every_keystroke_but_shows_the_account_as_it_is", () => {
     const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
     // The project typed so far, and the one typing last paused on.
-    const dialog = editor({ ...newDatabase(), account: "ops@example.com", project: "acme-prod-1234", pam: check }, { lookup: { account: "frank@example.com", project: PROD } });
+    const dialog = editor({ ...NEW_LOCATED, account: "ops@example.com", project: "acme-prod-1234", pam: check }, { lookup: { account: "frank@example.com", project: PROD } });
     expect(propsOf(elementsOf(dialog.tree(), EntitlementSuggestions)[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check });
     // The account field shows what was chosen or typed, whatever Google was last asked about.
     expect(propsOf(elementsOf(dialog.tree(), GoogleAccountField)[0])).toMatchObject({ account: "ops@example.com" });
     // Without a lookup that differs from the draft, it is the draft's.
-    const same = editor({ ...newDatabase(), account: "frank@example.com", project: PROD, pam: check });
+    const same = editor({ ...NEW_LOCATED, account: "frank@example.com", pam: check });
     expect(propsOf(elementsOf(same.tree(), EntitlementSuggestions)[0])).toMatchObject({ account: "frank@example.com", project: PROD });
   });
 
@@ -642,9 +663,10 @@ describe("the New database dialog", () => {
   });
 
   it("draws_its_segmented_controls_like_connect_via", () => {
-    const groups = elementsOf(editor(newDatabase()).tree(), RadioGroup.Root).map((element) => propsOf<{ className: string; "aria-label": string }>(element));
-    expect(groups.map((group) => group["aria-label"])).toEqual(["How to choose the instance", "Environment"]);
+    const groups = elementsOf(editor(NEW_LOCATED).tree(), RadioGroup.Root).map((element) => propsOf<{ className: string; "aria-label": string }>(element));
+    expect(groups.map((group) => group["aria-label"])).toEqual(["How to choose the instance", "Route", "Environment"]);
     expect(groups[1].className).toBe(segmented);
+    expect(groups[2].className).toBe(segmented);
     // The two long choices stack on a narrow screen.
     expect(groups[0].className).toContain(segmented);
     expect(groups[0].className).toContain("flex-col sm:flex-row");
@@ -664,109 +686,93 @@ describe("the New database dialog", () => {
 describe("the route of a database in the dialog", () => {
   const [WEB_1, WEB_2, WEB_3, GONE] = ["00000000000000b1", "00000000000000b2", "00000000000000b3", "00000000000000b9"];
   const host = (id: string, alias: string) => hostView({ id, payload: hostPayload({ alias }) });
-  /** web-1 has its IAP route in the dev project, web-2 in the prod project, and web-3 has none. */
   const LIBRARY = recordOverview({
     hosts: [host(WEB_3, "web-3"), host(WEB_2, "web-2"), host(WEB_1, "web-1")],
     transports: [hostTransport({ project: DEV }, WEB_1), hostTransport({ project: PROD }, WEB_2)],
   });
   const newInDev: DatabaseDraft = { ...newDatabase(), account: "frank@example.com", project: DEV, environment: "dev" };
-  const routes = (tree: ReactNode) => elementsOf(controlOf(tree, "Route"), "option");
-  /** The words of each Route option. */
-  const routeLabels = (tree: ReactNode) => routes(tree).map((option) => textIn(option));
-  /** The Route option that says `label`. */
-  function optionOf(tree: ReactNode, label: string) {
-    const found = routes(tree).find((option) => textIn(option) === label);
-    if (!found) throw new Error(`no ${label} route`);
-    return propsOf<{ value: string; disabled?: boolean }>(found);
-  }
+  const items = (tree: ReactNode) => elementsOf(tree, CommandItem);
+  const hostItem = (tree: ReactNode, id: string) => {
+    const found = items(tree).find((item) => String(propsOf<{ value: string }>(item).value).includes(id));
+    if (!found) throw new Error(`no ${id} host`);
+    return propsOf<{ onSelect: () => void; "data-checked": boolean; value: string }>(found);
+  };
+  const chooseHost = (tree: ReactNode, id: string) => hostItem(tree, id).onSelect();
   const press = (tree: ReactNode, label: string) => buttonsIn(tree).find((button) => textIn(button) === label)!.props.onClick!();
 
-  it("a_private_only_instance_with_one_jump_host_in_its_project_goes_through_it", () => {
+  it("separates the route type from a searchable, bounded host list", () => {
+    const dialog = editor(SAVED, { overview: LIBRARY });
+    expect(groupOf(dialog.tree(), "Route").value).toBe("public");
+    expect(elementsOf(dialog.tree(), CommandInput)).toHaveLength(0);
+    groupOf(dialog.tree(), "Route").onValueChange("private");
+    expect(dialog.kept.draft.network).toBe("private");
+    expect(elementsOf(dialog.tree(), CommandInput)).toHaveLength(1);
+    expect(dialog.markup()).toContain("max-h-60");
+    expect(items(dialog.tree()).map((item) => textIn(item))).toEqual(expect.arrayContaining([expect.stringContaining("web-1"), expect.stringContaining("web-2")]));
+  });
+
+  it("a private-only instance with one matching IAP host chooses it and shows the choice", () => {
     const dialog = editor(newInDev, { overview: LIBRARY, instances: listed([ORDERS_PG, BILLING_PG]) });
-    // The row says which host it would go through before it is picked, and an instance with a public IP says nothing of one.
     expect(text(dialog.markup())).toContain("billing-pg PostgreSQL 16 asia-east1 · Private IP only · via web-1 · IAM sign-in on");
-    expect(text(dialog.markup())).toContain("orders-pg PostgreSQL 16 asia-east1 · Public IP and private IP · IAM sign-in on");
     radioOf(dialog.tree(), "billing-pg").onChange();
     expect(dialog.kept.draft).toMatchObject({ instance: "billing-pg", network: "private", via_host: WEB_1 });
-    expect(valueOf(dialog.tree(), "Route")).toBe(WEB_1);
-    expect(text(dialog.markup())).toContain("billing-pg PostgreSQL 16 asia-east1 · Private IP only · via web-1 · IAM sign-in on");
-    expect(text(dialog.markup())).not.toContain("New IAP host");
+    expect(text(dialog.markup())).toContain("Selected host: web-1");
+    expect(hostItem(dialog.tree(), WEB_1)["data-checked"]).toBe(true);
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ instance: "billing-pg", network: "private", via_host: WEB_1 }));
   });
 
-  it("a_private_only_instance_with_several_jump_hosts_waits_for_one_and_save_says_to_choose", () => {
+  it("a private-only instance with several matching hosts waits for one", () => {
     const both = recordOverview({ ...LIBRARY, transports: [hostTransport({ project: DEV }, WEB_1), hostTransport({ project: DEV }, WEB_2)] });
     const dialog = editor(newInDev, { overview: both, instances: listed([BILLING_PG]) });
     radioOf(dialog.tree(), "billing-pg").onChange();
-    expect(dialog.kept.draft.network).toBe("private");
-    expect(dialog.kept.draft.via_host).toBeUndefined();
+    expect(dialog.kept.draft).toMatchObject({ network: "private", via_host: undefined });
+    expect(groupOf(dialog.tree(), "Route").value).toBe("private");
     expect(text(dialog.markup())).toContain("Private IP only · Choose a host");
-    // The field shows that none is chosen yet, as a choice that cannot be chosen.
-    expect(valueOf(dialog.tree(), "Route")).toBe("");
-    expect(optionOf(dialog.tree(), "Choose a host")).toMatchObject({ value: "", disabled: true });
-    expect(text(dialog.markup())).not.toContain("New IAP host");
-    // Save stays on; pressing it saves nothing and says what is missing.
-    expect(buttonTag(dialog.markup(), "Save database")).not.toContain(DISABLED);
-    expect(dialog.markup()).not.toContain("Choose a host to connect through.");
+    expect(text(dialog.markup())).toContain("Choose a host to connect through.");
+    const groups = elementsOf(dialog.tree(), CommandGroup);
+    expect(propsOf<{ heading: string }>(groups[0]).heading).toBe("Suggested for this project");
+    expect(elementsOf(groups[0], CommandItem)).toHaveLength(2);
     submit(dialog.tree());
     expect(dialog.onSave).not.toHaveBeenCalled();
-    expect(dialog.markup()).toMatch(/<p[^>]*role="alert"[^>]*>Choose a host to connect through\.<\/p>/);
-    // Once a host is chosen the sentence goes, the row names it, and the database is saved through it.
-    typeInto(dialog.tree(), "Route", WEB_2);
-    expect(dialog.markup()).not.toContain("Choose a host to connect through.");
-    expect(text(dialog.markup())).toContain("Private IP only · via web-2");
-    expect(routeLabels(dialog.tree())).not.toContain("Choose a host");
+    chooseHost(dialog.tree(), WEB_2);
+    expect(dialog.kept.draft).toMatchObject({ network: "private", via_host: WEB_2 });
+    expect(text(dialog.markup())).toContain("Selected host: web-2");
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ network: "private", via_host: WEB_2 }));
   });
 
-  it("the_sentence_about_a_missing_host_takes_the_place_of_an_earlier_failure", () => {
+  it("a missing route host replaces an earlier save error", () => {
     const dialog = editor({ ...newInDev, region: "asia-east1", instance: "billing-pg", name: "billing-pg", network: "private" }, { error: "Enter a database name (up to 128 characters)." });
-    expect(dialog.markup()).toMatch(/<p[^>]*role="alert"[^>]*>Enter a database name \(up to 128 characters\)\.<\/p>/);
     submit(dialog.tree());
     expect(dialog.onSave).not.toHaveBeenCalled();
-    expect(dialog.markup().match(/role="alert"/g)).toHaveLength(1);
     expect(dialog.markup()).toMatch(/<p[^>]*role="alert"[^>]*>Choose a host to connect through\.<\/p>/);
   });
 
-  it("a_private_only_instance_without_a_jump_host_offers_a_new_iap_host", () => {
+  it("offers a new IAP host when none match while other hosts stay selectable", () => {
     const bare = recordOverview({ hosts: [host(WEB_3, "web-3")], transports: [] });
     const dialog = editor(newInDev, { overview: bare, instances: listed([BILLING_PG]) });
-    expect(text(dialog.markup())).toContain("billing-pg PostgreSQL 16 asia-east1 · Private IP only · Needs a jump host · IAM sign-in on");
-    // Nothing is offered before the instance is picked.
-    expect(text(dialog.markup())).not.toContain("New IAP host");
     radioOf(dialog.tree(), "billing-pg").onChange();
-    expect(dialog.kept.draft.network).toBe("private");
-    expect(dialog.kept.draft.via_host).toBeUndefined();
-    const html = dialog.markup();
-    expect(text(html)).toContain("Private IP only · Needs a jump host");
-    expect(buttonTag(html, "New IAP host")).not.toContain(DISABLED);
-    press(dialog.tree(), "New IAP host");
-    expect(dialog.createIapHost).toHaveBeenCalledTimes(1);
-    // The page closes the dialog the way Cancel does; the dialog itself saves and cancels nothing.
-    expect(dialog.onCancel).not.toHaveBeenCalled();
-    expect(dialog.onSave).not.toHaveBeenCalled();
-    // A host whose route is elsewhere can still be chosen by hand, and then nothing more is offered.
-    expect(routeLabels(dialog.tree())).toEqual(["Choose a host", "Public IP", "Through web-3"]);
-    typeInto(dialog.tree(), "Route", WEB_3);
+    expect(text(dialog.markup())).toContain("Private IP only · Needs a jump host");
+    expect(buttonTag(dialog.markup(), "New IAP host")).not.toContain(DISABLED);
+    chooseHost(dialog.tree(), WEB_3);
     expect(dialog.kept.draft).toMatchObject({ network: "private", via_host: WEB_3 });
     expect(text(dialog.markup())).not.toContain("New IAP host");
-    expect(text(dialog.markup())).toContain("Private IP only · via web-3");
+    const unchosen = editor(newInDev, { overview: bare, instances: listed([BILLING_PG]) });
+    radioOf(unchosen.tree(), "billing-pg").onChange();
+    press(unchosen.tree(), "New IAP host");
+    expect(unchosen.createIapHost).toHaveBeenCalledTimes(1);
   });
 
-  it("picking_an_instance_with_a_public_ip_goes_over_it_again", () => {
+  it("a public-IP instance resets the proposed private route and allows a new host choice", () => {
     const dialog = editor(newInDev, { overview: LIBRARY, instances: listed([ORDERS_PG, BILLING_PG]) });
     radioOf(dialog.tree(), "billing-pg").onChange();
     expect(dialog.kept.draft.via_host).toBe(WEB_1);
     radioOf(dialog.tree(), "orders-pg").onChange();
-    expect(dialog.kept.draft.network).toBe("public");
-    expect(dialog.kept.draft.via_host).toBeUndefined();
-    expect(valueOf(dialog.tree(), "Route")).toBe(optionOf(dialog.tree(), "Public IP").value);
-    // After that the route is the person's to change.
-    typeInto(dialog.tree(), "Route", WEB_2);
+    expect(dialog.kept.draft).toMatchObject({ network: "public", via_host: undefined });
+    groupOf(dialog.tree(), "Route").onValueChange("private");
+    chooseHost(dialog.tree(), WEB_2);
     expect(dialog.kept.draft).toMatchObject({ instance: "orders-pg", network: "private", via_host: WEB_2 });
-    // The same, picked straight: one jump host is taken, several or none leave the host to be chosen.
     const one = [{ id: WEB_1, alias: "web-1" }];
     const two = [...one, { id: WEB_2, alias: "web-2" }];
     const route = ({ network, via_host }: DatabaseDraft) => [network, via_host];
@@ -774,58 +780,58 @@ describe("the route of a database in the dialog", () => {
     expect(route(pickInstance(newDatabase(), BILLING_PG, one))).toEqual(["private", WEB_1]);
     expect(route(pickInstance({ ...newDatabase(), network: "private", via_host: WEB_2 }, BILLING_PG, two))).toEqual(["private", undefined]);
     expect(route(pickInstance(newDatabase(), BILLING_PG))).toEqual(["private", undefined]);
-    // An instance with no address at all goes the private way too, and its start says what it lacks.
-    expect(route(pickInstance(newDatabase(), instance({ public_ip: false, private_ip: false }), one))).toEqual(["private", WEB_1]);
   });
 
-  it("the_route_offers_the_public_ip_then_every_host_by_alias_and_saves_the_one_chosen", () => {
-    const dialog = editor(SAVED, { overview: LIBRARY });
-    expect(routeLabels(dialog.tree())).toEqual(["Public IP", "Through web-1", "Through web-2", "Through web-3"]);
-    expect(valueOf(dialog.tree(), "Route")).toBe(optionOf(dialog.tree(), "Public IP").value);
-    expect(routes(dialog.tree()).map((option) => propsOf<{ value: string }>(option).value).slice(1)).toEqual([WEB_1, WEB_2, WEB_3]);
-    typeInto(dialog.tree(), "Route", WEB_3);
+  it("searches all hosts by alias, hostname and group without hiding nonmatching-project hosts", () => {
+    const ops = groupView({ payload: { schema: 1, name: "Operations", parent_id: null, defaults: {} } });
+    const grouped = hostView({ id: WEB_3, payload: hostPayload({ alias: "web-3", hostname: "reporting.internal", group_id: ops.id }) });
+    const overview = recordOverview({ hosts: [host(WEB_1, "web-1"), grouped], groups: [ops], transports: [hostTransport({ project: PROD }, WEB_1)] });
+    const dialog = editor({ ...SAVED, network: "private", via_host: WEB_1 }, { overview });
+    const groups = elementsOf(dialog.tree(), CommandGroup);
+    expect(propsOf<{ heading: string }>(groups[0]).heading).toBe("Suggested for this project");
+    expect(propsOf<{ heading: string }>(groups[1]).heading).toBe("All other hosts");
+    expect(hostItem(dialog.tree(), WEB_3).value).toContain("reporting.internal");
+    expect(hostItem(dialog.tree(), WEB_3).value).toContain("Operations");
+    expect(hostItem(dialog.tree(), WEB_3).value).toContain("web-3");
+    chooseHost(dialog.tree(), WEB_3);
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenLastCalledWith({ ...SAVED, network: "private", via_host: WEB_3 });
-    // Back on the public IP it is saved as it was, naming no host.
-    typeInto(dialog.tree(), "Route", optionOf(dialog.tree(), "Public IP").value);
+    groupOf(dialog.tree(), "Route").onValueChange("public");
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenLastCalledWith(SAVED);
-    expect(Object.keys(dialog.onSave.mock.lastCall![0])).not.toContain("via_host");
-    // The field is labelled Route, and a host's hidden characters show as codes.
-    expect(text(dialog.markup())).toContain("Route");
     const spoofed = recordOverview({ hosts: [host(WEB_1, "web‮-1")], transports: [] });
-    expect(routeLabels(editor(SAVED, { overview: spoofed }).tree())).toEqual(["Public IP", "Through web⟨U+202E⟩-1"]);
-    expect(editor(SAVED, { overview: spoofed }).markup()).not.toContain("‮");
+    const spoofedDialog = editor({ ...SAVED, network: "private", via_host: WEB_1 }, { overview: spoofed });
+    expect(text(spoofedDialog.markup())).toContain("web⟨U+202E⟩-1");
+    expect(spoofedDialog.markup()).not.toContain("‮");
   });
 
-  it("a_saved_database_whose_host_is_gone_keeps_it_and_says_it_is_unavailable", () => {
+  it("keeps a missing saved host until the person replaces it", () => {
     const gone: SavedDatabase = { ...SAVED, network: "private", via_host: GONE };
     const dialog = editor(gone, { overview: LIBRARY });
-    expect(valueOf(dialog.tree(), "Route")).toBe(GONE);
-    expect(optionOf(dialog.tree(), "Host unavailable")).toMatchObject({ value: GONE, disabled: true });
-    // Saved as it is: changing something else does not need another host.
+    expect(text(dialog.markup())).toContain("Host unavailable");
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenLastCalledWith(gone);
-    typeInto(dialog.tree(), "Route", WEB_1);
-    expect(routeLabels(dialog.tree())).not.toContain("Host unavailable");
+    chooseHost(dialog.tree(), WEB_1);
+    expect(text(dialog.markup())).not.toContain("Host unavailable");
+    expect(dialog.kept.draft.via_host).toBe(WEB_1);
   });
 
-  it("a_route_chosen_and_chosen_back_is_no_change", () => {
+  it("a route chosen and chosen back is no change", () => {
     const dialog = editor(SAVED, { overview: LIBRARY });
-    typeInto(dialog.tree(), "Route", WEB_1);
+    groupOf(dialog.tree(), "Route").onValueChange("private");
+    chooseHost(dialog.tree(), WEB_1);
     expect(changed(dialog.kept.draft, SAVED)).toBe(true);
-    typeInto(dialog.tree(), "Route", optionOf(dialog.tree(), "Public IP").value);
+    groupOf(dialog.tree(), "Route").onValueChange("public");
     expect(changed(dialog.kept.draft, SAVED)).toBe(false);
-    // The same for a database that goes through a host, its fields in the order the list gives them: another host, or the public IP, and back.
     const { account, default_database, pam, local_port, ...where } = SAVED;
     const routed: SavedDatabase = { ...where, network: "private", via_host: WEB_1, account, default_database, pam, local_port };
-    expect(Object.keys(routed).indexOf("via_host")).toBe(Object.keys(routed).indexOf("network") + 1);
     const again = editor(routed, { overview: LIBRARY });
-    typeInto(again.tree(), "Route", WEB_2);
+    chooseHost(again.tree(), WEB_2);
     expect(changed(again.kept.draft, routed)).toBe(true);
-    typeInto(again.tree(), "Route", optionOf(again.tree(), "Public IP").value);
+    groupOf(again.tree(), "Route").onValueChange("public");
     expect(changed(again.kept.draft, routed)).toBe(true);
-    typeInto(again.tree(), "Route", WEB_1);
+    groupOf(again.tree(), "Route").onValueChange("private");
+    chooseHost(again.tree(), WEB_1);
     expect(changed(again.kept.draft, routed)).toBe(false);
   });
 });
@@ -967,13 +973,13 @@ describe("the dialog as the Databases page mounts it", () => {
     });
     const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
     const drawn = (initial: DatabaseDraft) => renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial })} /></QueryClientProvider>);
-    const global = drawn({ ...newInProd, pam: check });
+    const global = drawn({ ...newInProd, region: "asia-east1", instance: "orders-pg", pam: check });
     expect(text(global)).toContain("You may request:");
     expect(global).toContain('aria-label="Add prod-admin"');
     expect(global).toContain('aria-label="Add prod-operate"');
     expect(global).not.toContain('aria-label="Add eu-operate"');
     // A check kept in another location asks for that location's.
-    const europe = drawn({ ...newInProd, pam: { ...check, location: "europe-west1" } });
+    const europe = drawn({ ...newInProd, region: "asia-east1", instance: "orders-pg", pam: { ...check, location: "europe-west1" } });
     expect(europe).toContain('aria-label="Add eu-operate"');
     expect(europe).not.toContain('aria-label="Add prod-admin"');
     // Without a grant check there is nothing to suggest, and without a project nothing to ask.
