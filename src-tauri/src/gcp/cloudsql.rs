@@ -12,13 +12,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
-use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use x509_cert::der::Decode;
 use zeroize::Zeroizing;
 
 use super::auth::{user_agent, Token, TokenSource};
-use super::pam::parse_rfc3339;
 use super::rest::{describe, query, GcpError, HTTP_TIMEOUT};
 
 const SQLADMIN_BASE: &str = "https://sqladmin.googleapis.com";
@@ -225,11 +226,8 @@ impl SqlAdmin for RestSqlAdmin {
         let answer = self.send(&token, &Subject::Instance(at), self.http.post(url).json(&body))?;
         let issued = read::<EphemeralAnswer>(answer, "the certificate")?.ephemeral_cert.unwrap_or_default();
         let cert_pem = issued.cert.filter(|pem| !pem.trim().is_empty()).ok_or_else(|| GcpError::Malformed("the answer carries no certificate".to_string()))?;
-        let cert_ends = issued
-            .expiration_time
-            .as_deref()
-            .and_then(parse_rfc3339)
-            .ok_or_else(|| GcpError::Malformed("the certificate comes without a valid expiry time".to_string()))?;
+        // The answer carries no expiry beside the certificate, so its end is read from the certificate, as Google's own connectors read it.
+        let cert_ends = certificate_end(&cert_pem).ok_or_else(|| GcpError::Malformed("the certificate cannot be read".to_string()))?;
         // The token is inside the certificate: when it ends, the instance can no longer sign anyone in with the certificate.
         let expires_at = token.expires_at.map_or(cert_ends, |token_ends| token_ends.min(cert_ends));
         Ok(EphemeralCert { cert_pem, expires_at, account: token.account })
@@ -296,6 +294,13 @@ fn segment(name: &str) -> String {
 /// it choked on.
 fn read<T: DeserializeOwned>(answer: serde_json::Value, what: &str) -> Result<T, GcpError> {
     serde_json::from_value(answer).map_err(|_| GcpError::Malformed(format!("the {API} API's answer about {what} is not in the shape it documents")))
+}
+
+/// When the first certificate in `pem` stops being valid, its `notAfter`; `None` when the text holds no certificate that can be read.
+fn certificate_end(pem: &str) -> Option<SystemTime> {
+    let der = CertificateDer::pem_slice_iter(pem.as_bytes()).next()?.ok()?;
+    let certificate = x509_cert::Certificate::from_der(der.as_ref()).ok()?;
+    Some(certificate.tbs_certificate.validity.not_after.to_system_time())
 }
 
 /// The error for an answer that is not a success. A `403` that says the API is not enabled is its own sentence, before the generic denial.
@@ -370,7 +375,6 @@ struct ConnectSettingsAnswer {
 #[serde(rename_all = "camelCase")]
 struct SslCert {
     cert: Option<String>,
-    expiration_time: Option<String>,
 }
 
 #[derive(Deserialize)]

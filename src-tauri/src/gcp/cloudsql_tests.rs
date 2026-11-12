@@ -15,9 +15,27 @@ const LIST_PATH: &str = "/v1/projects/acme-dev-654321/instances";
 /// The server CA of an instance whose CA hierarchy has two certificates, as one text. The bodies are not certificates: the client keeps
 /// the text whole and leaves reading it to the TLS code.
 const SERVER_CA: &str = "-----BEGIN CERTIFICATE-----\nc2VydmVyLWNhLW9uZQ==\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nc2VydmVyLWNhLXR3bw==\n-----END CERTIFICATE-----\n";
-const CLIENT_CERT: &str = "-----BEGIN CERTIFICATE-----\nY2xpZW50LWNlcnQ=\n-----END CERTIFICATE-----\n";
-/// `2027-01-15T09:00:00.123Z`, the expiry the certificate fixture carries (1 800 000 000 seconds are 08:00:00Z that day).
-const CERT_EXPIRES: Duration = Duration::from_millis(1_800_003_600_123);
+/// `2027-01-15T09:00:00Z`, when the client certificate fixture ends (1 800 000 000 seconds are 08:00:00Z that day).
+const CERT_EXPIRES: Duration = Duration::from_secs(1_800_003_600);
+/// Text armored as a certificate that is not one: its body is `client-cert` in base64.
+const NOT_A_CERT: &str = "-----BEGIN CERTIFICATE-----\nY2xpZW50LWNlcnQ=\n-----END CERTIFICATE-----\n";
+
+/// A client certificate as Cloud SQL issues one: valid for the hour that ends at `CERT_EXPIRES`. It is made once, since making its key
+/// takes a moment.
+fn client_cert() -> &'static str {
+    static CERT: OnceLock<String> = OnceLock::new();
+    CERT.get_or_init(|| {
+        let mut params = rcgen::CertificateParams::default();
+        params.not_before = rcgen::date_time_ymd(2027, 1, 15) + Duration::from_secs(8 * 3600);
+        params.not_after = rcgen::date_time_ymd(2027, 1, 15) + Duration::from_secs(9 * 3600);
+        params.self_signed(&rcgen::KeyPair::generate().expect("a key is made")).expect("the certificate is made").pem()
+    })
+}
+
+/// The first line of the client certificate's body, to look for where the certificate must not appear.
+fn client_cert_body() -> &'static str {
+    client_cert().lines().nth(1).expect("the certificate has a body")
+}
 
 /// One key for the tests that only need a key to send: making an RSA key takes a moment.
 fn key() -> &'static EphemeralKey {
@@ -89,11 +107,15 @@ fn read_settings(body: serde_json::Value) -> Result<ConnectSettings, GcpError> {
     admin(&server).connect_settings(Some(ACCOUNT), &instance())
 }
 
-fn cert_json(expiration_time: &str) -> serde_json::Value {
-    json!({
-        "kind": "sql#sslCertsCreateEphemeral",
-        "ephemeralCert": { "kind": "sql#sslCert", "cert": CLIENT_CERT, "certSerialNumber": "1", "createTime": "2027-01-15T08:00:00.123Z", "expirationTime": expiration_time }
-    })
+/// A `generateEphemeralCert` answer as Cloud SQL gives one: the certificate, its serial number and its kind, with no `createTime` or
+/// `expirationTime`.
+fn cert_json() -> serde_json::Value {
+    json!({ "ephemeralCert": { "kind": "sql#sslCert", "cert": client_cert(), "certSerialNumber": "1" } })
+}
+
+/// An answer that gives `cert` as the certificate, beside an expiry of its own.
+fn cert_json_with_expiry(cert: &str, expiration_time: &str) -> serde_json::Value {
+    json!({ "ephemeralCert": { "kind": "sql#sslCert", "cert": cert, "certSerialNumber": "1", "expirationTime": expiration_time } })
 }
 
 /// What `ephemeral_cert` makes of the fixture certificate, signed with the tokens of `tokens`.
@@ -275,7 +297,7 @@ fn an_answer_that_is_not_json_is_malformed_and_quotes_none_of_it() {
 }
 
 #[test]
-fn ephemeral_cert_sends_the_public_key_and_the_token_and_reads_the_expiry() {
+fn ephemeral_cert_sends_the_public_key_and_the_token_and_reads_the_expiry_from_the_certificate() {
     let key = key();
     assert!(key.public_pem().starts_with("-----BEGIN PUBLIC KEY-----"));
     let mut server = mockito::Server::new();
@@ -287,19 +309,19 @@ fn ephemeral_cert_sends_the_public_key_and_the_token_and_reads_the_expiry() {
         // The documented request, and nothing else in it.
         .match_body(Matcher::Json(json!({ "public_key": key.public_pem(), "access_token": "t0k" })))
         .with_header("content-type", "application/json")
-        .with_body(cert_json("2027-01-15T09:00:00.123Z").to_string())
+        .with_body(cert_json().to_string())
         .expect(1)
         .create();
     let cert = admin(&server).ephemeral_cert(Some(ACCOUNT), &instance(), key).unwrap();
     mock.assert();
-    assert_eq!(cert, EphemeralCert { cert_pem: CLIENT_CERT.into(), expires_at: UNIX_EPOCH + CERT_EXPIRES, account: ACCOUNT.into() });
+    assert_eq!(cert, EphemeralCert { cert_pem: client_cert().into(), expires_at: UNIX_EPOCH + CERT_EXPIRES, account: ACCOUNT.into() });
 }
 
 #[test]
 fn the_certificate_belongs_to_the_account_the_token_resolved_to() {
     // No account asked for: the token source decides, and the certificate says who it is for.
     let mut server = mockito::Server::new();
-    server.mock("POST", CERT_PATH).with_body(cert_json("2027-01-15T09:00:00.123Z").to_string()).create();
+    server.mock("POST", CERT_PATH).with_body(cert_json().to_string()).create();
     let cert = admin(&server).ephemeral_cert(None, &instance(), key()).unwrap();
     assert_eq!(cert.account, "static@example.com");
 }
@@ -308,38 +330,48 @@ fn the_certificate_belongs_to_the_account_the_token_resolved_to() {
 fn ephemeral_cert_expiry_is_capped_by_the_token_expiry() {
     // The token ends 08:16:40Z, before the certificate's 09:00:00Z: once it does, the instance cannot sign anyone in with the certificate.
     let token_ends = UNIX_EPOCH + Duration::from_secs(1_800_001_000);
-    let cert = issue_cert(Arc::new(Expiring { expires_at: Some(token_ends) }), cert_json("2027-01-15T09:00:00.123Z")).unwrap();
+    let cert = issue_cert(Arc::new(Expiring { expires_at: Some(token_ends) }), cert_json()).unwrap();
     assert_eq!(cert.expires_at, token_ends);
 }
 
 #[test]
 fn ephemeral_cert_expiry_is_kept_when_the_token_outlives_it_or_has_no_known_end() {
     for expires_at in [None, Some(UNIX_EPOCH + Duration::from_secs(1_800_009_999)), Some(UNIX_EPOCH + CERT_EXPIRES)] {
-        let cert = issue_cert(Arc::new(Expiring { expires_at }), cert_json("2027-01-15T09:00:00.123Z")).unwrap();
+        let cert = issue_cert(Arc::new(Expiring { expires_at }), cert_json()).unwrap();
         assert_eq!(cert.expires_at, UNIX_EPOCH + CERT_EXPIRES, "{expires_at:?}");
     }
 }
 
 #[test]
-fn a_certificate_answer_without_a_certificate_or_an_expiry_is_malformed() {
+fn an_expiration_time_in_the_answer_does_not_replace_the_certificate_s_own_end() {
+    // The instance holds the certificate to the end written in it, whatever the answer beside it says.
+    let cert = issue_cert(Arc::new(StaticToken("t0k".into())), cert_json_with_expiry(client_cert(), "2027-01-15T12:00:00Z")).unwrap();
+    assert_eq!(cert.expires_at, UNIX_EPOCH + CERT_EXPIRES);
+}
+
+#[test]
+fn a_certificate_answer_without_a_readable_certificate_is_malformed() {
+    // An expiry in the answer does not make up for a certificate that cannot be read.
     let tokens = || -> Arc<dyn TokenSource> { Arc::new(StaticToken("t0k".into())) };
-    let mut no_cert = cert_json("2027-01-15T09:00:00.123Z");
+    let mut no_cert = cert_json();
     no_cert["ephemeralCert"].as_object_mut().unwrap().remove("cert");
-    let mut no_expiry = cert_json("2027-01-15T09:00:00.123Z");
-    no_expiry["ephemeralCert"].as_object_mut().unwrap().remove("expirationTime");
-    let bodies = [json!({}), json!({ "ephemeralCert": {} }), no_cert, no_expiry, cert_json("tomorrow"), cert_json("2027-01-15T09:00:00+02:00")];
+    let unreadable = ["", NOT_A_CERT, "not a certificate"].map(|cert| cert_json_with_expiry(cert, "2027-01-15T09:00:00Z"));
+    let bodies = [json!({}), json!({ "ephemeralCert": {} }), no_cert].into_iter().chain(unreadable);
     for body in bodies {
         let result = issue_cert(tokens(), body.clone());
         assert!(matches!(result, Err(GcpError::Malformed(_))), "{body}: {result:?}");
+        // What the certificate text holds is not repeated in the error: a certificate carries the access token.
+        let shown = result.map_err(|error| format!("{error:?} {error}")).unwrap_err();
+        assert!(!shown.contains("Y2xpZW50LWNlcnQ=") && !shown.contains("not a certificate"), "{shown}");
     }
 }
 
 #[test]
 fn a_certificate_answer_of_the_wrong_shape_does_not_put_the_certificate_in_the_error() {
     // `ephemeralCert` is text here: serde would quote it in its own message, and the certificate carries the access token.
-    let error = issue_cert(Arc::new(StaticToken("t0k".into())), json!({ "ephemeralCert": CLIENT_CERT })).unwrap_err();
+    let error = issue_cert(Arc::new(StaticToken("t0k".into())), json!({ "ephemeralCert": client_cert() })).unwrap_err();
     assert!(matches!(error, GcpError::Malformed(_)), "{error:?}");
-    assert!(!format!("{error:?} {error}").contains("Y2xpZW50LWNlcnQ="), "{error}");
+    assert!(!format!("{error:?} {error}").contains(client_cert_body()), "{error}");
 }
 
 #[test]
@@ -643,7 +675,7 @@ fn names_cannot_add_a_segment_or_a_query_to_the_request() {
     let odd = InstanceRef { project: "acme/dev?x=1".into(), region: "asia-east1".into(), instance: "orders pg#1".into() };
     let mut server = mockito::Server::new();
     let settings = server.mock("GET", "/v1/projects/acme%2Fdev%3Fx%3D1/instances/orders%20pg%231/connectSettings").with_body(settings_json().to_string()).expect(1).create();
-    let cert = server.mock("POST", "/v1/projects/acme%2Fdev%3Fx%3D1/instances/orders%20pg%231:generateEphemeralCert").with_body(cert_json("2027-01-15T09:00:00.123Z").to_string()).expect(1).create();
+    let cert = server.mock("POST", "/v1/projects/acme%2Fdev%3Fx%3D1/instances/orders%20pg%231:generateEphemeralCert").with_body(cert_json().to_string()).expect(1).create();
     let list = server.mock("GET", "/v1/projects/acme%2Fdev%3Fx%3D1/instances").with_body(json!({}).to_string()).expect(1).create();
     let admin = admin(&server);
     admin.connect_settings(Some(ACCOUNT), &odd).unwrap();
@@ -700,8 +732,8 @@ fn an_ephemeral_key_prints_no_key_material() {
 #[test]
 fn an_ephemeral_cert_prints_no_certificate_text() {
     // The certificate carries the access token, so it is not printed either.
-    let cert = EphemeralCert { cert_pem: CLIENT_CERT.into(), expires_at: UNIX_EPOCH + CERT_EXPIRES, account: ACCOUNT.into() };
+    let cert = EphemeralCert { cert_pem: client_cert().into(), expires_at: UNIX_EPOCH + CERT_EXPIRES, account: ACCOUNT.into() };
     let shown = format!("{cert:?} {cert:#?}");
     assert!(shown.contains(ACCOUNT));
-    assert!(!shown.contains("BEGIN CERTIFICATE") && !shown.contains("Y2xpZW50LWNlcnQ="), "{shown}");
+    assert!(!shown.contains("BEGIN CERTIFICATE") && !shown.contains(client_cert_body()), "{shown}");
 }
