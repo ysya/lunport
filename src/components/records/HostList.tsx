@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent, type ReactElement } from "react";
 import {
   AlertCircle,
   Check,
   ChevronDown,
+  ChevronRight,
   Clock3,
   Cloud,
   Download,
@@ -129,6 +130,7 @@ export function RecordHostList({
   const [search, setSearch] = useState("");
   const [draggedGroup, setDraggedGroup] = useState<string | null>(null);
   const [groupDrop, setGroupDrop] = useState<{ id: string; side: "before" | "after" } | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const cleanupGroupDrag = useRef<(() => void) | null>(null);
   const suppressGroupClick = useRef(false);
   useEffect(() => () => cleanupGroupDrag.current?.(), []);
@@ -257,7 +259,7 @@ export function RecordHostList({
     window.addEventListener("blur", cancel);
     window.addEventListener("keydown", key);
   };
-  const groupCards = (nodes: GroupNode[]) => {
+  const groupCards = (nodes: GroupNode[], tree = false): ReactElement => {
     const siblings = nodes.map((node) => node.group.id);
     const move = (id: string, index: number, offset: -1 | 1) => {
       const target = siblings[index + offset];
@@ -265,10 +267,11 @@ export function RecordHostList({
       const next = moveGroup(overview.group_order?.ids ?? [], siblings, id, target, offset < 0 ? "before" : "after");
       if (next) reorder?.(next);
     };
-    return <div className="library-group-grid">
+    return <div className={cn("library-group-grid", tree && "library-group-tree")}>
       {nodes.map((node, index) => {
         const name = revealHidden(node.group.payload.name);
-        return <div key={node.group.id}
+        const expanded = expandedGroups.has(node.group.id);
+        const card = <div key={node.group.id}
           className={cn("library-group-card", draggedGroup === node.group.id && "is-dragging", groupDrop?.id === node.group.id && `group-drop-${groupDrop.side}`)}
           data-group-row={node.group.id} data-reorderable={orderEnabled}
           onPointerDown={(event) => startGroupDrag(event, node.group.id, siblings)}
@@ -289,9 +292,21 @@ export function RecordHostList({
                 <span className="library-group-path">{revealHidden(groupPath(overview, node.group.id, node.group.scope))}</span>}
             </span>
           </button>
+          {tree && node.children.length > 0 && <button type="button" className="library-group-edit library-group-toggle"
+            aria-label={`${expanded ? "Collapse" : "Expand"} group ${name}`} aria-expanded={expanded}
+            onClick={() => setExpandedGroups((current) => {
+              const next = new Set(current);
+              if (next.has(node.group.id)) next.delete(node.group.id);
+              else next.add(node.group.id);
+              return next;
+            })}><ChevronRight className={cn("size-4", expanded && "rotate-90")} /></button>}
           {selectGroup && <button type="button" className="library-group-edit" aria-label={`Edit group ${name}`}
             disabled={disabled} onClick={() => selectGroup(node.group.id)}><MoreHorizontal className="size-4" /></button>}
         </div>;
+        return tree ? <div key={node.group.id} className="library-group-branch">
+          {card}
+          {expanded && node.children.length > 0 && groupCards(node.children, true)}
+        </div> : card;
       })}
     </div>;
   };
@@ -499,7 +514,7 @@ export function RecordHostList({
               </DropdownMenuContent>
             </DropdownMenu>}
           </div>
-          {groupCards(rootGroups)}
+          {groupCards(rootGroups, !search.trim())}
           {showUngrouped && <div className="library-group-grid mt-3"><div className="library-group-card">
             <button type="button" aria-label="Open ungrouped hosts" onClick={() => { setSearch(""); changeFilter?.({ kind: "ungrouped" }); }}>
               <span className="library-folder-icon"><FolderOpen className="size-5" /></span>

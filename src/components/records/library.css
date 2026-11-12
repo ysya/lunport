@@ -344,6 +344,13 @@
   grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
   gap: 0.75rem;
 }
+.library-group-tree { display: flex; flex-direction: column; gap: 0.5rem; }
+.library-group-tree .library-group-tree {
+  margin: 0.5rem 0 0 1.25rem;
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--library-line);
+}
+.library-group-toggle { display: grid; place-items: center; }
 .library-group-card {
   display: flex;
   align-items: center;

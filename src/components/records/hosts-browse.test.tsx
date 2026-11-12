@@ -27,6 +27,11 @@ describe("Hosts browsing", () => {
     expect(html).toContain('aria-label="Open ungrouped hosts"');
     expect(html).not.toContain('data-host-id="' + host.id + '"');
   });
+  it("offers an expand control for nested groups in the group index", () => {
+    const html = render({ kind: "groups" });
+    expect(html).toContain('aria-label="Expand group Operations"');
+    expect(html).toContain('aria-expanded="false"');
+  });
   it("shows searchable tags with host counts without displaying every host in the tag index", () => {
     const html = render({ kind: "tags" } as LibraryFilter);
     expect(html).toContain('aria-label="Search tags"');
