@@ -4,6 +4,7 @@ import { LoaderCircle, Plus } from "lucide-react";
 import { RadioGroup } from "radix-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -28,7 +29,8 @@ import {
   type SavedDatabase,
 } from "@/lib/databases";
 import { isProjectId, newPamCheck } from "@/lib/transports";
-import { RecordField, selectClass } from "./form";
+import { RecordField } from "./form";
+import { groupPath, recordHostSearchText } from "./group-tree";
 import { choice, EntitlementsInput, EntitlementSuggestions, GoogleAccountField, segmented } from "./IapRouteFields";
 
 /*
@@ -105,12 +107,6 @@ const throughHost = (draft: DatabaseDraft, host: string | undefined): DatabaseDr
 const chosenHost = (draft: DatabaseDraft): string | null => routeHost(draft) || null;
 /** Whether `draft` is over its private IP and goes through no host yet, which it cannot be saved as. */
 const hostless = (draft: DatabaseDraft) => draft.network === "private" && chosenHost(draft) === null;
-
-/** The value of the Route field's Public IP; every other value is a host's identity. */
-const PUBLIC_ROUTE = "public";
-
-/** `draft` the way the Route field's `value` says: over its public IP, or through that host. */
-const withRoute = (draft: DatabaseDraft, value: string): DatabaseDraft => (value === PUBLIC_ROUTE ? overPublicIp(draft) : throughHost(draft, value));
 
 /**
  * `draft` at the instance picked from the list, which starts again from the database `postgres` and goes the way the instance is
@@ -356,32 +352,45 @@ export function DatabaseEditorView(props: DatabaseEditorViewProps) {
                 </p>
               </RecordField>
             )}
-            <RecordField label="Route">
-              <select className={selectClass} value={draft.network === "public" ? PUBLIC_ROUTE : (host ?? "")} onChange={(event) => onDraft(withRoute(draft, event.target.value))}>
-                {missing && (
-                  <option value="" disabled>
-                    Choose a host
-                  </option>
-                )}
-                {unavailable && (
-                  <option value={host} disabled>
-                    {HOST_UNAVAILABLE}
-                  </option>
-                )}
-                <option value={PUBLIC_ROUTE}>Public IP</option>
-                {hosts.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {`Through ${revealHidden(candidate.alias)}`}
-                  </option>
-                ))}
-              </select>
-              {missing && candidates.length === 0 && (
-                <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => createIapHost()}>
-                  <Plus />
-                  New IAP host
-                </Button>
-              )}
-            </RecordField>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Route</p>
+              <RadioGroup.Root aria-label="Route" value={draft.network} disabled={busy}
+                onValueChange={(network) => onDraft(network === "public" ? overPublicIp(draft) : throughHost(draft, host ?? undefined))}
+                className={segmented}>
+                <RadioGroup.Item value="public" className={choice}>Public IP</RadioGroup.Item>
+                <RadioGroup.Item value="private" className={choice}>Through a host</RadioGroup.Item>
+              </RadioGroup.Root>
+              {draft.network === "private" && <div className="space-y-2">
+                <p className={cn("text-xs", unavailable ? "text-warning" : "text-muted-foreground")}>
+                  {unavailable ? HOST_UNAVAILABLE : host ? `Selected host: ${revealHidden(hosts.find((candidate) => candidate.id === host)?.alias ?? "")}` : "Choose a host to connect through."}
+                </p>
+                <Command className="h-auto rounded-lg border bg-background">
+                  <CommandInput aria-label="Search route hosts" placeholder="Search hosts by name, address or Group…" disabled={busy} />
+                  <CommandList className="max-h-60">
+                    <CommandEmpty>No matching hosts.</CommandEmpty>
+                    {[
+                      { label: "Suggested for this project", hosts: hosts.filter((candidate) => candidates.some((suggested) => suggested.id === candidate.id)) },
+                      { label: "All other hosts", hosts: hosts.filter((candidate) => !candidates.some((suggested) => suggested.id === candidate.id)) },
+                    ].map((section) => section.hosts.length > 0 && <CommandGroup key={section.label} heading={section.label}>
+                      {section.hosts.map((candidate) => {
+                        const entry = overview.hosts.find((item) => item.id === candidate.id)!;
+                        const group = groupPath(overview, entry.payload.group_id, entry.scope);
+                        return <CommandItem key={candidate.id} value={recordHostSearchText(overview, entry)} data-checked={host === candidate.id} disabled={busy}
+                          onSelect={() => onDraft(throughHost(draft, candidate.id))}>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">{revealHidden(candidate.alias)}</span>
+                            <span className="block truncate text-xs text-muted-foreground">{revealHidden([entry.effective_payload.hostname, group].filter(Boolean).join(" · "))}</span>
+                          </span>
+                        </CommandItem>;
+                      })}
+                    </CommandGroup>)}
+                  </CommandList>
+                </Command>
+                {missing && candidates.length === 0 && <Button type="button" variant="outline" size="sm" className="w-fit" onClick={createIapHost}>
+                  <Plus />New IAP host
+                </Button>}
+              </div>}
+            </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <RecordField label="Name">
                 <Input value={draft.name} maxLength={128} required placeholder="Orders" onChange={(event) => patch({ name: event.target.value })} />
