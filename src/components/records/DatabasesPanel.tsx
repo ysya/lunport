@@ -1,5 +1,5 @@
 import "./databases.css";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -85,6 +85,7 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
 
 /** The grant of the host a database is reached through, with the request that its button makes. */
 type RouteGrantRequest = RouteHostGrant & { request: () => void };
+const detailsPanelId = (id: string) => `${databaseDetailsId(id)}-panel`;
 
 /**
  * The grant the host a database is reached through needs, beside the database's own and read the same way, through the
@@ -126,7 +127,7 @@ export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: Da
   return <tr className={cn("border-b last:border-0 hover:bg-muted/20", details?.open && "bg-primary/5")}>
     <td className="max-w-72 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
-        {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button type="button" className="min-w-0 truncate text-left font-medium hover:text-primary" title={name} aria-current={details?.open ? "true" : undefined} onClick={details?.toggle}>{name}</button>}
+        {row.removed ? <span className="truncate font-medium" title={name}>{name}</span> : <button type="button" className="min-w-0 truncate text-left font-medium hover:text-primary" title={name} aria-expanded={details?.open} aria-controls={detailsPanelId(database.id)} onClick={details?.toggle}>{name}</button>}
         {!row.removed && <EnvironmentBadge environment={row.environment} />}
       </div>
       {row.removed ? <span className="mt-1 block text-xs text-warning">Deleted on another device. Stop this running database to remove it here.</span> : <>
@@ -149,7 +150,7 @@ export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: Da
       {row.environment === "prod" && live.writable_until_ms !== null && <WritesOnMarker until={live.writable_until_ms} />}
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
-      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={databaseDetailsId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
+      {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={detailsPanelId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
       {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} aria-label={`${verb} ${name}`} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{verb}</Button>}
     </div></td>
   </tr>;
@@ -180,6 +181,9 @@ export function DatabaseAccess({ row, route }: { row: DatabaseView; route: Route
 export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOverview; createIapHost: () => void }) {
   const query = useQuery(databasesQuery);
   const client = useQueryClient();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLElement>(null);
+  const savedFocus = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const flight = useRef(false);
@@ -189,6 +193,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const [stopping, setStopping] = useState<DatabaseView | null>(null);
   // The selected database has its connection details beside the list. Undefined selects the first row; null closes the details.
   const [selectedId, setSelectedId] = useState<string | null | undefined>(undefined);
+  const [focusAfterSelection, setFocusAfterSelection] = useState<string | null>(null);
   // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
   // while the dialog is open. The opening keys the editor, so that one that is still mounted never shows the draft of an earlier opening.
   const [editing, setEditing] = useState<{ key: number; initial: DatabaseDraft; expected: SavedDatabase | null } | null>(null);
@@ -207,6 +212,15 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const selectable = visible.filter((row) => !row.removed);
   const selected = selectedId === null ? null : selectable.find((row) => row.database.id === selectedId) ?? selectable[0] ?? null;
   const selectedVia = selected ? routeHostGrant(overview, selected.database) : null;
+  useEffect(() => {
+    if (focusAfterSelection !== null && selected?.database.id === focusAfterSelection) {
+      if (workspaceRef.current && workspaceRef.current.clientWidth < 1100) {
+        detailRef.current?.focus();
+        detailRef.current?.scrollIntoView({ block: "start" });
+      }
+      setFocusAfterSelection(null);
+    }
+  }, [focusAfterSelection, selected?.database.id]);
   // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown: in the dialog for a
   // save, which stays open with what was typed, and on the page for the rest. A save that worked closes the dialog.
   const action = async (run: () => Promise<void>, inEditor = false) => {
@@ -243,6 +257,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     const saved = await saveDatabase(next, editing.expected);
     setSearch("");
     setSelectedId(saved.id);
+    savedFocus.current = saved.id;
   }, true); };
   // The grant is read again so that the selected details show what was requested.
   const requestGrant = (id: string) => void action(async () => {
@@ -254,7 +269,11 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     try { await requestRouteGrant(id); }
     finally { await client.invalidateQueries({ queryKey: pamStatusQuery(hostId).queryKey }); }
   });
-  const toggleDetails = (id: string) => setSelectedId(selected?.database.id === id ? null : id);
+  const toggleDetails = (id: string) => {
+    const closing = selected?.database.id === id;
+    setSelectedId(closing ? null : id);
+    setFocusAfterSelection(closing ? null : id);
+  };
   // A delete can fail once the record is gone, and a dialog that stayed open would offer to delete it again: it closes either way, and
   // the failure is shown on the page beside the list that was read again.
   const remove = (row: DatabaseView) => void action(async () => {
@@ -285,7 +304,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
       <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-14 text-center">
         <Database className="size-7 text-muted-foreground" /><h2 className="font-medium">Your Cloud SQL databases, within reach</h2>
         <p className="max-w-sm text-sm text-muted-foreground">Save a PostgreSQL instance and Lunport offers it to your other apps on a local port, signed in with your Google account.</p>
-      </div> : <div className={cn("database-workspace", selected && "has-details")}>
+      </div> : <div ref={workspaceRef} className={cn("database-workspace", selected && "has-details")}>
       <div className="database-list overflow-x-auto rounded-lg border">
       <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Local address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{visible.map((row) => {
@@ -298,7 +317,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
         })}</tbody></table>
       {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
       </div>
-      {selected && <aside className="database-detail space-y-4" aria-label="Database details">
+      {selected && <aside ref={detailRef} id={detailsPanelId(selected.database.id)} tabIndex={-1} className="database-detail space-y-4" aria-label="Database details">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-1">
             <h2 className="break-words text-base font-semibold">{revealHidden(selected.database.name)}</h2>
@@ -332,7 +351,16 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
         </div>}
       </aside>}
     </div>}
-    <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl">
+    <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl" onCloseAutoFocus={(event) => {
+      const id = savedFocus.current;
+      savedFocus.current = null;
+      if (id === null || !workspaceRef.current || workspaceRef.current.clientWidth >= 1100) return;
+      if (detailRef.current?.id === detailsPanelId(id)) {
+        event.preventDefault();
+        detailRef.current.focus();
+        detailRef.current.scrollIntoView({ block: "start" });
+      } else setFocusAfterSelection(id);
+    }}>
       <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
       {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} overview={overview} busy={busy} error={editorError} onSave={save} onCancel={() => closeEditor()} createIapHost={() => closeEditor(createIapHost)} onDirty={setDirty} />}
     </TaskDialogContent></Dialog>
