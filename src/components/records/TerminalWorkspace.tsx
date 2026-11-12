@@ -1,12 +1,25 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { CircleAlert, Library, LoaderCircle, Plus, Terminal, Unplug, X } from "lucide-react";
 import { useTerminalStore, type TerminalTab } from "@/stores/terminals";
+import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { isImeKey } from "@/lib/ime";
 import "./terminal.css";
 const TerminalPane = lazy(() => import("./TerminalPane").then((module) => ({ default: module.TerminalPane })));
+
+export function requestTerminalClose(id: string, onConfirm: (id: string) => void) {
+  const tab = useTerminalStore.getState().tabs.find((item) => item.id === id);
+  if ((tab?.state === "open" || tab?.state === "connecting") && useSettingsStore.getState().confirmTerminalClose !== false) onConfirm(id);
+  else useTerminalStore.getState().close(id);
+}
+
+export function completeTerminalClose(id: string, doNotAskAgain: boolean) {
+  if (doNotAskAgain) useSettingsStore.getState().setConfirmTerminalClose(false);
+  useTerminalStore.getState().close(id);
+}
 
 /**
  * The session tabs the title bar shows. The strip, and the room between and around the tabs, drag the window: Tauri starts a drag
@@ -51,11 +64,11 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const activate = useTerminalStore((state) => state.activate);
   const [closing, setClosing] = useState<string | null>(null);
+  const [doNotAskAgain, setDoNotAskAgain] = useState(false);
   const strip = useRef<HTMLElement>(null);
   const requestClose = (id: string) => {
-    const tab = useTerminalStore.getState().tabs.find((tab) => tab.id === id);
-    if (tab?.state === "open" || tab?.state === "connecting") setClosing(id);
-    else useTerminalStore.getState().close(id);
+    setDoNotAskAgain(false);
+    requestTerminalClose(id, setClosing);
   };
   useEffect(() => () => useTerminalStore.getState().reset(), []);
   useEffect(() => { strip.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" }); }, [activeId, tabs.length]);
@@ -84,7 +97,7 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
     <Suspense fallback={activeId ? <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading terminal…</div> : null}>
       {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id && !settingsOpen} openKeys={openKeys} />)}
     </Suspense>
-    <Dialog open={closing !== null} onOpenChange={(open) => { if (!open) setClosing(null); }}>
+    <Dialog open={closing !== null} onOpenChange={(open) => { if (!open) { setClosing(null); setDoNotAskAgain(false); } }}>
       <DialogContent onCloseAutoFocus={(event) => {
         event.preventDefault();
         requestAnimationFrame(() => {
@@ -97,9 +110,13 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
       }}>
         <DialogTitle>Close terminal?</DialogTitle>
         <DialogDescription>This ends this SSH session. Running commands may stop. Reconnecting opens a new shell.</DialogDescription>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Checkbox checked={doNotAskAgain} onCheckedChange={(checked) => setDoNotAskAgain(checked === true)} />
+          Don't ask again
+        </label>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setClosing(null)}>Cancel</Button>
-          <Button variant="destructive" onClick={() => { if (closing) useTerminalStore.getState().close(closing); setClosing(null); }}>Close terminal</Button>
+          <Button variant="outline" onClick={() => { setClosing(null); setDoNotAskAgain(false); }}>Cancel</Button>
+          <Button variant="destructive" onClick={() => { if (closing) completeTerminalClose(closing, doNotAskAgain); setClosing(null); setDoNotAskAgain(false); }}>Close terminal</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
