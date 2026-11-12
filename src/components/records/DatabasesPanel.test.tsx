@@ -103,10 +103,17 @@ const grantLineTag = (html: string) => html.match(/<span class="mt-1 flex[^"]*"[
 const classesOf = (html: string) => new Set((html.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/));
 
 describe("the Databases page", () => {
+  it("shows the selected database in a separate details area", () => {
+    const html = render([row({}, { pam: null })]);
+    expect(html).toContain('aria-label="Database details"');
+    expect(text(html)).toContain("Connection URL");
+    expect(text(html)).toContain("Copy password");
+  });
+
   it("renders_a_prod_database_with_its_badge_route_and_grant_line", async () => {
     const { html } = await renderWithGrants([row()]);
     const shown = text(html);
-    expect(shown).toContain("Databases 1");
+    expect(shown).toContain("Cloud SQL 1");
     expect(shown).toContain("Cloud SQL connections that Lunport signs in to for your other apps.");
     expect(shown).toMatch(/Orders\s+PROD/);
     expect(shown).toContain("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
@@ -209,14 +216,22 @@ describe("the Databases page", () => {
     );
     const html = navigation("hosts");
     const library = html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'));
-    const order = ["All hosts (1)", "Keys (0)", "Tunnels", "Databases"].map((label) => library.indexOf(`aria-label="${label}"`));
+    const order = ["All hosts (1)", "Keys (0)", "AI activity", "Tunnels", "Cloud SQL"].map((label) => library.indexOf(`aria-label="${label}"`));
     expect(order.every((at) => at >= 0), "every row is there").toBe(true);
     expect(order, "in this order").toEqual([...order].sort((a, b) => a - b));
     // It shows no count, as Tunnels shows none, and is the current page only on its own page.
-    expect(html).not.toContain('aria-label="Databases (');
-    expect(html).not.toContain('aria-current="page" aria-label="Databases"');
-    expect(navigation("databases")).toContain('aria-current="page" aria-label="Databases"');
+    expect(html).not.toContain('aria-label="Cloud SQL (');
+    expect(html).not.toContain('aria-current="page" aria-label="Cloud SQL"');
+    expect(navigation("databases")).toContain('aria-current="page" aria-label="Cloud SQL"');
     expect(navigation("databases")).not.toContain('aria-current="page" aria-label="Tunnels"');
+  });
+
+  it("groups tunnels and Cloud SQL as connections", () => {
+    const html = renderToStaticMarkup(
+      <LibraryNavigation overview={recordOverview()} panel="databases" filter={{ kind: "all" }} navigate={vi.fn()} changeFilter={vi.fn()} createGroup={vi.fn()} />,
+    );
+    expect(text(html)).toContain("Connections");
+    expect(html).toContain('aria-current="page" aria-label="Cloud SQL"');
   });
 
   it("a_grant_ending_within_five_minutes_warns_without_a_request_button", async () => {
@@ -502,7 +517,7 @@ describe("the grant of the host a database is reached through", () => {
     const client = new QueryClient();
     client.setQueryData(pamStatusQuery(WEB).queryKey, none);
     const drawn = (busy: boolean) => renderToStaticMarkup(<QueryClientProvider client={client}><table><tbody>{DatabaseRow({
-      row: through({ pam: null }), hostAlias: "web\u202e-1", busy, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(),
+      row: through({ pam: null }), hostAlias: "web\u202e-1", busy, toggle: vi.fn(), requestGrant: vi.fn(), details: { open: false, toggle: vi.fn() },
       routeGrant: { hostId: WEB, alias: "web\u202e-1", pam: ROUTE_PAM, request: vi.fn() },
     })}</tbody></table></QueryClientProvider>);
     // The code's plus sign is escaped: the label is matched as a pattern.
@@ -629,10 +644,9 @@ describe("the marker of a prod row whose writes are on", () => {
     return found ? { classes: new Set(found[1].split(/\s+/)), words: found[2] } : null;
   };
 
-  it("a_collapsed_prod_row_whose_writes_are_on_shows_the_time_left_in_the_destructive_style", () => {
+  it("a_prod_row_whose_writes_are_on_shows_the_time_left_in_the_destructive_style", () => {
     const html = render([writable(14 * MINUTE + 59 * SECOND)]);
-    // The details are closed: the danger state is on the row itself.
-    expect(html).not.toContain("<section");
+    // The danger state remains on the row when its details are visible beside it.
     expect(marker(html)?.words).toBe("Writes on · 14:59");
     expect(marker(html)?.classes.has("text-destructive")).toBe(true);
     expect(marker(html)?.classes.has("bg-destructive/10")).toBe(true);
@@ -660,7 +674,7 @@ describe("the marker of a prod row whose writes are on", () => {
       row({ live: live("running") }, { id: "00000000000000a2", name: "Billing", pam: null }),
       writable(30 * SECOND, {}, { id: "00000000000000a3", name: "Reports" }),
     ]);
-    expect(html.match(/Writes on · \d\d:\d\d/g)).toEqual(["Writes on · 05:00", "Writes on · 00:30"]);
+    expect(html.split("<aside")[0].match(/Writes on · \d\d:\d\d/g)).toEqual(["Writes on · 05:00", "Writes on · 00:30"]);
   });
 
   it("a_row_that_runs_although_its_record_is_gone_still_says_that_writes_are_on", () => {
@@ -682,10 +696,12 @@ describe("the marker of a prod row whose writes are on", () => {
   });
 
   it("holds_no_clock_for_a_row_without_a_window", () => {
-    // Only a row whose window is open counts down: the grant line of a database with a grant check is the one that asks for the clock.
-    render([row({ live: live("running") }, { pam: null }), writable(MINUTE, {}, { id: "00000000000000a2", name: "Reports", environment: "dev" })]);
+    // Only a row whose window is open counts down; this checks rows without the selected detail card's own clock.
+    const drawRow = (view: DatabaseView) => renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: view, hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn() })}</tbody></table>);
+    drawRow(row({ live: live("running") }, { pam: null }));
+    drawRow(writable(MINUTE, {}, { id: "00000000000000a2", name: "Reports", environment: "dev" }));
     expect(vi.mocked(useNow)).not.toHaveBeenCalled();
-    render([writable(MINUTE)]);
+    drawRow(writable(MINUTE));
     expect(vi.mocked(useNow)).toHaveBeenCalledTimes(1);
   });
 });
@@ -767,25 +783,25 @@ describe("stopping a database", () => {
   });
 });
 
-describe("the connection details under a row", () => {
+describe("the connection details beside the list", () => {
   const labelOf = (button: { props: unknown }) => (button.props as { "aria-label"?: string })["aria-label"];
   const noDetails = { pam: null };
   const shared = (name: string, id: string, patch: Partial<DatabaseView> = {}, database: Partial<SavedDatabase> = {}) => row(patch, { id, name, ...noDetails, ...database });
 
-  it("a_database_with_a_port_has_a_details_button_that_is_closed_until_asked", () => {
+  it("shows the first database's details and lets the person close them", () => {
     const html = render([row({}, noDetails)]);
     const toggle = iconButton(html, "Connection details for Orders");
-    expect(toggle).toContain('aria-expanded="false"');
+    expect(toggle).toContain('aria-expanded="true"');
     expect(toggle).not.toContain(DISABLED);
-    // Nothing of the details is drawn, asked for or read until then.
-    expect(html).not.toContain("<section");
-    expect(text(html)).not.toMatch(/Copy URL|Copy password|Rotate password|postgresql:\/\//);
+    expect(html).toContain('aria-label="Database details"');
+    expect(text(html)).toMatch(/Copy URL.*Copy password.*Rotate password/);
+    expect(iconButton(html, "Close database details")).not.toContain(DISABLED);
     expect(invoke).not.toHaveBeenCalled();
   });
 
   it("the_details_button_controls_the_card_that_carries_its_id", () => {
-    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
-    // Closed or open, it names the card it opens, which is drawn under the row with that id.
+    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
+    // Closed or open, it names the card shown beside the list with that id.
     for (const open of [false, true]) expect(toggle(open), String(open)).toContain('aria-controls="database-details-00000000000000a1"');
     const client = new QueryClient();
     const card = renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseAccess row={row({ live: live("running") }, noDetails)} route={PUBLIC_ROUTE} /></QueryClientProvider>);
@@ -798,29 +814,28 @@ describe("the connection details under a row", () => {
   });
 
   it("the_details_button_follows_whether_the_details_are_open_and_presses_through", () => {
-    const [toggle, requestGrant, ask, edit, details] = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
-    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle, requestGrant, ask, edit, details: { open, toggle: details } });
+    const [toggle, requestGrant, details] = [vi.fn(), vi.fn(), vi.fn()];
+    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle, requestGrant, details: { open, toggle: details } });
     const html = (open: boolean) => renderToStaticMarkup(<table><tbody>{drawn(open)}</tbody></table>);
     expect(iconButton(html(false), "Connection details for Orders")).toContain('aria-expanded="false"');
     expect(iconButton(html(true), "Connection details for Orders")).toContain('aria-expanded="true"');
-    // Open, the row leaves out its bottom line so that it and its details read as one.
+    // Selection highlights the row while the details appear beside the list.
     expect(html(false).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).toContain("border-b");
-    expect(html(true).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).not.toContain("border-b");
-    expect(html(true).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).toContain("border-b-0");
+    expect(html(true).match(/<tr class="([^"]*)"/)?.[1].split(/\s+/)).toContain("bg-primary/5");
     buttonsIn(drawn(false)).find((button) => labelOf(button) === "Connection details for Orders")!.props.onClick!();
     expect(details).toHaveBeenCalledTimes(1);
-    // It starts, stops, edits, deletes and asks for nothing.
-    expect([toggle, requestGrant, ask, edit].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0, 0]);
+    // It starts, stops and asks for no grant.
+    expect([toggle, requestGrant].map((fn) => fn.mock.calls.length)).toEqual([0, 0]);
   });
 
   it("a_row_given_no_details_has_no_details_button", () => {
-    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn(), ask: vi.fn(), edit: vi.fn() })}</tbody></table>);
+    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn() })}</tbody></table>);
     expect(html).not.toContain("Connection details");
     // The shared Button's class names carry `aria-expanded:` variants, so only the attribute itself says a button opens something.
     expect(html).not.toContain('aria-expanded="');
   });
 
-  it("only_a_database_offered_on_a_port_with_a_record_gives_details", () => {
+  it("every_saved_database_can_be_inspected_even_without_a_local_port", () => {
     const html = render([
       shared("Orders", "00000000000000a1"),
       shared("Scratch", "00000000000000a2", {}, { local_port: null }),
@@ -829,7 +844,7 @@ describe("the connection details under a row", () => {
       shared("Moved", "00000000000000a4", { live: live("running") }, { local_port: null }),
     ]);
     expect(html).toContain('aria-label="Connection details for Orders"');
-    expect(html).not.toContain('aria-label="Connection details for Scratch"');
+    expect(html).toContain('aria-label="Connection details for Scratch"');
     expect(html).not.toContain('aria-label="Connection details for Old"');
     expect(html).toContain('aria-label="Connection details for Moved"');
   });
@@ -878,25 +893,23 @@ describe("the connection details under a row", () => {
 });
 
 describe("opening the editor from the page", () => {
-  const labelOf = (button: { props: unknown }) => (button.props as { "aria-label"?: string })["aria-label"];
-
-  it("a_rows_name_and_edit_button_both_open_the_editor_for_that_row", () => {
-    const [toggle, requestGrant, ask, edit] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
-    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), hostAlias: null, busy: false, toggle, requestGrant, ask, edit }));
+  it("a row name selects its details and editing lives in those details", () => {
+    const [toggle, requestGrant, details] = [vi.fn(), vi.fn(), vi.fn()];
+    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), hostAlias: null, busy: false, toggle, requestGrant, details: { open: false, toggle: details } }));
     buttons.find((button) => textIn(button) === "Orders")!.props.onClick!();
-    expect(edit).toHaveBeenCalledTimes(1);
-    buttons.find((button) => labelOf(button) === "Edit Orders")!.props.onClick!();
-    expect(edit).toHaveBeenCalledTimes(2);
-    // Neither starts, stops, deletes or asks for a grant.
-    expect([toggle, ask, requestGrant].map((fn) => fn.mock.calls.length)).toEqual([0, 0, 0]);
+    expect(details).toHaveBeenCalledTimes(1);
+    expect([toggle, requestGrant].map((fn) => fn.mock.calls.length)).toEqual([0, 0]);
+    const html = render([row({}, { pam: null })]);
+    expect(buttonTag(html, "Edit")).toContain('aria-label="Edit Orders"');
+    expect(buttonTag(html, "Delete")).toContain('aria-label="Delete Orders"');
   });
 
-  it("the_name_is_a_button_that_is_held_back_when_the_edit_button_is", () => {
+  it("the name remains inspectable while changes are unavailable", () => {
     const stopped = render([row({}, { pam: null })]);
     expect(buttonTag(stopped, "Orders")).not.toContain(DISABLED);
-    for (const phase of ["starting", "running", "stopping"] as const) expect(buttonTag(render([row({ live: live(phase) }, { pam: null })]), "Orders"), phase).toContain(DISABLED);
-    expect(buttonTag(render([row({ blocked: true }, { pam: null })]), "Orders")).toContain(DISABLED);
-    // A row that is only listed to be stopped has nothing to edit: its name is words, not a button.
+    for (const phase of ["starting", "running", "stopping"] as const) expect(buttonTag(render([row({ live: live(phase) }, { pam: null })]), "Orders"), phase).not.toContain(DISABLED);
+    expect(buttonTag(render([row({ blocked: true }, { pam: null })]), "Orders")).not.toContain(DISABLED);
+    // A row that is only listed to be stopped has nothing to inspect: its name is words, not a button.
     const gone = render([row({ live: live("running"), removed: true, blocked: true })]);
     expect(() => buttonTag(gone, "Orders")).toThrow("no Orders button");
     expect(text(gone)).toContain("Orders");
@@ -912,7 +925,7 @@ describe("opening the editor from the page", () => {
     expect(buttonsIn(header.actions).find((button) => textIn(button) === "New database")?.props.onClick).toBeTypeOf("function");
     expect((elementsOf(tree, Dialog)[0].props as unknown as { open: boolean }).open).toBe(false);
     expect(elementsOf(tree, DatabaseRow)).toHaveLength(1);
-    expect(typeof (elementsOf(tree, DatabaseRow)[0].props as unknown as { edit: unknown }).edit).toBe("function");
+    expect(typeof (elementsOf(tree, DatabaseRow)[0].props as unknown as { details: { toggle: unknown } }).details.toggle).toBe("function");
   });
 
   it("closing_the_dialog_with_changes_asks_with_the_words_the_tunnels_page_uses", () => {

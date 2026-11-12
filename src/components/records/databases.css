@@ -1,10 +1,14 @@
 .databases-panel { container-type: inline-size; min-width: 0; padding: 1.4rem var(--page-inset) 2rem; }
+.database-workspace { display: grid; gap: 1rem; min-width: 0; }
+.database-list { container-type: inline-size; min-width: 0; }
+.database-detail { min-width: 0; align-self: start; border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1rem; }
 .database-address-compact { display: none; }
-/* A row's connection details are as wide as the list shows: its table is wider than the list in a narrow window and scrolls sideways, and the details stay in view. */
-.database-details { position: sticky; left: 1rem; width: calc(100cqw - 2rem - 2px); }
+@container (min-width: 1100px) {
+  .database-workspace.has-details { grid-template-columns: minmax(0, 1.35fr) minmax(24rem, .9fr); }
+  .database-detail { position: sticky; top: 1rem; max-height: calc(100vh - 8rem); overflow-y: auto; }
+}
 @container (max-width: 720px) {
   .database-address-column { display: none; }
   .database-address-compact { display: block; }
   .databases-panel td { padding-left: .65rem; padding-right: .65rem; }
-  .database-details { left: .65rem; width: calc(100cqw - 1.3rem - 2px); }
 }

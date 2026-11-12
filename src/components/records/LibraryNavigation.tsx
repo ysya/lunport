@@ -239,9 +239,12 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
         <nav aria-label="Workspace sections" className="space-y-1">
           {row("All hosts", <Server className="size-4" />, panel === "hosts" && (collapsed || ["all", "recent", "attention"].includes(filter.kind)), () => choose({ kind: "all" }), overview.hosts.length)}
           {row("Keys", <KeyRound className="size-4" />, panel === "keys", () => navigate("keys"), overview.keys.filter((key) => key.status !== "deleted").length)}
-          {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
-          {row("Databases", <Database className="size-4" />, panel === "databases", () => navigate("databases"))}
           {row("AI activity", <Bot className="size-4" />, panel === "activity", () => navigate("activity"))}
+        </nav>
+        <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Connections</div>
+        <nav aria-label="Connections" className="space-y-1">
+          {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
+          {row("Cloud SQL", <Database className="size-4" />, panel === "databases", () => navigate("databases"))}
         </nav>
         <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Cloud</div>
         <nav aria-label="Cloud providers" className="space-y-1">
