@@ -52,7 +52,7 @@ import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
 
 /**
- * A grant line of a database's row, from the grant `read` found: the line itself, in the warning color when the grant is missing or
+ * A grant line in a database's details, from the grant `read` found: the line itself, in the warning color when the grant is missing or
  * about to end, Request grant beside it when one can be requested, and under it what else it has to say (`databaseGrantLine`). `led`
  * leads the line, and `subject` is what the button names. A read that fails shows its error in place of whatever an earlier read found,
  * as a host's details pane does.
@@ -73,7 +73,7 @@ function GrantLine({ read, pam, subject, led = "", busy, request }: { read: UseQ
 }
 
 /**
- * The grant a database needs, on its row: read when the row shows and every minute through the database's `databasePamStatusQuery`.
+ * The grant a database needs, read while its details are shown and every minute through the database's `databasePamStatusQuery`.
  * Drawn only for a database with a grant check. A grant that is missing is in the warning color and comes with Request grant; one that
  * ends within five minutes is in the warning color too, and says that a new one can be requested when it ends, since PAM takes no request
  * while a grant is active.
@@ -87,12 +87,12 @@ function DatabaseGrant({ id, name, pam, busy, request }: { id: string; name: str
 type RouteGrantRequest = RouteHostGrant & { request: () => void };
 
 /**
- * The grant the host a database is reached through needs, on its row beside the database's own and read the same way, through the
+ * The grant the host a database is reached through needs, beside the database's own and read the same way, through the
  * `pamStatusQuery` of the host's first hop: the host's details pane and the tunnels through it share that read. It says what the
  * database's line does, led by the host's alias, and comes with a Request grant of its own, since the host's grant is not the database's.
  * Drawn only for a host whose first hop has a route with a grant check (`routeHostGrant`).
  */
-function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & { busy: boolean }) {
+export function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & { busy: boolean }) {
   const read = useQuery(pamStatusQuery(hostId));
   return <GrantLine read={read} pam={pam} subject={alias} led={`${alias}: `} busy={busy} request={request} />;
 }
@@ -103,12 +103,11 @@ function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & {
  * removes it from the list. A row given `details` can select or close the details beside the list. A prod database whose writable window is
  * open says so in its Status, with the time left, whether its details are open or not. A database that runs here as it was saved before
  * another device changed it says that its port applies the change once it is started again, and its badge and its lock follow the
- * environment its port locks by (`row.environment`), which stays prod until then. A database reached through a host whose first hop's
- * route asks for a grant has a `routeGrant`, which the row draws as a grant line of its own under the database's. A database reached
+ * environment its port locks by (`row.environment`), which stays prod until then. A database reached
  * through a host names it after where it is, by `hostAlias`; one whose host is not in the library (no alias) says that the host is
  * unavailable, in the warning color. While a database starts its Status says the step its start is at. No hooks: exported for the tests.
  */
-export function DatabaseRow({ row, hostAlias, busy, toggle, requestGrant, details, routeGrant }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; requestGrant: () => void; details?: { open: boolean; toggle: () => void }; routeGrant?: RouteGrantRequest | null }) {
+export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
   const route = revealHidden(databaseRoute(database, hostAlias));
@@ -134,8 +133,6 @@ export function DatabaseRow({ row, hostAlias, busy, toggle, requestGrant, detail
         <span className="mt-1 block truncate text-xs text-muted-foreground" title={route}>{route}</span>
         {unavailable && <span className="mt-1 block text-xs text-warning">{HOST_UNAVAILABLE}</span>}
         {row.changed && <span className="mt-1 block text-xs text-warning">The database changed on another device. Stop and start it again to apply it.</span>}
-        {database.pam && <DatabaseGrant id={database.id} name={database.name} pam={database.pam} busy={busy} request={requestGrant} />}
-        {routeGrant && <RouteGrant {...routeGrant} busy={busy} />}
       </>}
       <span className="database-address-compact mt-1 truncate font-mono text-xs text-muted-foreground" title={address}>{address}</span>
     </td>
@@ -209,6 +206,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const visible = rows.filter((r) => `${r.database.name} ${r.database.project} ${r.database.region} ${r.database.instance}`.toLowerCase().includes(needle));
   const selectable = visible.filter((row) => !row.removed);
   const selected = selectedId === null ? null : selectable.find((row) => row.database.id === selectedId) ?? selectable[0] ?? null;
+  const selectedVia = selected ? routeHostGrant(overview, selected.database) : null;
   // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown: in the dialog for a
   // save, which stays open with what was typed, and on the page for the rest. A save that worked closes the dialog.
   const action = async (run: () => Promise<void>, inEditor = false) => {
@@ -241,8 +239,12 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     setDiscarding(false); setDirty(false); setEditing(null);
     then?.();
   };
-  const save = (next: SavedDatabase) => { if (editing) void action(async () => { await saveDatabase(next, editing.expected); }, true); };
-  // The grant is read again too, so that the row shows what was requested.
+  const save = (next: SavedDatabase) => { if (editing) void action(async () => {
+    const saved = await saveDatabase(next, editing.expected);
+    setSearch("");
+    setSelectedId(saved.id);
+  }, true); };
+  // The grant is read again so that the selected details show what was requested.
   const requestGrant = (id: string) => void action(async () => {
     try { await requestDatabaseGrant(id); }
     finally { await client.invalidateQueries({ queryKey: databasePamStatusKey(id) }); }
@@ -289,12 +291,9 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
         <tbody>{visible.map((row) => {
           const id = row.database.id;
           const open = selected?.database.id === id;
-          const via = routeHostGrant(overview, row.database);
           const route = routeSummary(overview, row.database);
           return <DatabaseRow key={id} row={row} hostAlias={route.alias} busy={busy}
               toggle={() => toggle(row)}
-              requestGrant={() => requestGrant(id)}
-              routeGrant={via && { ...via, request: () => requestHostGrant(id, via.hostId) }}
               details={!row.removed ? { open, toggle: () => toggleDetails(id) } : undefined} />;
         })}</tbody></table>
       {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
@@ -307,6 +306,21 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
           </div>
           <Button size="icon-sm" variant="ghost" aria-label="Close database details" onClick={() => setSelectedId(null)}><X className="size-4" /></Button>
         </div>
+        {(selected.database.pam || selectedVia) && <section className="space-y-2 rounded-lg border p-3" aria-label="Access grants">
+          <h3 className="text-xs font-medium text-muted-foreground">Access grants</h3>
+          {selected.database.pam && <DatabaseGrant id={selected.database.id} name={selected.database.name} pam={selected.database.pam} busy={busy} request={() => requestGrant(selected.database.id)} />}
+          {selectedVia && <RouteGrant {...selectedVia} busy={busy} request={() => requestHostGrant(selected.database.id, selectedVia.hostId)} />}
+        </section>}
+        {selected.database.local_port !== null && (
+          selected.live.phase === "stopped" || selected.live.phase === "error"
+            ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-primary/5 p-3 text-sm">
+                <p>{selected.live.phase === "error" ? "Retry this database, then copy its connection URL and password." : "Start this database, then copy its connection URL and password."}</p>
+                <Button size="sm" disabled={busy} onClick={() => toggle(selected)}>{selected.live.phase === "error" ? "Retry" : "Start"}</Button>
+              </div>
+            : selected.live.phase === "running"
+              ? <p className="rounded-lg bg-primary/5 p-3 text-sm">Copy the connection URL and password to use this database.</p>
+              : null
+        )}
         {hasConnectionDetails(selected)
           ? <DatabaseAccess row={selected} route={routeSummary(overview, selected.database)} />
           : <div id={databaseDetailsId(selected.database.id)} className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">

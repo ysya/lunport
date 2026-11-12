@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseAccess, DatabaseRow, DatabasesPanel, StopDatabaseDialog } from "./DatabasesPanel";
+import { DatabaseAccess, DatabaseRow, DatabasesPanel, RouteGrant, StopDatabaseDialog } from "./DatabasesPanel";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
 import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
@@ -108,6 +108,22 @@ describe("the Databases page", () => {
     expect(html).toContain('aria-label="Database details"');
     expect(text(html)).toContain("Connection URL");
     expect(text(html)).toContain("Copy password");
+  });
+
+  it("keeps grant actions with the selected connection details", () => {
+    const html = render([row()]);
+    const index = html.indexOf('aria-label="Database details"');
+    expect(text(html.slice(0, index))).not.toContain("Checking the grant");
+    expect(text(html.slice(index))).toContain("Checking the grant");
+  });
+
+  it("guides a saved database from start to copying its connection details", () => {
+    const stopped = render([row({}, { pam: null })]);
+    const detail = stopped.slice(stopped.indexOf('aria-label="Database details"'));
+    expect(text(detail)).toContain("Start this database, then copy its connection URL and password.");
+    expect(buttonTag(detail, "Start")).not.toContain(DISABLED);
+    const running = render([row({ live: live("running") }, { pam: null })]);
+    expect(text(running.slice(running.indexOf('aria-label="Database details"')))).toContain("Copy the connection URL and password to use this database.");
   });
 
   it("renders_a_prod_database_with_its_badge_route_and_grant_line", async () => {
@@ -266,10 +282,10 @@ describe("the Databases page", () => {
       expect(buttonTag(html, "Request grant"), what).not.toContain(DISABLED);
       expect(text(html), what).not.toContain("You can request a new grant");
     }
-    // Each database that lacks a grant offers a button of its own, named for it.
+    // The selected database has a grant action; the others wait until selected.
     const two = await renderWithGrants([row(), row({}, { id: "00000000000000a2", name: "Analytics" })], none);
-    expect(two.html.match(/>Request grant<\/button>/g)).toHaveLength(2);
-    expect(two.html).toContain('aria-label="Request grant for Analytics"');
+    expect(two.html.match(/>Request grant<\/button>/g)).toHaveLength(1);
+    expect(two.html).not.toContain('aria-label="Request grant for Analytics"');
   });
 
   it("a_grant_whose_end_has_passed_reads_as_missing_not_as_a_negative_number", async () => {
@@ -307,15 +323,14 @@ describe("the Databases page", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("reads_each_databases_grant_once_and_by_its_own_identity", async () => {
+  it("reads_only_the_selected_databases_grant", async () => {
     const other = { id: "00000000000000a2", name: "Analytics", environment: "staging" as const };
     const { client, html } = await renderWithGrants([row(), row({}, other)]);
-    expect(grantQueries(client)).toHaveLength(2);
+    expect(grantQueries(client)).toHaveLength(1);
     expect(invoke.mock.calls.map(([command, args]) => [command, args])).toEqual([
       ["databases_pam_status", { id: ORDERS.id }],
-      ["databases_pam_status", { id: other.id }],
     ]);
-    expect(text(html).match(/prod-operate · Active until 10:30/g)).toHaveLength(2);
+    expect(text(html).match(/prod-operate · Active until 10:30/g)).toHaveLength(1);
   });
 
   it("names_each_phase_and_counts_the_connections_of_a_running_database", () => {
@@ -516,10 +531,9 @@ describe("the grant of the host a database is reached through", () => {
     // The grant was read already, so that a server render draws it.
     const client = new QueryClient();
     client.setQueryData(pamStatusQuery(WEB).queryKey, none);
-    const drawn = (busy: boolean) => renderToStaticMarkup(<QueryClientProvider client={client}><table><tbody>{DatabaseRow({
-      row: through({ pam: null }), hostAlias: "web\u202e-1", busy, toggle: vi.fn(), requestGrant: vi.fn(), details: { open: false, toggle: vi.fn() },
-      routeGrant: { hostId: WEB, alias: "web\u202e-1", pam: ROUTE_PAM, request: vi.fn() },
-    })}</tbody></table></QueryClientProvider>);
+    const drawn = (busy: boolean) => renderToStaticMarkup(<QueryClientProvider client={client}>
+      <RouteGrant hostId={WEB} alias={"web\u202e-1"} pam={ROUTE_PAM} busy={busy} request={vi.fn()} />
+    </QueryClientProvider>);
     // The code's plus sign is escaped: the label is matched as a pattern.
     const button = (busy: boolean) => iconButton(drawn(busy), "Request grant for web⟨U\\+202E⟩-1");
     expect(text(drawn(false))).toContain("web⟨U+202E⟩-1: Needs a grant: jump-access");
@@ -540,10 +554,10 @@ describe("the grant of the host a database is reached through", () => {
     const client = new QueryClient();
     client.setQueryData(databasesKey, [through()]);
     const tree = renderHook(client, () => DatabasesPanel({ overview: library(), createIapHost: vi.fn() }));
-    const props = elementsOf(tree, DatabaseRow)[0].props as unknown as { routeGrant: { hostId: string; alias: string; request: () => void } | null; requestGrant: () => void };
-    expect(props.routeGrant).toMatchObject({ hostId: WEB, alias: "web-1" });
+    const props = elementsOf(tree, RouteGrant)[0].props as unknown as { hostId: string; alias: string; request: () => void };
+    expect(props).toMatchObject({ hostId: WEB, alias: "web-1" });
     const invalidated = vi.spyOn(client, "invalidateQueries");
-    props.routeGrant!.request();
+    props.request();
     // It asks for the host's grant, not the database's own.
     expect(invoke.mock.calls).toEqual([["databases_request_route_grant", { id: ORDERS.id }]]);
     await vi.waitFor(() => expect(invalidated).toHaveBeenCalledWith({ queryKey: ["gcp", "pam-status", WEB] }));
@@ -556,9 +570,9 @@ describe("the grant of the host a database is reached through", () => {
     const client = new QueryClient();
     client.setQueryData(databasesKey, [through()]);
     const tree = renderHook(client, () => DatabasesPanel({ overview: library(), createIapHost: vi.fn() }));
-    const props = elementsOf(tree, DatabaseRow)[0].props as unknown as { routeGrant: { request: () => void } };
+    const props = elementsOf(tree, RouteGrant)[0].props as unknown as { request: () => void };
     const invalidated = vi.spyOn(client, "invalidateQueries");
-    props.routeGrant.request();
+    props.request();
     await vi.waitFor(() => expect(invalidated).toHaveBeenCalledWith({ queryKey: ["gcp", "pam-status", WEB] }));
     expect(invalidated).toHaveBeenCalledWith({ queryKey: databasesKey, refetchType: "all" });
   });
@@ -697,7 +711,7 @@ describe("the marker of a prod row whose writes are on", () => {
 
   it("holds_no_clock_for_a_row_without_a_window", () => {
     // Only a row whose window is open counts down; this checks rows without the selected detail card's own clock.
-    const drawRow = (view: DatabaseView) => renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: view, hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn() })}</tbody></table>);
+    const drawRow = (view: DatabaseView) => renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: view, hostAlias: null, busy: false, toggle: vi.fn() })}</tbody></table>);
     drawRow(row({ live: live("running") }, { pam: null }));
     drawRow(writable(MINUTE, {}, { id: "00000000000000a2", name: "Reports", environment: "dev" }));
     expect(vi.mocked(useNow)).not.toHaveBeenCalled();
@@ -800,7 +814,7 @@ describe("the connection details beside the list", () => {
   });
 
   it("the_details_button_controls_the_card_that_carries_its_id", () => {
-    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
+    const toggle = (open: boolean) => iconButton(renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), details: { open, toggle: vi.fn() } })}</tbody></table>), "Connection details for Orders");
     // Closed or open, it names the card shown beside the list with that id.
     for (const open of [false, true]) expect(toggle(open), String(open)).toContain('aria-controls="database-details-00000000000000a1"');
     const client = new QueryClient();
@@ -814,8 +828,8 @@ describe("the connection details beside the list", () => {
   });
 
   it("the_details_button_follows_whether_the_details_are_open_and_presses_through", () => {
-    const [toggle, requestGrant, details] = [vi.fn(), vi.fn(), vi.fn()];
-    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle, requestGrant, details: { open, toggle: details } });
+    const [toggle, details] = [vi.fn(), vi.fn(), vi.fn()];
+    const drawn = (open: boolean) => DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle, details: { open, toggle: details } });
     const html = (open: boolean) => renderToStaticMarkup(<table><tbody>{drawn(open)}</tbody></table>);
     expect(iconButton(html(false), "Connection details for Orders")).toContain('aria-expanded="false"');
     expect(iconButton(html(true), "Connection details for Orders")).toContain('aria-expanded="true"');
@@ -825,11 +839,11 @@ describe("the connection details beside the list", () => {
     buttonsIn(drawn(false)).find((button) => labelOf(button) === "Connection details for Orders")!.props.onClick!();
     expect(details).toHaveBeenCalledTimes(1);
     // It starts, stops and asks for no grant.
-    expect([toggle, requestGrant].map((fn) => fn.mock.calls.length)).toEqual([0, 0]);
+    expect(toggle).not.toHaveBeenCalled();
   });
 
   it("a_row_given_no_details_has_no_details_button", () => {
-    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn(), requestGrant: vi.fn() })}</tbody></table>);
+    const html = renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: row({}, noDetails), hostAlias: null, busy: false, toggle: vi.fn() })}</tbody></table>);
     expect(html).not.toContain("Connection details");
     // The shared Button's class names carry `aria-expanded:` variants, so only the attribute itself says a button opens something.
     expect(html).not.toContain('aria-expanded="');
@@ -894,11 +908,11 @@ describe("the connection details beside the list", () => {
 
 describe("opening the editor from the page", () => {
   it("a row name selects its details and editing lives in those details", () => {
-    const [toggle, requestGrant, details] = [vi.fn(), vi.fn(), vi.fn()];
-    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), hostAlias: null, busy: false, toggle, requestGrant, details: { open: false, toggle: details } }));
+    const [toggle, details] = [vi.fn(), vi.fn(), vi.fn()];
+    const buttons = buttonsIn(DatabaseRow({ row: row({}, { pam: null }), hostAlias: null, busy: false, toggle, details: { open: false, toggle: details } }));
     buttons.find((button) => textIn(button) === "Orders")!.props.onClick!();
     expect(details).toHaveBeenCalledTimes(1);
-    expect([toggle, requestGrant].map((fn) => fn.mock.calls.length)).toEqual([0, 0]);
+    expect(toggle).not.toHaveBeenCalled();
     const html = render([row({}, { pam: null })]);
     expect(buttonTag(html, "Edit")).toContain('aria-label="Edit Orders"');
     expect(buttonTag(html, "Delete")).toContain('aria-label="Delete Orders"');

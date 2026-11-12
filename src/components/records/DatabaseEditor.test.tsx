@@ -55,6 +55,7 @@ const instance = (patch: Partial<InstanceSummary> = {}): InstanceSummary => ({
   ...patch,
 });
 const ORDERS_PG = instance();
+const NEW_LOCATED = pickInstance({ ...newDatabase(), project: PROD }, ORDERS_PG);
 /** Reachable over its private address only. */
 const BILLING_PG = instance({ name: "billing-pg", public_ip: false });
 /** Signs nobody in with Google. */
@@ -195,6 +196,25 @@ function submit(tree: ReactNode) {
 }
 
 describe("the New database dialog", () => {
+  it("shows instance selection before connection settings", () => {
+    const dialog = editor({ ...newDatabase(), project: PROD }, { instances: listed([ORDERS_PG]) });
+    expect(text(dialog.markup())).toContain("Cloud SQL instances in acme-prod-123456");
+    expect(hasField(dialog.tree(), "Name")).toBe(false);
+    expect(elementsOf(dialog.tree(), RadioGroup.Root).some((item) => propsOf<{ "aria-label": string }>(item)["aria-label"] === "Route")).toBe(false);
+    radioOf(dialog.tree(), "orders-pg").onChange();
+    expect(hasField(dialog.tree(), "Name")).toBe(true);
+    expect(groupOf(dialog.tree(), "Route").value).toBe("public");
+    expect(text(dialog.markup())).toContain("Local access");
+  });
+
+  it("keeps advanced access collapsed unless a saved record uses PAM", () => {
+    const fresh = editor(pickInstance({ ...newDatabase(), project: PROD }, ORDERS_PG));
+    const advanced = elementsOf(fresh.tree(), "details")[0];
+    expect(propsOf<{ open?: boolean }>(advanced).open).toBe(false);
+    expect(textIn(advanced)).toContain("Advanced access");
+    expect(propsOf<{ open?: boolean }>(elementsOf(editor(SAVED).tree(), "details")[0]).open).toBe(true);
+  });
+
   it("suggestPort_skips_ports_in_use", () => {
     expect(suggestPort([])).toBe(6543);
     expect(suggestPort([6543])).toBe(6544);
@@ -469,7 +489,7 @@ describe("the New database dialog", () => {
   });
 
   it("offers_the_three_environments_as_one_choice_with_none_chosen_for_a_new_database", () => {
-    const dialog = editor(newDatabase());
+    const dialog = editor(NEW_LOCATED);
     const html = dialog.markup();
     expect(text(html)).toMatch(/Environment\s+Dev\s+Staging\s+Prod/);
     expect(groupOf(dialog.tree(), "Environment").value).toBeNull();
@@ -501,7 +521,7 @@ describe("the New database dialog", () => {
   });
 
   it("the_pam_switch_asks_for_thirty_minutes_in_the_global_location_and_off_forgets_the_check", () => {
-    const dialog = editor(newDatabase());
+    const dialog = editor(NEW_LOCATED);
     expect(switchOf(dialog.tree(), "Requires a PAM grant").checked).toBe(false);
     expect(hasField(dialog.tree(), "Entitlements")).toBe(false);
     switchOf(dialog.tree(), "Requires a PAM grant").onCheckedChange(true);
@@ -519,7 +539,7 @@ describe("the New database dialog", () => {
 
   it("draws_the_entitlement_suggestions_for_the_drafts_account_project_and_check_and_adds_the_one_pressed", () => {
     const check = { entitlements: ["prod-operate"], location: "global", duration_secs: 1800, justification: null };
-    const dialog = editor({ ...newDatabase(), account: "frank@example.com", project: PROD, pam: check });
+    const dialog = editor({ ...NEW_LOCATED, account: "frank@example.com", pam: check });
     const suggestions = elementsOf(dialog.tree(), EntitlementSuggestions);
     expect(suggestions).toHaveLength(1);
     expect(propsOf(suggestions[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check, disabled: false });
@@ -527,7 +547,7 @@ describe("the New database dialog", () => {
     expect(dialog.kept.draft.pam).toEqual({ ...check, entitlements: ["prod-operate", "prod-admin"] });
     // Nothing is drawn while the check is off, and nothing is pressed while a save is under way.
     expect(elementsOf(editor(newDatabase()).tree(), EntitlementSuggestions)).toHaveLength(0);
-    expect(propsOf(elementsOf(editor({ ...newDatabase(), pam: check }, { busy: true }).tree(), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
+    expect(propsOf(elementsOf(editor({ ...NEW_LOCATED, pam: check }, { busy: true }).tree(), EntitlementSuggestions)[0])).toMatchObject({ disabled: true });
   });
 
   it("a_new_database_opens_offered_to_other_apps_on_the_first_free_port_and_a_saved_one_keeps_its_own_setting", () => {
@@ -549,8 +569,8 @@ describe("the New database dialog", () => {
       const tree = DatabaseEditorView(viewOf(client, { initial, existing }).props);
       return { sharing: switchOf(tree, "Let other apps connect").checked, port: hasField(tree, "Port on 127.0.0.1") ? valueOf(tree, "Port on 127.0.0.1") : null };
     };
-    expect(shown(newDatabase())).toEqual({ sharing: true, port: 6543 });
-    expect(shown(newDatabase(), [other("00000000000000a2", 6543), other("00000000000000a3", 6544)])).toEqual({ sharing: true, port: 6545 });
+    expect(shown(NEW_LOCATED)).toEqual({ sharing: true, port: 6543 });
+    expect(shown(NEW_LOCATED, [other("00000000000000a2", 6543), other("00000000000000a3", 6544)])).toEqual({ sharing: true, port: 6545 });
     expect(shown({ ...SAVED, local_port: null }, [other("00000000000000a2", 6543)])).toEqual({ sharing: false, port: null });
     expect(shown(SAVED, [other("00000000000000a2", 6544)])).toEqual({ sharing: true, port: 6543 });
   });
@@ -598,7 +618,7 @@ describe("the New database dialog", () => {
   });
 
   it("sharing_proposes_the_first_free_port_and_off_offers_none", () => {
-    const dialog = editor(newDatabase(), { used: [6543, 6544] });
+    const dialog = editor(NEW_LOCATED, { used: [6543, 6544] });
     expect(switchOf(dialog.tree(), "Let other apps connect").checked).toBe(false);
     expect(hasField(dialog.tree(), "Port on 127.0.0.1")).toBe(false);
     switchOf(dialog.tree(), "Let other apps connect").onCheckedChange(true);
@@ -620,12 +640,12 @@ describe("the New database dialog", () => {
   it("asks_about_the_settled_project_and_account_not_every_keystroke_but_shows_the_account_as_it_is", () => {
     const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
     // The project typed so far, and the one typing last paused on.
-    const dialog = editor({ ...newDatabase(), account: "ops@example.com", project: "acme-prod-1234", pam: check }, { lookup: { account: "frank@example.com", project: PROD } });
+    const dialog = editor({ ...NEW_LOCATED, account: "ops@example.com", project: "acme-prod-1234", pam: check }, { lookup: { account: "frank@example.com", project: PROD } });
     expect(propsOf(elementsOf(dialog.tree(), EntitlementSuggestions)[0])).toMatchObject({ account: "frank@example.com", project: PROD, pam: check });
     // The account field shows what was chosen or typed, whatever Google was last asked about.
     expect(propsOf(elementsOf(dialog.tree(), GoogleAccountField)[0])).toMatchObject({ account: "ops@example.com" });
     // Without a lookup that differs from the draft, it is the draft's.
-    const same = editor({ ...newDatabase(), account: "frank@example.com", project: PROD, pam: check });
+    const same = editor({ ...NEW_LOCATED, account: "frank@example.com", pam: check });
     expect(propsOf(elementsOf(same.tree(), EntitlementSuggestions)[0])).toMatchObject({ account: "frank@example.com", project: PROD });
   });
 
@@ -643,7 +663,7 @@ describe("the New database dialog", () => {
   });
 
   it("draws_its_segmented_controls_like_connect_via", () => {
-    const groups = elementsOf(editor(newDatabase()).tree(), RadioGroup.Root).map((element) => propsOf<{ className: string; "aria-label": string }>(element));
+    const groups = elementsOf(editor(NEW_LOCATED).tree(), RadioGroup.Root).map((element) => propsOf<{ className: string; "aria-label": string }>(element));
     expect(groups.map((group) => group["aria-label"])).toEqual(["How to choose the instance", "Route", "Environment"]);
     expect(groups[1].className).toBe(segmented);
     expect(groups[2].className).toBe(segmented);
@@ -953,13 +973,13 @@ describe("the dialog as the Databases page mounts it", () => {
     });
     const check = { entitlements: [], location: "global", duration_secs: 1800, justification: null };
     const drawn = (initial: DatabaseDraft) => renderToStaticMarkup(<QueryClientProvider client={client}><DatabaseEditor {...dialogProps({ initial })} /></QueryClientProvider>);
-    const global = drawn({ ...newInProd, pam: check });
+    const global = drawn({ ...newInProd, region: "asia-east1", instance: "orders-pg", pam: check });
     expect(text(global)).toContain("You may request:");
     expect(global).toContain('aria-label="Add prod-admin"');
     expect(global).toContain('aria-label="Add prod-operate"');
     expect(global).not.toContain('aria-label="Add eu-operate"');
     // A check kept in another location asks for that location's.
-    const europe = drawn({ ...newInProd, pam: { ...check, location: "europe-west1" } });
+    const europe = drawn({ ...newInProd, region: "asia-east1", instance: "orders-pg", pam: { ...check, location: "europe-west1" } });
     expect(europe).toContain('aria-label="Add eu-operate"');
     expect(europe).not.toContain('aria-label="Add prod-admin"');
     // Without a grant check there is nothing to suggest, and without a project nothing to ask.
