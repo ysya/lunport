@@ -104,7 +104,7 @@ type Options = {
 
 /** The view of the dialog over `initial`, with the state the dialog keeps for it: pressing a control changes `kept` as the dialog's state setters do. */
 function editor(initial: DatabaseDraft, options: Options = {}) {
-  const kept = { draft: initial, mode: options.mode ?? (initial.instance === "" ? "pick" : "manual"), connection: options.connection ?? "", hostMissing: false };
+  const kept = { draft: initial, mode: options.mode ?? (initial.instance === "" ? "pick" : "manual"), connection: options.connection ?? "", hostMissing: false, routeSearch: "" };
   const onSave = vi.fn();
   const onCancel = vi.fn();
   const createIapHost = vi.fn();
@@ -131,6 +131,8 @@ function editor(initial: DatabaseDraft, options: Options = {}) {
     onCancel,
     overview,
     hostMissing: kept.hostMissing,
+    routeSearch: kept.routeSearch,
+    onRouteSearch: (next) => { kept.routeSearch = next; },
     onHostMissing: () => {
       kept.hostMissing = true;
     },
@@ -698,6 +700,7 @@ describe("the route of a database in the dialog", () => {
     return propsOf<{ onSelect: () => void; "data-checked": boolean; value: string }>(found);
   };
   const chooseHost = (tree: ReactNode, id: string) => hostItem(tree, id).onSelect();
+  const searchHost = (tree: ReactNode, query: string) => propsOf<{ onValueChange: (value: string) => void }>(elementsOf(tree, CommandInput)[0]).onValueChange(query);
   const press = (tree: ReactNode, label: string) => buttonsIn(tree).find((button) => textIn(button) === label)!.props.onClick!();
 
   it("separates the route type from a searchable, bounded host list", () => {
@@ -708,7 +711,23 @@ describe("the route of a database in the dialog", () => {
     expect(dialog.kept.draft.network).toBe("private");
     expect(elementsOf(dialog.tree(), CommandInput)).toHaveLength(1);
     expect(dialog.markup()).toContain("max-h-60");
-    expect(items(dialog.tree()).map((item) => textIn(item))).toEqual(expect.arrayContaining([expect.stringContaining("web-1"), expect.stringContaining("web-2")]));
+    expect(items(dialog.tree()).map((item) => textIn(item))).toEqual([expect.stringContaining("web-2")]);
+    searchHost(dialog.tree(), "web-1");
+    expect(items(dialog.tree()).map((item) => textIn(item))).toEqual([expect.stringContaining("web-1")]);
+  });
+
+  it("limits initial suggestions in a large project while keeping a saved selection visible", () => {
+    const many = Array.from({ length: 12 }, (_, index) => host(index.toString(16).padStart(16, "0"), `web-${index}`));
+    const overview = recordOverview({
+      hosts: many,
+      transports: many.map((entry) => hostTransport({ project: PROD }, entry.id)),
+    });
+    const selected = many[9];
+    const dialog = editor({ ...SAVED, network: "private", via_host: selected.id }, { overview });
+    expect(items(dialog.tree())).toHaveLength(7);
+    expect(hostItem(dialog.tree(), selected.id)["data-checked"]).toBe(true);
+    searchHost(dialog.tree(), "web-11");
+    expect(items(dialog.tree()).map((item) => textIn(item))).toEqual([expect.stringContaining("web-11")]);
   });
 
   it("a private-only instance with one matching IAP host chooses it and shows the choice", () => {
@@ -755,6 +774,7 @@ describe("the route of a database in the dialog", () => {
     radioOf(dialog.tree(), "billing-pg").onChange();
     expect(text(dialog.markup())).toContain("Private IP only · Needs a jump host");
     expect(buttonTag(dialog.markup(), "New IAP host")).not.toContain(DISABLED);
+    searchHost(dialog.tree(), "web-3");
     chooseHost(dialog.tree(), WEB_3);
     expect(dialog.kept.draft).toMatchObject({ network: "private", via_host: WEB_3 });
     expect(text(dialog.markup())).not.toContain("New IAP host");
@@ -771,6 +791,7 @@ describe("the route of a database in the dialog", () => {
     radioOf(dialog.tree(), "orders-pg").onChange();
     expect(dialog.kept.draft).toMatchObject({ network: "public", via_host: undefined });
     groupOf(dialog.tree(), "Route").onValueChange("private");
+    searchHost(dialog.tree(), "web-2");
     chooseHost(dialog.tree(), WEB_2);
     expect(dialog.kept.draft).toMatchObject({ instance: "orders-pg", network: "private", via_host: WEB_2 });
     const one = [{ id: WEB_1, alias: "web-1" }];
@@ -789,11 +810,13 @@ describe("the route of a database in the dialog", () => {
     const dialog = editor({ ...SAVED, network: "private", via_host: WEB_1 }, { overview });
     const groups = elementsOf(dialog.tree(), CommandGroup);
     expect(propsOf<{ heading: string }>(groups[0]).heading).toBe("Suggested for this project");
-    expect(propsOf<{ heading: string }>(groups[1]).heading).toBe("All other hosts");
+    searchHost(dialog.tree(), "Operations");
+    expect(propsOf<{ heading: string }>(elementsOf(dialog.tree(), CommandGroup)[0]).heading).toBe("Matching hosts");
     expect(hostItem(dialog.tree(), WEB_3).value).toContain("reporting.internal");
     expect(hostItem(dialog.tree(), WEB_3).value).toContain("Operations");
     expect(hostItem(dialog.tree(), WEB_3).value).toContain("web-3");
     chooseHost(dialog.tree(), WEB_3);
+    expect(text(dialog.markup())).toContain("Selected host: web-3 · Operations");
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenLastCalledWith({ ...SAVED, network: "private", via_host: WEB_3 });
     groupOf(dialog.tree(), "Route").onValueChange("public");
@@ -811,6 +834,7 @@ describe("the route of a database in the dialog", () => {
     expect(text(dialog.markup())).toContain("Host unavailable");
     submit(dialog.tree());
     expect(dialog.onSave).toHaveBeenLastCalledWith(gone);
+    searchHost(dialog.tree(), "web-1");
     chooseHost(dialog.tree(), WEB_1);
     expect(text(dialog.markup())).not.toContain("Host unavailable");
     expect(dialog.kept.draft.via_host).toBe(WEB_1);
@@ -819,6 +843,7 @@ describe("the route of a database in the dialog", () => {
   it("a route chosen and chosen back is no change", () => {
     const dialog = editor(SAVED, { overview: LIBRARY });
     groupOf(dialog.tree(), "Route").onValueChange("private");
+    searchHost(dialog.tree(), "web-1");
     chooseHost(dialog.tree(), WEB_1);
     expect(changed(dialog.kept.draft, SAVED)).toBe(true);
     groupOf(dialog.tree(), "Route").onValueChange("public");
@@ -831,6 +856,7 @@ describe("the route of a database in the dialog", () => {
     groupOf(again.tree(), "Route").onValueChange("public");
     expect(changed(again.kept.draft, routed)).toBe(true);
     groupOf(again.tree(), "Route").onValueChange("private");
+    searchHost(again.tree(), "web-1");
     chooseHost(again.tree(), WEB_1);
     expect(changed(again.kept.draft, routed)).toBe(false);
   });

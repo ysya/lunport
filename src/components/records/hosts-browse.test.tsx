@@ -14,37 +14,49 @@ const render = (filter: LibraryFilter, data = overview) => renderToStaticMarkup(
 );
 
 describe("Hosts browsing", () => {
-  it("offers All hosts, Groups, and Tags inside the Hosts page", () => {
+  it("keeps the group collection visible beside the all-hosts list", () => {
     const html = render({ kind: "all" });
-    expect(html).toContain('aria-label="Host browse"');
-    expect(html).toContain('aria-label="Browse all hosts"');
-    expect(html).toContain('aria-label="Browse groups"');
-    expect(html).toContain('aria-label="Browse tags"');
-  });
-  it("shows root groups and Ungrouped without displaying every host in the group index", () => {
-    const html = render({ kind: "groups" } as LibraryFilter);
+    expect(html).toContain('aria-label="Host collections"');
     expect(html).toContain('aria-label="Open group Operations"');
-    expect(html).toContain('aria-label="Open ungrouped hosts"');
-    expect(html).not.toContain('data-host-id="' + host.id + '"');
+    expect(html).toContain('data-host-id="' + host.id + '"');
+  });
+  it("offers All hosts, Groups, and Tags in the persistent collection pane", () => {
+    const html = render({ kind: "all" });
+    expect(html).toContain('aria-label="Host collections"');
+    expect(html).toContain('aria-label="Host collection filters"');
+    expect(html).toContain('>All hosts</span>');
+    expect(html).toContain('>Groups</button>');
+    expect(html).toContain('>Tags</button>');
+  });
+  it("shows root groups and Ungrouped beside the host list", () => {
+    const html = render({ kind: "all" });
+    expect(html).toContain('aria-label="Open group Operations"');
+    expect(html).toContain('>Ungrouped</span>');
+    expect(html).toContain('data-host-id="' + host.id + '"');
   });
   it("offers an expand control for nested groups in the group index", () => {
     const html = render({ kind: "groups" });
     expect(html).toContain('aria-label="Expand group Operations"');
     expect(html).toContain('aria-expanded="false"');
   });
-  it("shows searchable tags with host counts without displaying every host in the tag index", () => {
-    const html = render({ kind: "tags" } as LibraryFilter);
-    expect(html).toContain('aria-label="Search tags"');
-    expect(html).toContain('aria-label="Open tag production (1 host)"');
-    expect(html).not.toContain('data-host-id="' + host.id + '"');
+  it("shows searchable tags with host counts in the collection pane", () => {
+    const html = render({ kind: "all" });
+    expect(html).toContain('aria-label="Find groups or tags"');
+    expect(html).toContain('>production</span><small>1</small>');
   });
   it("keeps the selected group and tag as Hosts filters", () => {
     const grouped = render({ kind: "group", id: parent.id });
-    expect(grouped).toContain('aria-label="Browse groups" aria-current="page"');
-    expect(grouped).toContain('aria-label="Open group API"');
+    expect(grouped).toContain('aria-label="Open group Operations" aria-current="page"');
+    expect(grouped).not.toContain('data-host-id="' + host.id + '"');
+    expect(grouped).toContain("No hosts directly in this group");
+    expect(render({ kind: "group", id: child.id })).toContain('data-host-id="' + host.id + '"');
     const tagged = render({ kind: "tag", id: "production" });
-    expect(tagged).toContain('aria-label="Browse tags" aria-current="page"');
+    expect(tagged).toContain('>production</span><small>1</small>');
     expect(tagged).toContain('data-host-id="' + host.id + '"');
+  });
+  it("shows the full group path in a cross-group host list", () => {
+    const html = render({ kind: "all" });
+    expect(html).toContain('title="Operations / API"');
   });
   it("shows multiple ancestor groups as navigable breadcrumbs", () => {
     const grandchild = groupView({

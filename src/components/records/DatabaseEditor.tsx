@@ -267,6 +267,8 @@ export type DatabaseEditorViewProps = {
   overview: RecordOverview;
   /** Whether Save was pressed while the draft went through no host, so that the dialog says to choose one while it still does. */
   hostMissing: boolean;
+  routeSearch: string;
+  onRouteSearch: (text: string) => void;
   onDraft: (next: DatabaseDraft) => void;
   onMode: (next: Mode) => void;
   onConnection: (text: string) => void;
@@ -285,13 +287,29 @@ export type DatabaseEditorViewProps = {
  * nothing and says to choose one; with no jump host in the project the Route field offers New IAP host.
  */
 export function DatabaseEditorView(props: DatabaseEditorViewProps) {
-  const { draft, mode, connection, instances, lookup, used, busy, error, overview, hostMissing, onDraft, onMode, onConnection, onSave, onHostMissing, onCancel, createIapHost } = props;
+  const { draft, mode, connection, instances, lookup, used, busy, error, overview, hostMissing, routeSearch, onRouteSearch, onDraft, onMode, onConnection, onSave, onHostMissing, onCancel, createIapHost } = props;
   const patch = (changes: Partial<DatabaseDraft>) => onDraft({ ...draft, ...changes });
   const ready = located(draft) && draft.environment !== null;
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
   const candidates = jumpHostCandidates(overview, draft.project);
   const hosts = libraryHosts(overview);
   const host = chosenHost(draft);
+  const selectedEntry = overview.hosts.find((entry) => entry.id === host);
+  const selectedPath = selectedEntry ? groupPath(overview, selectedEntry.payload.group_id, selectedEntry.scope) : "";
+  const routeWords = routeSearch.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+  const initialSuggested = candidates.slice(0, 6);
+  const initialIds = new Set(initialSuggested.map((candidate) => candidate.id));
+  const selectedOther = hosts.find((candidate) => candidate.id === host && !initialIds.has(candidate.id));
+  const matchingHosts = routeWords.length ? hosts.filter((candidate) => {
+    const entry = overview.hosts.find((item) => item.id === candidate.id);
+    return entry && routeWords.every((word) => recordHostSearchText(overview, entry).toLocaleLowerCase().includes(word));
+  }) : [];
+  const routeSections = routeWords.length
+    ? [{ label: "Matching hosts", hosts: matchingHosts }]
+    : [
+      { label: "Selected host", hosts: selectedOther ? [selectedOther] : [] },
+      { label: "Suggested for this project", hosts: initialSuggested },
+    ];
   const missing = hostless(draft);
   // A host the library no longer has stays the route until another is chosen, and the field shows it as unavailable.
   const unavailable = host !== null && !hosts.some((candidate) => candidate.id === host);
@@ -360,28 +378,26 @@ export function DatabaseEditorView(props: DatabaseEditorViewProps) {
               <div className="space-y-2">
                 <p className="text-sm font-medium">Route</p>
                 <RadioGroup.Root aria-label="Route" value={draft.network} disabled={busy}
-                  onValueChange={(network) => onDraft(network === "public" ? overPublicIp(draft) : throughHost(draft, host ?? undefined))}
+                  onValueChange={(network) => { onRouteSearch(""); onDraft(network === "public" ? overPublicIp(draft) : throughHost(draft, host ?? undefined)); }}
                   className={segmented}>
                   <RadioGroup.Item value="public" className={choice}>Public IP</RadioGroup.Item>
                   <RadioGroup.Item value="private" className={choice}>Through a host</RadioGroup.Item>
                 </RadioGroup.Root>
                 {draft.network === "private" && <div className="space-y-2">
                   <p className={cn("text-xs", unavailable ? "text-warning" : "text-muted-foreground")}>
-                    {unavailable ? HOST_UNAVAILABLE : host ? `Selected host: ${revealHidden(hosts.find((candidate) => candidate.id === host)?.alias ?? "")}` : "Choose a host to connect through."}
+                    {unavailable ? HOST_UNAVAILABLE : host ? `Selected host: ${revealHidden([selectedEntry?.payload.alias, selectedPath].filter(Boolean).join(" · "))}` : "Choose a host to connect through."}
                   </p>
-                  <Command className="h-auto rounded-lg border bg-background">
-                    <CommandInput aria-label="Search route hosts" placeholder="Search hosts by name, address or Group…" disabled={busy} />
+                  <Command shouldFilter={false} className="h-auto rounded-lg border bg-background">
+                    <CommandInput aria-label="Search route hosts" placeholder="Search hosts by name, address or Group…" disabled={busy}
+                      value={routeSearch} onValueChange={onRouteSearch} />
                     <CommandList className="max-h-60">
-                      <CommandEmpty>No matching hosts.</CommandEmpty>
-                      {[
-                        { label: "Suggested for this project", hosts: hosts.filter((candidate) => candidates.some((suggested) => suggested.id === candidate.id)) },
-                        { label: "All other hosts", hosts: hosts.filter((candidate) => !candidates.some((suggested) => suggested.id === candidate.id)) },
-                      ].map((section) => section.hosts.length > 0 && <CommandGroup key={section.label} heading={section.label}>
+                      <CommandEmpty>{routeWords.length ? "No matching hosts." : hosts.length ? "Search to find other hosts." : "No hosts available."}</CommandEmpty>
+                      {routeSections.map((section) => section.hosts.length > 0 && <CommandGroup key={section.label} heading={section.label}>
                         {section.hosts.map((candidate) => {
                           const entry = overview.hosts.find((item) => item.id === candidate.id)!;
                           const group = groupPath(overview, entry.payload.group_id, entry.scope);
                           return <CommandItem key={candidate.id} value={recordHostSearchText(overview, entry)} data-checked={host === candidate.id} disabled={busy}
-                            onSelect={() => onDraft(throughHost(draft, candidate.id))}>
+                            onSelect={() => { onDraft(throughHost(draft, candidate.id)); onRouteSearch(""); }}>
                             <span className="min-w-0 flex-1">
                               <span className="block truncate font-medium">{revealHidden(candidate.alias)}</span>
                               <span className="block truncate text-xs text-muted-foreground">{revealHidden([entry.effective_payload.hostname, group].filter(Boolean).join(" · "))}</span>
@@ -391,6 +407,8 @@ export function DatabaseEditorView(props: DatabaseEditorViewProps) {
                       </CommandGroup>)}
                     </CommandList>
                   </Command>
+                  {!routeWords.length && hosts.length > initialSuggested.length + (selectedOther ? 1 : 0) &&
+                    <p className="text-xs text-muted-foreground">Search to find other hosts by name, address, or Group path.</p>}
                   {missing && candidates.length === 0 && <Button type="button" variant="outline" size="sm" className="w-fit" onClick={createIapHost}>
                     <Plus />New IAP host
                   </Button>}
@@ -527,6 +545,7 @@ export function DatabaseEditor({ initial, existing, overview, busy, error, onSav
   const [mode, setMode] = useState<Mode>(() => (initial.instance === "" ? "pick" : "manual"));
   const [connection, setConnection] = useState(() => (located(initial) ? connectionName(initial) : ""));
   const [hostMissing, setHostMissing] = useState(false);
+  const [routeSearch, setRouteSearch] = useState("");
   const project = useDebounced(draft.project, LOOKUP_DELAY_MS);
   const account = useDebounced(draft.account, LOOKUP_DELAY_MS);
   const settled = project === draft.project && account === draft.account;
@@ -548,6 +567,8 @@ export function DatabaseEditor({ initial, existing, overview, busy, error, onSav
       error={error}
       overview={overview}
       hostMissing={hostMissing}
+      routeSearch={routeSearch}
+      onRouteSearch={setRouteSearch}
       onDraft={change}
       onMode={setMode}
       onConnection={setConnection}

@@ -214,11 +214,11 @@ export function RecordsWorkspace({
   const createHost = () => requestSelection(newHost());
   // The editor is a dialog over any panel, so the New IAP host of the Google Cloud page and of the database editor needs no panel switch.
   const createIapHost = () => requestSelection(newHost("iap"));
-  const createGroup = () =>
+  const createGroup = (parentId?: string | null) =>
     requestSelection({
       kind: "new_group",
       nonce: ++nonce.current,
-      parentId: groupContext?.id,
+      parentId: parentId === undefined ? groupContext?.id : parentId ?? undefined,
       scope: creationScope,
     });
   const editHost = (id: string) => {

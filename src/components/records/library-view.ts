@@ -37,11 +37,11 @@ export function libraryHosts(
         return false;
       if (
         filter.kind === "group" &&
-        !groupAncestors(
+        groupAncestors(
           overview,
           host.payload.group_id,
           host.scope,
-        ).groups.some((g) => g.id === filter.id)
+        ).groups[0]?.id !== filter.id
       )
         return false;
       const text = recordHostSearchText(overview, host).toLocaleLowerCase();
