@@ -74,6 +74,15 @@ export function useSetMcpHostAllowed() {
   });
 }
 
+export function useSetMcpDatabaseAllowed() {
+  const queryClient = useQueryClient();
+  return useMutation<McpStatus, unknown, { id: string; allowed: boolean }>({
+    mutationFn: ({ id, allowed }) => tauriInvoke<McpStatus>("mcp_set_database_allowed", { id, allowed }),
+    onSuccess: (status) => queryClient.setQueryData(mcpStatusKey, status),
+    onError: (error) => toast.error("Could not update database AI access", { description: errorMessage(error) }),
+  });
+}
+
 export function mcpGroupKey(scope: HostScope, id: string): string {
   return scope.kind === "local" ? `local/${id}` : `space/${scope.space_id}/${id}`;
 }

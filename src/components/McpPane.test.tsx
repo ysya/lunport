@@ -15,7 +15,7 @@ const status: McpStatus = {
   max_transfer_mib: 1024,
   noninteractive_credentials_supported: false,
   noninteractive_credentials_notice: "Stored credentials require Ask on macOS.",
-  audit_error: "Audit file unavailable", allowed_hosts: ["0000000000000001"], allowed_groups: [], pending: [],
+  audit_error: "Audit file unavailable", allowed_hosts: ["0000000000000001"], allowed_groups: [], allowed_databases: [], pending: [],
   recent: [{
     id: "a", client: "mcp", host_id: "0000000000000001", alias: "web", command: "sleep 4", mode: "ask",
     requested_by: ["observed-process"], requester_id: "42", client_info: { name: "claimed-client", title: null, version: "1" },

@@ -46,6 +46,8 @@ struct McpPolicy {
     #[serde(default)]
     allowed_groups: BTreeSet<String>,
     #[serde(default)]
+    allowed_databases: BTreeSet<String>,
+    #[serde(default)]
     approval_mode: ApprovalMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_transfer_mib: Option<u32>,
@@ -144,6 +146,7 @@ pub struct McpStatus {
     pub bridge_active: bool,
     pub allowed_hosts: Vec<String>,
     pub allowed_groups: Vec<String>,
+    pub allowed_databases: Vec<String>,
     pub pending: Vec<McpPendingRequest>,
     pub recent: Vec<McpAuditEntry>,
     pub executable: String,
@@ -262,6 +265,7 @@ impl McpRuntime {
             bridge_active: false,
             allowed_hosts: policy.allowed_hosts.into_iter().collect(),
             allowed_groups: vec![],
+            allowed_databases: policy.allowed_databases.into_iter().collect(),
             pending,
             recent,
             executable: std::env::current_exe()
@@ -470,6 +474,23 @@ fn change_host_permission(
     Ok(())
 }
 
+fn change_database_permission(
+    policy: &Mutex<McpPolicy>,
+    id: &str,
+    allowed: bool,
+    validate: impl FnOnce() -> Result<(), AppError>,
+    persist: impl FnOnce(&McpPolicy) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if allowed { validate()?; }
+    let mut current = policy.lock().unwrap();
+    let mut next = current.clone();
+    if allowed { next.allowed_databases.insert(id.into()); }
+    else { next.allowed_databases.remove(id); }
+    persist(&next)?;
+    *current = next;
+    Ok(())
+}
+
 fn display_safe_command(command: &str) -> bool {
     !command.is_empty()
         && command.len() <= MAX_COMMAND_BYTES
@@ -591,6 +612,27 @@ pub fn mcp_set_host_allowed(
         for request in denied {
             let _ = request.decision.send(ApprovalDecision::Deny);
         }
+    }
+    Ok(status_for(&state))
+}
+
+#[tauri::command]
+pub fn mcp_set_database_allowed(
+    state: tauri::State<AppState>,
+    id: String,
+    allowed: bool,
+) -> Result<McpStatus, AppError> {
+    change_database_permission(&state.mcp.policy, &id, allowed, || {
+        let core = state.sync.core.lock().unwrap();
+        let records = crate::sync::record_runtime::active_state(&core)?;
+        if !crate::sync::databases::view(records).iter().any(|row| row.database.id == id) {
+            return Err(AppError::NotFound("Database is not saved in this library.".into()));
+        }
+        Ok(())
+    }, save_policy)?;
+    if !allowed {
+        state.mcp.cancel_records(None);
+        state.mcp.deny_all_pending();
     }
     Ok(status_for(&state))
 }
@@ -833,6 +875,26 @@ mod tests {
         assert_eq!(serde_json::to_value(policy).unwrap()["approval_mode"], "ask");
         assert!(!display_safe_command("echo hello\rhidden"));
         assert!(!display_safe_command("echo \u{200f}hidden"));
+    }
+
+    #[test]
+    fn database_sql_permission_is_default_deny_and_survives_policy_round_trip() {
+        let old: McpPolicy = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(serde_json::to_value(&old).unwrap()["allowed_databases"], json!([]));
+        let granted: McpPolicy = serde_json::from_str(r#"{"enabled":true,"allowed_databases":["db-web-1"]}"#).unwrap();
+        assert_eq!(serde_json::to_value(granted).unwrap()["allowed_databases"], json!(["db-web-1"]));
+    }
+
+    #[test]
+    fn database_sql_grant_changes_only_after_validation_and_persistence() {
+        let policy = Mutex::new(McpPolicy::default());
+        assert!(change_database_permission(&policy, "db-web-1", true, || Err(AppError::Other("missing database".into())), |_| Ok(())).is_err());
+        assert!(change_database_permission(&policy, "db-web-1", true, || Ok(()), |_| Err(AppError::Other("disk full".into()))).is_err());
+        assert!(policy.lock().unwrap().allowed_databases.is_empty());
+        change_database_permission(&policy, "db-web-1", true, || Ok(()), |_| Ok(())).unwrap();
+        assert!(policy.lock().unwrap().allowed_databases.contains("db-web-1"));
+        change_database_permission(&policy, "db-web-1", false, || panic!("revocation needs no library read"), |_| Ok(())).unwrap();
+        assert!(policy.lock().unwrap().allowed_databases.is_empty());
     }
 
     #[test]
