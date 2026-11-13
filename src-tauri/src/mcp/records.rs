@@ -601,6 +601,7 @@ fn execute_command_context(
     };
     let request = McpPendingRequest {
         host_proposal: sudo.then(|| McpHostProposal { kind: "sudo_exec".into(), settings: Vec::new() }),
+        database_id: None,
         id: context.id.clone(),
         alias: destination.alias.clone(),
         host_id: Some(host_id.clone()),
@@ -985,6 +986,8 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
             | "delete_database"
             | "start_database"
             | "stop_database"
+            | "query_database"
+            | "execute_database"
     ) {
         Ok(())
     } else {
@@ -1114,6 +1117,7 @@ pub(crate) fn dispatch(
         .map_err(|e| e.to_string())?,
         "list_databases" => crate::sync::engine::with_env(app, |env| super::databases::list(env, &state.mcp, &state.session.databases))
             .map_err(|e| e.to_string())?,
+        "query_database" | "execute_database" => super::database_sql::run(app, &records, &policy, params, context, cancel, if method == "query_database" { crate::session::database_query::SqlMode::Read } else { crate::session::database_query::SqlMode::Write }),
         "create_database" | "update_database" => crate::sync::engine::with_env(app, |env| {
             let tool = if method == "create_database" { super::databases::create } else { super::databases::update };
             tool(env, &state.mcp, &state.session.databases, params, context, cancel, &|request| {

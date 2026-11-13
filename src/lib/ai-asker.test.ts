@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { unreviewedNote } from "./ai-asker";
 
 describe("Auto-log database notice", () => {
+  it("names a direct query instead of a database port start", () => {
+    expect(unreviewedNote({ client: "Codex", unreviewed: "database_query" }, "grant"))
+      .toBe("Auto-log is on: once the grant is active, the AI client's read-only database query runs without per-query review.");
+  });
   it("names the database in every window the person agrees in", () => {
     const ai = { client: "Codex", unreviewed: "database" } as const;
     expect(unreviewedNote(ai, "hostkey"))

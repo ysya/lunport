@@ -13,6 +13,8 @@ import { PageHeader } from "@/components/app/PageHeader";
 import { renderHook } from "@/lib/test-ipc";
 import { tauriInvoke } from "@/lib/ipc";
 import { useNow } from "@/lib/use-now";
+import { mcpStatusKey } from "@/lib/mcp";
+import type { McpStatus } from "@/bindings/McpStatus";
 import type { RecordOverview } from "@/lib/records";
 import { databasesKey, type DatabasePhase, type DatabaseStep, type DatabaseView, type SavedDatabase } from "@/lib/databases";
 import { gcloudAccountsKey, pamStatusQuery, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
@@ -64,9 +66,10 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 /** The panel over `rows` (none: the list is still loading), as a server render draws it: the grants its rows read are not read yet. */
-function render(rows?: DatabaseView[], overview = recordOverview()) {
+function render(rows?: DatabaseView[], overview = recordOverview(), ai?: McpStatus) {
   const client = new QueryClient();
   if (rows) client.setQueryData(databasesKey, rows);
+  if (ai) client.setQueryData(mcpStatusKey, ai);
   return renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} createIapHost={vi.fn()} /></QueryClientProvider>);
 }
 
@@ -103,6 +106,18 @@ const grantLineTag = (html: string) => html.match(/<span class="mt-1 flex[^"]*"[
 const classesOf = (html: string) => new Set((html.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/));
 
 describe("the Databases page", () => {
+  it("keeps per-database AI SQL access beside the selected database even without a local port", () => {
+    const ai: McpStatus = {
+      enabled: true, bridge_active: true, approval_mode: "auto_log", max_transfer_mib: 1024,
+      noninteractive_credentials_supported: false, noninteractive_credentials_notice: "", audit_error: null,
+      allowed_hosts: [], allowed_groups: [], allowed_databases: [ORDERS.id], pending: [], recent: [], executable: "lunport", last_client_at_ms: null,
+    };
+    const html = render([row({}, { local_port: null, pam: null })], recordOverview(), ai);
+    expect(html).toContain('aria-label="AI SQL access"');
+    expect(html).toContain('aria-label="Allow AI SQL access to Orders"');
+    expect(html).toContain("Every write asks for confirmation");
+    expect(html).toContain("No local port is shared");
+  });
   it("shows the selected database in a separate details area", () => {
     const html = render([row({}, { pam: null })]);
     expect(html).toContain('aria-label="Database details"');

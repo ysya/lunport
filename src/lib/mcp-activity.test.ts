@@ -64,6 +64,9 @@ describe("AI activity results", () => {
     [{ outcome: "database_started", command: "" }, "succeeded", "Database started"],
     [{ outcome: "database_starting", command: "" }, "unknown", "Still connecting"],
     [{ outcome: "database_stopped", command: "" }, "succeeded", "Database stopped"],
+    [{ outcome: "database_queried", command: "SELECT 1" }, "succeeded", "Query completed"],
+    [{ outcome: "database_executed", command: "UPDATE orders SET checked = true" }, "succeeded", "Write completed"],
+    [{ outcome: "database_write_uncertain", command: "UPDATE orders SET checked = true", stop: stop("error") }, "unknown", "Write outcome uncertain"],
     [{ outcome: "database_not_started", command: "", stop: stop("refused", "approval") }, "not_run", "Refused by you"],
     [{ outcome: "scp_uploaded", command: "Upload /tmp/report.txt → /srv/report.txt", ended: null, exit_code: null }, "succeeded", "Uploaded"],
     [{ outcome: "scp_downloaded", command: "Download /tmp/report.txt ← /srv/report.txt", ended: null, exit_code: null }, "succeeded", "Downloaded"],
@@ -113,6 +116,11 @@ describe("AI activity results", () => {
 });
 
 describe("AI activity titles", () => {
+  it("never claims that a write committed when its outcome is uncertain", () => {
+    const uncertain = entry({ outcome: "database_write_uncertain", command: "UPDATE orders SET checked = true", database: "orders-dev", host_id: null, alias: "", stop: stop("error") });
+    expect(titleText(activityTitle(uncertain, activityResult(uncertain).kind))).toBe("Write outcome uncertain for database orders-dev");
+    expect(resultSentence(uncertain, activityResult(uncertain))).toContain("Check the database before retrying");
+  });
   it("titles name the action, the host and the tunnel", () => {
     const command = entry();
     expect(activityTitle(command, "succeeded")).toEqual({ before: "Ran a command on ", host: "web-1", after: "" });

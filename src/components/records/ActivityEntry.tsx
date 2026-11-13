@@ -67,6 +67,7 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
   const action = actionKind(entry);
   const command = action === "command";
   const transfer = action === "transfer";
+  const sql = action === "database" && /^(database_(?:not_)?queried|database_(?:not_)?executed|database_write_uncertain)$/.test(entry.outcome);
   const hostNamed = namesHost(entry);
   // The header toggles the details, unless the click selected text or was on the host's button.
   const toggleFromHeader = (event: MouseEvent<HTMLDivElement>) => {
@@ -76,8 +77,8 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
   };
   const copy = () => {
     copyText(entry.command).then(
-      () => toast.success(transfer ? "Transfer paths copied" : "Command copied"),
-      (error: unknown) => toast.error(transfer ? "Could not copy transfer paths" : "Could not copy the command", { description: revealHidden(errorMessage(error)) }),
+      () => toast.success(sql ? "SQL copied" : transfer ? "Transfer paths copied" : "Command copied"),
+      (error: unknown) => toast.error(sql ? "Could not copy SQL" : transfer ? "Could not copy transfer paths" : "Could not copy the command", { description: revealHidden(errorMessage(error)) }),
     );
   };
   return <li className="min-w-0 rounded-lg border bg-card">
@@ -109,10 +110,12 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
     </div>
     {expanded && <div id={detailsId} className="space-y-3 border-t px-3 py-3 text-xs select-text">
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5">
-        {entry.command && <><dt className="text-muted-foreground">{transfer ? "Transfer paths" : "Command"}</dt>
+        {entry.command && <><dt className="text-muted-foreground">{sql ? "SQL" : transfer ? "Transfer paths" : "Command"}</dt>
           <dd><pre className="max-h-48 overflow-auto font-mono whitespace-pre-wrap break-all"><code>{revealHidden(entry.command)}</code></pre></dd></>}
         <dt className="text-muted-foreground">Result</dt><dd>{revealHidden(resultSentence(entry, result))}</dd>
         <dt className="text-muted-foreground">Review</dt><dd>{reviewSentence(entry)}</dd>
+        {sql && entry.rows_returned != null && <><dt className="text-muted-foreground">Rows returned</dt><dd>{entry.rows_returned}</dd></>}
+        {sql && entry.rows_affected != null && <><dt className="text-muted-foreground">Rows affected</dt><dd>{entry.rows_affected}</dd></>}
         {entry.at_ms > 0 && <><dt className="text-muted-foreground">Requested</dt><dd className="tabular-nums"><RecordedTime ms={entry.at_ms} /></dd></>}
         <dt className="text-muted-foreground">Completed</dt><dd className="tabular-nums"><RecordedTime ms={entry.completed_at_ms} /></dd>
         <dt className="text-muted-foreground">Request ID</dt><dd className="break-all font-mono">{revealHidden(entry.id)}</dd>
@@ -132,7 +135,7 @@ export function ActivityEntry({ entry, host, expanded, onToggle, showHost }: {
             <Button size="sm" variant="outline" disabled aria-describedby={`${detailsId}-gone`}><Server className="size-3.5" />Show host</Button>
             <span id={`${detailsId}-gone`} className="sr-only">{HOST_GONE}</span>
           </span>)}
-        {entry.command && <Button size="sm" variant="outline" onClick={copy}><Copy className="size-3.5" />{transfer ? "Copy transfer paths" : "Copy command"}</Button>}
+        {entry.command && <Button size="sm" variant="outline" onClick={copy}><Copy className="size-3.5" />{sql ? "Copy SQL" : transfer ? "Copy transfer paths" : "Copy command"}</Button>}
       </div>}
     </div>}
   </li>;

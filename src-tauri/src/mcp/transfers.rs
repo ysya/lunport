@@ -213,6 +213,7 @@ pub(super) fn execute_context(
                 ("File limit".into(), format!("{limit_mib} MiB")),
             ],
         }),
+        database_id: None,
         id: context.id.clone(),
         alias: destination.alias.clone(),
         host_id: Some(host_id.clone()),
@@ -434,6 +435,8 @@ pub(super) fn execute_context(
         stop,
         tunnel: None,
         database: None,
+        rows_returned: None,
+        rows_affected: None,
     });
     match result {
         Ok(mut value) => {

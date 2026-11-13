@@ -24,6 +24,13 @@ pub(super) fn active_groups(policy: &McpPolicy, state: &SyncStateV3) -> Vec<Stri
         .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
         .collect()
 }
+pub(super) fn database_key(state: &SyncStateV3, id: &str) -> String {
+    format!("{}/database/{id}", state.device_id)
+}
+pub(super) fn active_databases(policy: &McpPolicy, state: &SyncStateV3) -> Vec<String> {
+    let prefix = format!("{}/database/", state.device_id);
+    policy.allowed_databases.iter().filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned)).collect()
+}
 pub(super) fn record_allowed(
     policy: &McpPolicy,
     state: &SyncStateV3,

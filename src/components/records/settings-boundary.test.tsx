@@ -63,7 +63,7 @@ describe("records settings compatibility", () => {
       if (category === "ai") {
         expect(text(html)).toContain("MCP");
         expect(text(html)).toContain(
-          "Only allowed hosts and Group members are available",
+          "Only allowed hosts, Group members and Cloud SQL databases are available",
         );
         expect(html).toContain("Allow host web");
       }

@@ -313,6 +313,8 @@ pub enum Unreviewed {
     Transfer,
     /// `start_database` starts its database.
     Database,
+    /// `query_database` reads its database directly.
+    DatabaseQuery,
 }
 
 /// The longest grant the window lets a person ask for, in minutes, and the longest justification: the limits of the grant memory

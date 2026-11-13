@@ -162,7 +162,7 @@ export function SettingsCategoryPane({
   return <>
     <DiagnosticsPane />
     <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
-      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Connection defaults alone never grant AI access. Both modes can request credentials through Lunport’s native windows for the current connection.</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Cloud SQL databases can be allowed individually from their details; direct SQL writes always require confirmation. Connection defaults alone never grant AI access. Both modes can request credentials through Lunport’s native windows for the current connection.</p>
     </Section>
   </>;
 }
@@ -719,6 +719,7 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
   const transferLimitValid = /^\d+$/.test(transferLimitInput) && Number.isSafeInteger(transferLimit) && transferLimit >= 1 && transferLimit <= 10_240;
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
+  const allowedDatabaseCount = status.data?.allowed_databases?.length ?? 0;
   const applyMode = (approvalMode: "ask" | "auto_log", riskAcknowledged: boolean) =>
     setMode.mutate({ approvalMode, riskAcknowledged }, {
       onSuccess: () => {
@@ -741,7 +742,7 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
           <SettingsRow
             id="set-mcp-enabled"
             label="Enable AI access"
-            description={records ? "Only allowed hosts and Group members are available. Turning this off cancels pending requests." : "Only selected host aliases are available. Turning this off cancels pending requests."}
+            description={records ? "Only allowed hosts, Group members and Cloud SQL databases are available. Turning this off cancels pending requests." : "Only selected host aliases are available. Turning this off cancels pending requests."}
           >
             <Switch
               id="set-mcp-enabled"
@@ -750,13 +751,14 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
               onCheckedChange={(enabled) => setEnabled.mutate(enabled)}
             />
           </SettingsRow>
+          {records && status.data && <p className="px-3 pb-2 text-xs text-muted-foreground">{allowedDatabaseCount} Cloud SQL {allowedDatabaseCount === 1 ? "database" : "databases"} allowed for direct AI SQL on this device. Manage each one in its Cloud SQL details.</p>}
         </SettingsGroup>
       } />
 
       {records && (
         <Section
           title="AI operation approval"
-          description="Ask reviews each command or file transfer before execution. Switching mode cancels active requests."
+          description="Ask reviews commands, transfers and direct SQL queries before execution. SQL writes always ask in both modes. Switching mode cancels active requests."
         >
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -783,7 +785,7 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log skips ordinary SSH command and file transfer review, and starts tunnels and databases without an approval window. The dedicated sudo tool still asks you to approve each command. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
+            Auto-log skips ordinary SSH command and file transfer review, and starts tunnels and databases without an approval window. Direct SQL queries also skip per-query review in Auto-log; SQL writes always ask you to approve each statement. The dedicated sudo tool still asks you to approve each command. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
