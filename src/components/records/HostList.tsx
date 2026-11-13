@@ -1,13 +1,16 @@
-import { useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type PointerEvent, type ReactElement } from "react";
 import {
   AlertCircle,
   Check,
-  ChevronDown,
+  ChevronRight,
   Clock3,
   Cloud,
   Download,
   Folder,
   FolderPlus,
+  FolderOpen,
+  Hash,
+  ArrowDownAZ,
   LoaderCircle,
   MoreHorizontal,
   Pencil,
@@ -26,9 +29,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { isImeKey } from "@/lib/ime";
@@ -42,11 +42,14 @@ import { CollectionActions } from "./CollectionActions";
 import { HostContextMenu } from "./HostContextMenu";
 import {
   buildRecordTree,
-  affectedRecords,
+  groupAncestors,
   groupPath,
+  type GroupNode,
+  type ScopeRoot,
   selectGroup as uniqueGroup,
 } from "./group-tree";
 import { libraryHosts, type LibraryFilter } from "./library-view";
+import { groupComparator, moveGroup } from "./group-order";
 
 export const readinessLabel = {
   ready: "Ready",
@@ -54,6 +57,18 @@ export const readinessLabel = {
   key_conflict: "Key conflict",
   needs_review: "Needs review",
 };
+export function browseGroupNodes(roots: ScopeRoot[], search: string): GroupNode[] {
+  const nodes = roots.flatMap((root) => root.groups);
+  const needle = search.trim().toLocaleLowerCase();
+  if (!needle) return nodes;
+  const matches: GroupNode[] = [];
+  const visit = (node: GroupNode) => {
+    if (node.group.payload.name.toLocaleLowerCase().includes(needle)) matches.push(node);
+    node.children.forEach(visit);
+  };
+  nodes.forEach(visit);
+  return matches;
+}
 export function RecordHostList({
   overview,
   selectedId,
@@ -65,6 +80,8 @@ export function RecordHostList({
   duplicate,
   create,
   createGroup,
+  reorder,
+  reordering = false,
   disabled = false,
   organizeDisabled = false,
   accept,
@@ -89,7 +106,9 @@ export function RecordHostList({
   selectGroup?: (id: string) => void;
   selectScope?: (scope: HostScope) => void;
   create?: () => void;
-  createGroup?: () => void;
+  createGroup?: (parentId?: string | null) => void;
+  reorder?: (ids: string[]) => void;
+  reordering?: boolean;
   disabled?: boolean;
   organizeDisabled?: boolean;
   accept?: (overview: RecordOverview) => unknown;
@@ -105,28 +124,51 @@ export function RecordHostList({
 }) {
   const recent = useSettingsStore((state) => state.recentConnections);
   const [search, setSearch] = useState("");
+  const [collectionSearch, setCollectionSearch] = useState("");
+  const [collectionsOpen, setCollectionsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(true);
+  const [tagsOpen, setTagsOpen] = useState(true);
+  const [draggedGroup, setDraggedGroup] = useState<string | null>(null);
+  const [groupDrop, setGroupDrop] = useState<{ id: string; side: "before" | "after" } | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const cleanupGroupDrag = useRef<(() => void) | null>(null);
+  const suppressGroupClick = useRef(false);
+  useEffect(() => () => cleanupGroupDrag.current?.(), []);
   const list = useRef<HTMLElement>(null);
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const hosts = libraryHosts(overview, filter, search, recent);
+  const groupIndex = filter.kind === "groups";
+  const tagIndex = filter.kind === "tags";
+  const browseIndex = groupIndex || tagIndex;
   const attention = libraryHosts(overview, { kind: "attention" }, "", {}).length;
   const roots = buildRecordTree(overview);
-  const allNodes = roots.flatMap((root) => root.groups);
-  const findNode = (
-    nodes: typeof allNodes,
-  ): (typeof allNodes)[number] | undefined => {
-    for (const node of nodes) {
-      if (filter.kind === "group" && node.group.id === filter.id) return node;
-      const child = findNode(node.children);
-      if (child) return child;
-    }
-  };
-  const browsableGroups =
-    filter.kind === "group"
-        ? (findNode(allNodes)?.children ?? [])
-        : [];
+  const compareGroups = groupComparator(overview.group_order?.ids ?? []);
+  const rootGroups = browseGroupNodes(roots, collectionSearch)
+    .sort((a, b) => compareGroups(a.group, b.group));
+  const tagCounts = new Map<string, number>();
+  for (const host of overview.hosts)
+    for (const tag of new Set(host.payload.tags)) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+  const allTags = [...tagCounts.keys()].sort((a, b) => a.localeCompare(b));
+  const visibleTags = allTags.filter((tag) => tag.toLocaleLowerCase().includes(collectionSearch.trim().toLocaleLowerCase()));
+  const showUngrouped = !collectionSearch.trim() || "ungrouped".includes(collectionSearch.trim().toLocaleLowerCase());
   const currentGroup =
     filter.kind === "group" ? uniqueGroup(overview.groups, filter.id) : null;
+  const groupAncestry = currentGroup
+    ? groupAncestors(overview, currentGroup.id, currentGroup.scope)
+    : null;
+  useEffect(() => {
+    if (filter.kind !== "group") return;
+    setGroupsOpen(true);
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      for (const ancestor of groupAncestry?.groups.slice(1) ?? []) next.add(ancestor.id);
+      return next;
+    });
+  }, [filter.kind, filter.kind === "group" ? filter.id : null, currentGroup?.payload.parent_id]);
+  useEffect(() => {
+    if (filter.kind === "tag") setTagsOpen(true);
+  }, [filter.kind, filter.kind === "tag" ? filter.id : null]);
   const title =
     filter.kind === "group"
       ? (currentGroup?.payload.name ?? "Unavailable group")
@@ -138,6 +180,8 @@ export function RecordHostList({
               recent: "Recent",
               attention: "Needs attention",
               ungrouped: "Ungrouped",
+              groups: "Groups",
+              tags: "Tags",
             } as const
           )[filter.kind];
   const counts = new Map<string, number>();
@@ -165,51 +209,201 @@ export function RecordHostList({
     !organizeDisabled &&
     !host.group_error &&
     counts.get(host.id) === 1;
+  const browse = (next: LibraryFilter) => {
+    setSearch("");
+    setCollectionSearch("");
+    setSelecting(false);
+    setChecked(new Set());
+    setCollectionsOpen(false);
+    changeFilter?.(next);
+  };
+  const orderEnabled = !!reorder && !reordering && !overview.group_order?.blocked && !collectionSearch.trim();
+  const startGroupDrag = (event: PointerEvent<HTMLDivElement>, id: string, siblings: string[]) => {
+    // Pointer gestures work alongside Tauri's native Windows file-drop handling.
+    if (!orderEnabled || event.button !== 0 || !(event.target instanceof Element) ||
+      !event.target.closest(".library-group-card > button:first-child")) return;
+    cleanupGroupDrag.current?.();
+    const origin = { x: event.clientX, y: event.clientY };
+    const pointer = event.pointerId;
+    let active = false;
+    let hit: { id: string; side: "before" | "after" } | null = null;
+    const move = (next: globalThis.PointerEvent) => {
+      if (next.pointerId !== pointer) return;
+      if (!active && Math.hypot(next.clientX - origin.x, next.clientY - origin.y) < 5) return;
+      if (!active) { active = true; setDraggedGroup(id); }
+      next.preventDefault();
+      const card = document.elementFromPoint(next.clientX, next.clientY)?.closest<HTMLElement>("[data-group-row]");
+      const target = card?.dataset.groupRow;
+      hit = card && target && target !== id && siblings.includes(target)
+        ? { id: target, side: next.clientY < card.getBoundingClientRect().top + card.getBoundingClientRect().height / 2 ? "before" : "after" }
+        : null;
+      setGroupDrop(hit);
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", key);
+      cleanupGroupDrag.current = null;
+      setDraggedGroup(null); setGroupDrop(null);
+      if (active) { suppressGroupClick.current = true; window.setTimeout(() => { suppressGroupClick.current = false; }, 0); }
+    };
+    const finish = (next: globalThis.PointerEvent) => {
+      if (next.pointerId !== pointer) return;
+      cleanup();
+      if (active && hit) {
+        const ids = moveGroup(overview.group_order?.ids ?? [], siblings, id, hit.id, hit.side);
+        if (ids) reorder?.(ids);
+      }
+    };
+    const cancel = () => cleanup();
+    const key = (next: KeyboardEvent) => { if (next.key === "Escape") { next.preventDefault(); cleanup(); } };
+    cleanupGroupDrag.current = cleanup;
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", key);
+  };
+  const groupCards = (nodes: GroupNode[], tree = false): ReactElement => {
+    const siblings = nodes.map((node) => node.group.id);
+    const move = (id: string, index: number, offset: -1 | 1) => {
+      const target = siblings[index + offset];
+      if (!orderEnabled || !target) return;
+      const next = moveGroup(overview.group_order?.ids ?? [], siblings, id, target, offset < 0 ? "before" : "after");
+      if (next) reorder?.(next);
+    };
+    return <div className={cn("library-group-grid", tree && "library-group-tree")}>
+      {nodes.map((node, index) => {
+        const name = revealHidden(node.group.payload.name);
+        const expanded = expandedGroups.has(node.group.id);
+        const card = <div key={node.group.id}
+          className={cn("library-group-card", filter.kind === "group" && filter.id === node.group.id && "is-selected", draggedGroup === node.group.id && "is-dragging", groupDrop?.id === node.group.id && `group-drop-${groupDrop.side}`)}
+          data-group-row={node.group.id} data-reorderable={orderEnabled}
+          onPointerDown={(event) => startGroupDrag(event, node.group.id, siblings)}
+          onClickCapture={(event) => { if (suppressGroupClick.current) { event.preventDefault(); event.stopPropagation(); } }}
+          onKeyDown={(event) => {
+            if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+              event.preventDefault();
+              move(node.group.id, index, event.key === "ArrowUp" ? -1 : 1);
+            }
+          }}>
+          <button type="button" aria-label={`Open group ${name}`}
+            aria-current={filter.kind === "group" && filter.id === node.group.id ? "page" : undefined}
+            disabled={disabled || !changeFilter}
+            onClick={() => browse({ kind: "group", id: node.group.id })}>
+            <span className="library-folder-icon"><Folder className="size-5" /></span>
+            <span className="min-w-0"><strong className="block truncate">{name}</strong>
+              <span>{node.hosts.length} {node.hosts.length === 1 ? "host" : "hosts"}</span>
+              {!!collectionSearch.trim() && !!node.group.payload.parent_id &&
+                <span className="library-group-path">{revealHidden(groupPath(overview, node.group.id, node.group.scope))}</span>}
+            </span>
+          </button>
+          {tree && node.children.length > 0 && <button type="button" className="library-group-edit library-group-toggle"
+            aria-label={`${expanded ? "Collapse" : "Expand"} group ${name}`} aria-expanded={expanded}
+            onClick={() => setExpandedGroups((current) => {
+              const next = new Set(current);
+              if (next.has(node.group.id)) next.delete(node.group.id);
+              else next.add(node.group.id);
+              return next;
+            })}><ChevronRight className={cn("size-4", expanded && "rotate-90")} /></button>}
+          {selectGroup && <button type="button" className="library-group-edit" aria-label={`Edit group ${name}`}
+            disabled={disabled} onClick={() => selectGroup(node.group.id)}><MoreHorizontal className="size-4" /></button>}
+        </div>;
+        return tree ? <div key={node.group.id} className="library-group-branch">
+          {card}
+          {expanded && node.children.length > 0 && groupCards(node.children, true)}
+        </div> : card;
+      })}
+    </div>;
+  };
   return (
-    <div className="library-catalog flex h-full min-h-0 flex-col">
-      <PageHeader className="library-page-header" title={changeFilter ? (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" className="library-view-trigger" aria-label={`Host views: ${revealHidden(title)}`}>
-              <span>{revealHidden(title)}</span>
-              <ChevronDown className="size-4" aria-hidden="true" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuLabel>Host views</DropdownMenuLabel>
-            <DropdownMenuRadioGroup value={filter.kind} onValueChange={(kind) => {
-              if (kind === "all" || kind === "recent" || kind === "attention") changeFilter({ kind });
-            }}>
-              <DropdownMenuRadioItem value="all"><Server />All hosts</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="recent"><Clock3 />Recent</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="attention">
-                <AlertCircle />Needs attention
-                <span className="library-view-menu-count">{attention}</span>
-              </DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ) : revealHidden(title)} count={hosts.length}
+    <div className="library-catalog flex h-full min-h-0">
+      {changeFilter && <aside id="host-collections" className="library-collections" aria-label="Host collections" data-open={collectionsOpen}>
+        <div className="library-collections-heading">
+          <strong>Browse</strong>
+          <button type="button" aria-label="Close collections" onClick={() => setCollectionsOpen(false)}><X className="size-4" /></button>
+        </div>
+        <div className="library-collections-search">
+          <Search className="size-3.5" aria-hidden="true" />
+          <Input id={browseIndex ? SEARCH_INPUT_ID : undefined} aria-label="Find groups or tags" placeholder="Find groups or tags…" value={collectionSearch}
+            onChange={(event) => setCollectionSearch(event.target.value)} />
+        </div>
+        <nav aria-label="Host collection filters" className="library-collection-list">
+          {([
+            { kind: "all", label: "All hosts", icon: <Server className="size-4" />, count: overview.hosts.length },
+            { kind: "recent", label: "Recent", icon: <Clock3 className="size-4" /> },
+            { kind: "attention", label: "Needs attention", icon: <AlertCircle className="size-4" />, count: attention },
+          ] as const).map((item) => <button key={item.kind} type="button" className="library-collection-item"
+            aria-current={filter.kind === item.kind ? "page" : undefined} onClick={() => browse({ kind: item.kind })}>
+            {item.icon}<span>{item.label}</span>{"count" in item && <small>{item.count}</small>}
+          </button>)}
+          <div className="library-collection-section">
+            <div className="library-collection-heading-row">
+              <button type="button" className="library-collection-heading" aria-expanded={groupsOpen}
+                onClick={() => setGroupsOpen((open) => !open)}><ChevronRight className={cn("size-4", groupsOpen && "rotate-90")} />Groups</button>
+              {createGroup && <button type="button" aria-label="New root group" title="New group" disabled={disabled}
+                onClick={() => createGroup(null)}><Plus className="size-3.5" /></button>}
+              {reorder && <DropdownMenu>
+                <DropdownMenuTrigger asChild><button type="button" aria-label="Group sorting" disabled={!orderEnabled}><MoreHorizontal className="size-4" /></button></DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem disabled={!orderEnabled || !overview.group_order?.ids.length} onSelect={() => reorder([])}><ArrowDownAZ />Sort groups by name</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>}
+            </div>
+            {groupsOpen && <>
+              {groupCards(rootGroups, !collectionSearch.trim())}
+              {showUngrouped && <button type="button" className="library-collection-item library-collection-ungrouped"
+                aria-current={filter.kind === "ungrouped" ? "page" : undefined} onClick={() => browse({ kind: "ungrouped" })}>
+                <FolderOpen className="size-4" /><span>Ungrouped</span><small>{libraryHosts(overview, { kind: "ungrouped" }, "", {}).length}</small>
+              </button>}
+              {!rootGroups.length && !showUngrouped && <p className="library-collection-empty">No matching groups</p>}
+            </>}
+          </div>
+          <div className="library-collection-section">
+            <button type="button" className="library-collection-heading" aria-expanded={tagsOpen}
+              onClick={() => setTagsOpen((open) => !open)}><ChevronRight className={cn("size-4", tagsOpen && "rotate-90")} />Tags</button>
+            {tagsOpen && <>
+              {visibleTags.map((tag) => <button key={tag} type="button" className="library-collection-item library-collection-tag"
+                aria-current={filter.kind === "tag" && filter.id === tag ? "page" : undefined}
+                onClick={() => browse({ kind: "tag", id: tag })}>
+                <Hash className="size-4" /><span>{revealHidden(tag)}</span><small>{tagCounts.get(tag)}</small>
+              </button>)}
+              {!visibleTags.length && <p className="library-collection-empty">{collectionSearch ? "No matching tags" : "No tags yet"}</p>}
+            </>}
+          </div>
+        </nav>
+      </aside>}
+      {collectionsOpen && changeFilter && <button type="button" className="library-collections-backdrop"
+        aria-label="Close collections" onClick={() => setCollectionsOpen(false)} />}
+      <div className="library-catalog-content flex min-h-0 min-w-0 flex-1 flex-col">
+      <PageHeader className="library-page-header" title={revealHidden(title)} count={browseIndex ? undefined : hosts.length}
         breadcrumb={filter.kind === "group" || filter.kind === "tag" ? <div className="library-breadcrumb">
             <button
               type="button"
-              onClick={() => changeFilter?.({ kind: "all" })}
+              onClick={() => browse({ kind: "all" })}
             >
-              Library
+              Hosts
             </button>
             <span>/</span>
-            <span>Hosts</span>
+            {filter.kind === "group" ? <>
+              <button type="button" onClick={() => { browse({ kind: "groups" }); setGroupsOpen(true); setCollectionsOpen(true); }}>Groups</button>
+              {[...(groupAncestry?.groups ?? [])].reverse().map((group) => <Fragment key={group.id}>
+                <span>/</span>
+                {group.id === filter.id
+                  ? <span aria-current="location">{revealHidden(group.payload.name)}</span>
+                  : <button type="button" aria-label={`Go to group ${revealHidden(group.payload.name)}`}
+                    onClick={() => browse({ kind: "group", id: group.id })}>{revealHidden(group.payload.name)}</button>}
+              </Fragment>)}
+            </> : <span>Tags</span>}
           </div> : undefined}
-        description={filter.kind === "attention" ? "Review connection settings and keys before connecting." : currentGroup ? revealHidden(groupPath(overview, currentGroup.id, currentGroup.scope)) : undefined}
+        description={filter.kind === "attention" ? "Review connection settings and keys before connecting." : groupAncestry?.error ? revealHidden(`Needs review: ${groupAncestry.error}`) : currentGroup ? "Hosts directly in this group." : undefined}
         actions={<>
-          {changeFilter && attention > 0 && filter.kind !== "attention" && (
-            <Button variant="ghost" size="sm" className="library-attention-shortcut"
-              aria-label={`Needs attention (${attention})`} title={`Needs attention (${attention})`}
-              onClick={() => changeFilter({ kind: "attention" })}>
-              <AlertCircle className="size-3.5" aria-hidden="true" />
-              <span>{attention}</span>
-            </Button>
-          )}
+          {changeFilter && <Button variant="outline" size="sm" className="library-collections-toggle"
+            aria-controls="host-collections" aria-expanded={collectionsOpen} onClick={() => setCollectionsOpen((open) => !open)}>
+            <Folder className="size-4" />Browse
+          </Button>}
           {currentGroup && selectGroup && (
             <Button
               variant="outline"
@@ -221,7 +415,12 @@ export function RecordHostList({
               Group settings
             </Button>
           )}
-          {create && (
+          {currentGroup && createGroup && (
+            <Button variant="outline" size="sm" onClick={() => createGroup(currentGroup.id)} disabled={disabled}>
+              <Plus className="size-4" />New subgroup
+            </Button>
+          )}
+          {create && !browseIndex && (
             <Button
               className="library-create"
               onClick={create}
@@ -258,7 +457,7 @@ export function RecordHostList({
                   </DropdownMenuItem>
                 </>}
                 {createGroup && (
-                  <DropdownMenuItem disabled={disabled} onSelect={createGroup}>
+                  <DropdownMenuItem disabled={disabled} onSelect={() => createGroup(null)}>
                     <FolderPlus />
                     New group
                   </DropdownMenuItem>
@@ -268,7 +467,7 @@ export function RecordHostList({
           )}
         </>}
       />
-      <div className="library-catalog-toolbar">
+      {!browseIndex && <div className="library-catalog-toolbar">
         <div className="library-search">
           <Search className="size-4" />
           <Input
@@ -320,7 +519,7 @@ export function RecordHostList({
             {selecting ? "Done" : "Select"}
           </Button>
         )}
-      </div>
+      </div>}
       <div className="library-catalog-scroll min-h-0 flex-1 overflow-y-auto"
         onClick={(event) => {
           if (!(event.target instanceof Element) || event.target.closest('button, input, select, textarea, a, [role="menu"], [role="dialog"], .library-host-card, .library-group-card')) return;
@@ -342,52 +541,11 @@ export function RecordHostList({
             </button>
           </div>
         )}
-        {!search.trim() && !!browsableGroups.length && (
-          <section className="library-group-section" aria-label="Browse groups">
-            <div className="library-section-label">
-              Groups <span>{browsableGroups.length}</span>
-            </div>
-            <div className="library-group-grid">
-              {browsableGroups.map((node) => (
-                <div key={node.group.id} className="library-group-card">
-                  <button
-                    type="button"
-                    disabled={disabled || !changeFilter}
-                    onClick={() =>
-                      changeFilter?.({ kind: "group", id: node.group.id })
-                    }
-                  >
-                    <span className="library-folder-icon">
-                      <Folder className="size-5" />
-                    </span>
-                    <span className="min-w-0">
-                      <strong className="block truncate">
-                        {revealHidden(node.group.payload.name)}
-                      </strong>
-                      <span>
-                        {affectedRecords(overview, node.group).hosts} hosts
-                      </span>
-                    </span>
-                  </button>
-                  {selectGroup && (
-                    <button
-                      type="button"
-                      className="library-group-edit"
-                      aria-label={
-                        "Edit group " + revealHidden(node.group.payload.name)
-                      }
-                      disabled={disabled}
-                      onClick={() => selectGroup(node.group.id)}
-                    >
-                      <MoreHorizontal className="size-4" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-        <section ref={list} tabIndex={-1} aria-label="Saved hosts" className="library-host-section" data-selecting={selecting}>
+        {browseIndex && <section className="library-browse-prompt">
+          <Folder className="size-6" aria-hidden="true" />
+          <p>Choose a {groupIndex ? "group" : "tag"} from Browse.</p>
+        </section>}
+        {!browseIndex && <section ref={list} tabIndex={-1} aria-label="Saved hosts" className="library-host-section" data-selecting={selecting}>
           <div className="library-host-grid">
             {hosts.map((host, index) => {
               const ambiguous = (counts.get(host.id) ?? 0) > 1;
@@ -399,6 +557,8 @@ export function RecordHostList({
                 ? checked.has(host.id)
                 : selectedId === host.id && !ambiguous;
               const name = revealHidden(host.payload.alias);
+              const showPath = filter.kind !== "group" && filter.kind !== "ungrouped";
+              const pathLabel = revealHidden(groupPath(overview, host.payload.group_id, host.scope) || "Ungrouped");
               const target = revealHidden(host.effective_payload.hostname);
               const user = revealHidden(host.effective_payload.user);
               const endpointHost = target.includes(":") && !target.startsWith("[")
@@ -441,6 +601,7 @@ export function RecordHostList({
                     aria-label={"Host actions for " + name}
                     className={cn(
                       "library-host-card",
+                      showPath && "has-path",
                       active && "is-selected",
                       blocked && "needs-attention",
                     )}
@@ -476,6 +637,7 @@ export function RecordHostList({
                       )}
                       <span className="library-host-identity">
                         <strong title={name}>{name}</strong>
+                        {showPath && <span className="library-host-path" title={pathLabel}>{pathLabel}</span>}
                       </span>
                       <span className="library-host-secondary">
                         <span className="library-host-connection" title={connectionTitle}>
@@ -535,6 +697,8 @@ export function RecordHostList({
                     ? "Your next connection starts here"
                     : filter.kind === "attention"
                       ? "All hosts are ready"
+                      : filter.kind === "group"
+                        ? "No hosts directly in this group"
                       : "No hosts here yet"}
               </h2>
               <p>
@@ -544,6 +708,8 @@ export function RecordHostList({
                     ? "Open a connection and it will appear here for quick access."
                     : filter.kind === "attention"
                       ? "There are no connection settings or keys to review."
+                      : filter.kind === "group"
+                        ? "Subgroups are in Browse. Add a host directly to this group."
                       : "Add a server or bring your connections from an SSH config."}
               </p>
               {search.trim() ? (
@@ -553,7 +719,7 @@ export function RecordHostList({
               ) : filter.kind === "recent" || filter.kind === "attention" ? (
                 <Button
                   variant="outline"
-                  onClick={() => changeFilter?.({ kind: "all" })}
+                  onClick={() => browse({ kind: "all" })}
                 >
                   Browse all hosts
                 </Button>
@@ -574,7 +740,7 @@ export function RecordHostList({
               )}
             </div>
           )}
-        </section>
+        </section>}
         {filter.kind === "all" &&
           roots.some((root) => root.diagnostics.length) && (
             <section className="mt-6">
@@ -617,6 +783,7 @@ export function RecordHostList({
           }
         />
       )}
+      </div>
     </div>
   );
 }

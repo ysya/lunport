@@ -1,33 +1,36 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LibraryNavigation } from "./LibraryNavigation";
-import { groupView, hostTransport, recordOverview } from "./fixtures";
+import { groupView, hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
 const navigationState = vi.hoisted(() => ({
   librarySidebarCollapsed: false,
-  collapsedRecordGroups: [] as string[],
-  toggleRecordGroup: () => { },
 }));
 
 vi.mock("@/stores/ui", () => ({
   useUiStore: (selector: (state: typeof navigationState) => unknown) => selector(navigationState),
 }));
 
-afterEach(() => { navigationState.librarySidebarCollapsed = false; navigationState.collapsedRecordGroups = []; });
+afterEach(() => { navigationState.librarySidebarCollapsed = false; });
 
 function navigation() {
   const parent = groupView();
   const child = groupView({ id: "0000000000000011", payload: { schema: 1, name: "API", parent_id: parent.id, defaults: {} } });
   return renderToStaticMarkup(<LibraryNavigation
-    overview={recordOverview({ groups: [parent, child] })}
+    overview={recordOverview({ groups: [parent, child], hosts: [hostView({ payload: hostPayload({ tags: ["production"] }) })] })}
     panel="hosts"
-    filter={{ kind: "all" }}
     navigate={vi.fn()}
     changeFilter={vi.fn()}
-    createGroup={vi.fn()}
   />);
 }
 
 describe("Records navigation controls", () => {
+  it("shows one Hosts destination without group and tag navigation", () => {
+    const html = navigation();
+    expect(html).toContain('aria-label="Hosts (1)"');
+    expect(html).not.toContain('aria-label="Groups"');
+    expect(html).not.toContain('aria-label="Tags"');
+    expect(html).not.toContain('class="library-nav-collections');
+  });
   it("the sidebar groups connection pages after AI activity", () => {
     const html = navigation();
     const tunnels = html.indexOf('aria-label="Tunnels"');
@@ -42,25 +45,21 @@ describe("Records navigation controls", () => {
     const html = renderToStaticMarkup(<LibraryNavigation
       overview={recordOverview({ transports: [hostTransport()] })}
       panel="transports"
-      filter={{ kind: "all" }}
       navigate={vi.fn()}
       changeFilter={vi.fn()}
-      createGroup={vi.fn()}
     />);
     expect(html).toContain('aria-label="Google Cloud"');
     expect(html).not.toContain('aria-label="Google Cloud (');
     // The rows with a count keep it.
-    expect(html).toContain('aria-label="All hosts (1)"');
+    expect(html).toContain('aria-label="Hosts (1)"');
   });
 
   it("lists the cloud providers under a Cloud heading of their own, Google Cloud first", () => {
     const html = renderToStaticMarkup(<LibraryNavigation
       overview={recordOverview()}
       panel="hosts"
-      filter={{ kind: "all" }}
       navigate={vi.fn()}
       changeFilter={vi.fn()}
-      createGroup={vi.fn()}
     />);
     const cloud = html.slice(html.indexOf('aria-label="Cloud providers"'));
     expect(html).toContain(">Cloud</div>");
@@ -69,21 +68,11 @@ describe("Records navigation controls", () => {
     expect(html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'))).not.toContain("Google Cloud");
   });
 
-  it("keeps group navigation separate from its disclosure and removes closed children from interaction", () => {
-    navigationState.collapsedRecordGroups = ["local:0000000000000010"];
-    const html = navigation();
-    expect(html).toContain('aria-label="Expand Operations"');
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain('data-open="false" inert="" aria-hidden="true"');
-    expect(html).toContain('aria-label="Operations (0)"');
-    expect(html).toContain('aria-label="API (0)"');
-  });
-  it("keeps named top-level navigation while removing Groups and Tags from a collapsed rail's focus order", () => {
+  it("keeps Hosts available in the collapsed rail", () => {
     navigationState.librarySidebarCollapsed = true;
     const html = navigation();
     expect(html).toContain('data-collapsed="true"');
-    expect(html).toContain('aria-label="All hosts (1)"');
-    expect(html).toMatch(/class="library-nav-collections[^\"]*" inert="" aria-hidden="true"/);
+    expect(html).toContain('aria-label="Hosts (1)"');
     expect(html).not.toContain('aria-label="Settings"');
   });
 });

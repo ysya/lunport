@@ -2,7 +2,7 @@ import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { groupAncestors, recordHostSearchText } from "./group-tree";
 
 export type LibraryFilter =
-  | { kind: "all" | "recent" | "attention" | "ungrouped" }
+  | { kind: "all" | "recent" | "attention" | "ungrouped" | "groups" | "tags" }
   | { kind: "group" | "tag"; id: string };
 
 export const recentHostKey = (id: string) => `records:${id}`;
@@ -17,6 +17,7 @@ export function libraryHosts(
   search: string,
   recent: Record<string, number>,
 ): RecordHostView[] {
+  if (filter.kind === "groups" || filter.kind === "tags") return [];
   const words = search.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
   const counts = new Map<string, number>();
   for (const host of overview.hosts)
@@ -36,11 +37,11 @@ export function libraryHosts(
         return false;
       if (
         filter.kind === "group" &&
-        !groupAncestors(
+        groupAncestors(
           overview,
           host.payload.group_id,
           host.scope,
-        ).groups.some((g) => g.id === filter.id)
+        ).groups[0]?.id !== filter.id
       )
         return false;
       const text = recordHostSearchText(overview, host).toLocaleLowerCase();

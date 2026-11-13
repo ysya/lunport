@@ -17,7 +17,7 @@ import type { RecordOverview } from "@/lib/records";
 import { databasesKey, type DatabasePhase, type DatabaseStep, type DatabaseView, type SavedDatabase } from "@/lib/databases";
 import { gcloudAccountsKey, pamStatusQuery, type GcloudAccountsView, type PamStatusView } from "@/lib/transports";
 
-const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false, collapsedRecordGroups: [] as string[], toggleRecordGroup: () => {} }));
+const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false }));
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
 vi.mock("@/lib/use-now", () => ({ useNow: vi.fn() }));
 vi.mock("@/stores/ui", () => ({ useUiStore: (selector: (state: typeof ui) => unknown) => selector(ui) }));
@@ -232,11 +232,11 @@ describe("the Databases page", () => {
 
   it("the_library_navigation_lists_databases_after_tunnels", () => {
     const navigation = (panel: WorkspacePanel) => renderToStaticMarkup(
-      <LibraryNavigation overview={recordOverview()} panel={panel} filter={{ kind: "all" }} navigate={vi.fn()} changeFilter={vi.fn()} createGroup={vi.fn()} />,
+      <LibraryNavigation overview={recordOverview()} panel={panel} navigate={vi.fn()} changeFilter={vi.fn()} />,
     );
     const html = navigation("hosts");
     const library = html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'));
-    const order = ["All hosts (1)", "Keys (0)", "AI activity", "Tunnels", "Cloud SQL"].map((label) => library.indexOf(`aria-label="${label}"`));
+    const order = ["Hosts (1)", "Keys (0)", "AI activity", "Tunnels", "Cloud SQL"].map((label) => library.indexOf(`aria-label="${label}"`));
     expect(order.every((at) => at >= 0), "every row is there").toBe(true);
     expect(order, "in this order").toEqual([...order].sort((a, b) => a - b));
     // It shows no count, as Tunnels shows none, and is the current page only on its own page.
@@ -248,7 +248,7 @@ describe("the Databases page", () => {
 
   it("groups tunnels and Cloud SQL as connections", () => {
     const html = renderToStaticMarkup(
-      <LibraryNavigation overview={recordOverview()} panel="databases" filter={{ kind: "all" }} navigate={vi.fn()} changeFilter={vi.fn()} createGroup={vi.fn()} />,
+      <LibraryNavigation overview={recordOverview()} panel="databases" navigate={vi.fn()} changeFilter={vi.fn()} />,
     );
     expect(text(html)).toContain("Connections");
     expect(html).toContain('aria-current="page" aria-label="Cloud SQL"');

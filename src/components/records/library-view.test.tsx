@@ -66,26 +66,31 @@ describe("connection library browsing", () => {
     ).toEqual([]);
     expect(host.payload.user).toBe("fallback");
   });
-  it("includes descendants of a selected Group and keeps broken membership inspectable in All hosts", () => {
+  it("shows only direct members of a selected Group and keeps broken membership inspectable in All hosts", () => {
     const parent = groupView();
     const child = groupView({
       id: "0000000000000011",
       payload: { schema: 1, name: "API", parent_id: parent.id, defaults: {} },
     });
     const member = hostView({ payload: hostPayload({ group_id: child.id }) });
-    const broken = hostView({
+    const direct = hostView({
       id: "0000000000000002",
+      payload: hostPayload({ group_id: parent.id }),
+    });
+    const broken = hostView({
+      id: "0000000000000003",
       payload: hostPayload({ group_id: "missing" }),
       group_error: "Missing group",
     });
     const overview = recordOverview({
       groups: [parent, child],
-      hosts: [member, broken],
+      hosts: [member, direct, broken],
     });
     expect(
       libraryHosts(overview, { kind: "group", id: parent.id }, "", {}),
-    ).toEqual([member]);
-    expect(libraryHosts(overview, { kind: "all" }, "", {})).toHaveLength(2);
+    ).toEqual([direct]);
+    expect(libraryHosts(overview, { kind: "group", id: child.id }, "", {})).toEqual([member]);
+    expect(libraryHosts(overview, { kind: "all" }, "", {})).toHaveLength(3);
     expect(libraryHosts(overview, { kind: "attention" }, "", {})).toEqual([
       broken,
     ]);
