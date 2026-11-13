@@ -45,6 +45,7 @@ const DONE = new Map([
   ["tunnel_started", "Tunnel started"], ["tunnel_stopped", "Tunnel stopped"],
   ["database_created", "Database created"], ["database_updated", "Database updated"], ["database_deleted", "Database deleted"],
   ["database_started", "Database started"], ["database_stopped", "Database stopped"],
+  ["database_queried", "Query completed"], ["database_executed", "Write completed"],
 ]);
 /** The connection management outcomes that did not complete. */
 const NOT_DONE = new Set([
@@ -52,6 +53,7 @@ const NOT_DONE = new Set([
   "host_creation_not_completed", "host_update_not_completed", "host_key_not_verified", "transport_not_set", "transport_not_removed",
   "tunnel_not_created", "tunnel_not_updated", "tunnel_not_deleted", "tunnel_not_started",
   "database_not_created", "database_not_updated", "database_not_deleted", "database_not_started",
+  "database_not_queried", "database_not_executed",
 ]);
 /** What an entry from before review and stop were recorded says when nothing ran; a command's own end is recorded as `allowed`. */
 const OLDER = new Map<string, ActivityResult>([
@@ -86,6 +88,7 @@ function ending(entry: McpAuditEntry): { result: ActivityResult; sentence: strin
 
 /** What became of the request: what stopped it, else what it recorded. Nothing is inferred from a missing exit status. */
 export function activityResult(entry: McpAuditEntry): ActivityResult {
+  if (entry.outcome === "database_write_uncertain") return { kind: "unknown", label: "Write outcome uncertain" };
   if (entry.stop) return STOPS[entry.stop.kind] ?? UNKNOWN;
   if (STARTING.has(entry.outcome)) return STILL_CONNECTING;
   const done = DONE.get(entry.outcome);
@@ -128,6 +131,9 @@ const NAMED_VERBS = new Map<string, Columns>([
   ...both("database_started", "database_not_started", ["Started", "Asked to start", "Could not start"]),
   ["database_starting", ["Starting", "Asked to start", "Could not start"]],
   ["database_stopped", ["Stopped", "Stopped", "Stopped"]],
+  ...both("database_queried", "database_not_queried", ["Queried", "Asked to query", "Could not query"]),
+  ...both("database_executed", "database_not_executed", ["Wrote to", "Asked to write to", "Could not write to"]),
+  ["database_write_uncertain", ["Write outcome uncertain for", "Write outcome uncertain for", "Write outcome uncertain for"]],
 ]);
 const COMMAND_TITLES: Columns = ["Ran a command on ", "Asked to run a command on ", "Could not run a command on "];
 const UPLOAD_TITLES: Columns = ["Uploaded a file to ", "Asked to upload a file to ", "Could not upload a file to "];
@@ -177,6 +183,7 @@ export function reviewSentence(entry: McpAuditEntry): string {
     case "no_answer": return "Lunport’s window got no answer.";
     case "auto_log":
       return actionKind(entry) === "tunnel" ? "Auto-log: started without per-tunnel review."
+        : entry.outcome === "database_queried" || entry.outcome === "database_not_queried" ? "Auto-log: queried without per-query review."
         : actionKind(entry) === "database" ? "Auto-log: started without per-database review."
         : actionKind(entry) === "transfer" ? "Auto-log: transferred without per-transfer review."
         : "Auto-log: ran without per-command review.";
@@ -196,6 +203,7 @@ const WINDOWS: Record<McpWindow, string> = {
 
 /** What happened, in a sentence: how a command that ran ended, or what stopped the request and in which of Lunport's windows. */
 export function resultSentence(entry: McpAuditEntry, result: ActivityResult): string {
+  if (entry.outcome === "database_write_uncertain") return "The write may have completed. Check the database before retrying. Lunport did not retry it.";
   if (entry.stop) {
     if (entry.stop.kind === "not_allowed") return "This host is not allowed for AI access.";
     const where = entry.stop.window ? WINDOWS[entry.stop.window] : undefined;
@@ -233,7 +241,7 @@ export function hostKey(entry: McpAuditEntry): string {
 /** Whether the entry names a host, by its id or only by its alias. A database on its public IP is reached through none: its entry
  * records no host id and an empty alias, so there is no host to filter by, show or give an id for. */
 export function namesHost(entry: McpAuditEntry): boolean {
-  return entry.host_id != null || entry.alias !== "";
+  return entry.host_id != null || (entry.alias !== "" && entry.database == null);
 }
 
 const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();

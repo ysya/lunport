@@ -98,6 +98,18 @@ const PROPOSAL_WORDS: Record<string, ProposalWords> = {
     button: "Start database", targetLine: databaseLine,
     note: "Requests expire after 120 seconds; a changed database requires fresh approval.",
   },
+  query_database: {
+    title: "Run this SQL query?",
+    description: "Lunport will run this SQL once on a read-only Cloud SQL session. Review the full statement and database. The AI client cannot approve it.",
+    button: "Run query", targetLine: databaseLine,
+    note: "SQL text is saved in AI activity. Query results are not logged. Requests expire after 120 seconds.",
+  },
+  execute_database: {
+    title: "Execute this database write?",
+    description: "Lunport will execute this SQL once on Cloud SQL. Review the full statement and database. This confirmation is required in Ask and Auto-log modes.",
+    button: "Execute SQL", targetLine: databaseLine,
+    note: "SQL text and outcome are saved in AI activity. A lost response may leave the write outcome uncertain; Lunport will not retry it.",
+  },
   scp_upload: {
     title: "Upload this file?",
     description: "Lunport will copy the local file to this host. Review both paths; an existing remote file may be replaced.",
@@ -126,6 +138,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
   const words = proposal ? PROPOSAL_WORDS[proposal.kind] ?? PROPOSAL_WORDS.create_host : null;
   const transfer = proposal?.kind === "scp_upload" || proposal?.kind === "scp_download";
   const sudo = proposal?.kind === "sudo_exec";
+  const sql = proposal?.kind === "query_database" || proposal?.kind === "execute_database";
 
   return (
     <>
@@ -149,7 +162,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
           {(!proposal || transfer || sudo) && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
           <McpAttribution requestedBy={request.requested_by} requesterId={request.requester_id} clientInfo={request.client_info} />
         </div>
-        {proposal && !sudo ? (
+        {proposal && !sudo && !sql ? (
           <dl className="space-y-2 rounded-lg border p-3 text-xs">
             {proposal.settings.map(([label, value]) => (
               <div key={label} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
@@ -159,7 +172,8 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
             ))}
           </dl>
         ) : <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Remote command</p>
+          {sql && <dl className="space-y-1 rounded-lg border p-3 text-xs">{proposal?.settings.map(([label, value]) => <div key={label} className="flex gap-2"><dt className="text-muted-foreground">{revealHidden(label)}:</dt><dd>{revealHidden(value)}</dd></div>)}</dl>}
+          <p className="text-xs font-medium text-muted-foreground">{sql ? "SQL statement" : "Remote command"}</p>
           <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/40 p-3 font-mono text-xs leading-relaxed text-foreground">
             {request.command}
           </pre>

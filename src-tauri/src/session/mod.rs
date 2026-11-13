@@ -51,6 +51,7 @@ pub(crate) mod database_access;
 pub(crate) mod database_path;
 pub(crate) mod database_ports;
 pub(crate) mod database_upstream;
+pub(crate) mod database_query;
 pub(crate) mod pgwire;
 pub mod embedded;
 pub mod auth;

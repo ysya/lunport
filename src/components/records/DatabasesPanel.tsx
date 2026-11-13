@@ -48,6 +48,8 @@ import {
   type SavedDatabase,
 } from "@/lib/databases";
 import { DatabaseAccessCard, WritesOnMarker } from "./DatabaseAccessCard";
+import { useMcpStatus, useSetMcpDatabaseAllowed } from "@/lib/mcp";
+import { Switch } from "@/components/ui/switch";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
 
@@ -96,6 +98,25 @@ const detailsPanelId = (id: string) => `${databaseDetailsId(id)}-panel`;
 export function RouteGrant({ hostId, alias, pam, busy, request }: RouteGrantRequest & { busy: boolean }) {
   const read = useQuery(pamStatusQuery(hostId));
   return <GrantLine read={read} pam={pam} subject={alias} led={`${alias}: `} busy={busy} request={request} />;
+}
+
+function DatabaseAiAccess({ database }: { database: SavedDatabase }) {
+  const status = useMcpStatus();
+  const change = useSetMcpDatabaseAllowed();
+  const allowed = status.data?.allowed_databases?.includes(database.id) ?? false;
+  return <section className="space-y-2 rounded-lg border p-3" aria-label="AI SQL access">
+    <div className="flex items-start justify-between gap-3">
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">AI SQL access</h3>
+        <p className="text-xs text-muted-foreground">Allow AI tools on this device to query this database through Lunport. SQL runs directly over Cloud SQL; no local port or password is shared.</p>
+      </div>
+      <Switch aria-label={`Allow AI SQL access to ${revealHidden(database.name)}`} checked={allowed} disabled={!status.data || change.isPending} onCheckedChange={(next) => change.mutate({ id: database.id, allowed: next })} />
+    </div>
+    {status.isError && <p role="alert" className="text-xs text-destructive">AI access status is unavailable.</p>}
+    {allowed && <p className="text-xs text-muted-foreground">Queries follow Ask or Auto-log. Every write asks for confirmation; production writes also request system authorization where available. SQL text and outcome are saved in AI activity, without result rows.</p>}
+    {allowed && routeHost(database) && <p className="text-xs text-muted-foreground">This private route also requires AI access to its Host or Group.</p>}
+    {allowed && status.data && !status.data.enabled && <p className="text-xs text-muted-foreground">Global AI access is off. This rule is saved for when you turn it on.</p>}
+  </section>;
 }
 
 /**
@@ -330,6 +351,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
           {selected.database.pam && <DatabaseGrant id={selected.database.id} name={selected.database.name} pam={selected.database.pam} busy={busy} request={() => requestGrant(selected.database.id)} />}
           {selectedVia && <RouteGrant {...selectedVia} busy={busy} request={() => requestHostGrant(selected.database.id, selectedVia.hostId)} />}
         </section>}
+        {!selected.removed && <DatabaseAiAccess database={selected.database} />}
         {selected.database.local_port !== null && (
           selected.live.phase === "stopped" || selected.live.phase === "error"
             ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-primary/5 p-3 text-sm">

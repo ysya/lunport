@@ -405,7 +405,9 @@ fn records_tool_inventory_is_explicit() {
             "update_database",
             "delete_database",
             "start_database",
-            "stop_database"
+            "stop_database",
+            "query_database",
+            "execute_database"
         ]
     );
 }

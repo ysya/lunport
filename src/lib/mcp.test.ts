@@ -32,7 +32,7 @@ describe("native MCP frontend boundary", () => {
       max_transfer_mib: 1024,
       noninteractive_credentials_supported: false,
       noninteractive_credentials_notice: "Use Ask for stored credentials.",
-      audit_error: null, allowed_hosts: [], allowed_groups: [], pending: [], recent: [],
+      audit_error: null, allowed_hosts: [], allowed_groups: [], allowed_databases: [], pending: [], recent: [],
       executable: "/fixture/lunport", last_client_at_ms: null,
     };
     const calls = stubBackend(async () => result);

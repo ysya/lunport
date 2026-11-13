@@ -24,6 +24,7 @@ pub(crate) mod activity;
 pub(crate) mod records;
 mod adapter;
 mod databases;
+mod database_sql;
 mod management;
 mod permissions;
 mod tunnels;
@@ -45,6 +46,8 @@ struct McpPolicy {
     allowed_hosts: BTreeSet<String>,
     #[serde(default)]
     allowed_groups: BTreeSet<String>,
+    #[serde(default)]
+    allowed_databases: BTreeSet<String>,
     #[serde(default)]
     approval_mode: ApprovalMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,6 +83,9 @@ pub struct McpPendingRequest {
     #[cfg_attr(test, ts(optional = nullable))]
     pub host_proposal: Option<McpHostProposal>,
     #[serde(default)] pub host_id: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub database_id: Option<String>,
     #[serde(default)] pub route: Vec<String>,
     #[serde(default)] pub requested_by: Vec<String>,
     #[serde(default)] pub requester_id: Option<String>,
@@ -129,6 +135,14 @@ pub struct McpAuditEntry {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub database: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub rows_returned: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub rows_affected: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +158,7 @@ pub struct McpStatus {
     pub bridge_active: bool,
     pub allowed_hosts: Vec<String>,
     pub allowed_groups: Vec<String>,
+    pub allowed_databases: Vec<String>,
     pub pending: Vec<McpPendingRequest>,
     pub recent: Vec<McpAuditEntry>,
     pub executable: String,
@@ -203,6 +218,7 @@ pub struct McpRuntime {
     policy: Mutex<McpPolicy>,
     audit: Mutex<records::AuditLog>,
     records_active:Mutex<HashMap<String,(String,crate::session::connect::CancelToken)>>,
+    sql_active: Mutex<HashMap<String,(String,Option<String>,crate::session::connect::CancelToken)>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
     /// Changes whenever `recent` does, while it is locked (`activity`).
@@ -218,6 +234,7 @@ impl Default for McpRuntime {
             policy: Mutex::new(McpPolicy::default()),
             audit: Mutex::new(records::AuditLog::default()),
             records_active:Mutex::new(HashMap::new()),
+            sql_active:Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
             revision: AtomicU64::new(0),
@@ -262,6 +279,7 @@ impl McpRuntime {
             bridge_active: false,
             allowed_hosts: policy.allowed_hosts.into_iter().collect(),
             allowed_groups: vec![],
+            allowed_databases: vec![],
             pending,
             recent,
             executable: std::env::current_exe()
@@ -367,6 +385,16 @@ impl McpRuntime {
     }
     fn cancel_records(&self,host:Option<&str>){
         for (id,cancel) in self.records_active.lock().unwrap().values(){if host.is_none_or(|h|h==id){cancel.cancel();}}
+        for (_,route,cancel) in self.sql_active.lock().unwrap().values(){if host.is_none_or(|h|route.as_deref()==Some(h)){cancel.cancel();}}
+    }
+    fn cancel_database_sql(&self, database_id: &str) {
+        for (id,_,cancel) in self.sql_active.lock().unwrap().values() { if id == database_id { cancel.cancel(); } }
+        let denied: Vec<_> = {
+            let mut pending = self.pending.lock().unwrap();
+            let ids: Vec<_> = pending.iter().filter(|(_,request)| request.request.database_id.as_deref() == Some(database_id)).map(|(id,_)| id.clone()).collect();
+            ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
+        };
+        for request in denied { let _ = request.decision.send(ApprovalDecision::Deny); }
     }
     fn deny_all_pending(&self) {
         let pending: Vec<_> = self
@@ -470,6 +498,23 @@ fn change_host_permission(
     Ok(())
 }
 
+fn change_database_permission(
+    policy: &Mutex<McpPolicy>,
+    id: &str,
+    allowed: bool,
+    validate: impl FnOnce() -> Result<(), AppError>,
+    persist: impl FnOnce(&McpPolicy) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if allowed { validate()?; }
+    let mut current = policy.lock().unwrap();
+    let mut next = current.clone();
+    if allowed { next.allowed_databases.insert(id.into()); }
+    else { next.allowed_databases.remove(id); }
+    persist(&next)?;
+    *current = next;
+    Ok(())
+}
+
 fn display_safe_command(command: &str) -> bool {
     !command.is_empty()
         && command.len() <= MAX_COMMAND_BYTES
@@ -505,7 +550,9 @@ fn status_for(state:&AppState)->McpStatus{
     {
         let core = state.sync.core.lock().unwrap();
         if let Ok(records) = crate::sync::record_runtime::active_state(&core) {
-            status.allowed_groups = permissions::active_groups(&state.mcp.policy.lock().unwrap(), records);
+            let policy = state.mcp.policy.lock().unwrap();
+            status.allowed_groups = permissions::active_groups(&policy, records);
+            status.allowed_databases = permissions::active_databases(&policy, records);
         }
     }
     if state.sync.core.lock().unwrap().format==crate::sync::record_runtime::RuntimeFormat::Records {status.bridge_active=matches!(*state.session.status.lock().unwrap(),crate::session::app::BrokerStatus::Running);}
@@ -581,7 +628,7 @@ pub fn mcp_set_host_allowed(
             let mut pending = state.mcp.pending.lock().unwrap();
             let ids: Vec<_> = pending
                 .iter()
-                .filter(|(_, p)| p.request.alias == alias)
+                .filter(|(_, p)| if p.request.database_id.is_some() { p.request.host_id.as_deref() == Some(alias.as_str()) } else { p.request.alias == alias })
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter()
@@ -591,6 +638,28 @@ pub fn mcp_set_host_allowed(
         for request in denied {
             let _ = request.decision.send(ApprovalDecision::Deny);
         }
+    }
+    Ok(status_for(&state))
+}
+
+#[tauri::command]
+pub fn mcp_set_database_allowed(
+    state: tauri::State<AppState>,
+    id: String,
+    allowed: bool,
+) -> Result<McpStatus, AppError> {
+    let _lifecycle = state.sync.lifecycle.lock().unwrap();
+    let core = state.sync.core.lock().unwrap();
+    let records = crate::sync::record_runtime::active_state(&core)?;
+    if allowed && !crate::sync::databases::view(records).iter().any(|row| row.database.id == id) {
+        return Err(AppError::NotFound("Database is not saved in this library.".into()));
+    }
+    let key = permissions::database_key(records, &id);
+    change_database_permission(&state.mcp.policy, &key, allowed, || Ok(()), save_policy)?;
+    drop(core);
+    drop(_lifecycle);
+    if !allowed {
+        state.mcp.cancel_database_sql(&id);
     }
     Ok(status_for(&state))
 }
@@ -801,6 +870,7 @@ fn tool_definitions() -> Value {
     tools.as_array_mut().unwrap().extend(tunnels::tool_definitions());
     tools.as_array_mut().unwrap().extend(transfers::tool_definitions());
     tools.as_array_mut().unwrap().extend(databases::tool_definitions());
+    tools.as_array_mut().unwrap().extend(database_sql::tool_definitions());
     tools
 }
 
@@ -833,6 +903,51 @@ mod tests {
         assert_eq!(serde_json::to_value(policy).unwrap()["approval_mode"], "ask");
         assert!(!display_safe_command("echo hello\rhidden"));
         assert!(!display_safe_command("echo \u{200f}hidden"));
+    }
+
+    #[test]
+    fn database_sql_permission_is_default_deny_and_survives_policy_round_trip() {
+        let old: McpPolicy = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(serde_json::to_value(&old).unwrap()["allowed_databases"], json!([]));
+        let granted: McpPolicy = serde_json::from_str(r#"{"enabled":true,"allowed_databases":["library-1/database/db-web-1"]}"#).unwrap();
+        assert_eq!(serde_json::to_value(granted).unwrap()["allowed_databases"], json!(["library-1/database/db-web-1"]));
+    }
+
+    #[test]
+    fn database_sql_grant_changes_only_after_validation_and_persistence() {
+        let policy = Mutex::new(McpPolicy::default());
+        let key = "library-1/database/db-web-1";
+        assert!(change_database_permission(&policy, key, true, || Err(AppError::Other("missing database".into())), |_| Ok(())).is_err());
+        assert!(change_database_permission(&policy, key, true, || Ok(()), |_| Err(AppError::Other("disk full".into()))).is_err());
+        assert!(policy.lock().unwrap().allowed_databases.is_empty());
+        change_database_permission(&policy, key, true, || Ok(()), |_| Ok(())).unwrap();
+        assert!(policy.lock().unwrap().allowed_databases.contains(key));
+        change_database_permission(&policy, key, false, || panic!("revocation needs no library read"), |_| Ok(())).unwrap();
+        assert!(policy.lock().unwrap().allowed_databases.is_empty());
+    }
+
+    #[test]
+    fn revoking_one_database_cancels_only_its_sql_and_pending_review() {
+        use crate::session::connect::CancelToken;
+        let runtime = McpRuntime::default();
+        let first = CancelToken::default();
+        let second = CancelToken::default();
+        let ssh = CancelToken::default();
+        runtime.sql_active.lock().unwrap().insert("sql-1".into(), ("db-1".into(), None, first.clone()));
+        runtime.sql_active.lock().unwrap().insert("sql-2".into(), ("db-2".into(), None, second.clone()));
+        runtime.records_active.lock().unwrap().insert("ssh-1".into(), ("host-1".into(), ssh.clone()));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        runtime.pending.lock().unwrap().insert("pending-sql".into(), PendingApproval {
+            deadline: InteractionDeadline::after(APPROVAL_TIMEOUT),
+            request: McpPendingRequest { id: "pending-sql".into(), database_id: Some("db-1".into()), ..Default::default() },
+            decision: sender,
+        });
+        runtime.cancel_database_sql("db-1");
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(!ssh.is_cancelled());
+        assert!(matches!(receiver.try_recv(), Ok(ApprovalDecision::Deny)));
+        assert!(runtime.pending.lock().unwrap().is_empty());
     }
 
     #[test]

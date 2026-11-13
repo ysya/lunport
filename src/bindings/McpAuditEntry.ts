@@ -21,4 +21,4 @@ tunnel: string | null,
 /**
  * The database's name, for a database request (`alias` is the host it is reached through, empty for one on its public IP).
  */
-database?: string | null, };
+database?: string | null, rows_returned?: number | null, rows_affected?: number | null, };

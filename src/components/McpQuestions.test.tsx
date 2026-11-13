@@ -35,6 +35,21 @@ function disabled(html: string, label: string) {
 }
 
 describe("MCP command review", () => {
+  it("shows the full SQL and database for mandatory write review", () => {
+    const sql = { ...request, alias: "Orders", command: "UPDATE orders SET status = 'done' WHERE id = 1", host_proposal: { kind: "execute_database", settings: [
+      ["Saved database ID", "00000000000000b1"], ["Instance", "acme-prod-123456:asia-east1:orders-pg"],
+      ["PostgreSQL database", "orders_live"], ["Environment", "Prod"], ["Route", "Public IP"],
+    ] as [string, string][] } };
+    const html = renderReview({ request: sql });
+    expect(html).toContain("Execute this database write?");
+    expect(html).toContain("Database: Orders");
+    expect(html).toContain("orders_live");
+    expect(html).toContain("00000000000000b1");
+    expect(html).toContain("UPDATE orders SET status = &#x27;done&#x27; WHERE id = 1");
+    expect(html).toContain("SQL statement");
+    expect(html).toContain("Execute SQL");
+    expect(html).not.toContain("Remote command");
+  });
   it("distinguishes a one-shot sudo request from an ordinary command", () => {
     const sudo = { ...request, command: "systemctl restart web-1", host_proposal: { kind: "sudo_exec", settings: [] as [string, string][] } };
     const html = renderReview({ request: sudo });

@@ -168,6 +168,10 @@ struct Dial {
 }
 
 impl CloudSqlUpstream {
+    /// Prepare a short-lived AI database session while attributing native grant and host questions to its client.
+    pub(crate) fn prepare_for_ai(&self, db: &SavedDatabase, cancel: &CancelToken, ai: &AiAsker) -> Result<Prepared, NotReady> {
+        self.ready(db, cancel, Some(ai), &|_| {})
+    }
     /// The upstream of the app's ports: Google's APIs through the app's clients, the broker's grant gates and its connector for the hosts
     /// databases are reached through, the person's questions in Lunport's windows (naming the AI client whose request starts a database,
     /// when one does), and this device's grant memory.

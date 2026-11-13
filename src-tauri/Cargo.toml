@@ -106,6 +106,7 @@ russh-sftp = "=3.0.1"
 # `signal`: `lunport connect` follows the terminal's size (SIGWINCH), stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT, and puts the
 # terminal back for Ctrl-Z (SIGTSTP) and sets it again when it continues (SIGCONT) (src/cli/run.rs).
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+tokio-postgres = { version = "0.7.18", default-features = false }
 
 [dev-dependencies]
 ts-rs = "10"
