@@ -114,25 +114,28 @@ jobs:
           cargo test --locked --manifest-path windows-sync-check/Cargo.toml -- --test-threads=2 --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Windows central filesystem security boundary failed' }
 
+      # From here on every cargo command for the application names the `ci` profile (src-tauri/Cargo.toml): dependencies optimised at
+      # level 1, the application crate as in a debug build, the output in target/ci. A command without it would compile the whole
+      # dependency graph again for `dev`. The two small crates of their own (windows-sync-check, cli-helper) keep their defaults.
       - name: Native Credential Manager capacity and DPAPI
-        run: cargo test --locked --lib -- --ignored --exact secrets::windows_credentials::tests::native_large_credentials --nocapture
+        run: cargo test --locked --profile ci --lib -- --ignored --exact secrets::windows_credentials::tests::native_large_credentials --nocapture
 
       - name: Complete safe Rust suite
         env:
           LUNPORT_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `vault:: ipc::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --profile ci --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
       # Release-profile boundaries run in parallel in CI - App on all three OSes.
       - name: Debug profile selection in the normal library
-        run: cargo test --locked --test app_profile_build
+        run: cargo test --locked --profile ci --test app_profile_build
 
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
-        run: cargo build --locked
+        run: cargo build --locked --profile ci
 
       - name: Concurrent AppHandle ownership and native loop cleanup
-        run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::concurrent_app_handles_preserve_native_event_loop --nocapture
+        run: cargo test --locked --profile ci --lib -- --ignored --exact sync::engine::windows_tests::concurrent_app_handles_preserve_native_event_loop --nocapture
 
       # Unit doubles never touch the Rc-backed Win32 tray or its event loop. Restart from
       # saved synced records, race startup/status/visibility, and check real native menu data
@@ -141,10 +144,10 @@ jobs:
         timeout-minutes: 5
         env:
           LUNPORT_TEST_SYNCED_STATE_OUT: ${{ runner.temp }}/synced-startup.json
-        run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
+        run: cargo test --locked --profile ci --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
 
       - name: Native crash leaves metadata without suppressing Windows Error Reporting
-        run: cargo test --locked --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture
+        run: cargo test --locked --profile ci --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture
 
       - name: Actual Development GUI startup from a synced library
         timeout-minutes: 8
@@ -166,12 +169,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cannot read the identity values (exit $LASTEXITCODE)" }
           $main = $identity.mainBinary
           $helper = $identity.consoleHelper
-          node ../scripts/windows-console-helper.mjs --copy-to target/debug
+          node ../scripts/windows-console-helper.mjs --copy-to target/ci
           if ($LASTEXITCODE -ne 0) { throw "the console helper did not build (exit $LASTEXITCODE)" }
           # Each line a program wrote, as text (2>&1 hands stderr's lines over as error records).
-          $alone = (& ".\target\debug\$main.exe" connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $alone = (& ".\target\ci\$main.exe" connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
           $aloneCode = $LASTEXITCODE
-          $relayed = (& ".\target\debug\$helper.exe" connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $relayed = (& ".\target\ci\$helper.exe" connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
           $relayedCode = $LASTEXITCODE
           Write-Output "$main.exe connect exited with $aloneCode and said:" $alone "$helper.exe connect exited with $relayedCode and said:" $relayed
           if ($relayedCode -ne $aloneCode -or $relayed -ne $alone) { throw "the helper did not bring back what $main.exe said, or its exit code" }
@@ -188,9 +191,9 @@ jobs:
       - name: The console helper and lunport.exe in a console of their own
         shell: pwsh
         run: |
-          $env:LUNPORT_TEST_PAIR = (Resolve-Path target/debug).Path
+          $env:LUNPORT_TEST_PAIR = (Resolve-Path target/ci).Path
           $env:LUNPORT_TEST_PAIR_PROFILE = 'development'
-          cargo test --locked --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
+          cargo test --locked --profile ci --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
           if ($LASTEXITCODE -ne 0) { throw "the pair in a console of its own failed (exit $LASTEXITCODE)" }
           exit 0
 
@@ -252,7 +255,7 @@ jobs:
           # A lost GITHUB_ENV line must fail this step, not turn it into a test that skips.
           LUNPORT_REQUIRE_TEST_SSH: "1"
         # Quoted for the same reason as above.
-        run: "cargo test --locked --lib -- ssh::engine_tests::environment --nocapture"
+        run: "cargo test --locked --profile ci --lib -- ssh::engine_tests::environment --nocapture"
 
       - name: What the OpenSSH server logged
         if: failure()

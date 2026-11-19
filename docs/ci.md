@@ -49,6 +49,25 @@ so dispatch scripts and Rust caches continue to work.
   (`scripts/identity.mjs`, `scripts/legacy-identity.json`) and to `src-tauri/tauri.conf.json`,
   whose bundle identifier the test clients are signed with.
 
+## Rust test profile
+
+The native jobs build and run the application's Rust tests with the `ci` profile (`[profile.ci]` in `src-tauri/Cargo.toml`):
+dependencies at optimisation level 1, the application crate unoptimised as under `dev`, debug assertions and overflow checks on.
+The suites are CPU-bound in debug code, so the tests take about a third less time, and the application crate, the only part a
+warm cache does not hold, compiles no slower.
+
+Every cargo command for the application in `Rust and SSH (macOS)`, `Rust, SSH and PAM (Linux)` and
+`Rust, SSH and native smoke (Windows)` names `--profile ci`; a command without it compiles the whole dependency graph a second
+time for `dev`. The Windows job's debug application, its console helper copy and `scripts/validate-windows-startup.ps1` therefore
+use `target/ci`. Three builds keep `dev`: the archived 1.2.0 group-order fixture, whose manifest has no such profile and which
+now compiles its dependencies itself; the manual Windows native probe, whose baseline may predate the profile; and the macOS
+credential checks, which compile the tests to run one probe. The release-profile boundary matrix is unaffected.
+
+The complete suites run with `--test-threads=2`, set when central sync arrived so that crypto and scratch OpenSSH tests do not
+contend for a runner's three or four cores: sync rounds in the tests keep their production request deadlines. Four threads
+passed repeatedly on an 18-core machine, which does not show they are safe on a runner; raise the value only after repeated
+runs on the runners themselves.
+
 ## Required checks and auto-merge
 
 `main` requires the checks that report on every PR: `Policy, versions and workflow lint`,
