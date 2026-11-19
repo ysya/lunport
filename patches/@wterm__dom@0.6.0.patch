@@ -1,0 +1,57 @@
+diff --git a/dist/input.js b/dist/input.js
+index 78a86ffd96eec03222777f40e9db6a0561684c3f..8bd089ff09bbd9a45000f8f8658c5e94af7900e9 100644
+--- a/dist/input.js
++++ b/dist/input.js
+@@ -224,8 +224,7 @@ export class InputHandler {
+         this.textarea.focus({ preventScroll: true });
+     }
+     syncInputPosition() {
+-        if (this.composing || this.touchPrimary)
+-            this.positionTextarea();
++        this.positionTextarea();
+     }
+     destroy() {
+         this.accessibility.destroy();
+diff --git a/dist/renderer.d.ts b/dist/renderer.d.ts
+index dbff0264a6d9d0fe4feea8d7de0ef8c617216b8b..549b1b013d0a92c253e1767e5a1bfa6e6ea7d538 100644
+--- a/dist/renderer.d.ts
++++ b/dist/renderer.d.ts
+@@ -15,6 +15,8 @@ export interface RenderViewport {
+     /** Following live output at the bottom; lets the GPU path paint the grid. */
+     live?: boolean;
+ }
++/** Class names for a private-use glyph cell, or an empty string for ordinary text. */
++export declare function glyphCellClass(cp: number): string;
+ export declare class Renderer {
+     private container;
+     private rows;
+diff --git a/dist/renderer.js b/dist/renderer.js
+index 077910eeb3822f38089dd3ad6a9f345ef2a2a38a..87db1128ada6f56a805c8cac49f9dfd1417bbe4e 100644
+--- a/dist/renderer.js
++++ b/dist/renderer.js
+@@ -355,6 +355,15 @@ for (const [codepoint, corner] of Object.entries(ROUNDED_BOX_CORNERS)) {
+         style: "",
+     };
+ }
++// Private-use glyphs (Powerline, Nerd Fonts) come from fallback fonts whose
++// design size ignores the cell. A class lets the host size or draw them.
++export function glyphCellClass(cp) {
++    if (cp >= 0xe0b0 && cp <= 0xe0bf)
++        return `term-powerline term-powerline-${cp.toString(16)}`;
++    return (cp >= 0xe000 && cp <= 0xf8ff) || (cp >= 0xf0000 && cp <= 0xffffd)
++        ? "term-symbol"
++        : "";
++}
+ export class Renderer {
+     get hasImageFlow() {
+         return (this.container.parentElement?.classList.contains("has-image-flow") ??
+@@ -810,7 +819,8 @@ export class Renderer {
+                     const cursor = col === cursorCol;
+                     const box = BOX_STYLES[cp];
+                     const boxStyle = box && ch === String.fromCodePoint(cp) ? box : null;
+-                    let className = boxStyle?.className ?? "";
++                    let className = boxStyle?.className ??
++                        (ch === String.fromCodePoint(cp) ? glyphCellClass(cp) : "");
+                     if (boxStyle && cell.flags & FLAG_BOLD)
+                         className += " term-box-bold";
+                     if (cursor)
