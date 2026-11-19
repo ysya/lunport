@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.0](https://github.com/ysya/lunport/compare/v2.1.0...v2.2.0) (2026-11-19)
+
+
+### Features
+
+* **mcp:** add per-database SQL access policy ([0c754a8](https://github.com/ysya/lunport/commit/0c754a8271a33bee158affe243c840cd1a713bfe))
+* **mcp:** direct Cloud SQL queries and approved writes ([aa96162](https://github.com/ysya/lunport/commit/aa96162595e72ad48a546e5a09c0709e26a75cdd))
+* **mcp:** enable direct Cloud SQL queries and approved writes ([9d9ed24](https://github.com/ysya/lunport/commit/9d9ed24ab2fcab942a8f62a6c6424d58d1b331ab))
+
+
+### Bug Fixes
+
+* **terminal:** draw prompt glyphs and upgrade dependencies ([c09f1a7](https://github.com/ysya/lunport/commit/c09f1a7d49ddbabdc4d0b01e59212e2d8f36049d))
+
 ## [2.1.0](https://github.com/ysya/lunport/compare/v2.0.0...v2.1.0) (2026-11-13)
 
 
