@@ -1,5 +1,5 @@
-wterm 0.5.4 — Vercel, Apache-2.0
-https://github.com/vercel-labs/wterm/tree/v0.5.4
+wterm 0.6.0 — Vercel, Apache-2.0
+https://github.com/vercel-labs/wterm/tree/v0.6.0
 
 
                                  Apache License

@@ -1,8 +1,8 @@
 diff --git a/dist/input.js b/dist/input.js
-index 73bdd5a9d80279abd9dca374515b0b551e879449..3f187fb9ec0bb770a403790e3be28ff731bb8c4a 100644
+index 78a86ffd96eec03222777f40e9db6a0561684c3f..8bd089ff09bbd9a45000f8f8658c5e94af7900e9 100644
 --- a/dist/input.js
 +++ b/dist/input.js
-@@ -223,8 +223,7 @@ export class InputHandler {
+@@ -224,8 +224,7 @@ export class InputHandler {
          this.textarea.focus({ preventScroll: true });
      }
      syncInputPosition() {
@@ -13,12 +13,12 @@ index 73bdd5a9d80279abd9dca374515b0b551e879449..3f187fb9ec0bb770a403790e3be28ff7
      destroy() {
          this.accessibility.destroy();
 diff --git a/dist/renderer.d.ts b/dist/renderer.d.ts
-index dc20dbbced64d441e22b9a93355f3bc76ec2d809..8c99229818ae67bb1b3cd6b2141ec9bd8c678969 100644
+index dbff0264a6d9d0fe4feea8d7de0ef8c617216b8b..549b1b013d0a92c253e1767e5a1bfa6e6ea7d538 100644
 --- a/dist/renderer.d.ts
 +++ b/dist/renderer.d.ts
-@@ -13,6 +13,8 @@ export interface RenderViewport {
-         end: number;
-     };
+@@ -15,6 +15,8 @@ export interface RenderViewport {
+     /** Following live output at the bottom; lets the GPU path paint the grid. */
+     live?: boolean;
  }
 +/** Class names for a private-use glyph cell, or an empty string for ordinary text. */
 +export declare function glyphCellClass(cp: number): string;
@@ -26,10 +26,10 @@ index dc20dbbced64d441e22b9a93355f3bc76ec2d809..8c99229818ae67bb1b3cd6b2141ec9bd
      private container;
      private rows;
 diff --git a/dist/renderer.js b/dist/renderer.js
-index 688ad09a7ea32990d94b751642fb496c3999f1c5..938e9755e86be5a5e8654e5bae958771aaea17c3 100644
+index 077910eeb3822f38089dd3ad6a9f345ef2a2a38a..87db1128ada6f56a805c8cac49f9dfd1417bbe4e 100644
 --- a/dist/renderer.js
 +++ b/dist/renderer.js
-@@ -326,6 +326,15 @@ for (const [codepoint, corner] of Object.entries(ROUNDED_BOX_CORNERS)) {
+@@ -355,6 +355,15 @@ for (const [codepoint, corner] of Object.entries(ROUNDED_BOX_CORNERS)) {
          style: "",
      };
  }
@@ -45,7 +45,7 @@ index 688ad09a7ea32990d94b751642fb496c3999f1c5..938e9755e86be5a5e8654e5bae958771
  export class Renderer {
      get hasImageFlow() {
          return (this.container.parentElement?.classList.contains("has-image-flow") ??
-@@ -578,7 +587,8 @@ export class Renderer {
+@@ -810,7 +819,8 @@ export class Renderer {
                      const cursor = col === cursorCol;
                      const box = BOX_STYLES[cp];
                      const boxStyle = box && ch === String.fromCodePoint(cp) ? box : null;
