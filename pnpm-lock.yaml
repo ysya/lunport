@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@wterm/dom@0.5.4': 66eb7c06a4c532c296a39041d31bb7926531a5ba3f22cbb2b78910000e350095
+  '@wterm/dom@0.5.4': 63c2ebf743c089203f8937306796f822d138fca947618432f92a1e0672d23ad8
 
 importers:
 
@@ -52,7 +52,7 @@ importers:
         version: 2.10.1
       '@wterm/dom':
         specifier: 0.5.4
-        version: 0.5.4(patch_hash=66eb7c06a4c532c296a39041d31bb7926531a5ba3f22cbb2b78910000e350095)
+        version: 0.5.4(patch_hash=63c2ebf743c089203f8937306796f822d138fca947618432f92a1e0672d23ad8)
       '@wterm/ghostty':
         specifier: 0.5.4
         version: 0.5.4
@@ -4749,7 +4749,7 @@ snapshots:
 
   '@wterm/core@0.5.4': {}
 
-  '@wterm/dom@0.5.4(patch_hash=66eb7c06a4c532c296a39041d31bb7926531a5ba3f22cbb2b78910000e350095)':
+  '@wterm/dom@0.5.4(patch_hash=63c2ebf743c089203f8937306796f822d138fca947618432f92a1e0672d23ad8)':
     dependencies:
       '@wterm/core': 0.5.4
 
