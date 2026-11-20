@@ -54,6 +54,25 @@ describe("closing a terminal tab", () => {
     expect(useSettingsStore.getState().confirmTerminalClose).toBe(true);
   });
 
+  it("detaches an ordinary tmux workspace with the shell close prompt enabled", () => {
+    const id = useTerminalStore.getState().open({ host: tab.host, name: tab.name, address: tab.address, historyKey: tab.historyKey, mode: "tmux" });
+    const onConfirm = vi.fn();
+    requestTerminalClose(id, onConfirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(useTerminalStore.getState().tabs).toHaveLength(0);
+  });
+
+  it("warns before a tmux detach could terminate the remote session despite the shell preference", () => {
+    useSettingsStore.getState().setConfirmTerminalClose(false);
+    const store = useTerminalStore.getState();
+    const id = store.open({ host: tab.host, name: tab.name, address: tab.address, historyKey: tab.historyKey, mode: "tmux" });
+    store.claimTmuxSession(id, { id: "$1", name: "build", created: "1740000000", server: "427:1740000000", destroyUnattached: true });
+    const onConfirm = vi.fn();
+    requestTerminalClose(id, onConfirm);
+    expect(onConfirm).toHaveBeenCalledWith(id);
+    expect(useTerminalStore.getState().tabs).toHaveLength(1);
+  });
+
   it("closes an ended session without asking even when confirmation is enabled", () => {
     const id = openTab();
     useTerminalStore.getState().updateState(id, "ended");

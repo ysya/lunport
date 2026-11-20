@@ -66,7 +66,7 @@ fn made_safe(message: ServerMessage) -> ServerMessage {
         ServerMessage::Exited { code, signal } => ServerMessage::Exited { code, signal: signal.map(|name| signal_name(&name)) },
         // The relay asks no questions (the owner's text is made printable where it is built: `shown_prompt`), `Opened` carries the
         // broker's own number, and `Connected` carries nothing.
-        message @ (ServerMessage::Opened { .. } | ServerMessage::Question(_) | ServerMessage::Event(Event::Connected)) => message,
+        message @ (ServerMessage::Opened { .. } | ServerMessage::TmuxSessions { .. } | ServerMessage::Question(_) | ServerMessage::Event(Event::Connected)) => message,
     }
 }
 
@@ -140,6 +140,7 @@ pub struct ShellControl {
     /// Notified when `life` changes: the shell printed something, or ended.
     life_changed: Condvar,
     settle: Duration,
+    tmux: bool,
 }
 
 impl Default for ShellControl {
@@ -151,6 +152,10 @@ impl Default for ShellControl {
 impl ShellControl {
     pub fn new() -> ShellControl {
         ShellControl::with_settle(SETTLE)
+    }
+
+    pub(super) fn for_tmux() -> ShellControl {
+        ShellControl { tmux: true, ..ShellControl::with_settle(Duration::ZERO) }
     }
 
     /// The same, with another settle time (tests).
@@ -165,6 +170,7 @@ impl ShellControl {
             life: Mutex::new(Life::default()),
             life_changed: Condvar::new(),
             settle,
+            tmux: false,
         }
     }
 
@@ -200,6 +206,11 @@ impl ShellControl {
         let Some(shell) = shell else { return };
         match shell.write(bytes) {
             Ok(()) | Err(SessionError::Closed) => {}
+            Err(_) if self.tmux => {
+                let text = "Could not send all input to tmux. Reconnect to resume.".into();
+                let _ = tell(link, ServerMessage::Event(Event::Error { kind: kinds::TMUX.into(), text }));
+                self.close_now();
+            }
             Err(SessionError::Timeout) => {
                 let alias = locked(&self.alias).clone();
                 let text = format!("What you typed did not reach {alias} in time: the connection is not responding.");
@@ -327,17 +338,24 @@ fn connection_lost(session: &dyn Session, target: &Target, alias: &str) -> Strin
 /// What the client is told when its shell has ended: an event that explains an end without a status, then `exited`. `quit` is the app's
 /// reason when it ended the session: it explains a shell that ended because it was closed, but a shell that ended on its own before it
 /// was closed (its exit code, its signal, a refused terminal) reports that.
-fn ending(exit: Option<Exit>, quit: Option<String>, session: &dyn Session, target: &Target, alias: &str) -> Vec<ServerMessage> {
+fn ending(exit: Option<Exit>, quit: Option<String>, session: &dyn Session, target: &Target, alias: &str, tmux: bool) -> Vec<ServerMessage> {
     let no_status = ServerMessage::Exited { code: None, signal: None };
     let explained = |event: Event| vec![ServerMessage::Event(event), no_status.clone()];
     match exit {
         Some(Exit::Code(code)) => vec![ServerMessage::Exited { code: Some(code), signal: None }],
         Some(Exit::Signal(signal)) => vec![ServerMessage::Exited { code: None, signal: Some(signal) }],
+        Some(Exit::Refused(why)) if tmux => explained(Event::Error {
+            kind: kinds::TMUX.into(),
+            text: format!("The tmux control channel on {alias} ended. {why}"),
+        }),
         Some(Exit::Refused(why)) => explained(Event::Error { kind: kinds::SHELL.to_string(), text: format!("Lunport could not open a shell on {alias}: {why}.") }),
         Some(Exit::Disconnected) | None => {
             let reason = match quit {
                 Some(reason) => reason,
-                None if session.is_alive() => format!("The shell on {alias} ended without an exit status."),
+                None if session.is_alive() => {
+                    let channel = if tmux { "tmux control channel" } else { "shell" };
+                    format!("The {channel} on {alias} ended without an exit status.")
+                }
                 None => connection_lost(session, target, alias),
             };
             explained(Event::Disconnected { reason })
@@ -347,7 +365,7 @@ fn ending(exit: Option<Exit>, quit: Option<String>, session: &dyn Session, targe
 
 /// What the client is told when the engine could not open the shell. A connection that is gone is told as it is everywhere
 /// (`connection_lost`); otherwise the reason is a clause of the sentence, so it does not start with a capital.
-fn no_shell(error: &SessionError, session: &dyn Session, target: &Target, alias: &str) -> Vec<ServerMessage> {
+fn open_failed(error: &SessionError, session: &dyn Session, target: &Target, alias: &str, tmux: bool) -> Vec<ServerMessage> {
     let no_status = ServerMessage::Exited { code: None, signal: None };
     if !session.is_alive() {
         return vec![ServerMessage::Event(Event::Disconnected { reason: connection_lost(session, target, alias) }), no_status];
@@ -357,8 +375,9 @@ fn no_shell(error: &SessionError, session: &dyn Session, target: &Target, alias:
         SessionError::Timeout => "the connection did not take the request in time".to_string(),
         SessionError::Channel(text) => format!("SSH error: {text}"),
     };
-    let text = format!("Lunport could not open a shell on {alias}: {}.", why.trim_end_matches('.'));
-    vec![ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }), no_status]
+    let (kind, channel) = if tmux { (kinds::TMUX, "the tmux control channel") } else { (kinds::SHELL, "a shell") };
+    let text = format!("Lunport could not open {channel} on {alias}: {}.", why.trim_end_matches('.'));
+    vec![ServerMessage::Event(Event::Error { kind: kind.to_string(), text }), no_status]
 }
 
 /// What the client is told when the session is over before it had a shell: nothing when it has gone away, the app's reason when the app
@@ -369,13 +388,15 @@ fn say_over(link: &dyn ClientLink, over: Over) {
     }
 }
 
-/// Runs the client's shell on the session `connected` holds, then closes the session; returns when both are done. Call it from a plain
-/// thread: the engine's calls block. `pty` is what the client asked for; the size is the last one it sent, if it sent one since.
-///
-/// The client may leave, or the app may end the session, at any step. Before the shell is opened that is looked at, and then no shell is
-/// opened. While the engine opens it, nothing can be done but wait for it, and a shell that opens for nobody is not announced to the
-/// client and is closed after its first output, like one the client leaves behind.
-pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control: &ShellControl, session_id: &str) {
+pub(super) enum ChannelRequest {
+    Shell(Pty),
+    Tmux(String),
+}
+
+/// Relays a shell or tmux control stream on the authenticated SSH session and closes it afterward.
+/// Call from a plain thread because the SSH engine blocks. A PTY uses the latest requested size.
+/// Once the local client leaves, close the remote channel after its configured settle time or first output.
+pub(super) fn run_terminal(connected: Connected, request: ChannelRequest, link: &dyn ClientLink, control: &ShellControl, session_id: &str) {
     let Connected { session, target } = connected;
     let alias = target.hops.last().map(|hop| hop.alias.clone()).unwrap_or_default();
     *locked(&control.alias) = alias.clone();
@@ -384,14 +405,22 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         session.close();
         return;
     }
-    let (cols, rows) = locked(&control.size).unwrap_or((pty.cols, pty.rows));
-    let shell: Arc<dyn ShellChannel> = match session.shell(Pty { cols, rows, ..pty }) {
+    let mut opened_with = None;
+    let opened = match request {
+        ChannelRequest::Shell(pty) => {
+            let (cols, rows) = locked(&control.size).unwrap_or((pty.cols, pty.rows));
+            opened_with = Some((cols, rows));
+            session.shell(Pty { cols, rows, ..pty })
+        }
+        ChannelRequest::Tmux(command) => session.stream_exec(&command),
+    };
+    let shell: Arc<dyn ShellChannel> = match opened {
         Ok(shell) => Arc::from(shell),
         Err(error) => {
             match control.over() {
                 Some(over) => say_over(link, over),
                 None => {
-                    let _ = tell_all(link, no_shell(&error, session.as_ref(), &target, &alias));
+                    let _ = tell_all(link, open_failed(&error, session.as_ref(), &target, &alias, control.tmux));
                 }
             }
             session.close();
@@ -406,10 +435,10 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         control.gone.store(true, Ordering::SeqCst);
         forwarding = false;
     }
-    if forwarding {
+    if let Some(size) = opened_with.filter(|_| forwarding) {
         // The size the client sent while the shell was being opened, or the one it was opened with: sent once more now that the PTY exists
         // (a resize before the shell is ready is ignored by the server).
-        control.send_size(shell.as_ref(), (cols, rows));
+        control.send_size(shell.as_ref(), size);
     }
     std::thread::scope(|scope| {
         if !forwarding {
@@ -434,7 +463,7 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         control.ended();
     });
     if !control.is_gone() {
-        let _ = tell_all(link, ending(shell.exited(), control.quit_reason(), session.as_ref(), &target, &alias));
+        let _ = tell_all(link, ending(shell.exited(), control.quit_reason(), session.as_ref(), &target, &alias, control.tmux));
     }
     session.close();
 }
@@ -447,6 +476,10 @@ mod tests {
     use crate::session::testing::{locked, Gate, GatedEngine};
     use crate::ssh::fake::{FakeEngine, FakeEvent};
     use crate::ssh::{AuthMethod, DisconnectKind, DisconnectReason, Hop, SessionError, SshEngine};
+
+    fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control: &ShellControl, session_id: &str) {
+        run_terminal(connected, ChannelRequest::Shell(pty), link, control, session_id);
+    }
 
     /// The client side, recorded. It can be made to go away part of the way through, as a client does: output frames after the first
     /// `data_limit` of them, and `Opened`, are then refused (and not recorded).

@@ -3,12 +3,14 @@ import { selectHost } from "./editor";
 import { useSettingsStore } from "@/stores/settings";
 import { recentHostKey } from "./library-view";
 import { IN_APP_TERMINAL } from "@/lib/settings-logic";
+import type { TmuxWorkspaceLocation } from "@/lib/tmux-workspace-state";
 import { useTerminalStore } from "@/stores/terminals";
 export async function connectSavedHost(
   overview: RecordOverview,
   hostId: string,
   terminalId: string | null,
   newTab: boolean,
+  tmux?: { resume?: TmuxWorkspaceLocation },
 ): Promise<void> {
   const host = selectHost(overview.hosts, hostId);
   if (!host)
@@ -17,9 +19,15 @@ export async function connectSavedHost(
     );
   if (host.readiness.kind !== "ready" || host.group_error)
     throw new Error("Resolve this host's key or settings before connecting.");
-  if (terminalId === IN_APP_TERMINAL) {
+  if (tmux || terminalId === IN_APP_TERMINAL) {
     const payload = host.effective_payload;
-    useTerminalStore.getState().open({ host: { id: hostId }, name: payload.alias, address: `${payload.user}@${payload.hostname}:${payload.port}`, historyKey: recentHostKey(hostId) });
+    useTerminalStore.getState().open({
+      host: { id: hostId },
+      name: payload.alias,
+      address: `${payload.user}@${payload.hostname}:${payload.port}`,
+      historyKey: recentHostKey(hostId),
+      ...(tmux && { mode: "tmux", tmuxResume: tmux.resume }),
+    });
     return;
   }
   await connectRecordHost(hostId, terminalId, newTab);

@@ -88,6 +88,7 @@ export function RecordHostList({
   onBusy,
   expand,
   connect,
+  connectTmux,
   connectingId,
   filter = { kind: "all" },
   changeFilter,
@@ -115,6 +116,7 @@ export function RecordHostList({
   onBusy?: (busy: boolean) => void;
   expand?: () => void;
   connect?: (id: string) => void;
+  connectTmux?: (id: string) => void;
   connectingId?: string | null;
   filter?: LibraryFilter;
   changeFilter?: (filter: LibraryFilter) => void;
@@ -584,6 +586,7 @@ export function RecordHostList({
                   organizeDisabled={!canOrganize(host)}
                   connectDisabled={blocked || !!connectingId}
                   connect={connect ? () => connectHost(host) : undefined}
+                  connectTmux={connectTmux ? () => connectTmux(host.id) : undefined}
                   edit={edit ? () => edit(host.id) : undefined}
                   duplicate={duplicate ? () => duplicate(host.id) : undefined}
                   inspect={inspect ? () => inspect(host.id) : undefined}

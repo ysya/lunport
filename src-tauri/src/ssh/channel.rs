@@ -98,6 +98,15 @@ impl ByteQueue {
     /// of that gap: a gap is announced by the push that keeps a chunk, by `close`, and by a read that finds the queue empty, whichever
     /// comes first.
     pub fn push(&self, chunk: Vec<u8>) -> bool {
+        self.push_chunk(chunk, true)
+    }
+
+    /// Keep complete protocol bytes or refuse the chunk without inserting a terminal notice.
+    pub fn push_strict(&self, chunk: Vec<u8>) -> bool {
+        self.push_chunk(chunk, false)
+    }
+
+    fn push_chunk(&self, chunk: Vec<u8>, announce_loss: bool) -> bool {
         let mut state = locked(&self.state);
         if state.closed {
             return false;
@@ -105,9 +114,11 @@ impl ByteQueue {
         if chunk.is_empty() {
             return true;
         }
-        if state.bytes != 0 && state.bytes + chunk.len() > self.capacity {
-            state.dropped += chunk.len() as u64;
-            state.unannounced += chunk.len() as u64;
+        if state.bytes + chunk.len() > self.capacity && (!announce_loss || state.bytes != 0) {
+            if announce_loss {
+                state.dropped += chunk.len() as u64;
+                state.unannounced += chunk.len() as u64;
+            }
             return false;
         }
         ByteQueue::announce_gap(&mut state);

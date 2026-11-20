@@ -9,6 +9,7 @@ import {
   LockKeyhole,
   Pencil,
   ShieldCheck,
+  SquareTerminal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
@@ -77,6 +78,7 @@ export function HostPreview({
   host,
   overview,
   connect,
+  connectTmux,
   edit,
   close,
   busy,
@@ -84,6 +86,7 @@ export function HostPreview({
   host: RecordHostView;
   overview: RecordOverview;
   connect: () => void;
+  connectTmux?: () => void;
   edit: () => void;
   close: () => void;
   busy: boolean;
@@ -116,6 +119,10 @@ export function HostPreview({
             <ArrowUpRight className="size-4" />
             {busy ? "Opening…" : "Connect"}
           </Button>
+          {connectTmux && <Button variant="outline" disabled={!ready || busy} onClick={connectTmux} title="Connect with tmux" aria-label="Connect with tmux">
+            <SquareTerminal className="size-3.5" />
+            tmux
+          </Button>}
           <Button variant="outline" disabled={busy} onClick={edit}>
             <Pencil className="size-3.5" />
             Edit

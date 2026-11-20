@@ -266,6 +266,7 @@ impl Client {
     fn message(&mut self, message: ServerMessage) -> Vec<Action> {
         match message {
             ServerMessage::Opened { .. } => self.opened(),
+            ServerMessage::TmuxSessions { .. } => Vec::new(),
             ServerMessage::Question(Question { kind: QuestionKind::HostKeyNotice, text, .. }) => vec![Action::Stderr(format!("{}\n", printable(&text)))],
             // A grant is requested in Lunport's window, never typed here: a broker without a window is told so at once, and its connect
             // fails with the refusal sentence instead of waiting for an answer nobody can give.

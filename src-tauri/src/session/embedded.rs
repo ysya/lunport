@@ -2,7 +2,7 @@
 //! native authentication, host-key checks and app shutdown remain broker-owned.
 //! Only the main WebView can open/control these sessions. No shell command API.
 use super::protocol::{
-    self, ClientKind, ClientMessage, Frame, HostQuery, PtyRequest, ServerMessage,
+    self, ClientKind, ClientMessage, Frame, HostQuery, PtyRequest, ServerMessage, TmuxTarget,
 };
 use crate::{ipc::server::Stream, state::AppState};
 use std::{
@@ -33,6 +33,7 @@ pub struct Terminals {
 enum Input {
     Data(Zeroizing<Vec<u8>>),
     Resize(u16, u16),
+    Select(TmuxTarget),
 }
 #[derive(Default)]
 struct Flow {
@@ -43,6 +44,7 @@ struct Terminal {
     input: mpsc::SyncSender<Input>,
     closer: Stream,
     closed: AtomicBool,
+    selecting_tmux: AtomicBool,
     flow: Mutex<Flow>,
     changed: Condvar,
 }
@@ -120,6 +122,7 @@ impl Terminals {
         host: HostQuery,
         cols: u16,
         rows: u16,
+        tmux: bool,
         mut stream: Stream,
         sink: Sink,
         generation: u64,
@@ -142,6 +145,7 @@ impl Terminals {
             input: sender,
             closer: stream.try_clone().map_err(|e| e.to_string())?,
             closed: AtomicBool::new(false),
+            selecting_tmux: AtomicBool::new(false),
             flow: Mutex::new(Flow::default()),
             changed: Condvar::new(),
         });
@@ -159,18 +163,19 @@ impl Terminals {
             },
         )
         .map_err(|e| e.to_string())?;
-        protocol::write_control(
-            &mut writer,
-            &ClientMessage::OpenShell {
+        let open = if tmux {
+            ClientMessage::OpenTmux { host }
+        } else {
+            ClientMessage::OpenShell {
                 host,
                 pty: PtyRequest {
                     cols,
                     rows,
                     term: "xterm-256color".into(),
                 },
-            },
-        )
-        .map_err(|e| e.to_string())?;
+            }
+        };
+        protocol::write_control(&mut writer, &open).map_err(|e| e.to_string())?;
         entries.insert(id.clone(), Arc::clone(&terminal));
         drop(entries);
         let input_owner = Arc::clone(&terminal);
@@ -185,6 +190,7 @@ impl Terminals {
                 let result = match input {
                     Input::Data(bytes) => protocol::write_data(&mut writer, &bytes),
                     Input::Resize(cols, rows) => protocol::write_control(&mut writer, &ClientMessage::WindowChange { cols, rows }),
+                    Input::Select(target) => protocol::write_control(&mut writer, &ClientMessage::TmuxSelect { target }),
                 };
                 if result.is_err() {
                     let _ = control(&input_sink, serde_json::json!({"type":"bridge_error","text":"Input could not reach the SSH session. Reconnect before continuing."}));
@@ -250,6 +256,9 @@ fn relay_output(
             }
             Frame::Control(bytes) => {
                 let message: ServerMessage = protocol::decode(&bytes)?;
+                if matches!(message, ServerMessage::TmuxSessions { .. }) {
+                    terminal.selecting_tmux.store(true, Ordering::Release);
+                }
                 control(
                     sink,
                     serde_json::to_value(message).map_err(|e| e.to_string())?,
@@ -280,6 +289,7 @@ pub async fn terminal_open(
     cols: u16,
     rows: u16,
     output: Channel<Response>,
+    tmux: Option<bool>,
 ) -> Result<(), String> {
     main_only(&window)?;
     dimensions(cols, rows)?;
@@ -317,6 +327,7 @@ pub async fn terminal_open(
             host,
             cols,
             rows,
+            tmux.unwrap_or(false),
             stream,
             Arc::new(move |bytes| output.send(Response::new(bytes)).map_err(|e| e.to_string())),
             generation,
@@ -324,6 +335,26 @@ pub async fn terminal_open(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub fn terminal_tmux_select(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+    target: TmuxTarget,
+) -> Result<(), String> {
+    main_only(&window)?;
+    let terminal = app.state::<AppState>().session.embedded.get(&id)?;
+    if terminal.closed.load(Ordering::Acquire)
+        || !terminal.selecting_tmux.swap(false, Ordering::AcqRel)
+    {
+        return Err("This terminal is not waiting for a tmux session selection".into());
+    }
+    if terminal.input.try_send(Input::Select(target)).is_err() {
+        terminal.selecting_tmux.store(true, Ordering::Release);
+        return Err("Terminal input is busy".into());
+    }
+    Ok(())
 }
 #[tauri::command]
 pub fn terminal_write(
@@ -399,6 +430,7 @@ mod tests {
             input: mpsc::sync_channel(1).0,
             closer: stream,
             closed: AtomicBool::new(false),
+            selecting_tmux: AtomicBool::new(false),
             flow: Mutex::new(Flow::default()),
             changed: Condvar::new(),
         }
@@ -416,6 +448,7 @@ mod tests {
                 HostQuery::Alias("web".into()),
                 80,
                 24,
+                false,
                 client,
                 sink,
                 generation,
@@ -444,6 +477,7 @@ mod tests {
                 HostQuery::Alias("web".into()),
                 80,
                 24,
+                false,
                 client,
                 Arc::new(|_| Ok(())),
                 0,
@@ -498,6 +532,110 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&packets[2][1..]).unwrap()["code"],
             7
         );
+    }
+    #[test]
+    fn real_ssh_tmux_discovery_and_control_share_one_login_then_detach() {
+        use crate::{
+            connect::shell_quote,
+            session::{
+                broker::Broker,
+                testing::{Decision, FakeConfirmer, FakeDirectory, FakeKeys},
+            },
+            ssh::{russh_engine::RusshEngine, testing::{fixture::Server, harness}},
+            sync::testkit::MemKeychain,
+        };
+        use std::{os::unix::fs::PermissionsExt, process::Command};
+
+        let Some(tools) = harness::tools() else { return };
+        let Some(tmux) = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path).map(|dir| dir.join("tmux")).find(|path| path.is_file())
+        }) else {
+            eprintln!("skipped: tmux is unavailable");
+            return;
+        };
+        let scratch = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = scratch.path().join("socket");
+        let wrapper = scratch.path().join("tmux");
+        std::fs::write(&wrapper, format!(
+            "#!/bin/sh\nexec {} -S {} -f /dev/null \"$@\"\n",
+            shell_quote(tmux.to_str().unwrap()), shell_quote(socket.to_str().unwrap()),
+        )).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct StopTmux(std::path::PathBuf);
+        impl Drop for StopTmux {
+            fn drop(&mut self) { let _ = Command::new(&self.0).arg("kill-server").output(); }
+        }
+        let _stop = StopTmux(wrapper.clone());
+        let path = shell_quote(scratch.path().to_str().unwrap());
+        let force = format!(r#"ForceCommand env PATH={path}:/bin:/usr/bin /bin/sh -c 'eval "$SSH_ORIGINAL_COMMAND"'"#);
+        let server = Server::start(&tools, &[&force, "LogLevel INFO"]);
+        let broker = Broker::new(
+            Arc::new(RusshEngine::new()),
+            Arc::new(FakeDirectory::new()
+                .with_hop(server.hop("web-1", "key-1"))
+                .with_pin("web-1", server.host_key())),
+            Arc::new(FakeKeys::new().with_key("key-1", "test", &server.key.private_text)),
+            Arc::new(MemKeychain::default()),
+            Arc::new(FakeConfirmer::deciding(vec![Decision::Trust])),
+        );
+        let registry = Arc::new(Terminals::default());
+        let name = "work '#{pid}'";
+        for attach in [false, true] {
+            let (stream, peer) = UnixStream::pair().unwrap();
+            let worker = {
+                let broker = Arc::clone(&broker);
+                std::thread::spawn(move || broker.serve(peer, Some(std::process::id())))
+            };
+            let (output, received) = mpsc::channel();
+            registry.open(
+                "tmux-preview".into(), HostQuery::Alias("web-1".into()), 80, 24, true, stream,
+                Arc::new(move |bytes| output.send(bytes).map_err(|error| error.to_string())), 0,
+            ).unwrap();
+            let terminal = registry.get("tmux-preview").unwrap();
+            let mut data = Vec::new();
+            loop {
+                let packet = received.recv_timeout(Duration::from_secs(15)).unwrap();
+                if packet[0] == 0 {
+                    data.extend_from_slice(&packet[1..]);
+                    let text = String::from_utf8_lossy(&data);
+                    if text.contains("\nLUNPORT_TMUX_REPLY\n") {
+                        assert!(text.contains("%session-changed $0 work '#{pid}'\n"), "{text}");
+                        break;
+                    }
+                    continue;
+                }
+                match protocol::decode::<ServerMessage>(&packet[1..]).unwrap() {
+                    ServerMessage::TmuxSessions { sessions } => {
+                        assert!(terminal.selecting_tmux.load(Ordering::Acquire));
+                        let target = if attach {
+                            assert_eq!(sessions.len(), 1);
+                            assert_eq!(sessions[0].name, name);
+                            TmuxTarget::Attach {
+                                id: sessions[0].id.clone(),
+                                created: sessions[0].created.clone(),
+                                server: sessions[0].server.clone(),
+                            }
+                        } else {
+                            assert!(sessions.is_empty());
+                            TmuxTarget::Create { name: name.into() }
+                        };
+                        assert!(terminal.input.try_send(Input::Select(target)).is_ok());
+                    }
+                    ServerMessage::Opened { .. } => assert!(terminal.input.try_send(Input::Data(
+                        Zeroizing::new(b"display-message -p LUNPORT_TMUX_REPLY\n".to_vec())
+                    )).is_ok()),
+                    ServerMessage::Event(super::protocol::Event::Error { text, .. }) => panic!("{text}"),
+                    ServerMessage::Exited { .. } => panic!("tmux ended early: {:?}", String::from_utf8_lossy(&data)),
+                    _ => {}
+                }
+            }
+            registry.close("tmux-preview");
+            worker.join().unwrap();
+        }
+        assert_eq!(server.sshd.log().lines().filter(|line| line.contains("Accepted publickey")).count(), 2);
+        let sessions = Command::new(wrapper).args(["list-sessions", "-F", "#{session_name}"]).output().unwrap();
+        assert!(sessions.status.success());
+        assert_eq!(sessions.stdout, format!("{name}\n").into_bytes());
     }
     #[test]
     fn real_ssh_shell_input_resize_output_and_exit() {
@@ -556,6 +694,7 @@ mod tests {
                 host,
                 100,
                 35,
+                false,
                 client,
                 Arc::new(move |bytes| output.send(bytes).map_err(|e| e.to_string())),
                 0,

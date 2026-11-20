@@ -104,6 +104,20 @@ In **Settings → Connections → In-app terminal**, choose the terminal text si
 
 Up to eight session tabs can be open. Retained history and queued data are bounded; if the terminal cannot consume output, it reports the interruption rather than retrying keystrokes.
 
+### Connect to a tmux workspace
+
+In the host's context menu, choose **Connect with tmux**. In Quick connect, highlight a ready host and press **Shift+Enter**. After SSH authentication, Lunport lists the sessions from the host's default tmux server. Attach to one, choose **Resume** to return to your most recent workspace on that host, or create a named session. The host must have `tmux` on its SSH command path.
+
+Quick connect also lists **Recent tmux workspaces**. Search by host or session name and choose a result to resume its last window and pane. If the session has ended, Lunport opens the host's current session list.
+
+A workspace tab contains the tmux session's windows. Use the toolbar to switch windows, add a window or split a pane. Click a pane to type in it, drag a divider to resize it, and use the mouse to select terminal text within that pane. **Find in pane** searches its retained output. Tmux determines the effective window size when multiple clients share a session.
+
+When a tmux version cannot report a pane's paste mode, Lunport accepts multiline paste while the pane has enabled bracketed paste. Single-line paste remains available.
+
+Close the workspace tab or choose **Detach** to close your client connection. Tmux normally keeps the remote session running. Lunport warns when it detects a remote setting that can end the session after the last client detaches. Use the separate terminate commands when you intend to end the remote window or session and its processes.
+
+After an unexpected SSH disconnect, Lunport tries to reconnect to the same tmux session and restore its last window and pane if they still exist. If the remote session ended, choose another from the current list. Both tmux and Lunport limit how much pane history can be recovered.
+
 Use a key from the local vault, a saved password or an interactive authentication prompt. Passwords, key passphrases and two-factor codes appear in Lunport’s **SSH authentication** window, with the requesting host and username. Answers apply to the current connection; cancelling or closing the terminal abandons its questions. Shell input continues in your preferred terminal.
 
 In the Records host editor, choose **Authentication → Password**. Leave the password unset to enter it in Lunport when connecting, or choose **Save password**, enter it and save the host. Saved SSH passwords use protected local credential storage and join end-to-end encrypted library sync when enabled. The editor shows saved status without reading or revealing the saved password; **Replace password** and **Remove saved password** take effect when you save changes. If credential storage fails after creating the host, retry **Save changes** without creating another host.

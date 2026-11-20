@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { CircleAlert, Library, LoaderCircle, Plus, Terminal, Unplug, X } from "lucide-react";
+import { CircleAlert, Library, LoaderCircle, Plus, SquareTerminal, Terminal, Unplug, X } from "lucide-react";
 import { useTerminalStore, type TerminalTab } from "@/stores/terminals";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
@@ -7,12 +7,17 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { isImeKey } from "@/lib/ime";
+import { revealHidden } from "@/lib/reveal-hidden";
 import "./terminal.css";
 const TerminalPane = lazy(() => import("./TerminalPane").then((module) => ({ default: module.TerminalPane })));
+const TmuxWorkspace = lazy(() => import("./TmuxWorkspace").then((module) => ({ default: module.TmuxWorkspace })));
 
 export function requestTerminalClose(id: string, onConfirm: (id: string) => void) {
   const tab = useTerminalStore.getState().tabs.find((item) => item.id === id);
-  if ((tab?.state === "open" || tab?.state === "connecting") && useSettingsStore.getState().confirmTerminalClose !== false) onConfirm(id);
+  const confirm = tab?.mode === "tmux"
+    ? tab.tmuxSession?.destroyUnattached
+    : useSettingsStore.getState().confirmTerminalClose !== false;
+  if (confirm && (tab?.state === "open" || tab?.state === "connecting")) onConfirm(id);
   else useTerminalStore.getState().close(id);
 }
 
@@ -45,12 +50,14 @@ export function SessionTabBar({ tabs, activeId, activate, requestClose, strip }:
         <button type="button" id="terminal-tab-library" role="tab" aria-selected={!activeId} aria-controls="terminal-library" tabIndex={!activeId ? 0 : -1} onClick={() => activate(null)}><Library className="size-3.5" /><span>Library</span></button>
       </div>
       {tabs.map((tab) => {
-        const ordinal = tab.name.match(/ \(\d+\)$/)?.[0] ?? "";
+        const tmux = tab.mode === "tmux";
+        const name = tab.tmuxSession ? `${tab.name} / ${revealHidden(tab.tmuxSession.name)}` : tab.name;
+        const ordinal = tab.tmuxSession ? "" : name.match(/ \(\d+\)$/)?.[0] ?? "";
         return <div key={tab.id} className="embedded-tab" data-tauri-drag-region data-active={activeId === tab.id} data-state={tab.state} role="presentation">
-        <button type="button" id={`terminal-tab-${tab.id}`} role="tab" title={`${tab.name}\n${tab.address}\n${tab.state}`} aria-label={`${tab.name}, ${tab.state}`} aria-selected={activeId === tab.id} aria-controls={`terminal-panel-${tab.id}`} tabIndex={activeId === tab.id ? 0 : -1} onClick={() => activate(tab.id)}>
-          {tab.state === "connecting" ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : tab.state === "error" ? <CircleAlert className="size-3.5 text-destructive" /> : tab.state === "ended" ? <Unplug className="size-3.5" /> : <Terminal className="size-3.5" />}<span>{ordinal ? tab.name.slice(0, -ordinal.length) : tab.name}</span>{ordinal && <span className="embedded-tab-ordinal">{ordinal.trim()}</span>}
+        <button type="button" id={`terminal-tab-${tab.id}`} role="tab" title={`${name}${tmux ? " · tmux" : ""}\n${tab.address}\n${tab.state}`} aria-label={`${name}${tmux ? ", tmux" : ""}, ${tab.state}`} aria-selected={activeId === tab.id} aria-controls={`terminal-panel-${tab.id}`} tabIndex={activeId === tab.id ? 0 : -1} onClick={() => activate(tab.id)}>
+          {tab.state === "connecting" ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : tab.state === "error" ? <CircleAlert className="size-3.5 text-destructive" /> : tab.state === "ended" ? <Unplug className="size-3.5" /> : tmux ? <SquareTerminal className="size-3.5" /> : <Terminal className="size-3.5" />}<span>{ordinal ? name.slice(0, -ordinal.length) : name}</span>{ordinal && <span className="embedded-tab-ordinal">{ordinal.trim()}</span>}
         </button>
-        <button type="button" className="embedded-tab-close" tabIndex={activeId === tab.id ? 0 : -1} aria-label={`Close terminal ${tab.name}`} onClick={() => requestClose(tab.id)}><X className="size-3" /></button>
+        <button type="button" className="embedded-tab-close" tabIndex={activeId === tab.id ? 0 : -1} aria-label={`Close ${tmux ? "tmux workspace" : "terminal"} ${name}`} onClick={() => requestClose(tab.id)}><X className="size-3" /></button>
       </div>;
       })}
     </nav>
@@ -65,6 +72,9 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
   const activate = useTerminalStore((state) => state.activate);
   const [closing, setClosing] = useState<string | null>(null);
   const [doNotAskAgain, setDoNotAskAgain] = useState(false);
+  const closingTab = tabs.find((tab) => tab.id === closing);
+  const closingTmux = closingTab?.mode === "tmux";
+  const closingSession = closingTab?.tmuxSession;
   const strip = useRef<HTMLElement>(null);
   const requestClose = (id: string) => {
     setDoNotAskAgain(false);
@@ -95,7 +105,12 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
     {renderHeader ? renderHeader(tabBar) : tabBar}
     <div id="terminal-library" className="terminal-library" role={tabs.length ? "tabpanel" : undefined} aria-labelledby={tabs.length ? "terminal-tab-library" : undefined} hidden={!!activeId}>{children}</div>
     <Suspense fallback={activeId ? <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading terminal…</div> : null}>
-      {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id && !settingsOpen} openKeys={openKeys} />)}
+      {tabs.map((tab) => {
+        const active = activeId === tab.id && !settingsOpen;
+        return tab.mode === "tmux"
+          ? <TmuxWorkspace key={tab.id} tab={tab} active={active} />
+          : <TerminalPane key={tab.id} tab={tab} active={active} openKeys={openKeys} />;
+      })}
     </Suspense>
     <Dialog open={closing !== null} onOpenChange={(open) => { if (!open) { setClosing(null); setDoNotAskAgain(false); } }}>
       <DialogContent onCloseAutoFocus={(event) => {
@@ -108,15 +123,15 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
           (input ?? tab)?.focus();
         });
       }}>
-        <DialogTitle>Close terminal?</DialogTitle>
-        <DialogDescription>This ends this SSH session. Running commands may stop. Reconnecting opens a new shell.</DialogDescription>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+        <DialogTitle>{closingTmux ? (closingSession ? `Detach from ${revealHidden(closingSession.name)}?` : "Detach from tmux?") : "Close terminal?"}</DialogTitle>
+        <DialogDescription>{closingTmux ? "The remote tmux configuration may end this session when its last client detaches." : "This ends this SSH session. Running commands may stop. Reconnecting opens a new shell."}</DialogDescription>
+        {!closingTmux && <label className="flex items-center gap-2 text-sm text-muted-foreground">
           <Checkbox checked={doNotAskAgain} onCheckedChange={(checked) => setDoNotAskAgain(checked === true)} />
           Don't ask again
-        </label>
+        </label>}
         <DialogFooter>
           <Button variant="outline" onClick={() => { setClosing(null); setDoNotAskAgain(false); }}>Cancel</Button>
-          <Button variant="destructive" onClick={() => { if (closing) completeTerminalClose(closing, doNotAskAgain); setClosing(null); setDoNotAskAgain(false); }}>Close terminal</Button>
+          <Button variant="destructive" onClick={() => { if (closing) completeTerminalClose(closing, !closingTmux && doNotAskAgain); setClosing(null); setDoNotAskAgain(false); }}>{closingTmux ? "Detach" : "Close terminal"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
