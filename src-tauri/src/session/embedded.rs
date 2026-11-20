@@ -535,6 +535,24 @@ mod tests {
     }
     #[test]
     fn real_ssh_tmux_discovery_and_control_share_one_login_then_detach() {
+        real_ssh_tmux(None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn real_ssh_tmux_attaches_to_existing_homebrew_session_with_a_minimal_path() {
+        let Some(tmux) = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| path.is_file())
+        else {
+            eprintln!("skipped: tmux is unavailable in the Homebrew prefixes");
+            return;
+        };
+        real_ssh_tmux(Some(tmux));
+    }
+
+    fn real_ssh_tmux(homebrew_tmux: Option<std::path::PathBuf>) {
         use crate::{
             connect::shell_quote,
             session::{
@@ -547,18 +565,22 @@ mod tests {
         use std::{os::unix::fs::PermissionsExt, process::Command};
 
         let Some(tools) = harness::tools() else { return };
-        let Some(tmux) = std::env::var_os("PATH").and_then(|path| {
+        let attach_existing = homebrew_tmux.is_some();
+        let Some(tmux) = homebrew_tmux.or_else(|| std::env::var_os("PATH").and_then(|path| {
             std::env::split_paths(&path).map(|dir| dir.join("tmux")).find(|path| path.is_file())
-        }) else {
+        })) else {
             eprintln!("skipped: tmux is unavailable");
             return;
         };
         let scratch = tempfile::tempdir_in("/tmp").unwrap();
-        let socket = scratch.path().join("socket");
         let wrapper = scratch.path().join("tmux");
+        let socket_dir = shell_quote(scratch.path().to_str().unwrap());
         std::fs::write(&wrapper, format!(
-            "#!/bin/sh\nexec {} -S {} -f /dev/null \"$@\"\n",
-            shell_quote(tmux.to_str().unwrap()), shell_quote(socket.to_str().unwrap()),
+            "#!/bin/sh
+unset TMUX
+TMUX_TMPDIR={socket_dir} exec {} -f /dev/null \"$@\"
+",
+            shell_quote(tmux.to_str().unwrap()),
         )).unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
         struct StopTmux(std::path::PathBuf);
@@ -566,8 +588,22 @@ mod tests {
             fn drop(&mut self) { let _ = Command::new(&self.0).arg("kill-server").output(); }
         }
         let _stop = StopTmux(wrapper.clone());
-        let path = shell_quote(scratch.path().to_str().unwrap());
-        let force = format!(r#"ForceCommand env PATH={path}:/bin:/usr/bin /bin/sh -c 'eval "$SSH_ORIGINAL_COMMAND"'"#);
+        let (name, connections) = if attach_existing {
+            let name = "mac-work";
+            let created = Command::new(&wrapper)
+                .args(["new-session", "-d", "-s", name, "/bin/sleep", "60"])
+                .output().unwrap();
+            assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+            (name, &[true][..])
+        } else {
+            ("work '#{pid}'", &[false, true][..])
+        };
+        let path = if attach_existing {
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_owned()
+        } else {
+            format!("{socket_dir}:/bin:/usr/bin")
+        };
+        let force = format!(r#"ForceCommand env -u TMUX TMUX_TMPDIR={socket_dir} PATH={path} /bin/sh -c 'eval "$SSH_ORIGINAL_COMMAND"'"#);
         let server = Server::start(&tools, &[&force, "LogLevel INFO"]);
         let broker = Broker::new(
             Arc::new(RusshEngine::new()),
@@ -579,8 +615,7 @@ mod tests {
             Arc::new(FakeConfirmer::deciding(vec![Decision::Trust])),
         );
         let registry = Arc::new(Terminals::default());
-        let name = "work '#{pid}'";
-        for attach in [false, true] {
+        for &attach in connections {
             let (stream, peer) = UnixStream::pair().unwrap();
             let worker = {
                 let broker = Arc::clone(&broker);
@@ -599,7 +634,7 @@ mod tests {
                     data.extend_from_slice(&packet[1..]);
                     let text = String::from_utf8_lossy(&data);
                     if text.contains("\nLUNPORT_TMUX_REPLY\n") {
-                        assert!(text.contains("%session-changed $0 work '#{pid}'\n"), "{text}");
+                        assert!(text.contains(&format!("%session-changed $0 {name}\n")), "{text}");
                         break;
                     }
                     continue;
@@ -632,7 +667,7 @@ mod tests {
             registry.close("tmux-preview");
             worker.join().unwrap();
         }
-        assert_eq!(server.sshd.log().lines().filter(|line| line.contains("Accepted publickey")).count(), 2);
+        assert_eq!(server.sshd.log().lines().filter(|line| line.contains("Accepted publickey")).count(), connections.len());
         let sessions = Command::new(wrapper).args(["list-sessions", "-F", "#{session_name}"]).output().unwrap();
         assert!(sessions.status.success());
         assert_eq!(sessions.stdout, format!("{name}\n").into_bytes());

@@ -24,12 +24,12 @@ pub(super) fn select(
     if cancel.is_cancelled() {
         return Ok(None);
     }
-    let command = shell_quote(&format!(
+    let command = tmux_shell_command(&format!(
         "LC_ALL=C exec tmux -u list-sessions -F {}",
         shell_quote(LIST_FORMAT)
     ));
     let result = session
-        .exec(&format!("/bin/sh -c {command}"), LIST_TIMEOUT, LIST_LIMIT)
+        .exec(&command, LIST_TIMEOUT, LIST_LIMIT)
         .map_err(|error| format!("Could not list remote tmux sessions. {error}"))?;
     let sessions = sessions_from_output(result)?;
     if cancel.is_cancelled()
@@ -61,6 +61,14 @@ pub(super) fn select(
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
+}
+
+fn tmux_shell_command(command: &str) -> String {
+    // A macOS SSH exec request can have a shorter PATH than the user's interactive shell.
+    const HOMEBREW_LOOKUP: &str = r#"if ! command -v tmux >/dev/null 2>&1; then
+    export PATH="${PATH:+$PATH:}/opt/homebrew/bin:/usr/local/bin"
+fi"#;
+    format!("/bin/sh -c {}", shell_quote(&format!("{HOMEBREW_LOOKUP}\n{command}")))
 }
 
 fn sessions_from_output(result: ExecResult) -> Result<Vec<TmuxSession>, String> {
@@ -180,8 +188,7 @@ fn control_command(target: TmuxTarget, sessions: &[TmuxSession]) -> Result<Strin
             format!("new-session -s {}", shell_quote(&name.replace('#', "##")))
         }
     };
-    let command = shell_quote(&format!("exec tmux -u -C {arguments}"));
-    Ok(format!("/bin/sh -c {command}"))
+    Ok(tmux_shell_command(&format!("exec tmux -u -C {arguments}")))
 }
 
 #[cfg(test)]

@@ -106,7 +106,7 @@ Up to eight session tabs can be open. Retained history and queued data are bound
 
 ### Connect to a tmux workspace
 
-In the host's context menu, choose **Connect with tmux**. In Quick connect, highlight a ready host and press **Shift+Enter**. After SSH authentication, Lunport lists the sessions from the host's default tmux server. Attach to one, choose **Resume** to return to your most recent workspace on that host, or create a named session. The host must have `tmux` on its SSH command path.
+In the host's context menu, choose **Connect with tmux**. In Quick connect, highlight a ready host and press **Shift+Enter**. After SSH authentication, Lunport lists the sessions from the host's default tmux server. Attach to one, choose **Resume** to return to your most recent workspace on that host, or create a named session. Lunport checks the host's SSH command path first, then the standard directories used by Homebrew on macOS.
 
 Quick connect also lists **Recent tmux workspaces**. Search by host or session name and choose a result to resume its last window and pane. If the session has ended, Lunport opens the host's current session list.
 
