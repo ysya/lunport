@@ -95,9 +95,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # rust-cache.yml saves this job's dependencies on `main` under the same shared key, where every pull request can restore them.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          shared-key: rust-tests
           cache-on-failure: true
       # tauri::generate_context! reads frontendDist (../dist) at compile time and fails when it is missing.
       # This job only runs Rust tests, so a placeholder page is enough.
@@ -111,9 +113,11 @@ jobs:
         run: |
           ls -l /usr/sbin/sshd
           ssh -V
+      # Every cargo command of this job names the `ci` profile (src-tauri/Cargo.toml): dependencies optimised at level 1, the
+      # application crate as in a debug build. A command without it would compile the whole dependency graph again for `dev`.
       # Keep cold-cache compilation outside the test-process watchdog.
       - name: Compile safe Rust suite
-        run: cargo test --locked --lib --no-run
+        run: cargo test --locked --profile ci --lib --no-run
       # LUNPORT_REQUIRE_OPENSSH=1: a missing sshd is a failure here, not a skipped test.
       - name: Complete safe Rust suite
         env:
@@ -124,7 +128,7 @@ jobs:
           python3 - <<'PY'
           import subprocess
           command = [
-              "cargo", "test", "--locked", "--lib", "--", "--test-threads=2",
+              "cargo", "test", "--locked", "--profile", "ci", "--lib", "--", "--test-threads=2",
               "--skip", "secrets::tests::round_trip_set_get_delete",
               "--skip", "ssh::engine_tests::login_methods::pam",
           ]
@@ -136,7 +140,7 @@ jobs:
           PY
 
       - name: Debug profile selection in the normal library
-        run: cargo test --locked --test app_profile_build
+        run: cargo test --locked --profile ci --test app_profile_build
 
   linux:
     name: Rust, SSH and PAM (Linux)
@@ -157,9 +161,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils openssh-server
       - uses: dtolnay/rust-toolchain@stable
+      # The shared key of rust-cache.yml, as in the macOS job.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          shared-key: rust-tests
       - name: Placeholder frontend
         run: |
           mkdir -p ../dist
@@ -182,6 +188,7 @@ jobs:
           done
           ssh-keyscan -T 2 -p 2222 127.0.0.1 > /dev/null
           echo "LUNPORT_PAM_PASSWORD=$password" >> "$GITHUB_ENV"
+      # `--profile ci` on every cargo command of this job too, as in the macOS job.
       # The pam tests are skipped here: the next step runs them against the container.
       - name: Complete safe Rust suite against a scratch sshd
         # Runs even when the container did not start, so that a first run shows both results.
@@ -189,10 +196,10 @@ jobs:
         env:
           LUNPORT_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --profile ci --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam"
 
       - name: Debug profile selection in the normal library
-        run: cargo test --locked --test app_profile_build
+        run: cargo test --locked --profile ci --test app_profile_build
       - name: Group ordering remains compatible with the published 1.2.0 client
         if: needs.changes.outputs.group_compat == 'true'
         run: |
@@ -207,7 +214,7 @@ jobs:
           LUNPORT_PAM_PORT: "2222"
           LUNPORT_PAM_USER: lunport
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --profile ci --lib -- ssh::engine_tests::login_methods::pam"
       - name: What the container logged
         if: failure()
         run: docker logs lunport-pam-sshd || true

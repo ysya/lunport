@@ -26,7 +26,7 @@ try {
         productName = $development.productName
         app = @{ windows = @(@{ label = 'main'; title = $title; width = 1100; height = 720; visible = $false }) }
     } | ConvertTo-Json -Depth 5 -Compress
-    cargo build --locked --features development-profile
+    cargo build --locked --profile ci --features development-profile
     if ($LASTEXITCODE -ne 0) { throw 'Development GUI build failed.' }
 } finally {
     $env:TAURI_CONFIG = $priorConfig
@@ -34,7 +34,7 @@ try {
 New-Item -ItemType Directory -Force -Path $profileDirectory | Out-Null
 Copy-Item $seed $statePath
 $logPath = Join-Path $profileDirectory 'diagnostics\app.log'
-$program = (Resolve-Path "target\debug\$($production.mainBinaryName).exe").Path
+$program = (Resolve-Path "target\ci\$($production.mainBinaryName).exe").Path
 $stdout = Join-Path $env:RUNNER_TEMP 'lunport-startup.stdout'
 $stderr = Join-Path $env:RUNNER_TEMP 'lunport-startup.stderr'
 function ConvertFrom-CompleteLogLines {

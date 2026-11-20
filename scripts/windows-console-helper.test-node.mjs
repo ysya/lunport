@@ -98,8 +98,8 @@ test("every Windows tauri build bundles the helper with the argument this script
       assert.ok(runsTheScript(outputs[0]), `the step ${outputs[0]} in ${name} does not run scripts/windows-console-helper.mjs`);
     }
   }
-  // The Windows test suite runs the helper this script builds, beside its debug build.
-  assert.match(workflow("test-windows.yml"), /node \.\.\/scripts\/windows-console-helper\.mjs --copy-to target\/debug/);
+  // The Windows test suite runs the helper this script builds, beside its debug build, which the `ci` profile puts in target/ci.
+  assert.match(workflow("test-windows.yml"), /node \.\.\/scripts\/windows-console-helper\.mjs --copy-to target\/ci$/m);
 });
 
 // The local modules a script loads, itself included, as paths from the repository root.
