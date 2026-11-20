@@ -2,13 +2,15 @@
 
 Application checks run on pull requests, once per revision. A newer revision cancels
 obsolete checks. Merging does not repeat the same test suites; `Release - Stable`
-runs release-please and builds installers only when a release PR is merged.
+runs release-please and builds installers only when a release PR is merged, and
+`CI - Rust cache` compiles the Rust test build without running it.
 
 | Workflow | When | Responsibility |
 | --- | --- | --- |
 | CI - App | Every PR; manual full run | Version consistency, CI policy and identity tests, the identity guard and workflow syntax; frontend tests/build for UI changes; macOS and Linux Rust/SSH tests for native changes |
 | CI - Windows | Every PR (Windows suites for native changes and the console helper scripts); manual | Windows Rust/SSH, console, GUI startup and one native tray smoke test |
 | CI - macOS credentials | Every PR (suites for credential/signing/build scripts, the identity files the frozen helpers are pinned to, the identity data the scripts read, `tauri.conf.json` or Rust dependencies); manual | Disposable Keychain authorization, frozen helper transport/recovery, signed universal app and updater |
+| CI - Rust cache | Push to main that changes Rust dependencies or cargo configuration; Mondays and Thursdays; manual | Compiles the Rust test build on the three desktop runners and saves its dependencies for the PR test jobs |
 | CI - Relay | Relay paths; manual | Relay tests, deployed update script and self-host integration |
 | Packages - Linux upgrade | Installer, icon, meaningful Tauri config, upgrade check or identity data changes; manual | DEB/RPM packaging and upgrade from the published 1.14.4 |
 | Packages - Windows upgrade (manual) | Explicit dispatch | NSIS/MSI contents and upgrade; supports reuse of verified candidates |
@@ -63,6 +65,26 @@ use `target/ci`. Three builds keep `dev`: the archived 1.2.0 group-order fixture
 now compiles its dependencies itself; the manual Windows native probe, whose baseline may predate the profile; and the macOS
 credential checks, which compile the tests to run one probe. The release-profile boundary matrix is unaffected.
 
+### Dependency cache
+
+A PR run restores a Rust cache saved by its own branch or by `main`, never one saved by another PR, and the test workflows run on
+PRs only. `CI - Rust cache` (`.github/workflows/rust-cache.yml`) therefore compiles the same test build on `main`, on the runners of
+the three native jobs, and saves its dependencies under the cache key those jobs ask for. The key holds the shared key
+`rust-tests`, the runner's system, the Rust version, the cargo configuration and the dependencies in `Cargo.toml` and `Cargo.lock`;
+it holds no workflow or job name, and the application's own version does not change it.
+
+- A PR that leaves the dependencies alone restores that cache, compiles only the application crate, and saves nothing.
+- A PR that changes dependencies restores the nearest cache, compiles what changed and saves a cache for its own later revisions.
+- After a merge that changes the key, and after a new stable Rust, PRs compile everything until the workflow has run on `main`:
+  it starts on such a push and twice a week, and it can be dispatched. A run that finds the exact key compiles nothing; restoring
+  it keeps GitHub from removing a cache that no PR has read for seven days.
+
+The four jobs must name the same `shared-key` and `workspaces`, and compile with the same command; the policy tests compare
+them. The release-profile matrix, the manual Windows native probe, the macOS credential checks and the release builds keep caches
+keyed by their own job.
+
+### Test threads
+
 The complete suites run with `--test-threads=2`, set when central sync arrived so that crypto and scratch OpenSSH tests do not
 contend for a runner's three or four cores: sync rounds in the tests keep their production request deadlines. Four threads
 passed repeatedly on an 18-core machine, which does not show they are safe on a runner; raise the value only after repeated
@@ -92,7 +114,8 @@ The policy has Node-only regression tests, including release version changes,
 dependency/configuration changes, missing files and manual runs. They also check that each
 workflow passes the selection on under its own name and that every job condition reads one
 it declares, since a misspelt output skips the job and a skipped required job reports as
-passing:
+passing, and that `CI - Rust cache` and the three native test jobs name the same cache and
+build:
 
 ```sh
 node --test scripts/ci-changes.test-node.mjs

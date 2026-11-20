@@ -95,9 +95,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # rust-cache.yml saves this job's dependencies on `main` under the same shared key, where every pull request can restore them.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          shared-key: rust-tests
           cache-on-failure: true
       # tauri::generate_context! reads frontendDist (../dist) at compile time and fails when it is missing.
       # This job only runs Rust tests, so a placeholder page is enough.
@@ -159,9 +161,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils openssh-server
       - uses: dtolnay/rust-toolchain@stable
+      # The shared key of rust-cache.yml, as in the macOS job.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          shared-key: rust-tests
       - name: Placeholder frontend
         run: |
           mkdir -p ../dist
