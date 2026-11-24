@@ -52,6 +52,7 @@ pub(crate) mod database_path;
 pub(crate) mod database_ports;
 pub(crate) mod database_upstream;
 pub(crate) mod database_query;
+pub(crate) mod database_console;
 pub(crate) mod pgwire;
 #[cfg(test)]
 pub(crate) mod pg_fake;
