@@ -57,9 +57,10 @@ export function statementsToRun(
 function statementAt(statements: StatementRange[], doc: string, cursor: number): StatementRange | null {
   const inside = statements.find((range) => range.from <= cursor && cursor <= range.to);
   if (inside) return inside;
-  let endsOnLine: StatementRange | null = null;
+  let before: StatementRange | null = null;
   for (const range of statements) {
-    if (range.to <= cursor && !doc.slice(range.to, cursor).includes("\n")) endsOnLine = range;
+    if (range.to <= cursor && !doc.slice(range.to, cursor).includes("\n")) before = range;
   }
-  return endsOnLine;
+  if (before) return before;
+  return statements.find((range) => range.from > cursor && !doc.slice(cursor, range.to).includes("\n")) ?? null;
 }

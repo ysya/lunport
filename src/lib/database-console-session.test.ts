@@ -15,7 +15,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     }
   },
 }));
-import { ConsoleSession } from "./database-console-session";
+import { ConsoleSession, type ConsoleState } from "./database-console-session";
 
 const opened: ConsoleOpen = { kind: "opened", read_only: "locked", iam_user: "frank@example.com", server_version: "16.3" };
 const tree: SchemaTree = { schemas: [], truncated: false };
@@ -218,6 +218,66 @@ describe("ConsoleSession", () => {
     expect(session.state.message).toBeNull();
     expect(calls("database_console_close")).toHaveLength(1);
     expect(calls("database_console_open")[1][1]).toMatchObject({ readOnly: "locked" });
+  });
+
+  it("a_close_during_a_reconnect_is_not_undone", async () => {
+    let finishClose: () => void = () => {};
+    let closes = 0;
+    route({
+      database_console_open: () => opened,
+      database_console_schema: () => tree,
+      database_console_close: () => (++closes === 1 ? new Promise<void>((resolve) => (finishClose = resolve)) : undefined),
+    });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    const reconnect = session.reconnect();
+    await vi.waitFor(() => expect(closes).toBe(1));
+    await session.close();
+    finishClose();
+    await reconnect;
+    expect(calls("database_console_open")).toHaveLength(1);
+  });
+
+  it("published_results_are_never_mutated", async () => {
+    route({ database_console_open: () => opened, database_console_schema: () => tree, database_console_run: () => rows(1) });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    const snapshots: ConsoleState["results"][] = [];
+    session.subscribe(() => snapshots.push(session.state.results));
+    await session.run([statement("SELECT 1;"), statement("SELECT 2;", 10)]);
+    const first = snapshots[0];
+    expect(first.map((tab) => tab.run)).toEqual([null, null]);
+    expect(session.state.results).not.toBe(first);
+    expect(session.state.results[1].run?.kind).toBe("rows");
+  });
+
+  it("an_ended_event_mid_run_keeps_running_until_the_run_settles", async () => {
+    let finish: (run: ConsoleRun) => void = () => {};
+    route({
+      database_console_open: () => opened,
+      database_console_schema: () => tree,
+      database_console_run: () => new Promise<ConsoleRun>((resolve) => (finish = resolve)),
+    });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    const running = session.run([statement("SELECT 1;"), statement("SELECT 2;", 10)]);
+    await vi.waitFor(() => expect(calls("database_console_run")).toHaveLength(1));
+    mocks.channels[0].onmessage({ kind: "ended", message: "The connection ended." });
+    expect(session.state.status).toBe("ended");
+    expect(session.state.running).toBe(true);
+    finish({ kind: "canceled", elapsed_ms: 1 });
+    await running;
+    expect(session.state.running).toBe(false);
+    expect(calls("database_console_run")).toHaveLength(1);
+  });
+
+  it("run_does_nothing_unless_the_session_is_open", async () => {
+    route({ database_console_open: () => ({ kind: "lock_unsupported", message: "No lock." }) });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    await session.run([statement("SELECT 1;")]);
+    expect(calls("database_console_run")).toHaveLength(0);
+    expect(session.state.running).toBe(false);
   });
 
   it("subscribers_hear_every_change_until_they_leave", async () => {

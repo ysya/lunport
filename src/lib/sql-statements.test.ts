@@ -55,6 +55,13 @@ describe("statementsToRun", () => {
     const spaced = "SELECT 1;   \nSELECT 2;";
     expect(statementsToRun(spaced, { from: 11, to: 11 }, false)).toEqual([{ from: 0, to: 9, text: "SELECT 1;" }]);
   });
+  it("runs the statement that starts after the cursor on the same line", () => {
+    expect(statementsToRun("  SELECT 1;", { from: 0, to: 0 }, false)).toEqual([{ from: 2, to: 11, text: "SELECT 1;" }]);
+  });
+  it("prefers the statement that ends at or before the cursor over one after it on the line", () => {
+    const line = "SELECT 1;  SELECT 2;";
+    expect(statementsToRun(line, { from: 10, to: 10 }, false)).toEqual([{ from: 0, to: 9, text: "SELECT 1;" }]);
+  });
   it("runs both statements of a selection at their document offsets", () => {
     expect(at(0, false, doc.length)).toEqual([
       { from: 0, to: 9, text: "SELECT 1;" },

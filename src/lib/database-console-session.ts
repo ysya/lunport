@@ -96,7 +96,7 @@ export class ConsoleSession {
     const events = new Channel<ConsoleEvent>();
     events.onmessage = (event) => {
       if (generation !== this.generation) return;
-      if (event.kind === "ended") this.update({ status: "ended", message: event.message, running: false });
+      if (event.kind === "ended") this.update({ status: "ended", message: event.message });
     };
     let answer;
     try {
@@ -130,7 +130,7 @@ export class ConsoleSession {
   }
 
   async run(statements: StatementRange[]): Promise<void> {
-    if (statements.length === 0 || this.current.running) return;
+    if (statements.length === 0 || this.current.running || this.current.status !== "open") return;
     const generation = this.generation;
     const run = ++this.runs;
     const results: ResultTab[] = statements.map((statement, index) => ({
@@ -141,8 +141,9 @@ export class ConsoleSession {
       page: [],
       offset: 0,
     }));
-    this.update({ running: true, results, messages: [], activeResult: results[0].key });
+    this.update({ running: true, results: [...results], messages: [], activeResult: results[0].key });
     for (let index = 0; index < results.length; index++) {
+      if (this.current.status !== "open") break;
       let answer: ConsoleRun;
       try {
         answer = await runStatement(this.tabId, results[index].statement.text, index === 0);
@@ -205,12 +206,13 @@ export class ConsoleSession {
   }
 
   async reconnect(): Promise<void> {
-    this.generation++;
+    const generation = ++this.generation;
     try {
       await closeConsole(this.tabId);
     } catch {
       // A session that is already gone needs no closing.
     }
+    if (generation !== this.generation) return;
     await this.open(this.readOnly);
   }
 
