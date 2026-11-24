@@ -151,7 +151,7 @@ export class ConsoleSession {
         if (generation !== this.generation) return;
         const text = sentence(error);
         if (text === ENDED_SENTENCE) this.update({ status: "ended", message: text, running: false });
-        else this.update({ running: false, messages: [...this.current.messages, text] });
+        else this.update({ running: false, messages: [...this.current.messages, text], activeResult: "messages" });
         return;
       }
       if (generation !== this.generation) return;
@@ -186,8 +186,15 @@ export class ConsoleSession {
     try {
       await cancelStatement(this.tabId);
     } catch (error) {
-      if (generation === this.generation) this.update({ messages: [...this.current.messages, sentence(error)] });
+      if (generation === this.generation) this.update({ messages: [...this.current.messages, sentence(error)], activeResult: "messages" });
     }
+  }
+
+  /** Shows the result tab `key`, or the messages for "messages". Any other key changes nothing. */
+  showResult(key: string): void {
+    if (key === this.current.activeResult) return;
+    if (key !== "messages" && !this.current.results.some((result) => result.key === key)) return;
+    this.update({ activeResult: key });
   }
 
   async showPage(key: string, offset: number): Promise<void> {
@@ -201,7 +208,7 @@ export class ConsoleSession {
         results: this.current.results.map((result) => (result.key === key ? { ...result, page, offset } : result)),
       });
     } catch (error) {
-      if (generation === this.generation) this.update({ messages: [...this.current.messages, sentence(error)] });
+      if (generation === this.generation) this.update({ messages: [...this.current.messages, sentence(error)], activeResult: "messages" });
     }
   }
 

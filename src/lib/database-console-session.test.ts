@@ -181,6 +181,46 @@ describe("ConsoleSession", () => {
     expect(session.state.results[0].run?.kind).toBe("rows");
   });
 
+  it("a_sentence_only_the_messages_hold_brings_the_messages_forward", async () => {
+    let finish: (run: ConsoleRun) => void = () => {};
+    const refusal = "The statement is larger than 256 KiB.";
+    route({
+      database_console_open: () => opened,
+      database_console_schema: () => tree,
+      database_console_run: () => new Promise<ConsoleRun>((resolve) => (finish = resolve)),
+      database_console_cancel: () => {
+        throw "Lunport could not reach Cloud SQL to cancel the query. It goes on running; close the tab to end the session.";
+      },
+      database_console_page: () => {
+        throw "That result is gone.";
+      },
+    });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    const running = session.run([statement("SELECT pg_sleep(5);")]);
+    await vi.waitFor(() => expect(calls("database_console_run")).toHaveLength(1));
+    expect(session.state.activeResult).toBe(session.state.results[0].key);
+    await session.cancel();
+    expect(session.state.activeResult).toBe("messages");
+    finish(rows(1));
+    await running;
+
+    session.showResult(session.state.results[0].key);
+    await session.showPage(session.state.results[0].key, 200);
+    expect(session.state.activeResult).toBe("messages");
+
+    route({
+      database_console_open: () => opened,
+      database_console_schema: () => tree,
+      database_console_run: () => {
+        throw refusal;
+      },
+    });
+    await session.run([statement("SELECT 1;")]);
+    expect(session.state.messages).toEqual([refusal]);
+    expect(session.state.activeResult).toBe("messages");
+  });
+
   it("show_page_asks_for_200_from_the_offset", async () => {
     route({
       database_console_open: () => opened,
@@ -278,6 +318,22 @@ describe("ConsoleSession", () => {
     await session.run([statement("SELECT 1;")]);
     expect(calls("database_console_run")).toHaveLength(0);
     expect(session.state.running).toBe(false);
+  });
+
+  it("show_result_picks_a_result_tab_or_the_messages", async () => {
+    route({ database_console_open: () => opened, database_console_schema: () => tree, database_console_run: () => rows(1) });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    await session.run([statement("SELECT 1;"), statement("SELECT 2;", 10)]);
+    const [first, second] = session.state.results;
+    session.showResult(second.key);
+    expect(session.state.activeResult).toBe(second.key);
+    session.showResult("messages");
+    expect(session.state.activeResult).toBe("messages");
+    session.showResult("run-99-1");
+    expect(session.state.activeResult).toBe("messages");
+    session.showResult(first.key);
+    expect(session.state.activeResult).toBe(first.key);
   });
 
   it("subscribers_hear_every_change_until_they_leave", async () => {
