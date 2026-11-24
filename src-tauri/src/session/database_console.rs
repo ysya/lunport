@@ -22,6 +22,7 @@ use tokio::time::Instant;
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::{CancelToken, Client, Config, NoTls, SimpleQueryMessage};
 
+use super::database_console_schema::{csv, json, write_replacing, ExportFormat};
 use super::database_ports::BoxStream;
 use super::database_query::valid_sql_within;
 
@@ -840,6 +841,16 @@ impl ConsoleConnection {
         let results = self.inner.results.lock().unwrap();
         let kept = results.kept.get(&result_id).ok_or_else(|| RESULT_GONE.to_string())?;
         Ok((kept.columns.clone(), kept.rows.clone()))
+    }
+
+    /// Writes the kept rows of `result_id` to `path` as CSV or JSON: the rows Lunport kept, not a re-run of the query.
+    pub(crate) fn export(&self, result_id: u32, format: ExportFormat, path: &std::path::Path) -> Result<(), String> {
+        let (columns, rows) = self.kept(result_id)?;
+        let content = match format {
+            ExportFormat::Csv => csv(&columns, &rows),
+            ExportFormat::Json => json(&columns, &rows),
+        };
+        write_replacing(path, &content)
     }
 
     /// Runs `sql` and keeps no result: for internal catalog reads. No row limit; past `MAX_KEPT_BYTES` it answers
