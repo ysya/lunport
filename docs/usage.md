@@ -88,6 +88,18 @@ Databases sync as encrypted library records, port numbers and routes included, w
 
 An AI client can also manage saved databases (see [AI access through MCP](#ai-access-through-mcp)): a database on its public IP while AI access is on, and a database reached through a host only while the client may use that host. A database it started keeps running when you turn off the client's access to its host, because it serves your apps; stop it from the Databases page.
 
+## Database console
+
+**Open console** on a saved database's row in **Databases** opens a console tab beside your terminal tabs, up to 8 tabs in all. It is there for every database that is not marked as deleted on another device, whether its local port is running or not: the console signs in to Cloud SQL on its own and never uses that port.
+
+Every console tab is read-only, whatever the database's environment. Lunport opens the session with Cloud SQL's `cloudsql_session_read_only` lock, checks that the lock is on, closes the session if it cannot confirm that, and the status bar says "Read-only (locked)". A statement that writes is refused by the database. For an older instance without that flag, the tab says so and offers **Open read-only (not locked)**. That choice sets `default_transaction_read_only` instead, which a statement in the session could turn off, and the status bar says "Read-only (not locked)". Lunport never switches to it on its own.
+
+**Run** runs the selected statements, or the statement at the cursor when nothing is selected: ⌘↩ (Ctrl+↩ on Windows and Linux). **Run all** runs every statement in the editor, at most 50: ⇧⌘↩ (Shift+Ctrl+↩). Statements run one at a time, each in a result tab of its own. **Cancel** stops the running statement, as does Escape while it runs.
+
+A result shows 200 rows at a time, with **Previous** and **Next**. Lunport keeps at most 10,000 rows or 16 MiB of a result, whichever limit is reached first, and says so above the rows when it kept fewer than the statement answered. Add a `LIMIT` or a `WHERE` to see what lies past it.
+
+**Export** writes the rows Lunport kept for that result, not the whole query and not a new run of it, as CSV or JSON to the file you choose. CSV has a header row, an empty field for NULL and `""` for an empty string. JSON is an array of objects keyed by column name, with each value as text exactly as PostgreSQL printed it, or `null`.
+
 ## Connect in Lunport or an external terminal
 
 The in-app terminal is available first on the **Beta** update channel in **Settings → Updates**.

@@ -22,6 +22,12 @@ import type { RouteChange } from "@/bindings/RouteChange";
 import type { TransportKind } from "@/bindings/TransportKind";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
 import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
+import type { ReadOnlyMode } from "@/bindings/ReadOnlyMode";
+import type { ConsoleOpen } from "@/bindings/ConsoleOpen";
+import type { ConsoleRun } from "@/bindings/ConsoleRun";
+import type { ConsoleColumn } from "@/bindings/ConsoleColumn";
+import type { SchemaTree } from "@/bindings/SchemaTree";
+import type { DatabaseView } from "@/lib/databases";
 import { useTerminalStore } from "@/stores/terminals";
 import "@/index.css";
 
@@ -185,6 +191,18 @@ else {
   let reviewedImport: ImportPreviewResult | null = null;
   let previewSequence = 0;
   let conflictResolved = false;
+  // A prod database with a small `orders` table, for the database console scenario.
+  const consoleDatabase: DatabaseView = {
+    database: { id: "00000000000000a1", name: "orders", engine: "postgres", project: "acme-prod-123456", region: "asia-east1", instance: "orders-pg", environment: "prod", network: "public", account: "frank@example.com", default_database: "postgres", pam: null, local_port: 6543 },
+    live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null, step: null, address: null },
+    synced: true, blocked: false, removed: false, changed: false, environment: "prod",
+  };
+  const consoleColumns: ConsoleColumn[] = [{ name: "id", type_name: "int8" }, { name: "customer", type_name: "text" }, { name: "total", type_name: "numeric" }, { name: "shipped_at", type_name: "timestamptz" }];
+  const consoleRows: (string | null)[][] = [["1", "Acme Retail", "129.00", "2027-01-04 09:12:00+00"], ["2", "Globex", "58.50", null], ["3", "Initech", "1042.75", "2027-01-05 14:30:00+00"]];
+  const consoleSchema: SchemaTree = { truncated: false, schemas: [{ name: "public", functions: [], relations: [{ name: "orders", kind: "table", columns: [
+    { name: "id", type_name: "int8", primary_key: true }, { name: "customer", type_name: "text", primary_key: false },
+    { name: "total", type_name: "numeric", primary_key: false }, { name: "shipped_at", type_name: "timestamptz", primary_key: false },
+  ] }] }] };
   let callbackId = 1;
   const callbacks = new Map<number, unknown>();
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -205,6 +223,16 @@ else {
           return;
         }
         if (scenario === "terminal-missing-key" && ["terminal_close", "terminal_ack"].includes(command)) return;
+        if (scenario === "database-console") {
+          if (command === "databases_list") return [consoleDatabase];
+          if (command === "database_console_open") return { kind: "opened", read_only: args.readOnly as ReadOnlyMode, iam_user: "frank@example.com", server_version: "PostgreSQL 16.4" } satisfies ConsoleOpen;
+          if (command === "database_console_schema") return consoleSchema;
+          if (command === "database_console_run") return /^\s*select\b/i.test(String(args.sql))
+            ? { kind: "rows", result_id: 1, columns: consoleColumns, row_count: consoleRows.length, truncated: null, elapsed_ms: 12, first_page: consoleRows } satisfies ConsoleRun
+            : { kind: "failed", message: "Only a SELECT is answered in this preview.", sqlstate: null, position: null, elapsed_ms: 1 } satisfies ConsoleRun;
+          if (command === "database_console_page") return [];
+          if (["database_console_close", "database_console_cancel", "database_console_export"].includes(command)) return;
+        }
         if (command === failure) throw new Error("Disposable fixture read failure. Retry after changing the preview scenario.");
         if (command === "secrets_has") return passwords.has(String(args.alias));
         if (command === "records_password_status") return passwords.has(String(args.hostId));
@@ -422,6 +450,11 @@ else {
     useApplyTheme();
     const status = useRecordsStatus();
     const [answer, setAnswer] = useState("");
+    useEffect(() => {
+      if (scenario !== "database-console") return;
+      useTerminalStore.getState().open({ kind: "database", databaseId: consoleDatabase.database.id, name: "orders", address: "orders-pg · acme-prod-123456", environment: "prod", readOnly: "locked" });
+      return () => useTerminalStore.getState().reset();
+    }, []);
     useEffect(() => {
       if (scenario !== "terminal-missing-key") return;
       useTerminalStore.getState().open({ kind: "terminal", host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
