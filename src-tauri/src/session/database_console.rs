@@ -668,6 +668,14 @@ impl Drop for ConsoleConnection {
 }
 
 impl ConsoleConnection {
+    /// Ends the session now, although a command still holds it: a statement on the wire loses its connection and answers the ended
+    /// sentence, as it does when the connection drops. Its future is neither dropped nor raced.
+    pub(crate) fn close(&self) {
+        self.inner.end(ENDED_CLEANLY);
+    }
+}
+
+impl ConsoleConnection {
     /// Signs in on `stream`, checks the read-only setting and answers the connection with a future that resolves with
     /// the sentence the connection ended with.
     pub(crate) async fn open(
@@ -906,6 +914,14 @@ pub(crate) struct Ticket {
     serial: u64,
 }
 
+/// Ends the session a slot that left the registry held, outside the registry's lock: its connection closes and its route is released now,
+/// although a command still running on it holds it.
+fn end_removed(session: Option<Arc<ConsoleSession>>) {
+    if let Some(session) = session {
+        session.end();
+    }
+}
+
 /// A tab's place among the app's sessions.
 enum Slot {
     /// An open is under way: closing the tab cancels it.
@@ -924,7 +940,7 @@ pub(crate) struct Consoles {
 }
 
 impl Slot {
-    /// Ends the slot: an open under way is cancelled, and an open session is handed back to be dropped outside the registry's lock.
+    /// Ends the slot: an open under way is cancelled, and an open session is handed back to be ended outside the registry's lock.
     fn end(self) -> Option<Arc<ConsoleSession>> {
         match self {
             Slot::Opening { cancel, .. } => {
@@ -949,7 +965,7 @@ impl Consoles {
         let cancel = CancelToken::default();
         let before = entries.insert(id.to_string(), Slot::Opening { ticket, cancel: cancel.clone() });
         drop(entries);
-        drop(before.and_then(Slot::end));
+        end_removed(before.and_then(Slot::end));
         Ok((ticket, cancel))
     }
 
@@ -961,7 +977,7 @@ impl Consoles {
             && matches!(entries.get(id), Some(Slot::Opening { ticket: opening, .. }) if *opening == ticket);
         if !current {
             drop(entries);
-            drop(session);
+            session.end();
             return false;
         }
         entries.insert(id.to_string(), Slot::Open(session));
@@ -986,7 +1002,7 @@ impl Consoles {
     /// Cancels an opening session, or drops an open one.
     pub(crate) fn close(&self, id: &str) {
         let removed = self.entries.lock().unwrap().remove(id);
-        drop(removed.and_then(Slot::end));
+        end_removed(removed.and_then(Slot::end));
     }
 
     /// Ends every session, as `embedded::Terminals::close_all` does for the terminals: the generation is bumped, so that no open under way
@@ -997,8 +1013,9 @@ impl Consoles {
             self.generation.fetch_add(1, Ordering::SeqCst);
             entries.drain().map(|(_, slot)| slot).collect()
         };
-        let sessions: Vec<_> = removed.into_iter().filter_map(Slot::end).collect();
-        drop(sessions);
+        for slot in removed {
+            end_removed(slot.end());
+        }
     }
 }
 
@@ -1020,13 +1037,34 @@ pub(crate) struct ConsoleSession {
     pub connection: ConsoleConnection,
     upstream: Arc<dyn Upstream>,
     db_id: String,
+    /// Whether the route was released: by `end`, or by the drop.
+    released: AtomicBool,
+}
+
+impl ConsoleSession {
+    pub(crate) fn new(connection: ConsoleConnection, upstream: Arc<dyn Upstream>, db_id: String) -> ConsoleSession {
+        ConsoleSession { connection, upstream, db_id, released: AtomicBool::new(false) }
+    }
+
+    /// Ends the session as its tab closes: the connection closes and the route is released now, while a command may still hold the
+    /// session. Neither blocks.
+    fn end(&self) {
+        self.connection.close();
+        self.release();
+    }
+
+    /// Releases the session's route once. For a host route that drops the `HostPath`, which closes its forward and SSH session on a
+    /// thread of its own.
+    fn release(&self) {
+        if !self.released.swap(true, Ordering::SeqCst) {
+            self.upstream.release(&self.db_id);
+        }
+    }
 }
 
 impl Drop for ConsoleSession {
-    /// Releases the session's route. For a host route that drops the `HostPath`, which closes its forward and SSH session on a thread of
-    /// its own, so dropping never blocks.
     fn drop(&mut self) {
-        self.upstream.release(&self.db_id);
+        self.release();
     }
 }
 
@@ -1182,7 +1220,7 @@ pub async fn database_console_open(
             };
         }
     };
-    let session = Arc::new(ConsoleSession { connection, upstream, db_id: db.id });
+    let session = Arc::new(ConsoleSession::new(connection, upstream, db.id));
     if !consoles.finish(&id, ticket, session) {
         return Err(CONSOLE_CLOSED.to_string());
     }

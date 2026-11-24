@@ -159,6 +159,9 @@ struct Kept {
     dial: Option<Dial>,
     /// The Google account of the last certificate, as the token source resolved it.
     account: Option<String>,
+    /// When the grant the kept material was had under ends, as the last check that found it held saw it: `Some(None)` when it has no
+    /// end or none is needed, `None` while that is not known. A cancel request does not dial with material past it (`connect`).
+    grant_ends: Option<Option<SystemTime>>,
 }
 
 impl Kept {
@@ -298,9 +301,14 @@ impl CloudSqlUpstream {
             return Ok(false);
         }
         match grant_state(self.gcp.as_ref(), db, now)? {
-            GrantState::NotNeeded => Ok(false),
+            GrantState::NotNeeded => {
+                locked(&route.kept).grant_ends = Some(None);
+                Ok(false)
+            }
             GrantState::Held { recent, until } => {
-                locked(&route.kept).grant = (!recent).then(|| CheckedGrant { for_account: account.clone(), until, checked_at: now });
+                let mut kept = locked(&route.kept);
+                kept.grant = (!recent).then(|| CheckedGrant { for_account: account.clone(), until, checked_at: now });
+                kept.grant_ends = Some(until);
                 Ok(recent)
             }
             GrantState::Needed => {
@@ -308,9 +316,14 @@ impl CloudSqlUpstream {
                     let mut kept = locked(&route.kept);
                     kept.grant = None;
                     kept.dial = None;
+                    kept.grant_ends = None;
                 }
                 // However the request ended, the grant was not had: the connection's grant is refused.
                 self.ask_for_grant(db, cancel, asking).map_err(NotReady::Refused)?;
+                // When the grant just given ends is kept for the cancel requests; a check that fails leaves it unknown.
+                if let Ok(GrantState::Held { until, .. }) = grant_state(self.gcp.as_ref(), db, (self.now)()) {
+                    locked(&route.kept).grant_ends = Some(until);
+                }
                 Ok(true)
             }
         }
@@ -599,10 +612,16 @@ impl Upstream for CloudSqlUpstream {
     fn connect(&self, db_id: &str, material: Option<u64>) -> Dialling {
         let route = locked(&self.routes).get(db_id).cloned();
         // The material the connection got ready with, or none: another certificate could be for another account than its user. A
-        // certificate past its use is none either: Cloud SQL would refuse it only once the dial seemed to have worked.
+        // certificate past its use is none either: Cloud SQL would refuse it only once the dial seemed to have worked. For a cancel
+        // request (no material named), neither is material had under a grant known to have ended: a console's Cancel then gets new material
+        // quietly instead (`refresh_quietly`).
         let now = (self.now)();
         let target = route.as_ref().and_then(|route| {
             let kept = locked(&route.kept);
+            let grant_ended = route.database.pam.is_some() && kept.grant_ends.is_some_and(|ends| ends.is_some_and(|ends| now >= ends));
+            if material.is_none() && grant_ended {
+                return None;
+            }
             let dial = kept.dial.as_ref().filter(|dial| material.is_none_or(|material| dial.generation == material) && now < dial.expires_at)?;
             Some((dial.generation, dial.ip, Arc::clone(&dial.config), dial.name.clone()))
         });

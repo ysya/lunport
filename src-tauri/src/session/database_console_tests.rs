@@ -919,7 +919,7 @@ async fn session(releases: &Arc<Releases>) -> (Arc<ConsoleSession>, DuplexStream
     );
     let (connection, _, _) = open.unwrap();
     let upstream: Arc<dyn Upstream> = releases.clone();
-    (Arc::new(ConsoleSession { connection, upstream, db_id: "db-orders".into() }), peer)
+    (Arc::new(ConsoleSession::new(connection, upstream, "db-orders".into())), peer)
 }
 
 #[tokio::test]
@@ -1007,4 +1007,65 @@ async fn closing_a_session_releases_its_route() {
     consoles.close("t1");
     consoles.close_all();
     assert_eq!(releases.released().len(), 1, "released once");
+}
+
+/// Answers the prepare of `sql` and takes its query, tells `running`, then never answers it, as a statement that runs long.
+fn never_answers(mut peer: DuplexStream, sql: &'static str, running: oneshot::Sender<()>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        answer_prepare(&mut peer, &[("?column?", 23)]).await;
+        assert_eq!(expect_query(&mut peer).await, sql);
+        running.send(()).unwrap();
+        read_until_closed(&mut peer).await;
+    })
+}
+
+#[tokio::test]
+async fn closing_a_tab_ends_its_running_statement() {
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (ticket, _) = consoles.begin("t1").unwrap();
+    let (open, peer) = session(&releases).await;
+    assert!(consoles.finish("t1", ticket, open));
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = never_answers(peer, "SELECT pg_sleep(600)", running_tx);
+    // The run holds the session, as the run command does while it awaits.
+    let held = consoles.get("t1").unwrap();
+    let running = tokio::spawn(async move { held.connection.run("SELECT pg_sleep(600)", true).await });
+    running_rx.await.unwrap();
+    consoles.close("t1");
+    assert_eq!(releases.released(), vec!["db-orders".to_string()], "the route was released at once");
+    assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
+    fake.await.unwrap();
+    assert_eq!(releases.released().len(), 1, "and only once");
+}
+
+#[tokio::test]
+async fn close_all_ends_running_statements() {
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (ticket, _) = consoles.begin("t1").unwrap();
+    let (open, peer) = session(&releases).await;
+    assert!(consoles.finish("t1", ticket, open));
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = never_answers(peer, "SELECT pg_sleep(600)", running_tx);
+    let held = consoles.get("t1").unwrap();
+    let running = tokio::spawn(async move { held.connection.run("SELECT pg_sleep(600)", true).await });
+    running_rx.await.unwrap();
+    consoles.close_all();
+    assert_eq!(releases.released(), vec!["db-orders".to_string()]);
+    assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
+    fake.await.unwrap();
+    // A tab opened again replaces its session, which ends the same way.
+    let (first, _) = consoles.begin("t2").unwrap();
+    let (open, peer) = session(&releases).await;
+    assert!(consoles.finish("t2", first, open));
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = never_answers(peer, "SELECT 1", running_tx);
+    let held = consoles.get("t2").unwrap();
+    let running = tokio::spawn(async move { held.connection.run("SELECT 1", true).await });
+    running_rx.await.unwrap();
+    consoles.begin("t2").unwrap();
+    assert_eq!(releases.released().len(), 2);
+    assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
+    fake.await.unwrap();
 }

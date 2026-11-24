@@ -1422,3 +1422,56 @@ fn a_quiet_refresh_never_opens_a_session_to_the_host() {
     upstream.prepare(&routed(), &cancel).unwrap();
     assert_eq!(cloud.link.opened().len(), 2);
 }
+
+/// The cancel dial of a console on `upstream` for `db`, as the console's open makes it.
+fn console_cancel_dial(upstream: &Arc<CloudSqlUpstream>, db: SavedDatabase) -> crate::session::database_console::CancelDial {
+    let (connecting, refreshing) = (Arc::clone(upstream), Arc::clone(upstream));
+    crate::session::database_console::dial_for_cancel(
+        Arc::new(move || connecting.connect(ID, None)),
+        Arc::new(move |cancel: &CancelToken| refreshing.refresh_quietly(&db, cancel)),
+        crate::session::database_console::CANCEL_WITHIN,
+    )
+}
+
+#[tokio::test]
+async fn a_cancel_after_the_grant_ended_refreshes_quietly() {
+    let cloud = Cloud::new(FakeOwner::typing(&[ANSWER]));
+    // Given ten minutes ago for thirty: it ends at twenty minutes, while its certificate is good for an hour.
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() - 10 * MINUTE)];
+    let upstream = Arc::new(cloud.upstream());
+    let cancel = CancelToken::default();
+    let material = upstream.prepare(&guarded(), &cancel).unwrap().material;
+    assert_eq!(upstream.connect(ID, None).material, Some(material));
+    cloud.clock.at(20 * MINUTE);
+    assert_eq!(upstream.connect(ID, None).material, None, "material had under a grant that ended is none for a cancel request");
+    assert_eq!(upstream.connect(ID, Some(material)).material, Some(material), "a connection that got ready with it dials as before");
+    // The cancel dial refreshes quietly: PAM says the grant ended, nobody is asked, and nothing is dialled.
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ENDED", t0() - 10 * MINUTE)];
+    let (looked, dialled) = (cloud.looked(), cloud.dialled.lock().unwrap().len());
+    let dial = console_cancel_dial(&upstream, guarded());
+    assert!(dial().await.is_err());
+    assert_eq!(cloud.looked(), looked + 1, "the refresh checked the grant");
+    assert!(cloud.owner.asked().is_empty(), "nobody was asked");
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 0);
+    // Only the dial the test made with the material itself went out.
+    assert_eq!(cloud.dialled.lock().unwrap().len(), dialled);
+    // Once a new grant is held, the refresh finds it and the cancel connection is dialled.
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() + 10 * MINUTE)];
+    assert!(dial().await.is_ok());
+    assert_eq!(cloud.dialled.lock().unwrap().len(), dialled + 1);
+    assert!(cloud.owner.asked().is_empty());
+}
+
+#[test]
+fn a_grant_asked_for_on_the_way_ends_the_material_for_a_cancel_request_with_it() {
+    // The person asks for thirty minutes.
+    let cloud = Cloud::new(FakeOwner::typing(&[ANSWER]));
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let material = upstream.prepare(&guarded(), &cancel).unwrap().material;
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 1);
+    cloud.clock.at(30 * MINUTE - Duration::from_secs(1));
+    assert_eq!(upstream.connect(ID, None).material, Some(material));
+    cloud.clock.at(30 * MINUTE);
+    assert_eq!(upstream.connect(ID, None).material, None, "the grant asked for ended");
+}
