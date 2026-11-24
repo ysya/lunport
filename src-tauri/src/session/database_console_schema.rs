@@ -1,8 +1,5 @@
 //! The console's schema tree, read from the catalog in one pass, and the CSV and JSON forms of a kept result.
 
-// The console's commands, which are the only callers outside the tests, come with the console's window.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 

@@ -1364,3 +1364,61 @@ fn a_start_that_cannot_reach_the_host_fails_at_connecting() {
     assert_eq!((live.phase, live.error.as_deref(), live.step), (DatabasePhase::Error, Some("Could not connect through web-1: Connection refused."), Some(DatabaseStep::Connect)));
     assert_eq!(cloud.certificates(), 0, "no certificate is fetched for a database that cannot get through");
 }
+
+#[test]
+fn a_cancel_without_material_refreshes_it_without_asking() {
+    // The person would grant whatever is asked: a quiet refresh must never ask.
+    let cloud = Cloud::new(FakeOwner::typing(&[ANSWER]));
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0() - 10 * MINUTE)];
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let first = upstream.prepare(&guarded(), &cancel).unwrap().material;
+    // A dial that failed took the material back: a cancel request has none to dial with.
+    upstream.forget(ID, first);
+    assert_eq!(upstream.connect(ID, None).material, None);
+    // The grant ended meanwhile, and the check of it is old enough to be made again: getting new material would ask for a grant.
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ENDED", t0() - 10 * MINUTE)];
+    cloud.clock.at(GRANT_RECHECK);
+    assert!(matches!(upstream.refresh_quietly(&guarded(), &cancel), Err(NotReady::Refused(_))));
+    assert!(cloud.owner.asked().is_empty(), "nobody was asked");
+    assert_eq!(cloud.pam.created.load(Ordering::SeqCst), 0, "and no grant was requested");
+    assert_eq!(cloud.certificates(), 1);
+    assert_eq!(upstream.connect(ID, None).material, None);
+    // While the grant is held, the refresh gets new material, and a cancel request dials with it.
+    *cloud.pam.held.lock().unwrap() = vec![cloud.pam.grant("ACTIVE", t0())];
+    upstream.refresh_quietly(&guarded(), &cancel).unwrap();
+    assert!(cloud.owner.asked().is_empty());
+    assert_eq!(cloud.certificates(), 2);
+    let dialled = cloud.dialled.lock().unwrap().len();
+    assert!(upstream.connect(ID, None).material.is_some());
+    assert_eq!(cloud.dialled.lock().unwrap().len(), dialled + 1);
+
+    // A database with no grant check: its certificate past its use is no material for a cancel request either.
+    upstream.prepare(&orders(), &cancel).unwrap();
+    cloud.clock.at(GRANT_RECHECK + HOUR);
+    assert_eq!(upstream.connect(ID, None).material, None, "a certificate past its use is not dialled with");
+    upstream.refresh_quietly(&orders(), &cancel).unwrap();
+    assert!(upstream.connect(ID, None).material.is_some());
+    assert!(cloud.owner.asked().is_empty());
+}
+
+#[test]
+fn a_quiet_refresh_never_opens_a_session_to_the_host() {
+    let cloud = Cloud::new(FakeOwner::default());
+    let upstream = cloud.upstream();
+    let cancel = CancelToken::default();
+    let first = upstream.prepare(&routed(), &cancel).unwrap().material;
+    assert_eq!(cloud.link.opened().len(), 1);
+    // While the session lives, a refresh gets new material over it.
+    upstream.forget(ID, first);
+    upstream.refresh_quietly(&routed(), &cancel).unwrap();
+    assert!(upstream.connect(ID, None).material.is_some());
+    assert_eq!(cloud.link.opened().len(), 1, "the live session was used");
+    // Once it is lost, a refresh opens no new one: the host's login or its server key could ask the person.
+    cloud.link.end(0).lose();
+    assert!(matches!(upstream.refresh_quietly(&routed(), &cancel), Err(NotReady::Failed(_))));
+    assert_eq!(cloud.link.opened().len(), 1, "no session was opened");
+    // The person's next connection opens one as before.
+    upstream.prepare(&routed(), &cancel).unwrap();
+    assert_eq!(cloud.link.opened().len(), 2);
+}

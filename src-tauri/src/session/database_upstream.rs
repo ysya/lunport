@@ -45,6 +45,8 @@ const GRANT_RECHECK: Duration = Duration::from_secs(5 * 60);
 const CANCELLED: &str = "The connection was cancelled.";
 /// Why a connection through a host could not get its forward when the database stopped meanwhile and took the session along.
 const PATH_CLOSED: &str = "The connection to the host closed. Connect again.";
+/// Why a quiet refresh through a host gets no material: its session to the host ended, and a refresh opens none.
+const NO_LIVE_PATH: &str = "The connection through the host ended. Reconnect to go on.";
 /// What a connection that has no material to dial with fails with.
 const NO_CERTIFICATE: &str = "no certificate is ready for it. Connect again.";
 /// What a connection through a host fails with when the forward it would dial does not run.
@@ -55,6 +57,41 @@ const PATH_NOT_OPEN: &str = "the connection through the host is not open. Connec
 type MakeOwner = Arc<dyn Fn(&CancelToken, Option<&AiAsker>) -> Box<dyn Owner + Send> + Send + Sync>;
 /// Dials an instance: the address to dial, the TLS configuration of the connection, and the name its certificate must be made out to.
 type Dialer = Arc<dyn Fn(SocketAddr, Arc<ClientConfig>, ServerName<'static>) -> BoxFuture<'static, io::Result<BoxStream>> + Send + Sync>;
+
+/// Who the questions on a connection's way are put to.
+#[derive(Clone, Copy)]
+enum Asking<'a> {
+    /// The person, in Lunport's windows, in the name of the AI client whose request starts the database (`None`: the person's own start,
+    /// and an app's connection).
+    Person(Option<&'a AiAsker>),
+    /// Nobody: every question is refused (`Refusing`), and no session to a host is opened, since a host's server key is asked about in a
+    /// window of its own.
+    Nobody,
+}
+
+impl<'a> Asking<'a> {
+    /// The AI client the questions name.
+    fn ai(self) -> Option<&'a AiAsker> {
+        match self {
+            Asking::Person(ai) => ai,
+            Asking::Nobody => None,
+        }
+    }
+}
+
+/// The owner of a refresh that may ask nobody: it answers every question as an owner that went away does. `Reply::Gone`, not
+/// `Reply::Cancelled`: the connections that wait at the same grant gate are not told that the person declined.
+struct Refusing;
+
+impl Owner for Refusing {
+    fn ask(&self, _: QuestionKind, _: &str, _: bool, _: Option<Instant>) -> Reply {
+        Reply::Gone
+    }
+
+    fn host_key_notice(&self, _: &str) {}
+
+    fn banner(&self, _: &str) {}
+}
 
 /// How the app's ports reach Cloud SQL. The grant a database asks for is requested through the gates hosts use, so that a host and a
 /// database that need the same grant ask the person once; the connection material comes from the Cloud SQL Admin API. Both are kept for a
@@ -170,8 +207,25 @@ struct Dial {
 impl CloudSqlUpstream {
     /// Prepare a short-lived AI database session while attributing native grant and host questions to its client.
     pub(crate) fn prepare_for_ai(&self, db: &SavedDatabase, cancel: &CancelToken, ai: &AiAsker) -> Result<Prepared, NotReady> {
-        self.ready(db, cancel, Some(ai), &|_| {})
+        self.ready(db, cancel, Asking::Person(Some(ai)), &|_| {})
     }
+
+    /// Gets `db`'s connection material anew, as `prepare` does, but asks nobody: a grant that must be asked for is refused
+    /// (`NotReady::Refused`), and a session to the host `db` is reached through is used only while it lives, never opened. A console's
+    /// Cancel calls it when the material it would dial with is gone (a certificate past its use, or one a grant's end took along), so that
+    /// no window opens for a cancel request. It blocks as `prepare` does, so it runs on a blocking thread.
+    pub(crate) fn refresh_quietly(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<(), NotReady> {
+        self.ready(db, cancel, Asking::Nobody, &|_| {}).map(drop)
+    }
+
+    /// The owner the questions of a connection that `cancel` cancels are put to.
+    fn owner(&self, cancel: &CancelToken, asking: Asking<'_>) -> Box<dyn Owner + Send> {
+        match asking {
+            Asking::Person(ai) => (self.make_owner)(cancel, ai),
+            Asking::Nobody => Box::new(Refusing),
+        }
+    }
+
     /// The upstream of the app's ports: Google's APIs through the app's clients, the broker's grant gates and its connector for the hosts
     /// databases are reached through, the person's questions in Lunport's windows (naming the AI client whose request starts a database,
     /// when one does), and this device's grant memory.
@@ -233,9 +287,9 @@ impl CloudSqlUpstream {
     }
 
     /// Whether the grant `db` asks for is held for `account`; PAM is asked when the last check no longer stands. When none is, the material
-    /// had under the grant that ended goes, and the person is asked for a grant in Lunport's window, in `ai`'s name when an AI client's
-    /// request starts the database. Answers whether the grant was given moments ago.
-    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<bool, NotReady> {
+    /// had under the grant that ended goes, and a grant is asked for as `asking` says: in Lunport's window, in the AI client's name when its
+    /// request starts the database, or of nobody, which refuses it. Answers whether the grant was given moments ago.
+    fn grant(&self, db: &SavedDatabase, route: &Route, account: &Option<String>, cancel: &CancelToken, asking: Asking<'_>) -> Result<bool, NotReady> {
         if db.pam.is_none() {
             return Ok(false);
         }
@@ -256,7 +310,7 @@ impl CloudSqlUpstream {
                     kept.dial = None;
                 }
                 // However the request ended, the grant was not had: the connection's grant is refused.
-                self.ask_for_grant(db, cancel, ai).map_err(NotReady::Refused)?;
+                self.ask_for_grant(db, cancel, asking).map_err(NotReady::Refused)?;
                 Ok(true)
             }
         }
@@ -267,13 +321,13 @@ impl CloudSqlUpstream {
     /// sentence of why not. Blocks until then (for as long as the person takes to answer, and then for the request), so it runs on a
     /// blocking thread.
     pub(crate) fn request_grant(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<(), String> {
-        self.ask_for_grant(db, cancel, None)
+        self.ask_for_grant(db, cancel, Asking::Person(None))
     }
 
-    /// `request_grant`, with the question in `ai`'s name when an AI client's request starts the database.
-    fn ask_for_grant(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>) -> Result<(), String> {
+    /// `request_grant`, with the question put as `asking` says.
+    fn ask_for_grant(&self, db: &SavedDatabase, cancel: &CancelToken, asking: Asking<'_>) -> Result<(), String> {
         let library = (self.library)()?;
-        let owner = (self.make_owner)(cancel, ai);
+        let owner = self.owner(cancel, asking);
         let remember = |name: &str, justification: &str, duration_secs: u32| (self.remember)(name, justification, duration_secs);
         obtain_grant(&self.gates, self.gcp.as_ref(), owner.as_ref(), &library, db, &remember, cancel)
     }
@@ -315,15 +369,16 @@ impl CloudSqlUpstream {
     /// (dropping the dead one closes it). A connection that waited for `opening` while an open of the path was on its way takes that open's
     /// failure when it failed, and opens nothing: the person is not asked once more for each connection that waited, and an unreachable
     /// host does not hold each of them for a connect timeout in turn. One that comes after the failure opens anew. It blocks for as long as
-    /// the connect takes, the questions the host's login asks of the person included: they are asked in `ai`'s name when an AI client's
-    /// request starts the database, and `step` is told `DatabaseStep::Grant` while the host's own grant is asked for.
+    /// the connect takes, the questions the host's login asks of the person included: they are asked in the AI client's name when its
+    /// request starts the database, and `step` is told `DatabaseStep::Grant` while the host's own grant is asked for. When `asking` is
+    /// nobody, only a live path is used: a dead one fails, and none is opened.
     fn path<'r>(
         &self,
         db: &SavedDatabase,
         route: &'r Route,
         host: &str,
         cancel: &CancelToken,
-        ai: Option<&AiAsker>,
+        asking: Asking<'_>,
         step: &(dyn Fn(DatabaseStep) + Sync),
     ) -> Result<(MutexGuard<'r, Option<FailedOpen>>, String), NotReady> {
         // The opens that had ended when this connection came: one that ends after it, failing, is one it waited behind.
@@ -338,10 +393,14 @@ impl CloudSqlUpstream {
             }
             drop(path.take());
         }
+        // A refresh that may ask nobody opens no session: it is not an open, and the connections waiting behind it open their own.
+        if matches!(asking, Asking::Nobody) {
+            return Err(NotReady::Failed(NO_LIVE_PATH.to_string()));
+        }
         if let Some(failed) = opening.as_ref().filter(|failed| failed.number > seen) {
             return Err(failed.failure.clone());
         }
-        let opened = self.open_path(db, route, host, cancel, ai, step);
+        let opened = self.open_path(db, route, host, cancel, asking.ai(), step);
         let number = route.opened.fetch_add(1, Ordering::SeqCst) + 1;
         match opened {
             Ok(alias) => Ok((opening, alias)),
@@ -390,8 +449,8 @@ impl CloudSqlUpstream {
     /// Gets the whole way to `db` ready and kept for its connections, as `prepare` answers it: the grant it asks for, the session to the
     /// host it is reached through with the forward on it, and the connection material. `step` is told each step as it begins (`Grant`
     /// for a database with a grant check, `Connect` for one reached through a host, then `Certificate`), and the questions on the way are
-    /// asked in `ai`'s name when an AI client's request starts the database.
-    fn ready(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<Prepared, NotReady> {
+    /// put as `asking` says.
+    fn ready(&self, db: &SavedDatabase, cancel: &CancelToken, asking: Asking<'_>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<Prepared, NotReady> {
         let route = self.route(db);
         // The account the connection signs in as: the database's own, else gcloud's active one, which the person can switch at any time.
         let account = db.account.clone().or_else(|| (self.active_account)());
@@ -401,13 +460,13 @@ impl CloudSqlUpstream {
             if db.pam.is_some() {
                 step(DatabaseStep::Grant);
             }
-            let recent_grant = self.grant(db, &route, &account, cancel, ai)?;
+            let recent_grant = self.grant(db, &route, &account, cancel, asking)?;
             // Through a host, the session to it comes after the grant and before the material, and `opening` is held until the forward is
             // had.
             let through = match db.route_host() {
                 Some(host) => {
                     step(DatabaseStep::Connect);
-                    Some(self.path(db, &route, host, cancel, ai, step)?)
+                    Some(self.path(db, &route, host, cancel, asking, step)?)
                 }
                 None => None,
             };
@@ -522,11 +581,11 @@ fn transport_error(kind: io::ErrorKind) -> bool {
 impl Upstream for CloudSqlUpstream {
     /// An app's connection gets the way ready as Start does, telling nobody its steps.
     fn prepare(&self, db: &SavedDatabase, cancel: &CancelToken) -> Result<Prepared, NotReady> {
-        self.ready(db, cancel, None, &|_| {})
+        self.ready(db, cancel, Asking::Person(None), &|_| {})
     }
 
     fn warm(&self, db: &SavedDatabase, cancel: &CancelToken, ai: Option<&AiAsker>, step: &(dyn Fn(DatabaseStep) + Sync)) -> Result<(), NotReady> {
-        self.ready(db, cancel, ai, step).map(drop)
+        self.ready(db, cancel, Asking::Person(ai), step).map(drop)
     }
 
     /// The address the kept material dials, on Cloud SQL's port: the instance's public one, or its private one for a database reached
@@ -539,10 +598,12 @@ impl Upstream for CloudSqlUpstream {
 
     fn connect(&self, db_id: &str, material: Option<u64>) -> Dialling {
         let route = locked(&self.routes).get(db_id).cloned();
-        // The material the connection got ready with, or none: another certificate could be for another account than its user.
+        // The material the connection got ready with, or none: another certificate could be for another account than its user. A
+        // certificate past its use is none either: Cloud SQL would refuse it only once the dial seemed to have worked.
+        let now = (self.now)();
         let target = route.as_ref().and_then(|route| {
             let kept = locked(&route.kept);
-            let dial = kept.dial.as_ref().filter(|dial| material.is_none_or(|material| dial.generation == material))?;
+            let dial = kept.dial.as_ref().filter(|dial| material.is_none_or(|material| dial.generation == material) && now < dial.expires_at)?;
             Some((dial.generation, dial.ip, Arc::clone(&dial.config), dial.name.clone()))
         });
         let (Some(route), Some((generation, ip, config, name))) = (route, target) else {

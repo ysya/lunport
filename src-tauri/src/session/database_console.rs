@@ -1,14 +1,13 @@
 //! A database console's session: one read-only PostgreSQL connection on a Cloud SQL stream, kept while its tab is
 //! open. It runs statements one at a time, keeps their rows for paging and export, and cancels the running one on
-//! request. It knows nothing of how the stream was dialled: it takes the stream and a way to dial a cancel connection.
+//! request. `ConsoleConnection` knows nothing of how the stream was dialled: it takes the stream and a way to dial a
+//! cancel connection. The app's sessions (`Consoles`) and their commands, at the end, dial it through a Cloud SQL
+//! upstream of each tab's own.
 
-// The console's commands, which are the only callers outside the tests, come with the console's window.
-#![cfg_attr(not(test), allow(dead_code))]
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -20,11 +19,18 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 use tokio_postgres::error::{ErrorPosition, SqlState};
-use tokio_postgres::{CancelToken, Client, Config, NoTls, SimpleQueryMessage};
+use tauri::Manager;
+use tokio_postgres::{CancelToken as QueryCancelToken, Client, Config, NoTls, SimpleQueryMessage};
 
-use super::database_console_schema::{csv, json, write_replacing, ExportFormat};
-use super::database_ports::BoxStream;
+use super::connect::CancelToken;
+use super::database_console_schema::{csv, json, read_schema, write_replacing, ExportFormat, SchemaTree};
+use super::database_ports::{unreachable, BoxStream, Dialling, NotReady, Prepared, Upstream};
 use super::database_query::valid_sql_within;
+use super::database_upstream::CloudSqlUpstream;
+use super::databases::started_broker;
+use super::tunnels::{main_only, snapshot};
+use crate::state::AppState;
+use crate::sync::databases::SavedDatabase;
 
 /// Whether the session holds Cloud SQL's read-only lock, or only defaults its transactions to read-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,7 +355,7 @@ struct Results {
 
 struct Inner {
     client: Client,
-    cancel_token: CancelToken,
+    cancel_token: QueryCancelToken,
     cancel_dial: CancelDial,
     /// Serializes everything sent on the connection.
     serial: tokio::sync::Mutex<()>,
@@ -440,7 +446,9 @@ impl Inner {
         }
         // Marked before the request goes out, so the statement's answer never arrives before the mark.
         let was_person = by_person && target.by_person.swap(true, Ordering::SeqCst);
-        if self.cancel_token.cancel_query_raw(&mut stream, NoTls).await.is_err() {
+        // A cancel connection that takes the request and never lets it out does not hold Cancel either.
+        let sent = tokio::time::timeout(CANCEL_WITHIN, self.cancel_token.cancel_query_raw(&mut stream, NoTls)).await;
+        if !matches!(sent, Ok(Ok(()))) {
             if by_person && !was_person {
                 target.by_person.store(false, Ordering::SeqCst);
             }
@@ -876,6 +884,364 @@ impl ConsoleConnection {
         }
         Ok(streamed.rows)
     }
+}
+
+// ---- The app's console sessions ----
+
+/// How many console sessions the app keeps open or opening at once, one for each tab.
+pub(crate) const MAX_CONSOLE_SESSIONS: usize = 8;
+const CONSOLE_CLOSED: &str = "This console is closed. Open it again from Databases.";
+const TOO_MANY_CONSOLES: &str = "Close a tab before opening another (maximum 8).";
+const DATABASE_GONE: &str = "This database is no longer in the library.";
+/// What an open answers when its tab closed while it was under way.
+const OPEN_CANCELLED: &str = "The console was closed while it opened.";
+/// How often an open under way looks whether its tab closed.
+const CLOSED_POLL: Duration = Duration::from_millis(50);
+
+/// One open of a tab's session: the workspace's generation it began in, and a number of its own, so that two opens of one tab never
+/// share one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ticket {
+    generation: u64,
+    serial: u64,
+}
+
+/// A tab's place among the app's sessions.
+enum Slot {
+    /// An open is under way: closing the tab cancels it.
+    Opening { ticket: Ticket, cancel: CancelToken },
+    Open(Arc<ConsoleSession>),
+}
+
+/// The app's console sessions, by the id of the tab the frontend made. A session dropped here closes its connection, and its route
+/// through `ConsoleSession`'s drop; nothing here blocks, so the main thread may close them all.
+#[derive(Default)]
+pub(crate) struct Consoles {
+    entries: Mutex<HashMap<String, Slot>>,
+    /// Bumped by `close_all`, as a reloaded workspace does: an open that began before it is never installed.
+    generation: AtomicU64,
+    serial: AtomicU64,
+}
+
+impl Slot {
+    /// Ends the slot: an open under way is cancelled, and an open session is handed back to be dropped outside the registry's lock.
+    fn end(self) -> Option<Arc<ConsoleSession>> {
+        match self {
+            Slot::Opening { cancel, .. } => {
+                cancel.cancel();
+                None
+            }
+            Slot::Open(session) => Some(session),
+        }
+    }
+}
+
+impl Consoles {
+    /// Registers an opening session. Its ticket is unique per begin (the generation together with a serial), so a second open of the same
+    /// id (Reconnect, React StrictMode) gets a ticket of its own, and only that ticket's `finish` is installed. The second open replaces
+    /// the first: an open under way is cancelled, and an open session is dropped.
+    pub(crate) fn begin(&self, id: &str) -> Result<(Ticket, CancelToken), String> {
+        let mut entries = self.entries.lock().unwrap();
+        if !entries.contains_key(id) && entries.len() >= MAX_CONSOLE_SESSIONS {
+            return Err(TOO_MANY_CONSOLES.to_string());
+        }
+        let ticket = Ticket { generation: self.generation.load(Ordering::SeqCst), serial: self.serial.fetch_add(1, Ordering::SeqCst) };
+        let cancel = CancelToken::default();
+        let before = entries.insert(id.to_string(), Slot::Opening { ticket, cancel: cancel.clone() });
+        drop(entries);
+        drop(before.and_then(Slot::end));
+        Ok((ticket, cancel))
+    }
+
+    /// Installs `session` as the tab's when `ticket` is still its open. False, and the session is dropped, after close, close_all or a
+    /// newer begin.
+    pub(crate) fn finish(&self, id: &str, ticket: Ticket, session: Arc<ConsoleSession>) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let current = ticket.generation == self.generation.load(Ordering::SeqCst)
+            && matches!(entries.get(id), Some(Slot::Opening { ticket: opening, .. }) if *opening == ticket);
+        if !current {
+            drop(entries);
+            drop(session);
+            return false;
+        }
+        entries.insert(id.to_string(), Slot::Open(session));
+        true
+    }
+
+    /// Takes the tab's place back from an open that ended without a session, unless a newer open has it.
+    pub(crate) fn abandon(&self, id: &str, ticket: Ticket) {
+        let mut entries = self.entries.lock().unwrap();
+        if matches!(entries.get(id), Some(Slot::Opening { ticket: opening, .. }) if *opening == ticket) {
+            entries.remove(id);
+        }
+    }
+
+    pub(crate) fn get(&self, id: &str) -> Result<Arc<ConsoleSession>, String> {
+        match self.entries.lock().unwrap().get(id) {
+            Some(Slot::Open(session)) => Ok(session.clone()),
+            _ => Err(CONSOLE_CLOSED.to_string()),
+        }
+    }
+
+    /// Cancels an opening session, or drops an open one.
+    pub(crate) fn close(&self, id: &str) {
+        let removed = self.entries.lock().unwrap().remove(id);
+        drop(removed.and_then(Slot::end));
+    }
+
+    /// Ends every session, as `embedded::Terminals::close_all` does for the terminals: the generation is bumped, so that no open under way
+    /// is installed after it.
+    pub(crate) fn close_all(&self) {
+        let removed: Vec<Slot> = {
+            let mut entries = self.entries.lock().unwrap();
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            entries.drain().map(|(_, slot)| slot).collect()
+        };
+        let sessions: Vec<_> = removed.into_iter().filter_map(Slot::end).collect();
+        drop(sessions);
+    }
+}
+
+/// Takes a tab's place back when its open ends without installing a session.
+struct OpeningGuard<'a> {
+    consoles: &'a Consoles,
+    id: &'a str,
+    ticket: Ticket,
+}
+
+impl Drop for OpeningGuard<'_> {
+    fn drop(&mut self) {
+        self.consoles.abandon(self.id, self.ticket);
+    }
+}
+
+/// A tab's open session, and the upstream it was dialled through, which is the tab's own.
+pub(crate) struct ConsoleSession {
+    pub connection: ConsoleConnection,
+    upstream: Arc<dyn Upstream>,
+    db_id: String,
+}
+
+impl Drop for ConsoleSession {
+    /// Releases the session's route. For a host route that drops the `HostPath`, which closes its forward and SSH session on a thread of
+    /// its own, so dropping never blocks.
+    fn drop(&mut self) {
+        self.upstream.release(&self.db_id);
+    }
+}
+
+/// Cancels its token when it goes, however the future that holds it ends.
+struct CancelOnDrop(CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// The cancel dial of an app's console: `connect` dials with the material the database's connections have now. When none is kept (a
+/// certificate past its use, or one a grant's end took along), `refresh` gets new material on a blocking thread, asking nobody, and the
+/// dial is made again. All of it is bounded by `within`: past it the refresh is cancelled and the dial fails, which Cancel says it could
+/// not reach Cloud SQL.
+pub(crate) fn dial_for_cancel(
+    connect: Arc<dyn Fn() -> Dialling + Send + Sync>,
+    refresh: Arc<dyn Fn(&CancelToken) -> Result<(), NotReady> + Send + Sync>,
+    within: Duration,
+) -> CancelDial {
+    Arc::new(move || {
+        let (connect, refresh) = (connect.clone(), refresh.clone());
+        async move {
+            let cancel = CancelToken::default();
+            let _cancel_on_exit = CancelOnDrop(cancel.clone());
+            let dial = async {
+                let first = connect();
+                if first.material.is_some() {
+                    return first.stream.await;
+                }
+                drop(first);
+                tokio::task::spawn_blocking(move || refresh(&cancel))
+                    .await
+                    .map_err(io::Error::other)?
+                    .map_err(|not_ready| io::Error::other(not_ready.sentence().to_string()))?;
+                connect().stream.await
+            };
+            tokio::time::timeout(within, dial)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Cloud SQL did not answer the cancel connection in time."))?
+        }
+        .boxed()
+    })
+}
+
+/// Resolves once `cancel` is set, looking every `CLOSED_POLL`.
+async fn cancelled(cancel: &CancelToken) {
+    while !cancel.is_cancelled() {
+        tokio::time::sleep(CLOSED_POLL).await;
+    }
+}
+
+/// Signs in to `db` over `upstream`, with the material `prepared` got, for the tab whose open `cancel` cancels. A dial or sign-in that
+/// fails takes that material back (`Upstream::forget`): a certificate Cloud SQL refused shows only then.
+async fn sign_in(
+    upstream: &Arc<CloudSqlUpstream>,
+    db: &SavedDatabase,
+    prepared: Prepared,
+    read_only: ReadOnlyMode,
+    cancel: &CancelToken,
+) -> Result<(ConsoleConnection, ConsoleOpened, BoxFuture<'static, String>), OpenError> {
+    let Dialling { material, stream } = upstream.connect(&db.id, Some(prepared.material));
+    let forget = || {
+        if let Some(material) = material {
+            upstream.forget(&db.id, material);
+        }
+    };
+    let dialled = tokio::select! {
+        dialled = tokio::time::timeout(SIGN_IN_WITHIN, stream) => dialled,
+        () = cancelled(cancel) => return Err(OpenError::Failed(OPEN_CANCELLED.to_string())),
+    };
+    let stream = match dialled {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            forget();
+            return Err(OpenError::Failed(unreachable(&db.connection_name(), &error)));
+        }
+        Err(_) => {
+            forget();
+            return Err(OpenError::Failed(SIGN_IN_TIMED_OUT.to_string()));
+        }
+    };
+    let login = ConsoleLogin { iam_user: prepared.iam_user, database: db.default_database.clone(), read_only };
+    let (connecting, refreshing, id, saved) = (upstream.clone(), upstream.clone(), db.id.clone(), db.clone());
+    // The cancel dial refreshes with the database as it was opened: one saved anew would take the route, and the host session the
+    // console rides on, along.
+    let cancel_dial = dial_for_cancel(
+        Arc::new(move || connecting.connect(&id, None)),
+        Arc::new(move |cancel: &CancelToken| refreshing.refresh_quietly(&saved, cancel)),
+        CANCEL_WITHIN,
+    );
+    let opened = tokio::select! {
+        opened = ConsoleConnection::open(stream, login, cancel_dial) => opened,
+        () = cancelled(cancel) => return Err(OpenError::Failed(OPEN_CANCELLED.to_string())),
+    };
+    if let Err(OpenError::Failed(_)) = &opened {
+        forget();
+    }
+    opened
+}
+
+/// The saved database `id` as the library holds it now. It blocks on the library.
+fn saved_database(app: &tauri::AppHandle, id: &str) -> Result<SavedDatabase, String> {
+    crate::sync::databases::view(&snapshot(app)?)
+        .into_iter()
+        .map(|row| row.database)
+        .find(|database| database.id == id)
+        .ok_or_else(|| DATABASE_GONE.to_string())
+}
+
+fn consoles(app: &tauri::AppHandle) -> Arc<Consoles> {
+    Arc::clone(&app.state::<AppState>().session.consoles)
+}
+
+/// Opens the tab `id`'s session to the saved database `database_id`, read-only as `read_only` says, through a Cloud SQL upstream of the
+/// tab's own. `events` is told when the session ends.
+#[tauri::command]
+pub async fn database_console_open(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+    database_id: String,
+    read_only: ReadOnlyMode,
+    events: tauri::ipc::Channel<ConsoleEvent>,
+) -> Result<ConsoleOpen, String> {
+    main_only(&window, "Database")?;
+    let consoles = consoles(&app);
+    let (ticket, cancel) = consoles.begin(&id)?;
+    let _opening = OpeningGuard { consoles: &consoles, id: &id, ticket };
+    let preparing = cancel.clone();
+    let (upstream, db, prepared) = tauri::async_runtime::spawn_blocking(move || {
+        let db = saved_database(&app, &database_id)?;
+        let broker = started_broker(&app)?;
+        let upstream = Arc::new(CloudSqlUpstream::for_app(&app, &broker));
+        match upstream.prepare(&db, &preparing) {
+            Ok(prepared) => Ok((upstream, db, prepared)),
+            Err(not_ready) => {
+                upstream.release(&db.id);
+                Err(not_ready.sentence().to_string())
+            }
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let (connection, opened, ended) = match sign_in(&upstream, &db, prepared, read_only, &cancel).await {
+        Ok(signed_in) => signed_in,
+        Err(error) => {
+            upstream.release(&db.id);
+            return match error {
+                OpenError::LockUnsupported(message) => Ok(ConsoleOpen::LockUnsupported { message }),
+                OpenError::Failed(message) => Err(message),
+            };
+        }
+    };
+    let session = Arc::new(ConsoleSession { connection, upstream, db_id: db.id });
+    if !consoles.finish(&id, ticket, session) {
+        return Err(CONSOLE_CLOSED.to_string());
+    }
+    tauri::async_runtime::spawn(async move {
+        let message = ended.await;
+        let _ = events.send(ConsoleEvent::Ended { message });
+    });
+    Ok(ConsoleOpen::Opened(opened))
+}
+
+#[tauri::command]
+pub fn database_console_close(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    consoles(&app).close(&id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn database_console_run(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String, sql: String, fresh: bool) -> Result<ConsoleRun, String> {
+    main_only(&window, "Database")?;
+    let session = consoles(&app).get(&id)?;
+    session.connection.run(&sql, fresh).await
+}
+
+#[tauri::command]
+pub fn database_console_page(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String, result_id: u32, offset: u32) -> Result<Vec<Vec<Option<String>>>, String> {
+    main_only(&window, "Database")?;
+    consoles(&app).get(&id)?.connection.page(result_id, offset)
+}
+
+#[tauri::command]
+pub async fn database_console_cancel(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    let session = consoles(&app).get(&id)?;
+    session.connection.cancel().await
+}
+
+#[tauri::command]
+pub async fn database_console_schema(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String) -> Result<SchemaTree, String> {
+    main_only(&window, "Database")?;
+    let session = consoles(&app).get(&id)?;
+    read_schema(&session.connection).await
+}
+
+/// Writes the kept rows of `result_id` to `path`, the file the save dialog chose.
+#[tauri::command]
+pub async fn database_console_export(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+    result_id: u32,
+    format: ExportFormat,
+    path: String,
+) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    let session = consoles(&app).get(&id)?;
+    tauri::async_runtime::spawn_blocking(move || session.connection.export(result_id, format, std::path::Path::new(&path)))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

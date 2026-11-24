@@ -771,3 +771,240 @@ async fn a_cancel_while_the_run_waits_for_a_cancel_to_close_cancels_the_run() {
         "the canceled statement went out"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_cancel_request_that_cannot_be_sent_keeps_the_session() {
+    // The cancel connection takes one byte and then nothing more: the request never gets out.
+    let (held_tx, held_rx) = oneshot::channel();
+    let held = Arc::new(Mutex::new(Some(held_tx)));
+    let dial: CancelDial = Arc::new(move || {
+        let (client, server) = tokio::io::duplex(1);
+        if let Some(held) = held.lock().unwrap().take() {
+            let _ = held.send(server);
+        }
+        async move { Ok(Box::new(client) as BoxStream) }.boxed()
+    });
+    let (console, _ended, mut peer) = opened(dial).await;
+    let (running_tx, running_rx) = oneshot::channel();
+    let (answer_tx, answer_rx) = oneshot::channel::<()>();
+    let fake = tokio::spawn(async move {
+        answer_prepare(&mut peer, &[("?column?", 23)]).await;
+        assert_eq!(expect_query(&mut peer).await, "SELECT pg_sleep(5)");
+        running_tx.send(()).unwrap();
+        answer_rx.await.unwrap();
+        peer.write_all(&rows_answer(&[("?column?", 23)], &one_row(), "SELECT 1")).await.unwrap();
+        peer
+    });
+    let running = tokio::spawn({
+        let console = console.clone();
+        async move { console.run("SELECT pg_sleep(5)", true).await }
+    });
+    running_rx.await.unwrap();
+    let asked = tokio::time::Instant::now();
+    assert_eq!(console.cancel().await.unwrap_err(), CANCEL_UNREACHABLE);
+    assert!(asked.elapsed() >= CANCEL_WITHIN, "it gave up only after its bound");
+    let _server_end = held_rx.await.unwrap();
+    // The statement goes on and its answer comes back as rows: the session was not ended.
+    answer_tx.send(()).unwrap();
+    assert!(matches!(running.await.unwrap().unwrap(), ConsoleRun::Rows { row_count: 1, .. }));
+    drop(fake.await.unwrap());
+}
+
+// ---- The cancel dial of an app's console ----
+
+/// A connect that answers no material the first `without` times, then a stream.
+fn connects(without: usize) -> (Arc<dyn Fn() -> Dialling + Send + Sync>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let connect = Arc::new(move || {
+        let call = counted.fetch_add(1, Ordering::SeqCst);
+        if call < without {
+            return Dialling { material: None, stream: async { Err(io::Error::new(io::ErrorKind::NotFound, "no certificate")) }.boxed() };
+        }
+        let (client, _server) = tokio::io::duplex(64);
+        Dialling { material: Some(1), stream: async move { Ok(Box::new(client) as BoxStream) }.boxed() }
+    });
+    (connect, calls)
+}
+
+#[tokio::test]
+async fn a_cancel_dial_without_material_refreshes_it_and_dials_again() {
+    let (connect, calls) = connects(1);
+    let refreshed = Arc::new(AtomicUsize::new(0));
+    let counted = refreshed.clone();
+    let dial = dial_for_cancel(connect, Arc::new(move |_: &CancelToken| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }), CANCEL_WITHIN);
+    assert!(dial().await.is_ok());
+    assert_eq!((calls.load(Ordering::SeqCst), refreshed.load(Ordering::SeqCst)), (2, 1));
+    // With material kept, nothing is refreshed.
+    assert!(dial().await.is_ok());
+    assert_eq!((calls.load(Ordering::SeqCst), refreshed.load(Ordering::SeqCst)), (3, 1));
+}
+
+#[tokio::test]
+async fn a_cancel_dial_that_cannot_refresh_fails() {
+    let (connect, calls) = connects(usize::MAX);
+    let dial = dial_for_cancel(connect, Arc::new(|_: &CancelToken| Err(NotReady::Refused("A grant is needed.".into()))), CANCEL_WITHIN);
+    assert!(dial().await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "nothing was dialled again");
+}
+
+#[tokio::test]
+async fn a_cancel_dial_gives_up_within_its_bound_and_stops_the_refresh() {
+    let (connect, _calls) = connects(usize::MAX);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let seen = stopped.clone();
+    // A refresh that waits behind a grant window another connection opened, until it is cancelled.
+    let dial = dial_for_cancel(connect, Arc::new(move |cancel: &CancelToken| {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !cancel.is_cancelled() && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        seen.store(cancel.is_cancelled(), Ordering::SeqCst);
+        Err(NotReady::Failed("cancelled".into()))
+    }), Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let error = dial().await.err().expect("it gave up");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    let end = std::time::Instant::now() + Duration::from_secs(2);
+    while !stopped.load(Ordering::SeqCst) && std::time::Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(stopped.load(Ordering::SeqCst), "the refresh was cancelled");
+}
+
+// ---- The app's console sessions ----
+
+const CLOSED_SENTENCE: &str = "This console is closed. Open it again from Databases.";
+const LIMIT_SENTENCE: &str = "Close a tab before opening another (maximum 8).";
+
+/// An upstream that dials nothing and records the databases it was told to release.
+#[derive(Default)]
+struct Releases(Mutex<Vec<String>>);
+
+impl Releases {
+    fn released(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Upstream for Releases {
+    fn prepare(&self, _: &crate::sync::databases::SavedDatabase, _: &CancelToken) -> Result<Prepared, NotReady> {
+        Err(NotReady::Failed("No preparation is scripted.".into()))
+    }
+
+    fn connect(&self, _: &str, _: Option<u64>) -> Dialling {
+        Dialling { material: None, stream: async { Err(io::Error::other("No dial is scripted.")) }.boxed() }
+    }
+
+    fn forget(&self, _: &str, _: u64) {}
+
+    fn release(&self, db_id: &str) {
+        self.0.lock().unwrap().push(db_id.to_string());
+    }
+}
+
+/// An open session of the database `db-orders`, on a fresh fake, whose route `releases` records.
+async fn session(releases: &Arc<Releases>) -> (Arc<ConsoleSession>, DuplexStream) {
+    let (client, mut peer) = tokio::io::duplex(64 * 1024);
+    let (open, ()) = tokio::join!(
+        ConsoleConnection::open(Box::new(client), login(ReadOnlyMode::Locked), unreachable_dial()),
+        async {
+            accept_startup(&mut peer).await;
+            answer_show(&mut peer, "cloudsql_session_read_only", "locked").await;
+        }
+    );
+    let (connection, _, _) = open.unwrap();
+    let upstream: Arc<dyn Upstream> = releases.clone();
+    (Arc::new(ConsoleSession { connection, upstream, db_id: "db-orders".into() }), peer)
+}
+
+#[tokio::test]
+async fn closing_an_opening_session_cancels_it() {
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (ticket, cancel) = consoles.begin("t1").unwrap();
+    assert!(!cancel.is_cancelled());
+    consoles.close("t1");
+    assert!(cancel.is_cancelled(), "the open was cancelled");
+    // Its open finishes late: the session is not kept, and its route is released.
+    let (late, _peer) = session(&releases).await;
+    assert!(!consoles.finish("t1", ticket, late));
+    assert_eq!(consoles.get("t1").err().as_deref(), Some(CLOSED_SENTENCE));
+    assert_eq!(releases.released(), vec!["db-orders".to_string()]);
+}
+
+#[tokio::test]
+async fn an_open_after_close_all_is_dropped() {
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (open_ticket, _) = consoles.begin("t1").unwrap();
+    let (open, _open_peer) = session(&releases).await;
+    assert!(consoles.finish("t1", open_ticket, open));
+    let (ticket, cancel) = consoles.begin("t2").unwrap();
+    consoles.close_all();
+    assert!(cancel.is_cancelled());
+    assert_eq!(releases.released().len(), 1, "the open session was dropped");
+    let (late, _peer) = session(&releases).await;
+    assert!(!consoles.finish("t2", ticket, late));
+    assert_eq!(consoles.get("t2").err().as_deref(), Some(CLOSED_SENTENCE));
+    assert_eq!(consoles.get("t1").err().as_deref(), Some(CLOSED_SENTENCE));
+    assert_eq!(releases.released().len(), 2);
+}
+
+#[tokio::test]
+async fn a_ninth_session_is_refused() {
+    let consoles = Consoles::default();
+    let tickets: Vec<Ticket> = (1..=8).map(|n| consoles.begin(&format!("t{n}")).unwrap().0).collect();
+    assert_eq!(consoles.begin("t9").err().as_deref(), Some(LIMIT_SENTENCE));
+    // A tab that opens again counts once.
+    assert!(consoles.begin("t1").is_ok());
+    // A failed open frees its place; a stale ticket frees nothing.
+    consoles.abandon("t1", tickets[0]);
+    assert_eq!(consoles.begin("t9").err().as_deref(), Some(LIMIT_SENTENCE));
+    consoles.abandon("t2", tickets[1]);
+    assert!(consoles.begin("t9").is_ok());
+}
+
+#[tokio::test]
+async fn a_reopened_id_ignores_the_first_open() {
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (first, _) = consoles.begin("t1").unwrap();
+    consoles.close("t1");
+    let (second, _) = consoles.begin("t1").unwrap();
+    assert_ne!(first, second);
+    let (s1, _peer1) = session(&releases).await;
+    let (s2, _peer2) = session(&releases).await;
+    assert!(!consoles.finish("t1", first, s1));
+    assert!(consoles.finish("t1", second, s2.clone()));
+    assert!(Arc::ptr_eq(&consoles.get("t1").unwrap(), &s2));
+    // The same holds without a close in between, as React StrictMode opens a tab twice.
+    let (third, _) = consoles.begin("t2").unwrap();
+    let (fourth, _) = consoles.begin("t2").unwrap();
+    let (s3, _peer3) = session(&releases).await;
+    let (s4, _peer4) = session(&releases).await;
+    assert!(!consoles.finish("t2", third, s3));
+    assert!(consoles.finish("t2", fourth, s4.clone()));
+    assert!(Arc::ptr_eq(&consoles.get("t2").unwrap(), &s4));
+}
+
+#[tokio::test]
+async fn closing_a_session_releases_its_route() {
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (ticket, _) = consoles.begin("t1").unwrap();
+    let (open, _peer) = session(&releases).await;
+    assert!(consoles.finish("t1", ticket, open));
+    assert!(consoles.get("t1").is_ok());
+    assert!(releases.released().is_empty());
+    consoles.close("t1");
+    assert_eq!(releases.released(), vec!["db-orders".to_string()]);
+    assert_eq!(consoles.get("t1").err().as_deref(), Some(CLOSED_SENTENCE));
+    consoles.close("t1");
+    consoles.close_all();
+    assert_eq!(releases.released().len(), 1, "released once");
+}

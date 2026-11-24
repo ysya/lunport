@@ -1305,7 +1305,7 @@ async fn relay(mut from_app: impl AsyncRead + Unpin, mut to_app: impl AsyncWrite
 }
 
 /// The sentence an app is refused with when Cloud SQL could not be reached, for `error`.
-fn unreachable(connection: &str, error: &io::Error) -> String {
+pub(super) fn unreachable(connection: &str, error: &io::Error) -> String {
     let reason = match error.kind() {
         io::ErrorKind::UnexpectedEof => "Cloud SQL closed the connection.".to_string(),
         _ => error.to_string(),
