@@ -411,7 +411,7 @@ async fn a_cancel_that_does_not_stop_ends_the_session() {
     fake.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_cancel_that_cannot_be_dialed_keeps_the_session() {
     let (console, ended, mut peer) = opened(unreachable_dial()).await;
     let (running_tx, running_rx) = oneshot::channel();
@@ -437,6 +437,9 @@ async fn a_cancel_that_cannot_be_dialed_keeps_the_session() {
         console.cancel().await.unwrap_err(),
         "Lunport could not reach Cloud SQL to cancel the query. It goes on running; close the tab to end the session."
     );
+    // No cancel request went out, so no Cancel bound runs: the statement may take longer than it.
+    tokio::time::advance(CANCEL_WITHIN + Duration::from_secs(1)).await;
+    assert!(!running.is_finished(), "the statement ended before its answer");
     finish_tx.send(()).unwrap();
     assert!(matches!(running.await.unwrap().unwrap(), ConsoleRun::Rows { row_count: 1, .. }));
     assert!(matches!(
@@ -492,7 +495,7 @@ async fn a_dropped_connection_ends_the_session() {
     let (console, ended, peer) = opened(unreachable_dial()).await;
     drop(peer);
     let message = ended.await;
-    assert!(!message.is_empty());
+    assert_eq!(message, "The connection ended.");
     let json = serde_json::to_value(ConsoleEvent::Ended { message }).unwrap();
     assert_eq!(json["kind"], "ended");
     assert_eq!(
@@ -564,4 +567,207 @@ async fn a_second_run_while_one_runs_is_refused() {
     finish_tx.send(()).unwrap();
     assert!(matches!(running.await.unwrap().unwrap(), ConsoleRun::Rows { row_count: 1, .. }));
     fake.await.unwrap();
+}
+
+/// An ErrorResponse with severity FATAL, as a server sends before it closes a session.
+fn fatal_response(sqlstate: &str, message: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (code, text) in [(b'S', "FATAL"), (b'V', "FATAL"), (b'C', sqlstate), (b'M', message)] {
+        body.push(code);
+        body.extend_from_slice(text.as_bytes());
+        body.push(0);
+    }
+    body.push(0);
+    body
+}
+
+#[tokio::test]
+async fn a_server_fatal_while_idle_ends_the_session_with_its_message() {
+    let (console, ended, mut peer) = opened(unreachable_dial()).await;
+    let fatal = fatal_response("57P05", "terminating connection due to idle-session timeout");
+    peer.write_all(&frame(b'E', &fatal)).await.unwrap();
+    drop(peer);
+    assert_eq!(
+        ended.await,
+        "The connection ended: terminating connection due to idle-session timeout."
+    );
+    assert_eq!(
+        console.run("SELECT 1", true).await.unwrap_err(),
+        "The connection ended. Reconnect to go on."
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_during_the_rows_answers_canceled() {
+    let (dial, mut dials) = cancel_line();
+    let (console, _ended, mut peer) = opened(dial).await;
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = tokio::spawn(async move {
+        answer_prepare(&mut peer, &[("id", 23)]).await;
+        assert_eq!(expect_query(&mut peer).await, "SELECT id FROM events");
+        let mut answer = frame(b'T', &row_description(&[("id", 23)]));
+        answer.extend(frame(b'D', &data_row(&[Some("1")])));
+        peer.write_all(&answer).await.unwrap();
+        running_tx.send(()).unwrap();
+        let mut cancel = dials.recv().await.unwrap();
+        assert_eq!(read_cancel_request(&mut cancel).await, (7, 11));
+        drop(cancel);
+        let canceled = error_response("57014", "canceling statement due to user request", None);
+        peer.write_all(&frame(b'E', &canceled)).await.unwrap();
+        peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+        peer
+    });
+    let running = tokio::spawn({
+        let console = console.clone();
+        async move { console.run("SELECT id FROM events", true).await }
+    });
+    running_rx.await.unwrap();
+    console.cancel().await.unwrap();
+    assert!(matches!(running.await.unwrap().unwrap(), ConsoleRun::Canceled { .. }));
+    fake.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cancel_during_the_prepare_answers_canceled() {
+    let (dial, mut dials) = cancel_line();
+    let (console, _ended, mut peer) = opened(dial).await;
+    let (preparing_tx, preparing_rx) = oneshot::channel();
+    let fake = tokio::spawn(async move {
+        // Parse waits, as it does on a lock, until the cancel request arrives.
+        loop {
+            if read_frame(&mut peer).await.0 == b'S' {
+                break;
+            }
+        }
+        preparing_tx.send(()).unwrap();
+        let mut cancel = dials.recv().await.unwrap();
+        assert_eq!(read_cancel_request(&mut cancel).await, (7, 11));
+        drop(cancel);
+        let canceled = error_response("57014", "canceling statement due to user request", None);
+        peer.write_all(&frame(b'E', &canceled)).await.unwrap();
+        peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+        peer
+    });
+    let running = tokio::spawn({
+        let console = console.clone();
+        async move { console.run("SELECT id FROM orders", true).await }
+    });
+    preparing_rx.await.unwrap();
+    console.cancel().await.unwrap();
+    assert!(matches!(running.await.unwrap().unwrap(), ConsoleRun::Canceled { .. }));
+    fake.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cancel_the_person_did_not_send_answers_failed() {
+    let (console, _ended, mut peer) = opened(unreachable_dial()).await;
+    let fake = tokio::spawn(async move {
+        answer_prepare(&mut peer, &[("?column?", 23)]).await;
+        assert_eq!(expect_query(&mut peer).await, "SELECT pg_sleep(600)");
+        let timeout = error_response("57014", "canceling statement due to statement timeout", None);
+        peer.write_all(&frame(b'E', &timeout)).await.unwrap();
+        peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+        peer
+    });
+    match console.run("SELECT pg_sleep(600)", true).await.unwrap() {
+        ConsoleRun::Failed { message, sqlstate, .. } => {
+            assert_eq!(message, "canceling statement due to statement timeout");
+            assert_eq!(sqlstate.as_deref(), Some("57014"));
+        }
+        other => panic!("{other:?}"),
+    }
+    fake.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_run_waits_for_a_catalog_read_cancels_the_run_only() {
+    let (dial, mut dials) = cancel_line();
+    let (console, _ended, mut peer) = opened(dial).await;
+    let (reading_tx, reading_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let catalog = "SELECT nspname FROM pg_catalog.pg_namespace";
+    let fake = tokio::spawn(async move {
+        assert_eq!(expect_query(&mut peer).await, catalog);
+        reading_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        peer.write_all(&rows_answer(&[("nspname", 25)], &[vec![Some("public".into())]], "SELECT 1"))
+            .await
+            .unwrap();
+        peer
+    });
+
+    let reading = tokio::spawn({
+        let console = console.clone();
+        async move { console.read_rows(catalog).await }
+    });
+    reading_rx.await.unwrap();
+    let running = tokio::spawn({
+        let console = console.clone();
+        async move { console.run("SELECT 1", true).await }
+    });
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    console.cancel().await.unwrap();
+    assert!(dials.try_recv().is_err(), "the cancel reached the catalog read");
+    release_tx.send(()).unwrap();
+    assert_eq!(reading.await.unwrap().unwrap(), vec![vec![Some("public".to_string())]]);
+    assert!(matches!(running.await.unwrap().unwrap(), ConsoleRun::Canceled { .. }));
+    let mut peer = fake.await.unwrap();
+    assert!(
+        read_frame(&mut peer).now_or_never().is_none(),
+        "the canceled statement went out"
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_run_waits_for_a_cancel_to_close_cancels_the_run() {
+    let (dial, mut dials) = cancel_line();
+    let (console, _ended, mut peer) = opened(dial).await;
+    let (running_tx, running_rx) = oneshot::channel();
+    let (cancel_read_tx, cancel_read_rx) = oneshot::channel();
+    let (close_tx, close_rx) = oneshot::channel::<()>();
+    let cancel_side = tokio::spawn(async move {
+        let mut cancel = dials.recv().await.unwrap();
+        assert_eq!(read_cancel_request(&mut cancel).await, (7, 11));
+        cancel_read_tx.send(()).unwrap();
+        close_rx.await.unwrap();
+        drop(cancel);
+        assert!(dials.try_recv().is_err(), "a second cancel was dialled");
+    });
+    let fake = tokio::spawn(async move {
+        answer_prepare(&mut peer, &[("?column?", 23)]).await;
+        assert_eq!(expect_query(&mut peer).await, "SELECT 1");
+        running_tx.send(()).unwrap();
+        cancel_read_rx.await.unwrap();
+        peer.write_all(&rows_answer(&[("?column?", 23)], &one_row(), "SELECT 1"))
+            .await
+            .unwrap();
+        peer
+    });
+
+    let first = tokio::spawn({
+        let console = console.clone();
+        async move { console.run("SELECT 1", true).await }
+    });
+    running_rx.await.unwrap();
+    console.cancel().await.unwrap();
+    assert!(matches!(first.await.unwrap().unwrap(), ConsoleRun::Rows { row_count: 1, .. }));
+    let second = tokio::spawn({
+        let console = console.clone();
+        async move { console.run("SELECT 2", true).await }
+    });
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!second.is_finished(), "the run did not wait for the cancel connection to close");
+    console.cancel().await.unwrap();
+    close_tx.send(()).unwrap();
+    assert!(matches!(second.await.unwrap().unwrap(), ConsoleRun::Canceled { .. }));
+    cancel_side.await.unwrap();
+    let mut peer = fake.await.unwrap();
+    assert!(
+        read_frame(&mut peer).now_or_never().is_none(),
+        "the canceled statement went out"
+    );
 }

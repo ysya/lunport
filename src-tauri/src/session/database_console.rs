@@ -117,6 +117,7 @@ const LOCK_FLAG: &str = "cloudsql_session_read_only";
 const BUSY: &str = "A statement is still running. Cancel it or wait for it.";
 const ENDED: &str = "The connection ended. Reconnect to go on.";
 const ENDED_CLEANLY: &str = "The connection ended.";
+const CONNECTION_LOST: &str = "The connection to Cloud SQL was lost.";
 const NOT_CONFIRMED: &str = "Lunport could not confirm that this session is read-only, so it closed it.";
 const LOCK_UNSUPPORTED: &str = "This instance does not support Cloud SQL's read-only lock.";
 const SIGN_IN_TIMED_OUT: &str = "Cloud SQL sign-in timed out.";
@@ -130,6 +131,15 @@ const SCHEMA_TOO_LARGE: &str = "The schema is too large to read.";
 const CELL_OVERHEAD: usize = std::mem::size_of::<Option<String>>();
 /// The longest CommandComplete tag Lunport keeps; real tags are a word or two and a count.
 const MAX_TAG_BYTES: usize = 64;
+
+/// The sentence a connection error ends a session with: the server's own message when the server ended it.
+fn ended_sentence(error: &tokio_postgres::Error) -> String {
+    match error.as_db_error() {
+        Some(db) => format!("The connection ended: {}.", db.message().trim_end_matches('.')),
+        None if error.is_closed() => ENDED_CLEANLY.to_string(),
+        None => CONNECTION_LOST.to_string(),
+    }
+}
 
 fn read_limit_sentence() -> String {
     format!(
@@ -307,6 +317,8 @@ impl AsyncWrite for StatementBudget {
 
 /// The statement on the wire now, as a cancel request sees it.
 struct Running {
+    /// Whether the statement is the person's; Cancel never reaches Lunport's own catalog reads.
+    person: bool,
     /// When the first cancel request for this statement was sent.
     cancel_sent: watch::Sender<Option<Instant>>,
     /// Whether the person's Cancel sent one.
@@ -315,6 +327,8 @@ struct Running {
 
 #[derive(Default)]
 struct RunState {
+    /// The person's run under way, waiting or running: whether they asked to cancel it.
+    person: Option<Arc<AtomicBool>>,
     running: Option<Arc<Running>>,
     /// Signals for cancel connections still open; the next statement waits for them to close.
     closing: Vec<oneshot::Receiver<()>>,
@@ -338,8 +352,6 @@ struct Inner {
     cancel_dial: CancelDial,
     /// Serializes everything sent on the connection.
     serial: tokio::sync::Mutex<()>,
-    /// Whether a person's `run` is under way, waiting or running.
-    person_running: AtomicBool,
     state: Mutex<RunState>,
     results: Mutex<Results>,
     wire: Arc<Wire>,
@@ -366,25 +378,44 @@ impl Inner {
     }
 
     /// Waits for earlier cancel connections to close, so that a late cancel request cannot reach the statement about
-    /// to be sent, then marks that statement as running.
-    async fn begin(&self) -> Arc<Running> {
+    /// to be sent, then marks that statement as running. `person` is the person's cancel mark for their run; None
+    /// answers a run the person canceled while it waited, which then sends nothing.
+    async fn begin(&self, person: Option<&AtomicBool>) -> Option<Arc<Running>> {
         let closing = std::mem::take(&mut self.state.lock().unwrap().closing);
         if !closing.is_empty() {
             let _ = tokio::time::timeout(CANCEL_WITHIN, join_all(closing)).await;
         }
-        let running = Arc::new(Running { cancel_sent: watch::Sender::new(None), by_person: AtomicBool::new(false) });
-        self.state.lock().unwrap().running = Some(running.clone());
+        let mut state = self.state.lock().unwrap();
+        if person.is_some_and(|canceled| canceled.load(Ordering::SeqCst)) {
+            return None;
+        }
+        let running = Arc::new(Running {
+            person: person.is_some(),
+            cancel_sent: watch::Sender::new(None),
+            by_person: AtomicBool::new(false),
+        });
+        state.running = Some(running.clone());
         self.wire.reset();
-        running
+        Some(running)
     }
 
     /// Registers a cancel for `target` while it is still the running statement.
-    fn register_cancel(&self, target: Option<&Arc<Running>>) -> Option<(Arc<Running>, oneshot::Sender<()>)> {
+    fn register_cancel(&self, target: &Arc<Running>) -> Option<oneshot::Sender<()>> {
         let mut state = self.state.lock().unwrap();
-        let running = state.running.clone()?;
-        if target.is_some_and(|target| !Arc::ptr_eq(target, &running)) {
+        if !state.running.as_ref().is_some_and(|running| Arc::ptr_eq(running, target)) {
             return None;
         }
+        let (closed, closing) = oneshot::channel();
+        state.closing.push(closing);
+        Some(closed)
+    }
+
+    /// Marks the person's run as canceled and, when its statement is on the wire, registers a cancel for it. None when
+    /// there is nothing to send: no run of the person's, or one still waiting, which `begin` then stops.
+    fn register_person_cancel(&self) -> Option<(Arc<Running>, oneshot::Sender<()>)> {
+        let mut state = self.state.lock().unwrap();
+        state.person.as_ref()?.store(true, Ordering::SeqCst);
+        let running = state.running.clone().filter(|running| running.person)?;
         let (closed, closing) = oneshot::channel();
         state.closing.push(closing);
         Some((running, closed))
@@ -481,8 +512,8 @@ impl Inner {
                     };
                     if let Some(truncation) = past {
                         streamed.truncated = Some(truncation);
-                        if let Some((target, closed)) = self.register_cancel(Some(running)) {
-                            tokio::spawn(self.clone().send_cancel(target, closed, false));
+                        if let Some(closed) = self.register_cancel(running) {
+                            tokio::spawn(self.clone().send_cancel(running.clone(), closed, false));
                         }
                         continue;
                     }
@@ -523,12 +554,12 @@ async fn cancel_bound(mut sent: watch::Receiver<Option<Instant>>) {
     tokio::time::sleep_until(at + CANCEL_WITHIN).await;
 }
 
-/// Clears the person's busy mark when their `run` ends, however it ends.
-struct PersonRun<'a>(&'a AtomicBool);
+/// Clears the person's run when it ends, however it ends.
+struct PersonRun<'a>(&'a Inner);
 
 impl Drop for PersonRun<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.state.lock().unwrap().person = None;
     }
 }
 
@@ -543,6 +574,15 @@ impl Drop for RunningStatement<'_> {
 
 fn elapsed_ms(started: Instant) -> u32 {
     u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX)
+}
+
+/// A server error that ended the person's statement: Canceled when it is the cancel the person sent.
+fn server_error(error: &tokio_postgres::Error, running: &Running, started: Instant) -> ConsoleRun {
+    if error.code() == Some(&SqlState::QUERY_CANCELED) && running.by_person.load(Ordering::SeqCst) {
+        ConsoleRun::Canceled { elapsed_ms: elapsed_ms(started) }
+    } else {
+        failed(error, started)
+    }
 }
 
 fn failed(error: &tokio_postgres::Error, started: Instant) -> ConsoleRun {
@@ -581,7 +621,7 @@ fn sign_in_error(error: &tokio_postgres::Error, mode: ReadOnlyMode) -> OpenError
             OpenError::LockUnsupported(LOCK_UNSUPPORTED.to_string())
         }
         Some(db) => OpenError::Failed(db.message().to_string()),
-        None => OpenError::Failed(error.to_string()),
+        None => OpenError::Failed(ended_sentence(error)),
     }
 }
 
@@ -664,7 +704,7 @@ impl ConsoleConnection {
         let driver = tokio::spawn(async move {
             let sentence = match connection.await {
                 Ok(()) => ENDED_CLEANLY.to_string(),
-                Err(error) => error.to_string(),
+                Err(error) => ended_sentence(&error),
             };
             driver_ended.set(&sentence);
         })
@@ -687,7 +727,6 @@ impl ConsoleConnection {
             client,
             cancel_dial,
             serial: tokio::sync::Mutex::new(()),
-            person_running: AtomicBool::new(false),
             state: Mutex::new(RunState::default()),
             results: Mutex::new(Results::default()),
             wire,
@@ -704,21 +743,29 @@ impl ConsoleConnection {
             return Err(ENDED.to_string());
         }
         valid_sql_within(sql, MAX_STATEMENT_BYTES).map_err(|error| error.to_string())?;
-        if inner.person_running.swap(true, Ordering::SeqCst) {
-            return Err(BUSY.to_string());
-        }
-        let _person = PersonRun(&inner.person_running);
+        let canceled = {
+            let mut state = inner.state.lock().unwrap();
+            if state.person.is_some() {
+                return Err(BUSY.to_string());
+            }
+            let canceled = Arc::new(AtomicBool::new(false));
+            state.person = Some(canceled.clone());
+            canceled
+        };
+        let _person = PersonRun(inner);
         let _serial = inner.serial.lock().await;
         if inner.ended.is_set() {
             return Err(ENDED.to_string());
         }
+        let Some(running) = inner.begin(Some(&canceled)).await else {
+            return Ok(ConsoleRun::Canceled { elapsed_ms: 0 });
+        };
+        let _statement = RunningStatement(inner);
         if fresh {
             let mut results = inner.results.lock().unwrap();
             results.kept.clear();
             results.bytes = 0;
         }
-        let running = inner.begin().await;
-        let _statement = RunningStatement(inner);
         let started = Instant::now();
         let mut bound = Box::pin(cancel_bound(running.cancel_sent.subscribe()));
 
@@ -736,20 +783,15 @@ impl ConsoleConnection {
                 .iter()
                 .map(|column| ConsoleColumn { name: column.name().to_string(), type_name: column.type_().name().to_string() })
                 .collect(),
-            Err(error) if error.as_db_error().is_some() => return Ok(failed(&error, started)),
+            Err(error) if error.as_db_error().is_some() => return Ok(server_error(&error, &running, started)),
             Err(_) => return Err(inner.lost()),
         };
 
         let room = MAX_RESULT_BYTES.min(MAX_KEPT_BYTES.saturating_sub(inner.results.lock().unwrap().bytes));
         let streamed = inner.stream(sql, &running, &mut bound, Caps { rows: MAX_RESULT_ROWS, bytes: room }).await?;
         if let Some(error) = &streamed.error {
-            let canceled = error.code() == Some(&SqlState::QUERY_CANCELED) && running.by_person.load(Ordering::SeqCst);
             if streamed.truncated.is_none() {
-                return Ok(if canceled {
-                    ConsoleRun::Canceled { elapsed_ms: elapsed_ms(started) }
-                } else {
-                    failed(error, started)
-                });
+                return Ok(server_error(error, &running, started));
             }
         }
         if columns.is_empty() {
@@ -782,10 +824,12 @@ impl ConsoleConnection {
         Ok(kept.rows.iter().skip(offset as usize).take(PAGE_ROWS).cloned().collect())
     }
 
-    /// Sends the cancel request for the statement running now and answers once it was sent; Ok and nothing sent when
-    /// none runs. Err is the sentence of a cancel that could not be dialled; the statement and the session go on.
+    /// Cancels the person's run. When its statement is on the wire it sends the cancel request and answers once it was
+    /// sent; a run still waiting for the connection answers Canceled without sending its statement. Ok and nothing sent
+    /// when no run of the person's is under way; Lunport's own catalog reads are never canceled. Err is the sentence of
+    /// a cancel that could not be dialled; the statement and the session go on.
     pub(crate) async fn cancel(&self) -> Result<(), String> {
-        let Some((target, closed)) = self.inner.register_cancel(None) else {
+        let Some((target, closed)) = self.inner.register_person_cancel() else {
             return Ok(());
         };
         self.inner.clone().send_cancel(target, closed, true).await
@@ -809,7 +853,7 @@ impl ConsoleConnection {
         if inner.ended.is_set() {
             return Err(ENDED.to_string());
         }
-        let running = inner.begin().await;
+        let running = inner.begin(None).await.expect("only the person's runs are canceled before they start");
         let _statement = RunningStatement(inner);
         let mut bound = Box::pin(cancel_bound(running.cancel_sent.subscribe()));
         let streamed = inner.stream(sql, &running, &mut bound, Caps { rows: usize::MAX, bytes: MAX_KEPT_BYTES }).await?;
