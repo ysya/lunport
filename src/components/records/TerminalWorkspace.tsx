@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { CircleAlert, Library, LoaderCircle, Plus, Terminal, Unplug, X } from "lucide-react";
-import { useTerminalStore, type TerminalTab } from "@/stores/terminals";
+import { CircleAlert, Database, Library, LoaderCircle, Plus, Terminal, Unplug, X } from "lucide-react";
+import { useTerminalStore, type SessionTab } from "@/stores/terminals";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } f
 import { isImeKey } from "@/lib/ime";
 import "./terminal.css";
 const TerminalPane = lazy(() => import("./TerminalPane").then((module) => ({ default: module.TerminalPane })));
+const DatabaseConsolePane = lazy(() => import("./console/DatabaseConsolePane"));
 
 export function requestTerminalClose(id: string, onConfirm: (id: string) => void) {
   const tab = useTerminalStore.getState().tabs.find((item) => item.id === id);
@@ -26,7 +27,7 @@ export function completeTerminalClose(id: string, doNotAskAgain: boolean) {
  * only from an element that carries `data-tauri-drag-region` itself, so the containers carry it and the tabs' buttons stay buttons.
  */
 export function SessionTabBar({ tabs, activeId, activate, requestClose, strip }: {
-  tabs: TerminalTab[];
+  tabs: SessionTab[];
   activeId: string | null;
   activate: (id: string | null) => void;
   requestClose: (id: string) => void;
@@ -46,11 +47,11 @@ export function SessionTabBar({ tabs, activeId, activate, requestClose, strip }:
       </div>
       {tabs.map((tab) => {
         const ordinal = tab.name.match(/ \(\d+\)$/)?.[0] ?? "";
-        return <div key={tab.id} className="embedded-tab" data-tauri-drag-region data-active={activeId === tab.id} data-state={tab.state} role="presentation">
+        return <div key={tab.id} className="embedded-tab" data-tauri-drag-region data-active={activeId === tab.id} data-state={tab.state} data-environment={tab.kind === "database" ? tab.environment : undefined} role="presentation">
         <button type="button" id={`terminal-tab-${tab.id}`} role="tab" title={`${tab.name}\n${tab.address}\n${tab.state}`} aria-label={`${tab.name}, ${tab.state}`} aria-selected={activeId === tab.id} aria-controls={`terminal-panel-${tab.id}`} tabIndex={activeId === tab.id ? 0 : -1} onClick={() => activate(tab.id)}>
-          {tab.state === "connecting" ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : tab.state === "error" ? <CircleAlert className="size-3.5 text-destructive" /> : tab.state === "ended" ? <Unplug className="size-3.5" /> : <Terminal className="size-3.5" />}<span>{ordinal ? tab.name.slice(0, -ordinal.length) : tab.name}</span>{ordinal && <span className="embedded-tab-ordinal">{ordinal.trim()}</span>}
+          {tab.state === "connecting" ? <LoaderCircle className="size-3.5 motion-safe:animate-spin" /> : tab.state === "error" ? <CircleAlert className="size-3.5 text-destructive" /> : tab.state === "ended" ? <Unplug className="size-3.5" /> : tab.kind === "database" ? <Database className="size-3.5" /> : <Terminal className="size-3.5" />}<span>{ordinal ? tab.name.slice(0, -ordinal.length) : tab.name}</span>{ordinal && <span className="embedded-tab-ordinal">{ordinal.trim()}</span>}
         </button>
-        <button type="button" className="embedded-tab-close" tabIndex={activeId === tab.id ? 0 : -1} aria-label={`Close terminal ${tab.name}`} onClick={() => requestClose(tab.id)}><X className="size-3" /></button>
+        <button type="button" className="embedded-tab-close" tabIndex={activeId === tab.id ? 0 : -1} aria-label={`Close ${tab.kind === "database" ? "console" : "terminal"} ${tab.name}`} onClick={() => requestClose(tab.id)}><X className="size-3" /></button>
       </div>;
       })}
     </nav>
@@ -64,6 +65,8 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const activate = useTerminalStore((state) => state.activate);
   const [closing, setClosing] = useState<string | null>(null);
+  const closingKind = useTerminalStore((state) => state.tabs.find((tab) => tab.id === closing)?.kind);
+  const consoleClose = closingKind === "database";
   const [doNotAskAgain, setDoNotAskAgain] = useState(false);
   const strip = useRef<HTMLElement>(null);
   const requestClose = (id: string) => {
@@ -95,7 +98,13 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
     {renderHeader ? renderHeader(tabBar) : tabBar}
     <div id="terminal-library" className="terminal-library" role={tabs.length ? "tabpanel" : undefined} aria-labelledby={tabs.length ? "terminal-tab-library" : undefined} hidden={!!activeId}>{children}</div>
     <Suspense fallback={activeId ? <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading terminal…</div> : null}>
-      {tabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id && !settingsOpen} openKeys={openKeys} />)}
+      {tabs.map((tab) => tab.kind === "database"
+        ? <div key={tab.id} id={`terminal-panel-${tab.id}`} className="embedded-pane" role="tabpanel" aria-labelledby={`terminal-tab-${tab.id}`} hidden={activeId !== tab.id || settingsOpen}>
+          <Suspense fallback={<div className="flex flex-1 items-center justify-center text-muted-foreground">Loading console…</div>}>
+            <DatabaseConsolePane tab={tab} active={activeId === tab.id && !settingsOpen} />
+          </Suspense>
+        </div>
+        : <TerminalPane key={tab.id} tab={tab} active={activeId === tab.id && !settingsOpen} openKeys={openKeys} />)}
     </Suspense>
     <Dialog open={closing !== null} onOpenChange={(open) => { if (!open) { setClosing(null); setDoNotAskAgain(false); } }}>
       <DialogContent onCloseAutoFocus={(event) => {
@@ -108,15 +117,15 @@ export function TerminalWorkspace({ children, renderHeader, openKeys }: { childr
           (input ?? tab)?.focus();
         });
       }}>
-        <DialogTitle>Close terminal?</DialogTitle>
-        <DialogDescription>This ends this SSH session. Running commands may stop. Reconnecting opens a new shell.</DialogDescription>
+        <DialogTitle>{consoleClose ? "Close console?" : "Close terminal?"}</DialogTitle>
+        <DialogDescription>{consoleClose ? "This ends this database session. A query that is running is canceled." : "This ends this SSH session. Running commands may stop. Reconnecting opens a new shell."}</DialogDescription>
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
           <Checkbox checked={doNotAskAgain} onCheckedChange={(checked) => setDoNotAskAgain(checked === true)} />
           Don't ask again
         </label>
         <DialogFooter>
           <Button variant="outline" onClick={() => { setClosing(null); setDoNotAskAgain(false); }}>Cancel</Button>
-          <Button variant="destructive" onClick={() => { if (closing) completeTerminalClose(closing, doNotAskAgain); setClosing(null); setDoNotAskAgain(false); }}>Close terminal</Button>
+          <Button variant="destructive" onClick={() => { if (closing) completeTerminalClose(closing, doNotAskAgain); setClosing(null); setDoNotAskAgain(false); }}>{consoleClose ? "Close console" : "Close terminal"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -424,7 +424,7 @@ else {
     const [answer, setAnswer] = useState("");
     useEffect(() => {
       if (scenario !== "terminal-missing-key") return;
-      useTerminalStore.getState().open({ host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
+      useTerminalStore.getState().open({ kind: "terminal", host: { id: overview.hosts[0].id }, name: "simple", address: "deploy@fixture.invalid:22", historyKey: "fixture" });
       return () => useTerminalStore.getState().reset();
     }, []);
     if (scenario === "hostkey" || scenario === "hostkey-changed" || scenario === "hostkey-saved" || scenario === "hostkey-ai") return <HostKeyCard

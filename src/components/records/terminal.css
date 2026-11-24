@@ -10,6 +10,13 @@
 .embedded-tab > button:first-child svg { flex-shrink: 0; }
 .embedded-tab > button:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .embedded-tab > button:first-child .embedded-tab-ordinal { flex-shrink: 0; color: var(--muted-foreground); font-size: 11px; }
+.embedded-tab[data-environment="prod"] { box-shadow: inset 0 3px var(--env-prod); }
+.embedded-tab[data-environment="staging"] { box-shadow: inset 0 3px var(--env-staging); }
+.embedded-tab[data-environment="dev"] { box-shadow: inset 0 3px var(--env-dev); }
+.embedded-tab[data-environment][data-active="true"] { box-shadow: inset 0 -2px var(--primary), inset 0 3px var(--env-mark); }
+.embedded-tab[data-environment="prod"] { --env-mark: var(--env-prod); }
+.embedded-tab[data-environment="staging"] { --env-mark: var(--env-staging); }
+.embedded-tab[data-environment="dev"] { --env-mark: var(--env-dev); }
 .embedded-tab-close { display: grid; place-items: center; width: 22px; height: 24px; flex-shrink: 0; border-radius: 4px; opacity: 0; cursor: pointer; }
 .embedded-tab:is([data-active="true"], :hover, :focus-within) .embedded-tab-close { opacity: 1; }
 .embedded-tab-close:hover { background: var(--accent); }
