@@ -1069,3 +1069,306 @@ async fn close_all_ends_running_statements() {
     assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
     fake.await.unwrap();
 }
+
+/// An upstream that keeps material for the database: each dial hands the test the server end of its connection, and the log records
+/// the dials and releases in the order they came.
+struct KeptMaterial {
+    log: Mutex<Vec<&'static str>>,
+    dials: mpsc::UnboundedSender<DuplexStream>,
+}
+
+impl KeptMaterial {
+    fn new() -> (Arc<KeptMaterial>, mpsc::UnboundedReceiver<DuplexStream>) {
+        let (dials, receiver) = mpsc::unbounded_channel();
+        (Arc::new(KeptMaterial { log: Mutex::new(Vec::new()), dials }), receiver)
+    }
+
+    fn log(&self) -> Vec<&'static str> {
+        self.log.lock().unwrap().clone()
+    }
+}
+
+impl Upstream for KeptMaterial {
+    fn prepare(&self, _: &crate::sync::databases::SavedDatabase, _: &CancelToken) -> Result<Prepared, NotReady> {
+        Err(NotReady::Failed("No preparation is scripted.".into()))
+    }
+
+    fn connect(&self, _: &str, material: Option<u64>) -> Dialling {
+        assert_eq!(material, None, "a cancel request names no material");
+        self.log.lock().unwrap().push("connect");
+        let (client, server) = tokio::io::duplex(1024);
+        let _ = self.dials.send(server);
+        Dialling { material: Some(1), stream: async move { Ok(Box::new(client) as BoxStream) }.boxed() }
+    }
+
+    fn forget(&self, _: &str, _: u64) {}
+
+    fn release(&self, _: &str) {
+        self.log.lock().unwrap().push("release");
+    }
+}
+
+/// An open session of `db-orders` installed as the tab `t1`, on a fresh fake, whose route `upstream` keeps. Its own cancel dial reaches
+/// nothing: only the close path's dial can send a cancel request.
+async fn installed(consoles: &Consoles, upstream: &Arc<KeptMaterial>) -> DuplexStream {
+    let (client, mut peer) = tokio::io::duplex(64 * 1024);
+    let (open, ()) = tokio::join!(
+        ConsoleConnection::open(Box::new(client), login(ReadOnlyMode::Locked), unreachable_dial()),
+        async {
+            accept_startup(&mut peer).await;
+            answer_show(&mut peer, "cloudsql_session_read_only", "locked").await;
+        }
+    );
+    let (connection, _, _) = open.unwrap();
+    let shared: Arc<dyn Upstream> = upstream.clone();
+    let (ticket, _) = consoles.begin("t1").unwrap();
+    assert!(consoles.finish("t1", ticket, Arc::new(ConsoleSession::new(connection, shared, "db-orders".into()))));
+    peer
+}
+
+/// Closes the tab `t1` while its statement runs, with `close` (or `close_all`), and checks a cancel request for the session went out on
+/// a dial made before the route was released.
+async fn closing_while_running_cancels(close_all: bool) {
+    let consoles = Consoles::default();
+    let (upstream, mut dials) = KeptMaterial::new();
+    let peer = installed(&consoles, &upstream).await;
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = never_answers(peer, "SELECT pg_sleep(600)", running_tx);
+    let held = consoles.get("t1").unwrap();
+    let running = tokio::spawn(async move { held.connection.run("SELECT pg_sleep(600)", true).await });
+    running_rx.await.unwrap();
+    if close_all {
+        consoles.close_all();
+    } else {
+        consoles.close("t1");
+    }
+    assert_eq!(upstream.log(), vec!["connect", "release"], "the cancel was dialled before the route was released");
+    let mut cancel = tokio::time::timeout(Duration::from_secs(5), dials.recv()).await.unwrap().unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(5), read_cancel_request(&mut cancel)).await.unwrap();
+    assert_eq!(request, (7, 11));
+    assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
+    fake.await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_a_tab_while_its_statement_runs_sends_a_cancel_request() {
+    closing_while_running_cancels(false).await;
+}
+
+#[tokio::test]
+async fn close_all_while_a_statement_runs_sends_a_cancel_request() {
+    closing_while_running_cancels(true).await;
+}
+
+#[tokio::test]
+async fn closing_an_idle_tab_sends_no_cancel_request() {
+    for close_all in [false, true] {
+        let consoles = Consoles::default();
+        let (upstream, mut dials) = KeptMaterial::new();
+        let _peer = installed(&consoles, &upstream).await;
+        if close_all {
+            consoles.close_all();
+        } else {
+            consoles.close("t1");
+        }
+        assert_eq!(upstream.log(), vec!["release"]);
+        assert!(dials.try_recv().is_err(), "a cancel was dialled");
+    }
+}
+
+#[tokio::test]
+async fn closing_a_tab_without_kept_material_dials_nothing_more() {
+    // `Releases` keeps no material: the close path neither refreshes it nor sends anything.
+    let consoles = Consoles::default();
+    let releases = Arc::new(Releases::default());
+    let (ticket, _) = consoles.begin("t1").unwrap();
+    let (open, peer) = session(&releases).await;
+    assert!(consoles.finish("t1", ticket, open));
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = never_answers(peer, "SELECT pg_sleep(600)", running_tx);
+    let held = consoles.get("t1").unwrap();
+    let running = tokio::spawn(async move { held.connection.run("SELECT pg_sleep(600)", true).await });
+    running_rx.await.unwrap();
+    consoles.close("t1");
+    assert_eq!(releases.released(), vec!["db-orders".to_string()]);
+    assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
+    fake.await.unwrap();
+}
+
+// ---- The byte limits of kept results ----
+
+/// The length of a wide value: one row of it costs `WIDE + CELL_OVERHEAD` of a result's room.
+const WIDE: usize = 1024 * 1024;
+
+/// Answers one statement as `run` sends it with `rows` rows of one `width`-byte value each, written row by row, then its tag.
+async fn answer_wide(peer: &mut DuplexStream, sql: &str, rows: usize, width: usize) {
+    answer_prepare(peer, &[("payload", 25)]).await;
+    assert_eq!(expect_query(peer).await, sql);
+    peer.write_all(&frame(b'T', &row_description(&[("payload", 25)]))).await.unwrap();
+    let row = frame(b'D', &data_row(&[Some(&"x".repeat(width))]));
+    for _ in 0..rows {
+        peer.write_all(&row).await.unwrap();
+    }
+    peer.write_all(&frame(b'C', format!("SELECT {rows}\0").as_bytes())).await.unwrap();
+    peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_result_past_the_byte_room_keeps_the_rows_that_fit_and_the_session_goes_on() {
+    let (console, _ended, mut peer) = opened(unreachable_dial()).await;
+    let fits = MAX_RESULT_BYTES / (WIDE + CELL_OVERHEAD);
+    let fake = tokio::spawn(async move {
+        answer_wide(&mut peer, "SELECT payload FROM events", fits + 2, WIDE).await;
+        // One value wider than the whole room: nothing of it is kept.
+        answer_wide(&mut peer, "SELECT payload FROM archive", 1, MAX_RESULT_BYTES + 1).await;
+        answer_statement(&mut peer, "SELECT 1", &[("?column?", 23)], &one_row()).await;
+        peer
+    });
+    match console.run("SELECT payload FROM events", true).await.unwrap() {
+        ConsoleRun::Rows { result_id, row_count, truncated, .. } => {
+            assert_eq!(row_count as usize, fits);
+            assert_eq!(truncated, Some(Truncation::Bytes));
+            assert_eq!(console.kept(result_id).unwrap().1.len(), fits);
+        }
+        other => panic!("{other:?}"),
+    }
+    match console.run("SELECT payload FROM archive", true).await.unwrap() {
+        ConsoleRun::Rows { row_count, truncated, first_page, .. } => {
+            assert_eq!(row_count, 0);
+            assert_eq!(truncated, Some(Truncation::Bytes));
+            assert!(first_page.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        console.run("SELECT 1", true).await.unwrap(),
+        ConsoleRun::Rows { row_count: 1, truncated: None, .. }
+    ));
+    fake.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_later_result_gets_what_is_left_of_the_session_room() {
+    let (console, _ended, mut peer) = opened(unreachable_dial()).await;
+    let row = WIDE + CELL_OVERHEAD;
+    // Each earlier result keeps all its rows and stays under one result's room.
+    let each = MAX_RESULT_BYTES / row;
+    let earlier = MAX_KEPT_BYTES / (each * row);
+    let left = MAX_KEPT_BYTES - earlier * each * row;
+    let fits = left.min(MAX_RESULT_BYTES) / row;
+    assert!(fits < each, "the session room must cut the last result shorter than one result's room does");
+    let fake = tokio::spawn(async move {
+        for _ in 0..earlier {
+            answer_wide(&mut peer, "SELECT payload FROM events", each, WIDE).await;
+        }
+        answer_wide(&mut peer, "SELECT payload FROM archive", each, WIDE).await;
+        peer
+    });
+    for index in 0..earlier {
+        match console.run("SELECT payload FROM events", index == 0).await.unwrap() {
+            ConsoleRun::Rows { row_count, truncated, .. } => {
+                assert_eq!(row_count as usize, each);
+                assert_eq!(truncated, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    match console.run("SELECT payload FROM archive", false).await.unwrap() {
+        ConsoleRun::Rows { row_count, truncated, .. } => {
+            assert_eq!(row_count as usize, fits);
+            assert_eq!(truncated, Some(Truncation::Bytes));
+        }
+        other => panic!("{other:?}"),
+    }
+    fake.await.unwrap();
+}
+
+// ---- COPY through the client ----
+
+const NO_COPY: &str = "The console cannot run COPY with STDIN or STDOUT. Use the local port and psql for that.";
+
+#[tokio::test]
+async fn copy_with_stdout_or_stdin_is_refused_and_the_session_goes_on() {
+    let (console, ended, mut peer) = opened(unreachable_dial()).await;
+    // Nothing of the refused statements goes out: the first frames the server sees are the next statement's.
+    let fake = tokio::spawn(async move {
+        answer_statement(&mut peer, "SELECT 1", &[("?column?", 23)], &one_row()).await;
+        peer
+    });
+    for sql in ["COPY t TO STDOUT", "/* load */ copy orders (id, note) from stdin with (format csv)", "COPY (SELECT 1) TO STDOUT WITH CSV"] {
+        match console.run(sql, true).await.unwrap() {
+            ConsoleRun::Failed { message, sqlstate, position, .. } => {
+                assert_eq!(message, NO_COPY, "{sql}");
+                assert_eq!((sqlstate, position), (None, None), "{sql}");
+            }
+            other => panic!("{sql}: {other:?}"),
+        }
+    }
+    assert!(matches!(
+        console.run("SELECT 1", true).await.unwrap(),
+        ConsoleRun::Rows { row_count: 1, .. }
+    ));
+    assert!(ended.now_or_never().is_none(), "the session ended");
+    fake.await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_to_a_file_goes_to_the_server() {
+    let (console, _ended, mut peer) = opened(unreachable_dial()).await;
+    let sql = "COPY orders TO '/var/lib/postgresql/orders.csv'";
+    let fake = tokio::spawn(async move {
+        answer_prepare(&mut peer, &[]).await;
+        assert_eq!(expect_query(&mut peer).await, sql);
+        let refusal = error_response("42501", "permission denied to COPY to a file", None);
+        peer.write_all(&frame(b'E', &refusal)).await.unwrap();
+        peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+        peer
+    });
+    match console.run(sql, true).await.unwrap() {
+        ConsoleRun::Failed { message, sqlstate, .. } => {
+            assert_eq!(message, "permission denied to COPY to a file");
+            assert_eq!(sqlstate.as_deref(), Some("42501"));
+        }
+        other => panic!("{other:?}"),
+    }
+    fake.await.unwrap();
+}
+
+#[test]
+fn only_a_copy_through_the_client_is_told_apart() {
+    for sql in [
+        "COPY t TO STDOUT",
+        "copy t to stdout",
+        "/* x */ copy t from stdin",
+        "-- load\nCOPY orders (id, note) FROM STDIN WITH (FORMAT csv)",
+        "COPY (SELECT 1) TO STDOUT WITH CSV",
+        "COPY (SELECT ')' FROM t) TO STDOUT",
+        "COPY t TO /* the client */ STDOUT",
+        "COPY BINARY t TO STDOUT",
+        "COPY t TO STDIN",
+        "COPY public.\"orders\" TO STDOUT",
+        "COPY public.from TO STDOUT",
+    ] {
+        assert!(copies_through_the_client(sql), "{sql}");
+    }
+    for sql in [
+        "COPY t TO '/var/lib/postgresql/t.csv'",
+        "COPY t FROM '/var/lib/postgresql/t.csv'",
+        "COPY t TO PROGRAM 'gzip > /tmp/t.gz'",
+        "COPY (SELECT stdout FROM t) TO '/var/lib/postgresql/t.csv'",
+        "COPY stdin FROM '/var/lib/postgresql/t.csv'",
+        "COPY \"from\" TO 'stdout'",
+        "SELECT 'COPY t TO STDOUT'",
+        "SELECT E'it\\'s COPY t TO STDOUT'",
+        "SELECT $$COPY t TO STDOUT$$",
+        "SELECT $body$ COPY t TO STDOUT $body$",
+        "-- COPY t TO STDOUT\nSELECT 1",
+        "/* COPY t /* nested */ TO STDOUT */ SELECT 1",
+        "SELECT \"COPY\" FROM t",
+        "PREPARE copy_rows AS SELECT $1",
+        "copying",
+        "",
+    ] {
+        assert!(!copies_through_the_client(sql), "{sql}");
+    }
+}

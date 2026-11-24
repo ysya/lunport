@@ -27,8 +27,28 @@ export function resultSummary(run: ConsoleRun | null): string {
 
 function truncation(run: Rows): string | null {
   if (run.truncated === "rows") return `Lunport kept the first ${count(run.row_count)} rows.`;
-  if (run.truncated === "bytes") return "Lunport kept the first 16 MiB.";
+  if (run.truncated === "bytes") {
+    return run.row_count === 0
+      ? "Lunport kept no rows: this result does not fit in its memory limit."
+      : `Lunport kept the first ${count(run.row_count)} rows, as many as fit in its memory limit.`;
+  }
   return null;
+}
+
+/** The most characters a grid cell draws, in its text and its title; Export still writes the whole value. */
+const CELL_CHARS = 2_000;
+
+/** `value` cut to `CELL_CHARS` characters, ending in "…" when cut, never between the halves of a surrogate pair. */
+export function cellText(value: string): string {
+  if (value.length <= CELL_CHARS) return value;
+  const last = value.charCodeAt(CELL_CHARS - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? CELL_CHARS - 1 : CELL_CHARS;
+  return `${value.slice(0, end)}…`;
+}
+
+function Cell({ value }: { value: string }) {
+  const shown = cellText(value);
+  return <td title={shown}><span className="console-cell">{shown}</span></td>;
 }
 
 function Grid({ run, page, offset }: { run: Rows; page: (string | null)[][]; offset: number }) {
@@ -47,7 +67,7 @@ function Grid({ run, page, offset }: { run: Rows; page: (string | null)[][]; off
             ? <td key={index}><span className="console-null">NULL</span></td>
             : cell === ""
               ? <td key={index} />
-              : <td key={index} title={cell}><span className="console-cell">{cell}</span></td>)}
+              : <Cell key={index} value={cell} />)}
         </tr>)}
       </tbody>
     </table>

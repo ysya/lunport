@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConsoleRun } from "@/bindings/ConsoleRun";
 import type { ResultTab } from "@/lib/database-console-session";
 import { DISABLED, buttonTag, text } from "@/components/keychain/test-markup";
-import { ResultTabs } from "./ResultTabs";
+import { ResultTabs, cellText } from "./ResultTabs";
 
 type Rows = Extract<ConsoleRun, { kind: "rows" }>;
 const statement = { from: 0, to: 21, text: "SELECT * FROM orders;" };
@@ -73,9 +73,30 @@ describe("ResultTabs", () => {
     expect(text(html)).toContain("Lunport kept the first 10,000 rows.");
   });
 
-  it("a_result_cut_at_the_byte_limit_says_so", () => {
-    const html = render([result(1, rows({ truncated: "bytes" }))]);
-    expect(text(html)).toContain("Lunport kept the first 16 MiB.");
+  it("a_result_cut_at_the_byte_limit_says_how_many_rows_it_kept", () => {
+    const html = render([result(1, rows({ row_count: 1_234, truncated: "bytes" }))]);
+    expect(text(html)).toContain("Rows 1–200 of 1,234");
+    expect(text(html)).toContain("Lunport kept the first 1,234 rows, as many as fit in its memory limit.");
+    expect(text(html)).not.toContain("16 MiB");
+  });
+
+  it("a_result_with_no_row_that_fits_the_byte_limit_says_none_was_kept", () => {
+    const html = render([result(1, rows({ row_count: 0, truncated: "bytes", first_page: [] }))]);
+    expect(text(html)).toContain("Rows 0–0 of 0");
+    expect(text(html)).toContain("Lunport kept no rows: this result does not fit in its memory limit.");
+  });
+
+  it("a_long_value_draws_its_first_2000_characters", () => {
+    const long = "a".repeat(5_000);
+    const html = render([result(1, rows({ row_count: 1, first_page: [["1", long]] }))]);
+    const shown = `${"a".repeat(2_000)}…`;
+    expect(html).toContain(`<td title="${shown}"><span class="console-cell">${shown}</span></td>`);
+    expect(html).not.toContain("a".repeat(2_001));
+  });
+
+  it("a_cut_value_never_ends_between_the_halves_of_a_character", () => {
+    expect(cellText(`${"a".repeat(1_999)}😀b`)).toBe(`${"a".repeat(1_999)}…`);
+    expect(cellText("a".repeat(2_000))).toBe("a".repeat(2_000));
   });
 
   it("a_statement_not_run_yet_says_so", () => {

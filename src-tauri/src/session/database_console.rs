@@ -134,6 +134,7 @@ const CANCEL_UNREACHABLE: &str =
     "Lunport could not reach Cloud SQL to cancel the query. It goes on running; close the tab to end the session.";
 const RESULT_GONE: &str = "This result is no longer kept. Run the statement again.";
 const SCHEMA_TOO_LARGE: &str = "The schema is too large to read.";
+const NO_COPY: &str = "The console cannot run COPY with STDIN or STDOUT. Use the local port and psql for that.";
 /// What a kept value costs beyond its text, so that a result of many NULLs still counts toward the byte limits.
 const CELL_OVERHEAD: usize = std::mem::size_of::<Option<String>>();
 /// The longest CommandComplete tag Lunport keeps; real tags are a word or two and a count.
@@ -656,6 +657,145 @@ async fn confirm_read_only(client: &Client, mode: ReadOnlyMode) -> Result<(), Op
     }
 }
 
+/// What `copies_through_the_client` sees of a statement outside parentheses.
+#[derive(Debug, PartialEq, Eq)]
+enum Token {
+    /// A bare word, in upper case: a keyword or an unquoted name.
+    Word(String),
+    Dot,
+    /// Anything else: a literal, a quoted name, an operator, an opening parenthesis.
+    Other,
+}
+
+/// Whether a byte goes on a bare word: a letter, a digit, `_`, `$` or any byte of a character past ASCII.
+fn word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+/// The end of a quoted run that starts after its opening `quote` at `from`: a doubled quote stays inside, and with `backslashes` a
+/// backslash takes the byte after it along.
+fn quoted_end(bytes: &[u8], from: usize, quote: u8, backslashes: bool) -> usize {
+    let mut at = from;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' if backslashes => at += 2,
+            byte if byte == quote => {
+                if bytes.get(at + 1) == Some(&quote) {
+                    at += 2;
+                } else {
+                    return at + 1;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The tokens of `sql` outside parentheses, past its comments, string literals (with `''`, `E'…'` and `$tag$…$tag$`) and quoted names.
+fn top_level_tokens(sql: &str) -> Vec<Token> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    let mut at = 0;
+    let mut push = |depth: usize, token: Token| {
+        if depth == 0 {
+            tokens.push(token);
+        }
+    };
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        match rest[0] {
+            byte if byte.is_ascii_whitespace() => at += 1,
+            b'-' if rest.starts_with(b"--") => {
+                at += rest.iter().position(|byte| *byte == b'\n').unwrap_or(rest.len());
+            }
+            b'/' if rest.starts_with(b"/*") => {
+                let mut nested = 0usize;
+                while at < bytes.len() {
+                    if bytes[at..].starts_with(b"/*") {
+                        nested += 1;
+                        at += 2;
+                    } else if bytes[at..].starts_with(b"*/") {
+                        nested -= 1;
+                        at += 2;
+                        if nested == 0 {
+                            break;
+                        }
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
+            b'\'' => {
+                at = quoted_end(bytes, at + 1, b'\'', false);
+                push(depth, Token::Other);
+            }
+            b'"' => {
+                at = quoted_end(bytes, at + 1, b'"', false);
+                push(depth, Token::Other);
+            }
+            b'$' => {
+                // `$tag$` opens a dollar-quoted literal that the same `$tag$` closes; `$1` is a parameter.
+                let len = rest[1..].iter().take_while(|byte| word_byte(**byte) && **byte != b'$').count();
+                let opens = rest.get(1 + len) == Some(&b'$') && (len == 0 || !rest[1].is_ascii_digit());
+                if opens {
+                    let tag = &rest[..len + 2];
+                    let body = at + tag.len();
+                    at = bytes[body..].windows(tag.len()).position(|window| window == tag).map_or(bytes.len(), |end| body + end + tag.len());
+                } else {
+                    at += 1 + rest[1..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+                }
+                push(depth, Token::Other);
+            }
+            b'(' => {
+                push(depth, Token::Other);
+                depth += 1;
+                at += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                at += 1;
+            }
+            b'.' => {
+                push(depth, Token::Dot);
+                at += 1;
+            }
+            byte if word_byte(byte) => {
+                let len = rest.iter().take_while(|byte| word_byte(**byte)).count();
+                let word = &rest[..len];
+                at += len;
+                if word.eq_ignore_ascii_case(b"e") && bytes.get(at) == Some(&b'\'') {
+                    at = quoted_end(bytes, at + 1, b'\'', true);
+                    push(depth, Token::Other);
+                } else {
+                    push(depth, Token::Word(String::from_utf8_lossy(word).to_ascii_uppercase()));
+                }
+            }
+            _ => {
+                push(depth, Token::Other);
+                at += 1;
+            }
+        }
+    }
+    tokens
+}
+
+/// Whether `sql`, one statement, is a COPY whose rows go through the client: its first `TO` or `FROM` outside parentheses names
+/// `STDOUT` or `STDIN` (PostgreSQL takes either word for the client, both ways). The console's simple queries cannot carry such a copy, so
+/// it never sends one. A COPY to or from a file, and a statement that only mentions COPY in a literal or a comment, are not such a copy.
+fn copies_through_the_client(sql: &str) -> bool {
+    let tokens = top_level_tokens(sql);
+    if tokens.first() != Some(&Token::Word("COPY".into())) {
+        return false;
+    }
+    // A keyword after a dot is a name: `public.from`.
+    let direction = (1..tokens.len()).find(|&index| {
+        matches!(&tokens[index], Token::Word(word) if word == "TO" || word == "FROM") && tokens[index - 1] != Token::Dot
+    });
+    direction.is_some_and(|index| matches!(tokens.get(index + 1), Some(Token::Word(word)) if word == "STDOUT" || word == "STDIN"))
+}
+
 /// A persistent read-only PostgreSQL session on one stream.
 pub(crate) struct ConsoleConnection {
     inner: Arc<Inner>,
@@ -672,6 +812,13 @@ impl ConsoleConnection {
     /// sentence, as it does when the connection drops. Its future is neither dropped nor raced.
     pub(crate) fn close(&self) {
         self.inner.end(ENDED_CLEANLY);
+    }
+
+    /// The cancel token of the session while one of the person's statements is on the wire; None otherwise, and for Lunport's own
+    /// catalog reads.
+    fn running_person_statement(&self) -> Option<QueryCancelToken> {
+        let state = self.inner.state.lock().unwrap();
+        state.running.as_ref().filter(|running| running.person).map(|_| self.inner.cancel_token.clone())
     }
 }
 
@@ -760,6 +907,9 @@ impl ConsoleConnection {
             return Err(ENDED.to_string());
         }
         valid_sql_within(sql, MAX_STATEMENT_BYTES).map_err(|error| error.to_string())?;
+        if copies_through_the_client(sql) {
+            return Ok(ConsoleRun::Failed { message: NO_COPY.to_string(), sqlstate: None, position: None, elapsed_ms: 0 });
+        }
         let canceled = {
             let mut state = inner.state.lock().unwrap();
             if state.person.is_some() {
@@ -1046,11 +1196,33 @@ impl ConsoleSession {
         ConsoleSession { connection, upstream, db_id, released: AtomicBool::new(false) }
     }
 
-    /// Ends the session as its tab closes: the connection closes and the route is released now, while a command may still hold the
-    /// session. Neither blocks.
+    /// Ends the session as its tab closes: a statement of the person's still running is canceled, the connection closes and the route is
+    /// released now, while a command may still hold the session. Nothing here blocks or waits.
     fn end(&self) {
+        self.cancel_running();
         self.connection.close();
         self.release();
+    }
+
+    /// Sends a cancel request for the person's running statement, so that the server stops it rather than running it until it next
+    /// writes. It is dialled now, before the route is released, and only with the material the database's connections keep: a refresh
+    /// would build a route again inside the upstream being released. The request goes out on a task of its own, bounded by
+    /// `CANCEL_WITHIN`; a failure is dropped, since the tab is gone.
+    fn cancel_running(&self) {
+        let Some(token) = self.connection.running_person_statement() else {
+            return;
+        };
+        let Dialling { material, stream } = self.upstream.connect(&self.db_id, None);
+        if material.is_none() {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            let _ = tokio::time::timeout(CANCEL_WITHIN, async move {
+                let mut stream = stream.await?;
+                token.cancel_query_raw(&mut stream, NoTls).await.map_err(io::Error::other)
+            })
+            .await;
+        });
     }
 
     /// Releases the session's route once. For a host route that drops the `HostPath`, which closes its forward and SSH session on a
