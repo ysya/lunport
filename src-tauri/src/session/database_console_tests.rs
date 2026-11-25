@@ -1070,25 +1070,56 @@ async fn close_all_ends_running_statements() {
     fake.await.unwrap();
 }
 
-/// An upstream that keeps material for the database: each dial hands the test the server end of its connection, and the log records
-/// the dials and releases in the order they came.
+/// How the cancel dial of a `KeptMaterial` upstream goes once its path is still open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CancelPath {
+    /// The dial reaches the instance and hands the test its server end.
+    Answers,
+    /// The dial fails.
+    Fails,
+    /// The dial never completes.
+    Hangs,
+}
+
+/// An upstream that keeps material for the database and reaches it as a host route does: `connect` answers at once, but the stream is
+/// dialled only when it is first polled, through a path that `release` closes. A dial polled after the release fails. The log records the
+/// connects, the dials and the releases in the order they came.
 struct KeptMaterial {
     log: Mutex<Vec<&'static str>>,
+    path_open: Arc<AtomicBool>,
+    cancel_path: CancelPath,
     dials: mpsc::UnboundedSender<DuplexStream>,
 }
 
 impl KeptMaterial {
     fn new() -> (Arc<KeptMaterial>, mpsc::UnboundedReceiver<DuplexStream>) {
+        Self::with(CancelPath::Answers)
+    }
+
+    fn with(cancel_path: CancelPath) -> (Arc<KeptMaterial>, mpsc::UnboundedReceiver<DuplexStream>) {
         let (dials, receiver) = mpsc::unbounded_channel();
-        (Arc::new(KeptMaterial { log: Mutex::new(Vec::new()), dials }), receiver)
+        let upstream = KeptMaterial { log: Mutex::new(Vec::new()), path_open: Arc::new(AtomicBool::new(true)), cancel_path, dials };
+        (Arc::new(upstream), receiver)
     }
 
     fn log(&self) -> Vec<&'static str> {
         self.log.lock().unwrap().clone()
     }
+
+    fn releases(&self) -> usize {
+        self.log().iter().filter(|entry| **entry == "release").count()
+    }
+
+    /// Waits up to `within` for the route to be released.
+    async fn released_within(&self, within: Duration) {
+        let end = tokio::time::Instant::now() + within;
+        while self.releases() == 0 && tokio::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
-impl Upstream for KeptMaterial {
+impl Upstream for Arc<KeptMaterial> {
     fn prepare(&self, _: &crate::sync::databases::SavedDatabase, _: &CancelToken) -> Result<Prepared, NotReady> {
         Err(NotReady::Failed("No preparation is scripted.".into()))
     }
@@ -1096,14 +1127,29 @@ impl Upstream for KeptMaterial {
     fn connect(&self, _: &str, material: Option<u64>) -> Dialling {
         assert_eq!(material, None, "a cancel request names no material");
         self.log.lock().unwrap().push("connect");
-        let (client, server) = tokio::io::duplex(1024);
-        let _ = self.dials.send(server);
-        Dialling { material: Some(1), stream: async move { Ok(Box::new(client) as BoxStream) }.boxed() }
+        let upstream = self.clone();
+        let stream = async move {
+            if !upstream.path_open.load(Ordering::SeqCst) {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "the path through the host is closed"));
+            }
+            upstream.log.lock().unwrap().push("dial");
+            match upstream.cancel_path {
+                CancelPath::Answers => {
+                    let (client, server) = tokio::io::duplex(1024);
+                    let _ = upstream.dials.send(server);
+                    Ok(Box::new(client) as BoxStream)
+                }
+                CancelPath::Fails => Err(io::Error::other("the instance refused the cancel connection")),
+                CancelPath::Hangs => std::future::pending().await,
+            }
+        };
+        Dialling { material: Some(1), stream: stream.boxed() }
     }
 
     fn forget(&self, _: &str, _: u64) {}
 
     fn release(&self, _: &str) {
+        self.path_open.store(false, Ordering::SeqCst);
         self.log.lock().unwrap().push("release");
     }
 }
@@ -1120,7 +1166,7 @@ async fn installed(consoles: &Consoles, upstream: &Arc<KeptMaterial>) -> DuplexS
         }
     );
     let (connection, _, _) = open.unwrap();
-    let shared: Arc<dyn Upstream> = upstream.clone();
+    let shared: Arc<dyn Upstream> = Arc::new(upstream.clone());
     let (ticket, _) = consoles.begin("t1").unwrap();
     assert!(consoles.finish("t1", ticket, Arc::new(ConsoleSession::new(connection, shared, "db-orders".into()))));
     peer
@@ -1142,12 +1188,50 @@ async fn closing_while_running_cancels(close_all: bool) {
     } else {
         consoles.close("t1");
     }
-    assert_eq!(upstream.log(), vec!["connect", "release"], "the cancel was dialled before the route was released");
-    let mut cancel = tokio::time::timeout(Duration::from_secs(5), dials.recv()).await.unwrap().unwrap();
+    let mut cancel = tokio::time::timeout(Duration::from_secs(5), dials.recv())
+        .await
+        .expect("the cancel was dialled through the path before it closed")
+        .unwrap();
     let request = tokio::time::timeout(Duration::from_secs(5), read_cancel_request(&mut cancel)).await.unwrap();
     assert_eq!(request, (7, 11));
+    upstream.released_within(Duration::from_secs(5)).await;
+    assert_eq!(upstream.log(), vec!["connect", "dial", "release"], "the route was released once, after the cancel");
     assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
     fake.await.unwrap();
+    // A later close or drop releases nothing more.
+    consoles.close("t1");
+    consoles.close_all();
+    assert_eq!(upstream.releases(), 1);
+}
+
+/// Closes the tab `t1` while its statement runs, through a path whose cancel dial goes as `cancel_path` says, and checks the route is
+/// released exactly once all the same, within `within`.
+async fn closing_while_running_releases_once(cancel_path: CancelPath, within: Duration) {
+    let consoles = Consoles::default();
+    let (upstream, _dials) = KeptMaterial::with(cancel_path);
+    let peer = installed(&consoles, &upstream).await;
+    let (running_tx, running_rx) = oneshot::channel();
+    let fake = never_answers(peer, "SELECT pg_sleep(600)", running_tx);
+    let held = consoles.get("t1").unwrap();
+    let running = tokio::spawn(async move { held.connection.run("SELECT pg_sleep(600)", true).await });
+    running_rx.await.unwrap();
+    consoles.close("t1");
+    assert_eq!(running.await.unwrap().unwrap_err(), "The connection ended. Reconnect to go on.");
+    fake.await.unwrap();
+    upstream.released_within(within).await;
+    assert_eq!(upstream.log(), vec!["connect", "dial", "release"]);
+    consoles.close_all();
+    assert_eq!(upstream.releases(), 1);
+}
+
+#[tokio::test]
+async fn a_close_cancel_whose_dial_fails_still_releases_the_route_once() {
+    closing_while_running_releases_once(CancelPath::Fails, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn a_close_cancel_whose_dial_hangs_releases_the_route_once_after_its_bound() {
+    closing_while_running_releases_once(CancelPath::Hangs, CANCEL_WITHIN + Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -1171,7 +1255,7 @@ async fn closing_an_idle_tab_sends_no_cancel_request() {
         } else {
             consoles.close("t1");
         }
-        assert_eq!(upstream.log(), vec!["release"]);
+        assert_eq!(upstream.log(), vec!["release"], "the route was released at once");
         assert!(dials.try_recv().is_err(), "a cancel was dialled");
     }
 }
@@ -1371,4 +1455,19 @@ fn only_a_copy_through_the_client_is_told_apart() {
     ] {
         assert!(!copies_through_the_client(sql), "{sql}");
     }
+}
+
+#[tokio::test]
+async fn a_refused_copy_that_starts_a_run_drops_earlier_results() {
+    let (console, _ended, mut peer) = opened(unreachable_dial()).await;
+    let fake = tokio::spawn(async move {
+        answer_statement(&mut peer, "SELECT 1", &[("?column?", 23)], &one_row()).await;
+        peer
+    });
+    let ConsoleRun::Rows { result_id, .. } = console.run("SELECT 1", true).await.unwrap() else {
+        panic!("not rows");
+    };
+    assert!(matches!(console.run("COPY t TO STDOUT", true).await.unwrap(), ConsoleRun::Failed { .. }));
+    assert_eq!(console.page(result_id, 0).unwrap_err(), "This result is no longer kept. Run the statement again.");
+    fake.await.unwrap();
 }

@@ -368,6 +368,13 @@ struct Inner {
 }
 
 impl Inner {
+    /// Drops every kept result, as a statement that starts a run does.
+    fn drop_results(&self) {
+        let mut results = self.results.lock().unwrap();
+        results.kept.clear();
+        results.bytes = 0;
+    }
+
     /// Ends the session with `sentence`, unless it already ended with another.
     fn end(&self, sentence: &str) {
         self.ended.set(sentence);
@@ -907,9 +914,6 @@ impl ConsoleConnection {
             return Err(ENDED.to_string());
         }
         valid_sql_within(sql, MAX_STATEMENT_BYTES).map_err(|error| error.to_string())?;
-        if copies_through_the_client(sql) {
-            return Ok(ConsoleRun::Failed { message: NO_COPY.to_string(), sqlstate: None, position: None, elapsed_ms: 0 });
-        }
         let canceled = {
             let mut state = inner.state.lock().unwrap();
             if state.person.is_some() {
@@ -924,14 +928,19 @@ impl ConsoleConnection {
         if inner.ended.is_set() {
             return Err(ENDED.to_string());
         }
+        // Refused before anything is sent; a refusal that starts a run still drops the run before it, as any statement does.
+        if copies_through_the_client(sql) {
+            if fresh {
+                inner.drop_results();
+            }
+            return Ok(ConsoleRun::Failed { message: NO_COPY.to_string(), sqlstate: None, position: None, elapsed_ms: 0 });
+        }
         let Some(running) = inner.begin(Some(&canceled)).await else {
             return Ok(ConsoleRun::Canceled { elapsed_ms: 0 });
         };
         let _statement = RunningStatement(inner);
         if fresh {
-            let mut results = inner.results.lock().unwrap();
-            results.kept.clear();
-            results.bytes = 0;
+            inner.drop_results();
         }
         let started = Instant::now();
         let mut bound = Box::pin(cancel_bound(running.cancel_sent.subscribe()));
@@ -1064,8 +1073,8 @@ pub(crate) struct Ticket {
     serial: u64,
 }
 
-/// Ends the session a slot that left the registry held, outside the registry's lock: its connection closes and its route is released now,
-/// although a command still running on it holds it.
+/// Ends the session a slot that left the registry held, outside the registry's lock: its connection closes and its route is released (now,
+/// or once the cancel request for a statement still running went out), although a command still running on it holds it.
 fn end_removed(session: Option<Arc<ConsoleSession>>) {
     if let Some(session) = session {
         session.end();
@@ -1197,32 +1206,43 @@ impl ConsoleSession {
     }
 
     /// Ends the session as its tab closes: a statement of the person's still running is canceled, the connection closes and the route is
-    /// released now, while a command may still hold the session. Nothing here blocks or waits.
+    /// released, while a command may still hold the session: now, or once the cancel request went out. Nothing here blocks or waits.
     fn end(&self) {
-        self.cancel_running();
+        let releasing = self.cancel_running();
         self.connection.close();
-        self.release();
+        if !releasing {
+            self.release();
+        }
     }
 
     /// Sends a cancel request for the person's running statement, so that the server stops it rather than running it until it next
-    /// writes. It is dialled now, before the route is released, and only with the material the database's connections keep: a refresh
-    /// would build a route again inside the upstream being released. The request goes out on a task of its own, bounded by
-    /// `CANCEL_WITHIN`; a failure is dropped, since the tab is gone.
-    fn cancel_running(&self) {
+    /// writes. It is dialled only with the material the database's connections keep: a refresh would build a route again inside the
+    /// upstream being released. The request goes out on a task of its own, bounded by `CANCEL_WITHIN`, and a failure is dropped, since the
+    /// tab is gone. A host route's stream is dialled only once that task polls it, through the path the release closes, so the task releases
+    /// the route itself once the request went out, failed or ran out of time. True when that task took the release over; the session counts
+    /// as released from now on, so neither a later release nor the drop releases it again.
+    fn cancel_running(&self) -> bool {
         let Some(token) = self.connection.running_person_statement() else {
-            return;
+            return false;
         };
         let Dialling { material, stream } = self.upstream.connect(&self.db_id, None);
         if material.is_none() {
-            return;
+            return false;
         }
+        if self.released.swap(true, Ordering::SeqCst) {
+            // Released already: the path the stream would go through is closed.
+            return true;
+        }
+        let (upstream, db_id) = (Arc::clone(&self.upstream), self.db_id.clone());
         tauri::async_runtime::spawn(async move {
             let _ = tokio::time::timeout(CANCEL_WITHIN, async move {
                 let mut stream = stream.await?;
                 token.cancel_query_raw(&mut stream, NoTls).await.map_err(io::Error::other)
             })
             .await;
+            upstream.release(&db_id);
         });
+        true
     }
 
     /// Releases the session's route once. For a host route that drops the `HostPath`, which closes its forward and SSH session on a
