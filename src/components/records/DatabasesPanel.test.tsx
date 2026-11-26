@@ -250,7 +250,7 @@ describe("the Databases page", () => {
 
   it("the_library_navigation_lists_databases_after_tunnels", () => {
     const navigation = (panel: WorkspacePanel) => renderToStaticMarkup(
-      <LibraryNavigation overview={recordOverview()} panel={panel} navigate={vi.fn()} changeFilter={vi.fn()} />,
+      <LibraryNavigation collapsed={false} overview={recordOverview()} panel={panel} navigate={vi.fn()} changeFilter={vi.fn()} />,
     );
     const html = navigation("hosts");
     const library = html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'));
@@ -266,7 +266,7 @@ describe("the Databases page", () => {
 
   it("groups tunnels and Cloud SQL as connections", () => {
     const html = renderToStaticMarkup(
-      <LibraryNavigation overview={recordOverview()} panel="databases" navigate={vi.fn()} changeFilter={vi.fn()} />,
+      <LibraryNavigation collapsed={false} overview={recordOverview()} panel="databases" navigate={vi.fn()} changeFilter={vi.fn()} />,
     );
     expect(text(html)).toContain("Connections");
     expect(html).toContain('aria-current="page" aria-label="Cloud SQL"');

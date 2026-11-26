@@ -1,5 +1,5 @@
-import { useId, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { useId, useRef, useState, type ReactNode } from "react";
+import { ChevronLeft, ChevronRight, Download, PanelRight } from "lucide-react";
 import type { ConsoleRun } from "@/bindings/ConsoleRun";
 import type { ExportFormat } from "@/bindings/ExportFormat";
 import { PAGE_ROWS } from "@/lib/database-console";
@@ -42,79 +42,110 @@ function Cell({ value }: { value: string }) {
   return <td title={shown}><span className="console-cell">{shown}</span></td>;
 }
 
-function Grid({ run, page, offset }: { run: Rows; page: (string | null)[][]; offset: number }) {
-  const [selectedRow, setSelectedRow] = useState<number | null>(null);
-  const selectedButton = useRef<HTMLButtonElement>(null);
-  const id = useId();
-  const record = selectedRow === null ? null : page[selectedRow];
-  function closeDetails() {
-    selectedButton.current?.focus();
-    setSelectedRow(null);
-  }
-
-  return <div className="console-result-content">
-    <div className="console-grid">
-      <table>
-        <thead>
-          <tr>
-            <th className="console-row-number">#</th>
-            {run.columns.map((column, index) => <th key={index} scope="col" title={revealHidden(column.type_name)}>{revealHidden(column.name)}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {page.map((row, rowIndex) => {
-            const rowNumber = offset + rowIndex + 1;
-            const selected = rowIndex === selectedRow;
-            return <tr key={rowNumber} data-selected={selected} onClick={(event) => {
-              // Dragging across cells to select text should keep the grid in place.
-              const selection = event.currentTarget.ownerDocument.getSelection();
-              if (event.detail !== 0 && selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) return;
-              setSelectedRow(rowIndex);
-            }}>
-              <td className="console-row-number">
-                <button
-                  type="button"
-                  className="console-row-detail-button"
-                  aria-label={"Inspect row " + rowNumber}
-                  title="Inspect row"
-                  aria-expanded={selected}
-                  aria-controls={selected ? id : undefined}
-                  ref={selected ? selectedButton : undefined}
-                >{rowNumber}</button>
-              </td>
-              {row.map((cell, index) => cell === null
-                ? <td key={index}><span className="console-null">NULL</span></td>
-                : cell === ""
-                  ? <td key={index} />
-                  : <Cell key={index} value={cell} />)}
-            </tr>;
-          })}
-        </tbody>
-      </table>
-    </div>
-    {selectedRow !== null && record && <RecordDetails
-      key={selectedRow}
-      id={id}
-      rowNumber={offset + selectedRow + 1}
-      columns={run.columns}
-      row={record}
-      onClose={closeDetails}
-    />}
-  </div>;
-}
-
-function Pager({ result, live, preview, onPage, onExport }: {
+type ResultPageProps = {
   result: ResultTab & { run: Rows };
   live: boolean;
   preview: boolean;
   onPage: (offset: number) => void;
   onExport: (format: ExportFormat) => void;
-}) {
+};
+
+function ResultPage(props: ResultPageProps) {
+  const { run, page, offset } = props.result;
+  const [selectedRow, setSelectedRow] = useState<number | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsButton = useRef<HTMLButtonElement>(null);
+  const selectedButton = useRef<HTMLButtonElement>(null);
+  const openedFromRow = useRef(false);
+  const id = useId();
+  const record = selectedRow === null ? null : page[selectedRow];
+
+  function toggleDetails(fromRow: boolean) {
+    if (!detailsOpen) openedFromRow.current = fromRow;
+    setDetailsOpen(!detailsOpen);
+  }
+
+  function closeDetails() {
+    setDetailsOpen(false);
+    const trigger = openedFromRow.current ? selectedButton.current : detailsButton.current;
+    trigger?.focus({ preventScroll: true });
+  }
+
+  return <>
+    <div className="console-result-content">
+      <div className="console-grid">
+        <table>
+          <thead>
+            <tr>
+              <th className="console-row-number">#</th>
+              {run.columns.map((column, index) => <th key={index} scope="col" title={revealHidden(column.type_name)}>{revealHidden(column.name)}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {page.map((row, rowIndex) => {
+              const rowNumber = offset + rowIndex + 1;
+              const selected = rowIndex === selectedRow;
+              return <tr key={rowNumber} data-selected={selected} onClick={(event) => {
+                // Dragging across cells to select text should keep the grid in place.
+                const selection = event.currentTarget.ownerDocument.getSelection();
+                if (event.detail !== 0 && selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) return;
+                setSelectedRow(rowIndex);
+                if (event.detail !== 0) event.currentTarget.querySelector("button")?.focus({ preventScroll: true });
+              }}>
+                <td className="console-row-number">
+                  <button
+                    type="button"
+                    className="console-row-select"
+                    aria-label={"Select row " + rowNumber}
+                    aria-pressed={selected}
+                    aria-keyshortcuts={selected ? "Space" : undefined}
+                    ref={selected ? selectedButton : undefined}
+                    onKeyDown={(event) => {
+                      if (event.key !== " " || !selected || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+                      event.preventDefault();
+                      if (!event.repeat) toggleDetails(true);
+                    }}
+                  >{rowNumber}</button>
+                </td>
+                {row.map((cell, index) => cell === null
+                  ? <td key={index}><span className="console-null">NULL</span></td>
+                  : cell === ""
+                    ? <td key={index} />
+                    : <Cell key={index} value={cell} />)}
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      {detailsOpen && selectedRow !== null && record && <RecordDetails
+        id={id}
+        rowNumber={offset + selectedRow + 1}
+        columns={run.columns}
+        row={record}
+        onClose={closeDetails}
+      />}
+    </div>
+    <Pager {...props} details={
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={!record}
+        aria-expanded={detailsOpen}
+        aria-controls={detailsOpen ? id : undefined}
+        ref={detailsButton}
+        onClick={() => toggleDetails(false)}
+      ><PanelRight aria-hidden="true" />Details</Button>
+    } />
+  </>;
+}
+
+function Pager({ result, live, preview, onPage, onExport, details }: ResultPageProps & { details: ReactNode }) {
   const { run, offset, page } = result;
   const first = run.row_count === 0 ? 0 : offset + 1;
   const kept = truncation(run);
   return <div className="console-pager">
     <span>{preview ? `${count(run.row_count)} ${run.row_count === 1 ? "row" : "rows"} in preview` : `Rows ${count(first)}–${count(offset + page.length)} of ${count(run.row_count)}`}</span>
+    {preview && <span>Limit {PAGE_ROWS}</span>}
     {kept && <span>{kept}</span>}
     <span className="console-spacer" />
     {!preview && <>
@@ -125,6 +156,7 @@ function Pager({ result, live, preview, onPage, onExport }: {
         Next<ChevronRight aria-hidden="true" />
       </Button>
     </>}
+    {details}
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button size="xs" variant="ghost" disabled={!live}><Download aria-hidden="true" />Export</Button>
@@ -184,8 +216,8 @@ export function ResultTabs({ results, messages, activeResult, live, preview = fa
       : run?.kind === "rows" && active
         ? <>
           {run.row_count === 0 && run.truncated === null && <p className="console-outcome">No rows.</p>}
-          <Grid key={active.key + ":" + active.offset} run={run} page={active.page} offset={active.offset} />
-          <Pager result={{ ...active, run }} live={live} preview={preview} onPage={(offset) => onPage(active.key, offset)} onExport={(format) => onExport(active, index, format)} />
+          <ResultPage key={active.key + ":" + active.offset} result={{ ...active, run }} live={live} preview={preview}
+            onPage={(offset) => onPage(active.key, offset)} onExport={(format) => onExport(active, index, format)} />
         </>
         : <p className="console-outcome" data-kind={run?.kind}>{said ? revealHidden(said) : preview && busy ? "Loading rows…" : null}</p>}
   </section>;

@@ -61,9 +61,12 @@ describe("ResultTabs", () => {
     expect(html).toContain('title="text"');
   });
 
-  it("exposes a focusable details control for a result row", () => {
+  it("offers row selection independently of the initially disabled details control", () => {
     const html = render([result(1, rows({ row_count: 1, first_page: [["1", "pending"]] }))]);
-    expect(html).toMatch(/<button[^>]*aria-label="Inspect row 1"[^>]*aria-expanded="false"/);
+    expect(html).toMatch(/<button[^>]*aria-label="Select row 1"[^>]*aria-pressed="false"/);
+    const details = buttonTag(html, "Details");
+    expect(details).toContain(DISABLED);
+    expect(details).toContain('aria-expanded="false"');
   });
 
   it("null_is_a_muted_null_and_an_empty_string_an_empty_cell", () => {

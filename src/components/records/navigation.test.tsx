@@ -1,23 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LibraryNavigation } from "./LibraryNavigation";
 import { groupView, hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
-const navigationState = vi.hoisted(() => ({
-  librarySidebarCollapsed: false,
-}));
-
-vi.mock("@/stores/ui", () => ({
-  useUiStore: (selector: (state: typeof navigationState) => unknown) => selector(navigationState),
-}));
-
-afterEach(() => { navigationState.librarySidebarCollapsed = false; });
-
-function navigation() {
+function navigation(collapsed = false, panel: "hosts" | null = "hosts") {
   const parent = groupView();
   const child = groupView({ id: "0000000000000011", payload: { schema: 1, name: "API", parent_id: parent.id, defaults: {} } });
   return renderToStaticMarkup(<LibraryNavigation
     overview={recordOverview({ groups: [parent, child], hosts: [hostView({ payload: hostPayload({ tags: ["production"] }) })] })}
-    panel="hosts"
+    panel={panel}
+    collapsed={collapsed}
     navigate={vi.fn()}
     changeFilter={vi.fn()}
   />);
@@ -45,6 +36,7 @@ describe("Records navigation controls", () => {
     const html = renderToStaticMarkup(<LibraryNavigation
       overview={recordOverview({ transports: [hostTransport()] })}
       panel="transports"
+      collapsed={false}
       navigate={vi.fn()}
       changeFilter={vi.fn()}
     />);
@@ -58,6 +50,7 @@ describe("Records navigation controls", () => {
     const html = renderToStaticMarkup(<LibraryNavigation
       overview={recordOverview()}
       panel="hosts"
+      collapsed={false}
       navigate={vi.fn()}
       changeFilter={vi.fn()}
     />);
@@ -68,9 +61,14 @@ describe("Records navigation controls", () => {
     expect(html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'))).not.toContain("Google Cloud");
   });
 
+  it("keeps Library destinations available without marking one current during a database session", () => {
+    const html = navigation(true, null);
+    expect(html).toContain('aria-label="Cloud SQL"');
+    expect(html).not.toContain('aria-current="page"');
+  });
+
   it("keeps Hosts available in the collapsed rail", () => {
-    navigationState.librarySidebarCollapsed = true;
-    const html = navigation();
+    const html = navigation(true);
     expect(html).toContain('data-collapsed="true"');
     expect(html).toContain('aria-label="Hosts (1)"');
     expect(html).not.toContain('aria-label="Settings"');

@@ -45,7 +45,9 @@ function Toggle({ open, onToggle, label, count, icon }: { open: boolean; onToggl
  * The schema of a console's database: schema, then Tables, Views and Functions, then a relation's columns with their types. Only
  * what is open is drawn, so a schema of thousands of tables stays quick to filter. The filter matches names on this computer.
  */
-export function SchemaTree({ tree, error, canRefresh, onRefresh, canBrowse, onBrowse, preview, initialOpen = [] }: {
+export function SchemaTree({ id, hidden, tree, error, canRefresh, onRefresh, canBrowse, onBrowse, preview, initialOpen = [] }: {
+  id?: string;
+  hidden?: boolean;
   tree: Tree | null;
   error: string | null;
   canRefresh: boolean;
@@ -80,7 +82,7 @@ export function SchemaTree({ tree, error, canRefresh, onRefresh, canBrowse, onBr
   // While filtering, every schema and group with a match is open, so the matches show.
   const isOpen = (key: string) => (needle !== "" && !key.startsWith("relation:")) || shown.has(key);
 
-  return <aside className="console-schema" aria-label="Schema">
+  return <aside id={id} hidden={hidden} className="console-schema" aria-label="Schema">
     <div className="console-schema-tools">
       <div className="console-schema-filter">
         <Search className="size-3.5" aria-hidden="true" />

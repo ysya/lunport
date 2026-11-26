@@ -1,14 +1,14 @@
 import "./database-console.css";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { EditorView } from "@codemirror/view";
-import { Code, LoaderCircle, LockKeyhole, Play, Square } from "lucide-react";
+import { Code, LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, Square } from "lucide-react";
 import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
 import type { ExportFormat } from "@/bindings/ExportFormat";
 import type { ReadOnlyMode } from "@/bindings/ReadOnlyMode";
 import { Button } from "@/components/ui/button";
-import { exportResult, PAGE_ROWS } from "@/lib/database-console";
+import { exportResult } from "@/lib/database-console";
 import { ConsoleSession, type ConsoleState, type ResultTab, type TablePreview } from "@/lib/database-console-session";
 import { databaseGrantLine, databasePamStatusQuery, databasesQuery, routeSummary, type SavedDatabase } from "@/lib/databases";
 import { useRecordsStatus } from "@/lib/records";
@@ -17,7 +17,7 @@ import { statementsToRun } from "@/lib/sql-statements";
 import { useNow } from "@/lib/use-now";
 import { errorMessage } from "@/lib/utils";
 import { useTerminalStore, type DatabaseTab, type TerminalState } from "@/stores/terminals";
-import { ConsoleStatusBar, readOnlyLabel } from "./ConsoleStatusBar";
+import { ConsoleStatusBar } from "./ConsoleStatusBar";
 import { ResultTabs } from "./ResultTabs";
 import { SchemaTree } from "./SchemaTree";
 import { SqlEditor } from "./SqlEditor";
@@ -86,22 +86,22 @@ function TableColumns({ tree, preview }: { tree: ConsoleState["schema"]; preview
 }
 
 /** The console keeps the editor mounted when browsing data or reconnecting. */
-export function ConsoleView({ tab, state, mac, notice, viewRef, statusBar, actions }: {
-  tab: DatabaseTab;
+export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, actions }: {
   state: ConsoleState;
   /** Whether the keys read as macOS keys. */
   mac: boolean;
   /** Why the last Run or Export did nothing. */
   notice: string | null;
   viewRef: MutableRefObject<EditorView | null>;
-  statusBar: ReactNode;
+  connectionStatus: ReactNode;
   actions: ConsoleActions;
 }) {
   const [showSqlEditor, setShowSqlEditor] = useState(false);
+  const [schemaHidden, setSchemaHidden] = useState(false);
+  const schemaId = useId();
   const [previewPane, setPreviewPane] = useState<"data" | "columns">("data");
   const open = state.status === "open";
   const canRun = open && !state.running;
-  const mode = state.opened?.read_only ?? tab.readOnly;
   const preview = state.preview;
   const editorVisible = !preview || showSqlEditor;
   const previewName = preview ? revealHidden(preview.schema + "." + preview.relation) : null;
@@ -118,9 +118,24 @@ export function ConsoleView({ tab, state, mac, notice, viewRef, statusBar, actio
     actions.browse(schema, relation);
   }
 
+  const cancel = state.running && <Button size="sm" variant="outline" onClick={actions.cancel}>
+    <Square className="size-3" aria-hidden="true" />Cancel
+  </Button>;
+  const runControls = <>
+    <Button size="sm" disabled={!canRun} onClick={() => actions.run(false)}>
+      <Play className="size-3" aria-hidden="true" />Run<kbd>{mac ? "⌘↩" : "Ctrl+↩"}</kbd>
+    </Button>
+    <Button size="sm" variant="outline" disabled={!canRun} onClick={() => actions.run(true)}>
+      Run all<kbd>{mac ? "⇧⌘↩" : "Shift+Ctrl+↩"}</kbd>
+    </Button>
+    {cancel}
+  </>;
+
   return <div className="console-pane">
     <div className="console-body">
       <SchemaTree
+        id={schemaId}
+        hidden={schemaHidden}
         tree={state.schema}
         error={state.schemaError}
         canRefresh={open}
@@ -131,35 +146,35 @@ export function ConsoleView({ tab, state, mac, notice, viewRef, statusBar, actio
       />
       <section className="console-main" aria-label="Query">
         <div className="console-toolbar">
-          {preview && <Button size="sm" variant="outline" aria-expanded={editorVisible} onClick={() => setShowSqlEditor(!editorVisible)}>
-            <Code className="size-3.5" aria-hidden="true" />SQL editor
-          </Button>}
-          {editorVisible && <>
-            <Button size="sm" disabled={!canRun} onClick={() => actions.run(false)}>
-              <Play className="size-3" aria-hidden="true" />Run<kbd>{mac ? "⌘↩" : "Ctrl+↩"}</kbd>
+          <button
+            type="button"
+            className="console-icon-button"
+            aria-label={schemaHidden ? "Show schema" : "Hide schema"}
+            title={schemaHidden ? "Show schema" : "Hide schema"}
+            aria-controls={schemaId}
+            aria-expanded={!schemaHidden}
+            onClick={() => setSchemaHidden(!schemaHidden)}
+          >
+            {schemaHidden ? <PanelLeftOpen className="size-4" aria-hidden="true" /> : <PanelLeftClose className="size-4" aria-hidden="true" />}
+          </button>
+          {previewName !== null ? <>
+            <h2 className="console-preview-title" title={previewName}>{previewName}</h2>
+            <div className="console-preview-views" role="group" aria-label="Table view">
+              <Button size="sm" variant={previewPane === "data" ? "secondary" : "ghost"} aria-pressed={previewPane === "data"} onClick={() => setPreviewPane("data")}>Data</Button>
+              <Button size="sm" variant={previewPane === "columns" ? "secondary" : "ghost"} aria-pressed={previewPane === "columns"} onClick={() => setPreviewPane("columns")}>Columns</Button>
+            </div>
+            <Button size="sm" variant="outline" aria-expanded={editorVisible} onClick={() => setShowSqlEditor(!editorVisible)}>
+              <Code className="size-3.5" aria-hidden="true" />SQL editor
             </Button>
-            <Button size="sm" variant="outline" disabled={!canRun} onClick={() => actions.run(true)}>
-              Run all<kbd>{mac ? "⇧⌘↩" : "Shift+Ctrl+↩"}</kbd>
-            </Button>
-          </>}
-          {(editorVisible || state.running) && <Button size="sm" variant="outline" disabled={!state.running} onClick={actions.cancel}>
-            <Square className="size-3" aria-hidden="true" />Cancel
-          </Button>}
+            {!editorVisible && cancel}
+          </> : runControls}
           {(state.status === "opening" || state.running) && <LoaderCircle className="size-4 text-muted-foreground motion-safe:animate-spin" aria-label={state.running ? "Running" : "Connecting"} />}
-          {notice && <span className="console-notice" role="status">{revealHidden(notice)}</span>}
-          <span className="console-spacer" />
-          <span className="console-read-only" data-mode={mode}><LockKeyhole className="size-3" aria-hidden="true" />{readOnlyLabel(mode)}</span>
+          {connectionStatus}
         </div>
+        {notice && <p className="console-notice" role="status">{revealHidden(notice)}</p>}
         <Banner state={state} actions={actions} />
+        {preview && editorVisible && <div className="console-run-toolbar">{runControls}</div>}
         <SqlEditor viewRef={viewRef} schema={state.schema} hidden={!editorVisible} running={state.running} onRun={actions.run} onCancel={actions.cancel} />
-        {previewName !== null && <div className="console-preview-header">
-          <h2 className="console-preview-title" title={previewName}>{previewName}</h2>
-          <div className="console-preview-views" role="group" aria-label="Table view">
-            <Button size="sm" variant={previewPane === "data" ? "secondary" : "ghost"} aria-pressed={previewPane === "data"} onClick={() => setPreviewPane("data")}>Data</Button>
-            <Button size="sm" variant={previewPane === "columns" ? "secondary" : "ghost"} aria-pressed={previewPane === "columns"} onClick={() => setPreviewPane("columns")}>Columns</Button>
-          </div>
-          {previewPane === "data" && <span className="console-preview-limit">Preview · up to {PAGE_ROWS} rows</span>}
-        </div>}
         {preview && previewPane === "columns" ? <TableColumns tree={state.schema} preview={preview} /> : <ResultTabs
           results={state.results}
           messages={state.messages}
@@ -173,16 +188,15 @@ export function ConsoleView({ tab, state, mac, notice, viewRef, statusBar, actio
         />}
       </section>
     </div>
-    {statusBar}
   </div>;
 }
 
-/** The status bar with what the library knows of the database: its route, and its grant when it has a grant check. */
-function ConsoleFooter({ environment, database, iamUser, readOnly }: {
+/** Connection details from the saved database and its current IAM grant. */
+function ConsoleConnection({ environment, database, iamUser, readOnly }: {
   environment: DatabaseEnvironment;
   database: SavedDatabase | null;
   iamUser: string | null;
-  readOnly: ReadOnlyMode;
+  readOnly: ReadOnlyMode | null;
 }) {
   const overview = useRecordsStatus().data?.overview ?? null;
   const pam = database?.pam ?? null;
@@ -309,15 +323,14 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
     exportResult: (result, index, format) => void exportTo(result, index, format),
   };
 
-  const mode = state.opened?.read_only ?? tab.readOnly;
+  const mode = state.status === "open" ? state.opened?.read_only ?? null : null;
   return <ConsoleView
-    tab={tab}
     state={state}
     mac={mac}
     notice={notice}
     viewRef={viewRef}
     actions={actions}
-    statusBar={<ConsoleFooter environment={tab.environment} database={database} iamUser={state.opened?.iam_user ?? null} readOnly={mode} />}
+    connectionStatus={<ConsoleConnection environment={tab.environment} database={database} iamUser={state.opened?.iam_user ?? null} readOnly={mode} />}
   />;
 }
 

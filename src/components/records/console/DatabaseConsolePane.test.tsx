@@ -1,20 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { ConsoleState } from "@/lib/database-console-session";
-import type { DatabaseTab } from "@/stores/terminals";
 import { DISABLED, buttonTag, text } from "@/components/keychain/test-markup";
 import { ConsoleView, type ConsoleActions } from "./DatabaseConsolePane";
+import { ConsoleStatusBar } from "./ConsoleStatusBar";
 
-const TAB: DatabaseTab = {
-  kind: "database",
-  id: "tab-1",
-  databaseId: "00000000000000a1",
-  name: "Orders",
-  address: "orders-pg · acme-prod-123456",
-  environment: "prod",
-  readOnly: "locked",
-  state: "open",
-};
 const state = (patch: Partial<ConsoleState> = {}): ConsoleState => ({
   status: "open",
   message: null,
@@ -43,7 +33,9 @@ const actions = (): ConsoleActions => ({
 
 function render(current: ConsoleState, { mac = true, notice = null as string | null } = {}) {
   return renderToStaticMarkup(
-    <ConsoleView tab={TAB} state={current} mac={mac} notice={notice} viewRef={{ current: null }} statusBar={null} actions={actions()} />,
+    <ConsoleView state={current} mac={mac} notice={notice} viewRef={{ current: null }} actions={actions()}
+      connectionStatus={<ConsoleStatusBar environment="prod" database={null} route={{ alias: null, iap: false }}
+        iamUser={current.opened?.iam_user ?? null} readOnly={current.opened?.read_only ?? null} grant={null} />} />,
   );
 }
 
@@ -72,7 +64,7 @@ describe("ConsoleView", () => {
     expect(buttonTag(html, "Reconnect")).not.toContain(DISABLED);
   });
 
-  it("the_toolbar_has_run_run_all_and_cancel_only", () => {
+  it("the_toolbar_hides_cancel_until_a_query_runs", () => {
     const html = render(state());
     const words = text(html);
     expect(words).toContain("Run ⌘↩");
@@ -80,7 +72,7 @@ describe("ConsoleView", () => {
     expect(words).toContain("Read-only (locked)");
     expect(words).not.toMatch(/History|Format|Copy/);
     expect(buttonTag(html, "Run ⌘↩")).not.toContain(DISABLED);
-    expect(buttonTag(html, "Cancel")).toContain(DISABLED);
+    expect(words).not.toContain("Cancel");
   });
 
   it("off_macos_the_keys_read_ctrl", () => {
@@ -117,6 +109,15 @@ describe("ConsoleView", () => {
     expect(buttonTag(html, "SQL editor")).toContain('aria-expanded="false"');
     expect(html).toMatch(/class="console-editor" hidden=""/);
     expect(text(html)).toContain("Read-only (locked)");
+  });
+
+  it("keeps the schema toggle and table operations on the same toolbar", () => {
+    const html = render(state({ preview: { schema: "public", relation: "orders" } }));
+    const toolbar = html.slice(html.indexOf('class="console-toolbar"'), html.indexOf('class="console-editor"'));
+    expect(toolbar).toContain('aria-label="Hide schema"');
+    expect(toolbar).toContain("public.orders");
+    expect(toolbar).toContain("Columns");
+    expect(toolbar).toContain("SQL editor");
   });
 
   it("a_notice_shows_why_nothing_ran", () => {
