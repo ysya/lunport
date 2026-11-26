@@ -110,6 +110,8 @@ tokio-postgres = { version = "0.7.18", default-features = false }
 
 [dev-dependencies]
 ts-rs = "10"
+# A paused clock for the database console's Cancel tests.
+tokio = { version = "1.52", features = ["test-util"] }
 mockito = "1"
 # Certificate authorities and certificates for the Cloud SQL TLS tests, made when a test runs; aws-lc-rs as rustls uses, not rcgen's
 # default ring.

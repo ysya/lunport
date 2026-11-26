@@ -83,6 +83,9 @@
     --destructive: #bf303b;
     --warning: #936100;
     --warning-foreground: #ffffff;
+    --env-prod: #bf303b;
+    --env-staging: #c08a00;
+    --env-dev: #8a8f98;
     --border: #d9dde4;
     --input: #c7cdd7;
     --ring: var(--primary);
@@ -124,6 +127,9 @@
     --destructive: #ff8087;
     --warning: #ffc533;
     --warning-foreground: #2a2000;
+    --env-prod: #ff7b84;
+    --env-staging: #e5b53a;
+    --env-dev: #a3a8b1;
     --border: #34373f;
     --input: #41454f;
     --ring: var(--primary);

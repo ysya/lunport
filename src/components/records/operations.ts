@@ -22,6 +22,7 @@ export async function connectSavedHost(
   if (tmux || terminalId === IN_APP_TERMINAL) {
     const payload = host.effective_payload;
     useTerminalStore.getState().open({
+      kind: "terminal",
       host: { id: hostId },
       name: payload.alias,
       address: `${payload.user}@${payload.hostname}:${payload.port}`,

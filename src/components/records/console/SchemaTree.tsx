@@ -1,0 +1,131 @@
+import { useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Folder, LoaderCircle, RotateCw, Search } from "lucide-react";
+import type { RelationNode } from "@/bindings/RelationNode";
+import type { SchemaNode } from "@/bindings/SchemaNode";
+import type { SchemaTree as Tree } from "@/bindings/SchemaTree";
+import { revealHidden } from "@/lib/reveal-hidden";
+
+const TRUNCATED = "Lunport shows the first 5,000 tables and views.";
+
+type Group = "tables" | "views" | "functions";
+const GROUP_NAMES: Record<Group, string> = { tables: "Tables", views: "Views", functions: "Functions" };
+const groupOf = (relation: RelationNode): Group => (relation.kind === "view" || relation.kind === "materialized_view" ? "views" : "tables");
+
+const schemaKey = (schema: string) => `schema:${schema}`;
+const groupKey = (schema: string, group: Group) => `group:${schema}:${group}`;
+const relationKey = (schema: string, relation: string) => `relation:${schema}:${relation}`;
+
+/** What shows open at first: the `public` schema (or the first one) with its tables, and each `schema.relation` of `initialOpen`. */
+function firstOpen(tree: Tree | null, initialOpen: string[]): Set<string> {
+  const open = new Set<string>();
+  const first = tree?.schemas.find((schema) => schema.name === "public") ?? tree?.schemas[0];
+  if (first) open.add(schemaKey(first.name)).add(groupKey(first.name, "tables"));
+  for (const name of initialOpen) {
+    const dot = name.indexOf(".");
+    const schema = tree?.schemas.find((candidate) => candidate.name === name.slice(0, dot));
+    const relation = schema?.relations.find((candidate) => candidate.name === name.slice(dot + 1));
+    if (!schema || !relation) continue;
+    open.add(schemaKey(schema.name)).add(groupKey(schema.name, groupOf(relation))).add(relationKey(schema.name, relation.name));
+  }
+  return open;
+}
+
+function Toggle({ open, onToggle, label, count, icon }: { open: boolean; onToggle: () => void; label: string; count?: number; icon?: boolean }) {
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return <button type="button" className="console-tree-toggle" aria-expanded={open} onClick={onToggle}>
+    <Chevron className="size-3 shrink-0" aria-hidden="true" />
+    {icon && <Folder className="size-3.5 shrink-0" aria-hidden="true" />}
+    <span className="console-tree-name" title={label}>{label}</span>
+    {count !== undefined && <span className="console-tree-count">{count.toLocaleString("en-US")}</span>}
+  </button>;
+}
+
+/**
+ * The schema of a console's database: schema, then Tables, Views and Functions, then a relation's columns with their types. Only
+ * what is open is drawn, so a schema of thousands of tables stays quick to filter. The filter matches names on this computer.
+ */
+export function SchemaTree({ tree, error, canRefresh, onRefresh, initialOpen = [] }: {
+  tree: Tree | null;
+  error: string | null;
+  canRefresh: boolean;
+  onRefresh: () => void;
+  /** `schema.relation` names drawn open at first. */
+  initialOpen?: string[];
+}) {
+  const [filter, setFilter] = useState("");
+  const [open, setOpen] = useState<Set<string> | null>(() => (tree ? firstOpen(tree, initialOpen) : null));
+  // The first tree to arrive decides what starts open; later refreshes keep what the person opened.
+  const shown = open ?? firstOpen(tree, initialOpen);
+  const toggle = (key: string) => {
+    const next = new Set(shown);
+    if (!next.delete(key)) next.add(key);
+    setOpen(next);
+  };
+  const needle = filter.trim().toLowerCase();
+  const schemas = useMemo(() => {
+    if (!tree) return [];
+    if (!needle) return tree.schemas;
+    return tree.schemas
+      .map((schema): SchemaNode => ({
+        ...schema,
+        relations: schema.relations.filter((relation) => relation.name.toLowerCase().includes(needle)),
+        functions: schema.functions.filter((fn) => fn.name.toLowerCase().includes(needle)),
+      }))
+      .filter((schema) => schema.relations.length > 0 || schema.functions.length > 0);
+  }, [tree, needle]);
+  // While filtering, every schema and group with a match is open, so the matches show.
+  const isOpen = (key: string) => (needle !== "" && !key.startsWith("relation:")) || shown.has(key);
+
+  return <aside className="console-schema" aria-label="Schema">
+    <div className="console-schema-tools">
+      <div className="console-schema-filter">
+        <Search className="size-3.5" aria-hidden="true" />
+        <input type="search" aria-label="Filter tables" placeholder="Filter tables…" value={filter} onChange={(event) => setFilter(event.target.value)} />
+      </div>
+      <button type="button" className="console-icon-button" aria-label="Refresh schema" title="Refresh schema" disabled={!canRefresh} onClick={onRefresh}>
+        <RotateCw className="size-3.5" aria-hidden="true" />
+      </button>
+    </div>
+    {error && <p className="console-schema-note" role="alert">{revealHidden(error)}</p>}
+    {tree?.truncated && <p className="console-schema-note">{TRUNCATED}</p>}
+    {!tree && !error && <LoaderCircle className="console-schema-loading size-4 motion-safe:animate-spin" aria-label="Loading schema" />}
+    <ul className="console-tree">
+      {schemas.map((schema) => {
+        const groups: Record<Group, number> = {
+          tables: schema.relations.filter((relation) => groupOf(relation) === "tables").length,
+          views: schema.relations.filter((relation) => groupOf(relation) === "views").length,
+          functions: schema.functions.length,
+        };
+        return <li key={schema.name}>
+          <Toggle open={isOpen(schemaKey(schema.name))} onToggle={() => toggle(schemaKey(schema.name))} label={revealHidden(schema.name)} icon />
+          {isOpen(schemaKey(schema.name)) && <ul>
+            {(Object.keys(groups) as Group[]).filter((group) => groups[group] > 0).map((group) => {
+              const key = groupKey(schema.name, group);
+              return <li key={group}>
+                <Toggle open={isOpen(key)} onToggle={() => toggle(key)} label={GROUP_NAMES[group]} count={groups[group]} />
+                {isOpen(key) && <ul>
+                  {group === "functions"
+                    ? schema.functions.map((fn, index) => <li key={`${fn.name}(${fn.arguments})#${index}`} className="console-tree-leaf">
+                      <span className="console-tree-name" title={revealHidden(`${fn.name}(${fn.arguments})`)}>{revealHidden(fn.name)}<span className="console-tree-type">({revealHidden(fn.arguments)})</span></span>
+                    </li>)
+                    : schema.relations.filter((relation) => groupOf(relation) === group).map((relation) => {
+                      const key = relationKey(schema.name, relation.name);
+                      return <li key={relation.name}>
+                        <Toggle open={isOpen(key)} onToggle={() => toggle(key)} label={revealHidden(relation.name)} />
+                        {isOpen(key) && <ul className="console-tree-columns">
+                          {relation.columns.map((column) => <li key={column.name} className="console-tree-leaf">
+                            <span className="console-tree-name" title={revealHidden(column.name)}>{revealHidden(column.name)}</span>
+                            <span className="console-tree-type">{revealHidden(column.type_name)}{column.primary_key ? " · PK" : ""}</span>
+                          </li>)}
+                        </ul>}
+                      </li>;
+                    })}
+                </ul>}
+              </li>;
+            })}
+          </ul>}
+        </li>;
+      })}
+    </ul>
+  </aside>;
+}

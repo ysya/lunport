@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { useTerminalStore } from "./terminals";
-const input = { host: { id: "saved-host" }, name: "web", address: "deploy@web:22", historyKey: "records:saved-host" };
+const input = { kind: "terminal" as const, host: { id: "saved-host" }, name: "web", address: "deploy@web:22", historyKey: "records:saved-host" };
+const database = { kind: "database" as const, databaseId: "db-1", name: "orders", address: "orders-pg · acme-prod-123456", environment: "prod" as const, readOnly: "locked" as const };
 beforeEach(() => useTerminalStore.getState().reset());
 describe("terminal workspace", () => {
   it("resumes a matching open tmux tab even when every tab slot is in use", () => {
@@ -52,6 +53,26 @@ describe("terminal workspace", () => {
     for (let index = 0; index < 8; index++) store.open(input);
     expect(() => store.open(input)).toThrow("maximum 8");
     expect(useTerminalStore.getState().tabs).toHaveLength(8);
+  });
+  it("a_database_tab_counts_toward_the_limit", () => {
+    const store = useTerminalStore.getState();
+    for (let index = 0; index < 7; index++) store.open(input);
+    store.open(database);
+    expect(() => store.open(input)).toThrow("Close a tab before opening another (maximum 8).");
+    expect(useTerminalStore.getState().tabs).toHaveLength(8);
+  });
+  it("database_tabs_are_named_apart", () => {
+    const store = useTerminalStore.getState();
+    store.open(database); store.open(database);
+    expect(useTerminalStore.getState().tabs.map((tab) => tab.name)).toEqual(["orders", "orders (2)"]);
+  });
+  it("changes the lock only on a database tab", () => {
+    const store = useTerminalStore.getState();
+    const db = store.open(database); const term = store.open(input);
+    store.setReadOnly(db, "not_locked"); store.setReadOnly(term, "not_locked"); store.setReadOnly("missing", "not_locked");
+    const [first, second] = useTerminalStore.getState().tabs;
+    expect(first).toMatchObject({ kind: "database", readOnly: "not_locked" });
+    expect(second).not.toHaveProperty("readOnly");
   });
   it("does not reactivate a closed tab or restore sessions after reset", () => {
     const store = useTerminalStore.getState(); const id = store.open(input);

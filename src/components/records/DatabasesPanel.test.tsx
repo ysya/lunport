@@ -2,7 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseAccess, DatabaseRow, DatabasesPanel, RouteGrant, StopDatabaseDialog } from "./DatabasesPanel";
+import { DatabaseAccess, DatabaseRow, DatabasesPanel, RouteGrant, StopDatabaseDialog, openDatabaseConsole } from "./DatabasesPanel";
+import { useTerminalStore } from "@/stores/terminals";
+import { toast } from "sonner";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
 import { hostPayload, hostTransport, hostView, recordOverview } from "./fixtures";
@@ -21,6 +23,7 @@ import { gcloudAccountsKey, pamStatusQuery, type GcloudAccountsView, type PamSta
 
 const ui = vi.hoisted(() => ({ librarySidebarCollapsed: false }));
 vi.mock("@/lib/ipc", () => ({ tauriInvoke: vi.fn() }));
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 vi.mock("@/lib/use-now", () => ({ useNow: vi.fn() }));
 vi.mock("@/stores/ui", () => ({ useUiStore: (selector: (state: typeof ui) => unknown) => selector(ui) }));
 
@@ -998,5 +1001,35 @@ describe("the environment badge", () => {
     expect(dev.has("text-muted-foreground")).toBe(true);
     expect(dev.has("bg-destructive")).toBe(false);
     expect(dev.has("text-warning")).toBe(false);
+  });
+});
+
+describe("opening a console from a database row", () => {
+  const drawRow = (view: DatabaseView) => renderToStaticMarkup(<table><tbody>{DatabaseRow({ row: view, hostAlias: null, busy: false, toggle: vi.fn() })}</tbody></table>);
+  beforeEach(() => useTerminalStore.getState().reset());
+  afterEach(() => useTerminalStore.getState().reset());
+
+  it("open_console_shows_on_every_row_that_is_not_removed", () => {
+    for (const phase of ["stopped", "starting", "running", "stopping", "error"] as const) {
+      expect(buttonTag(drawRow(row({ live: live(phase) })), "Open console"), phase).not.toContain(DISABLED);
+    }
+    expect(buttonTag(drawRow(row({ live: live("stopped") }, { local_port: null })), "Open console")).not.toContain(DISABLED);
+    expect(drawRow(row({ removed: true, live: live("running") }))).not.toContain("Open console");
+  });
+
+  it("opens_a_locked_tab_in_the_row_environment_with_the_instance_and_project_as_its_address", () => {
+    openDatabaseConsole(row({ environment: "dev" }));
+    const { tabs, activeId } = useTerminalStore.getState();
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]).toMatchObject({ kind: "database", databaseId: ORDERS.id, name: "Orders", address: "orders-pg · acme-prod-123456", environment: "dev", readOnly: "locked" });
+    expect(activeId).toBe(tabs[0].id);
+  });
+
+  it("shows_the_limit_error_as_a_toast", () => {
+    for (let index = 0; index < 8; index += 1) openDatabaseConsole(row());
+    expect(toast.error).not.toHaveBeenCalled();
+    openDatabaseConsole(row());
+    expect(toast.error).toHaveBeenCalledWith("Close a tab before opening another (maximum 8).");
+    expect(useTerminalStore.getState().tabs).toHaveLength(8);
   });
 });

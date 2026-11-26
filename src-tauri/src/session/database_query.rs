@@ -168,14 +168,21 @@ pub(crate) struct SqlResult {
 }
 
 fn valid_sql(sql: &str) -> Result<(), SqlError> {
+    valid_sql_within(sql, MAX_SQL_BYTES)
+}
+
+pub(crate) fn valid_sql_within(sql: &str, max_bytes: usize) -> Result<(), SqlError> {
     if sql.trim().is_empty()
-        || sql.len() > MAX_SQL_BYTES
+        || sql.len() > max_bytes
         || sql.chars().any(|c| {
             (c.is_control() && c != '\n' && c != '\t')
                 || crate::session::auth::is_deceptive_format(c)
         })
     {
-        return Err(SqlError::Rejected("Provide one SQL statement of at most 16 KiB without control or deceptive format characters.".into()));
+        return Err(SqlError::Rejected(format!(
+            "Provide one SQL statement of at most {} KiB without control or deceptive format characters.",
+            max_bytes / 1024
+        )));
     }
     Ok(())
 }
@@ -301,6 +308,7 @@ async fn run_on_stream_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::pg_fake::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -317,76 +325,22 @@ mod tests {
         writer.abort();
     }
 
-    fn frame(kind: u8, body: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![kind];
-        bytes.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
-        bytes.extend_from_slice(body);
-        bytes
-    }
-
-    async fn read_frame(peer: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
-        let mut header = [0u8; 5];
-        peer.read_exact(&mut header).await.unwrap();
-        let size = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
-        let mut body = vec![0; size - 4];
-        peer.read_exact(&mut body).await.unwrap();
-        (header[0], body)
-    }
-
-    fn text_column() -> Vec<u8> {
-        let mut body = 1u16.to_be_bytes().to_vec();
-        body.extend_from_slice(b"answer\0");
-        body.extend_from_slice(&0u32.to_be_bytes());
-        body.extend_from_slice(&0u16.to_be_bytes());
-        body.extend_from_slice(&25u32.to_be_bytes());
-        body.extend_from_slice(&(-1i16).to_be_bytes());
-        body.extend_from_slice(&(-1i32).to_be_bytes());
-        body.extend_from_slice(&0u16.to_be_bytes());
-        body
-    }
-
     #[tokio::test]
     async fn direct_read_uses_locked_cloud_sql_session_and_returns_text_rows() {
         let (client, mut peer) = tokio::io::duplex(16 * 1024);
         let server = tokio::spawn(async move {
-            let mut length = [0u8; 4];
-            peer.read_exact(&mut length).await.unwrap();
-            let mut startup = vec![0; u32::from_be_bytes(length) as usize - 4];
-            peer.read_exact(&mut startup).await.unwrap();
-            let startup = String::from_utf8_lossy(&startup);
+            let startup = accept_startup(&mut peer).await;
             assert!(startup.contains("frank@example.com"));
             assert!(startup.contains("cloudsql_session_read_only=locked"));
             assert!(!startup.contains("password"));
-            peer.write_all(&frame(b'R', &0u32.to_be_bytes()))
+            answer_prepare(&mut peer, &[("answer", 25)]).await;
+            assert_eq!(expect_query(&mut peer).await, "SELECT 1");
+            peer.write_all(&frame(b'T', &row_description(&[("answer", 25)])))
                 .await
                 .unwrap();
-            peer.write_all(&frame(b'Z', b"I")).await.unwrap();
-
-            loop {
-                let (kind, _) = read_frame(&mut peer).await;
-                if kind == b'S' {
-                    break;
-                }
-            }
-            peer.write_all(&frame(b'1', &[])).await.unwrap();
-            peer.write_all(&frame(b't', &0u16.to_be_bytes()))
+            peer.write_all(&frame(b'D', &data_row(&[Some("1")])))
                 .await
                 .unwrap();
-            peer.write_all(&frame(b'T', &text_column())).await.unwrap();
-            peer.write_all(&frame(b'Z', b"I")).await.unwrap();
-
-            loop {
-                let (kind, body) = read_frame(&mut peer).await;
-                if kind == b'Q' {
-                    assert_eq!(body, b"SELECT 1\0");
-                    break;
-                }
-            }
-            peer.write_all(&frame(b'T', &text_column())).await.unwrap();
-            let mut row = 1u16.to_be_bytes().to_vec();
-            row.extend_from_slice(&1u32.to_be_bytes());
-            row.push(b'1');
-            peer.write_all(&frame(b'D', &row)).await.unwrap();
             peer.write_all(&frame(b'C', b"SELECT 1\0")).await.unwrap();
             peer.write_all(&frame(b'Z', b"I")).await.unwrap();
         });
@@ -410,27 +364,9 @@ mod tests {
     async fn lost_write_response_reports_uncertain_outcome() {
         let (client, mut peer) = tokio::io::duplex(16 * 1024);
         let server = tokio::spawn(async move {
-            let mut length = [0u8; 4];
-            peer.read_exact(&mut length).await.unwrap();
-            let mut startup = vec![0; u32::from_be_bytes(length) as usize - 4];
-            peer.read_exact(&mut startup).await.unwrap();
-            assert!(!String::from_utf8_lossy(&startup).contains("cloudsql_session_read_only"));
-            peer.write_all(&frame(b'R', &0u32.to_be_bytes()))
-                .await
-                .unwrap();
-            peer.write_all(&frame(b'Z', b"I")).await.unwrap();
-            loop {
-                let (kind, _) = read_frame(&mut peer).await;
-                if kind == b'S' {
-                    break;
-                }
-            }
-            peer.write_all(&frame(b'1', &[])).await.unwrap();
-            peer.write_all(&frame(b't', &0u16.to_be_bytes()))
-                .await
-                .unwrap();
-            peer.write_all(&frame(b'n', &[])).await.unwrap();
-            peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+            let startup = accept_startup(&mut peer).await;
+            assert!(!startup.contains("cloudsql_session_read_only"));
+            answer_prepare(&mut peer, &[]).await;
             loop {
                 let (kind, _) = read_frame(&mut peer).await;
                 if kind == b'S' {
@@ -450,5 +386,12 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, SqlError::Uncertain(_)), "{error:?}");
         server.await.unwrap();
+    }
+
+    #[test]
+    fn valid_sql_within_names_its_limit() {
+        let error = valid_sql_within(&"x".repeat(300 * 1024), 256 * 1024).unwrap_err();
+        assert!(format!("{error:?}").contains("256 KiB"), "{error:?}");
+        assert!(valid_sql_within("SELECT 1", 256 * 1024).is_ok());
     }
 }

@@ -31,6 +31,8 @@ pub struct SessionRuntime {
     /// The local ports of the saved databases this device runs.
     pub(crate) databases: database_ports::DatabasePorts,
     pub embedded: std::sync::Arc<embedded::Terminals>,
+    /// The database consoles' sessions, one for each tab.
+    pub(crate) consoles: std::sync::Arc<database_console::Consoles>,
     pub deployments: deploy::Deployments,
     pub files: files::Transfers,
     pub auth_questions: std::sync::Arc<auth_window::AuthHub>,
@@ -52,7 +54,11 @@ pub(crate) mod database_path;
 pub(crate) mod database_ports;
 pub(crate) mod database_upstream;
 pub(crate) mod database_query;
+pub(crate) mod database_console;
+pub(crate) mod database_console_schema;
 pub(crate) mod pgwire;
+#[cfg(test)]
+pub(crate) mod pg_fake;
 pub mod embedded;
 pub mod auth;
 pub(crate) mod credential_approval;

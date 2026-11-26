@@ -1,9 +1,12 @@
 import { create } from "zustand";
 import type { TerminalHost, TmuxSessionInfo } from "@/lib/embedded-terminal";
 import { sameTmuxSession, type SessionIdentity, type TmuxWorkspaceLocation } from "@/lib/tmux-workspace-state";
+import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
+import type { ReadOnlyMode } from "@/bindings/ReadOnlyMode";
 
 export type TerminalState = "connecting" | "open" | "ended" | "error";
 export type TerminalTab = {
+  kind: "terminal";
   id: string;
   host: TerminalHost;
   name: string;
@@ -14,26 +17,38 @@ export type TerminalTab = {
   tmuxSession?: TmuxSessionInfo;
   state: TerminalState;
 };
+export type DatabaseTab = {
+  kind: "database";
+  id: string;
+  databaseId: string;
+  name: string;
+  address: string;
+  environment: DatabaseEnvironment;
+  readOnly: ReadOnlyMode;
+  state: TerminalState;
+};
+export type SessionTab = TerminalTab | DatabaseTab;
 type TerminalStore = {
-  tabs: TerminalTab[];
+  tabs: SessionTab[];
   activeId: string | null;
-  open: (tab: Omit<TerminalTab, "id" | "state" | "tmuxSession">) => string;
+  open: (tab: Omit<TerminalTab, "id" | "state" | "tmuxSession"> | Omit<DatabaseTab, "id" | "state">) => string;
+  setReadOnly: (id: string, readOnly: ReadOnlyMode) => void;
   activate: (id: string | null) => void;
   updateState: (id: string, state: TerminalState) => void;
   claimTmuxSession: (id: string, session?: TmuxSessionInfo) => boolean;
   close: (id: string) => void;
   reset: () => void;
 };
-function attachedTmux(tabs: TerminalTab[], historyKey: string, session: SessionIdentity, except?: string) {
-  return tabs.find((tab) => tab.id !== except && tab.historyKey === historyKey &&
-    (tab.state === "open" || tab.state === "connecting") && tab.tmuxSession && sameTmuxSession(tab.tmuxSession, session),
+function attachedTmux(tabs: SessionTab[], historyKey: string, session: SessionIdentity, except?: string) {
+  return tabs.find((tab): tab is TerminalTab => tab.kind === "terminal" && tab.id !== except && tab.historyKey === historyKey &&
+    (tab.state === "open" || tab.state === "connecting") && !!tab.tmuxSession && sameTmuxSession(tab.tmuxSession, session),
   );
 }
 /** Session metadata only. Terminal bytes, credentials and live handles are never persisted. */
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
   tabs: [], activeId: null,
   open: (input) => {
-    if (input.mode === "tmux" && input.tmuxResume) {
+    if (input.kind === "terminal" && input.mode === "tmux" && input.tmuxResume) {
       const existing = attachedTmux(get().tabs, input.historyKey, input.tmuxResume.session);
       if (existing) {
         set({ activeId: existing.id });
@@ -42,7 +57,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     }
     const id = crypto.randomUUID();
     set((current) => {
-      if (current.tabs.length >= 8) throw new Error("Close a terminal before opening another (maximum 8).");
+      if (current.tabs.length >= 8) throw new Error("Close a tab before opening another (maximum 8).");
       let name = input.name;
       let ordinal = 2;
       while (current.tabs.some((tab) => tab.name === name)) name = `${input.name} (${ordinal++})`;
@@ -50,12 +65,13 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
     return id;
   },
+  setReadOnly: (id, readOnly) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.kind === "database" && tab.readOnly !== readOnly ? { ...tab, readOnly } : tab) })),
   activate: (id) => set((current) => id === null || current.tabs.some((tab) => tab.id === id) ? { activeId: id } : {}),
   updateState: (id, state) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.state !== state ? { ...tab, state } : tab) })),
   claimTmuxSession: (id, session) => {
     const current = get();
     const tab = current.tabs.find((entry) => entry.id === id);
-    if (tab?.mode !== "tmux") return false;
+    if (tab?.kind !== "terminal" || tab.mode !== "tmux") return false;
     const existing = session && attachedTmux(current.tabs, tab.historyKey, session, id);
     if (existing) {
       set({ tabs: current.tabs.filter((entry) => entry.id !== id), activeId: current.activeId === id ? existing.id : current.activeId });

@@ -292,13 +292,15 @@ fn run_app(host: bool, start_hidden: bool) {
         })
         .on_page_load(|webview, payload| {
             if webview.label() == "main" && matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                // A reloaded workspace cannot own the old JavaScript terminal handles.
+                // A reloaded workspace cannot own the old JavaScript terminal handles, nor its console sessions.
                 webview.app_handle().state::<state::AppState>().session.embedded.close_all();
+                webview.app_handle().state::<state::AppState>().session.consoles.close_all();
             }
         })
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window.app_handle().state::<state::AppState>().session.embedded.close_all();
+                window.app_handle().state::<state::AppState>().session.consoles.close_all();
             }
             // The host key window: closing it refuses every key it was asking about.
             if window.label() == session::auth_window::AUTH_WINDOW {
@@ -434,6 +436,13 @@ fn run_app(host: bool, start_hidden: bool) {
             session::databases::databases_request_grant,
             session::databases::databases_request_route_grant,
             session::databases::databases_list_instances,
+            session::database_console::database_console_open,
+            session::database_console::database_console_close,
+            session::database_console::database_console_run,
+            session::database_console::database_console_page,
+            session::database_console::database_console_cancel,
+            session::database_console::database_console_schema,
+            session::database_console::database_console_export,
             os_auth::os_unlock_method,
             session::transports::transports_oslogin_profile,
             session::transports::transports_pam_status,
