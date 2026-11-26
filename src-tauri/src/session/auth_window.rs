@@ -152,7 +152,9 @@ impl NativeOwner {
             QuestionKind::Interactive => ("interactive", text.to_string(), None),
             QuestionKind::Grant => {
                 // The window shows the sentence and the form; the prompt itself is Lunport's own data.
-                let prompt = GrantPrompt::from_text(text);
+                // An AI client's suggestion is shown with the form, capped to the entitlement's maximum.
+                let suggestion = self.ai.as_ref().and_then(|ai| ai.grant.as_ref());
+                let prompt = GrantPrompt::from_text(text).map(|prompt| prompt.with_suggestion(suggestion));
                 (
                     "grant",
                     prompt.as_ref().map(GrantPrompt::sentence).unwrap_or_else(|| text.to_string()),
@@ -389,6 +391,33 @@ mod tests {
         match worker.join().unwrap() {
             Reply::Answer(secret) => assert_eq!(GrantAnswer::decode(&secret), Some(answer)),
             other => panic!("expected the answer, got {other:?}"),
+        }
+    }
+
+    /// An AI client's suggestion reaches the Request-a-grant form capped to the entitlement's maximum, next to the remembered
+    /// justification; a person's grant question shows none.
+    #[test]
+    fn a_grant_question_shows_the_ai_clients_suggestion_capped() {
+        use crate::session::protocol::{AiAsker, GrantSuggestion, SuggestedGrant};
+        let suggestion = GrantSuggestion { justification: Some("restart app-api after the deploy".into()), minutes: Some(120) };
+        let asker = AiAsker { client: "claude".into(), unreviewed: None, grant: Some(suggestion) };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()), max_minutes: Some(60), suggested: None };
+        for (ai, expected) in [
+            (Some(asker), Some(SuggestedGrant { justification: Some("restart app-api after the deploy".into()), minutes: Some(60), capped_from: Some(120) })),
+            (None, None),
+        ] {
+            let hub = Arc::new(AuthHub::default());
+            let owner = NativeOwner { ai, hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "mcp-1".into(), cancel: CancelToken::default() };
+            let text = prompt.to_text();
+            let worker = std::thread::spawn(move || owner.ask(QuestionKind::Grant, &text, true, None));
+            wait(&hub);
+            let q = hub.pending().remove(0);
+            let shown = q.grant.clone().expect("a grant form");
+            assert_eq!(shown.suggested, expected);
+            assert_eq!(shown.justification.as_deref(), Some("restart app-api"), "the remembered justification stays");
+            assert_eq!(shown.max_minutes, Some(60));
+            hub.resolve(&q.id, None).unwrap();
+            let _ = worker.join();
         }
     }
 
