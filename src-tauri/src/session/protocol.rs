@@ -1,11 +1,11 @@
 //! The local IPC protocol between the broker and its clients. A frame is `u32 length | u8 type | payload`, the
 //! length big-endian and counting the type byte and the payload. A control frame (`CONTROL`) carries one JSON message; a data frame
-//! (`DATA`) carries raw bytes: keystrokes from the client, terminal output (stdout and stderr merged by the PTY) from the broker.
+//! (`DATA`) carries raw bytes in both directions: shell I/O or the tmux control stream.
 //!
-//! This version speaks the shell subset: client → broker `hello`, `open_shell`, `window_change`, `answer`, `close` and data; broker →
-//! client `opened`, `question`, `event`, `exited` and data. `exec` and the MCP client are not served yet: they are read, so that the broker can
-//! refuse them by name. Both sides are this same executable, but after an update the CLI on disk can be newer than the app that is
-//! running, so `hello` carries `PROTOCOL_VERSION`.
+//! A terminal says `hello` then requests a shell with `open_shell` or a tmux picker with `open_tmux`. The tmux path lists sessions
+//! in `tmux_sessions` and waits for `tmux_select` before starting the control stream. Both paths report `opened`, `question`,
+//! `event` and `exited`. Both sides are this same executable, but after an update the CLI on disk can be newer than the running
+//! app, so `hello` carries `PROTOCOL_VERSION`.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -177,6 +177,23 @@ pub struct PtyRequest {
     pub term: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxSession {
+    pub id: String,
+    pub name: String,
+    pub created: String,
+    pub server: String,
+    pub destroy_unattached: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TmuxTarget {
+    Attach { id: String, created: String, server: String },
+    Create { name: String },
+}
+
 /// A message from a client.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -189,6 +206,8 @@ pub enum ClientMessage {
         client_info: Option<serde_json::Value>,
     },
     OpenShell { host: HostQuery, pty: PtyRequest },
+    OpenTmux { host: HostQuery },
+    TmuxSelect { target: TmuxTarget },
     /// A command without a terminal (not served yet). Read so that it can be refused by name; its fields are not looked at.
     Exec {},
     /// The client's terminal was resized.
@@ -216,6 +235,8 @@ impl fmt::Debug for ClientMessage {
                 f.debug_struct("Hello").field("client", client).field("version", version).field("client_info", client_info).finish()
             }
             ClientMessage::OpenShell { host, pty } => f.debug_struct("OpenShell").field("host", host).field("pty", pty).finish(),
+            ClientMessage::OpenTmux { host } => f.debug_struct("OpenTmux").field("host", host).finish(),
+            ClientMessage::TmuxSelect { .. } => f.write_str("TmuxSelect"),
             ClientMessage::Exec {} => f.write_str("Exec"),
             ClientMessage::WindowChange { cols, rows } => f.debug_struct("WindowChange").field("cols", cols).field("rows", rows).finish(),
             ClientMessage::Answer { question_id, value, cancel } => f
@@ -382,6 +403,8 @@ pub mod kinds {
     pub const CONNECT: &str = "connect";
     /// The shell could not be started.
     pub const SHELL: &str = "shell";
+    /// The tmux session could not be listed or used.
+    pub const TMUX: &str = "tmux";
     /// Input did not reach the server in time.
     pub const INPUT: &str = "input";
 }
@@ -392,6 +415,7 @@ pub mod kinds {
 pub enum ServerMessage {
     /// The shell is open: raw mode and data from here on.
     Opened { session_id: String },
+    TmuxSessions { sessions: Vec<TmuxSession> },
     Question(Question),
     Event(Event),
     /// The shell ended: its exit code, or the signal that killed it; both `None` when it ended without either (a lost connection, which
@@ -402,6 +426,20 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_open_discovery_and_selection_have_typed_frames() {
+        let open = br#"{"type":"open_tmux","host":{"id":"web-1"}}"#;
+        assert_ne!(decode::<ClientMessage>(open).unwrap(), ClientMessage::Unknown);
+        let selection = br#"{"type":"tmux_select","target":{"kind":"attach","id":"$1","created":"123","server":"45:120"}}"#;
+        assert_ne!(
+            decode::<ClientMessage>(selection).unwrap(),
+            ClientMessage::Unknown
+        );
+        let sessions = br#"{"type":"tmux_sessions","sessions":[{"id":"$1","name":"work","created":"123","server":"45:120","destroyUnattached":true}]}"#;
+        let sessions = decode::<ServerMessage>(sessions).unwrap();
+        assert_eq!(serde_json::to_value(sessions).unwrap()["sessions"][0]["destroyUnattached"], true);
+    }
 
     fn frames_of(bytes: &[u8]) -> Vec<Result<Option<Frame>, String>> {
         let mut reader = bytes;

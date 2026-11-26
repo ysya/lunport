@@ -7,6 +7,13 @@ import { connectSavedHost } from "./operations";
 import { hostView, recordOverview } from "./fixtures";
 afterEach(() => { useTerminalStore.getState().reset(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe("saved-host terminal destination", () => {
+  it("opens a tmux workspace in the app even when an external terminal is selected", async () => {
+    const backend = vi.fn(); stubBackend(backend);
+    const host = hostView();
+    await connectSavedHost(recordOverview({ hosts: [host] }), host.id, "external", true, {});
+    expect(backend).not.toHaveBeenCalled();
+    expect(useTerminalStore.getState().tabs).toEqual([expect.objectContaining({ host: { id: host.id }, mode: "tmux", state: "connecting" })]);
+  });
   it("opens a stable-ID app session without launching an external terminal or recording premature success", async () => {
     const backend = vi.fn(); stubBackend(backend);
     const host = hostView();

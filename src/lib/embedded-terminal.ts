@@ -2,11 +2,16 @@ import { Channel } from "@tauri-apps/api/core";
 import { tauriInvoke } from "./ipc";
 
 export type TerminalHost = { id: string } | { alias: string };
+export type TmuxSessionInfo = { id: string; name: string; created: string; server: string; destroyUnattached: boolean };
+export type TmuxSelection =
+  | ({ kind: "attach" } & Pick<TmuxSessionInfo, "id" | "created" | "server">)
+  | { kind: "create"; name: string };
 
 export type TerminalEvent =
   | { type: "opened"; session_id: string }
   | { type: "event"; event: "connected" | "disconnected" | "error" | "banner"; kind?: string; text?: string; reason?: string }
   | { type: "question"; text: string }
+  | { type: "tmux_sessions"; sessions: TmuxSessionInfo[] }
   | { type: "exited"; code: number | null; signal: string | null }
   | { type: "closed" }
   | { type: "bridge_error"; text: string };
@@ -20,6 +25,8 @@ export class EmbeddedTerminal {
   readonly id = crypto.randomUUID();
   private disposed = false;
   private opened = false;
+  private tmux = false;
+  private awaitingTmuxSelection = false;
   private pending = 0;
   private sent = Promise.resolve();
   private received = 0;
@@ -48,24 +55,37 @@ export class EmbeddedTerminal {
           const event = JSON.parse(new TextDecoder().decode(packet.subarray(1))) as TerminalEvent;
           if (event.type === "opened") {
             this.opened = true;
+            this.awaitingTmuxSelection = false;
             // The pane/font can change while native authentication is pending.
             if (this.dimensions) this.resize(this.dimensions.cols, this.dimensions.rows);
+          } else if (event.type === "tmux_sessions" && this.tmux) {
+            this.awaitingTmuxSelection = true;
+          } else if (event.type === "closed" || event.type === "exited" || event.type === "bridge_error"
+            || (event.type === "event" && (event.event === "error" || event.event === "disconnected"))) {
+            this.opened = false;
+            this.awaitingTmuxSelection = false;
           }
-          if (event.type === "closed" || event.type === "exited" || event.type === "bridge_error") this.opened = false;
-          if (event.type === "event" && (event.event === "error" || event.event === "disconnected")) this.opened = false;
           this.event(event);
         } else throw new Error("Unknown terminal packet");
       } catch (error) { this.fail(error); }
     };
   }
-  async start(host: TerminalHost, cols: number, rows: number) {
+  async start(host: TerminalHost, cols: number, rows: number, mode?: "tmux") {
     if (this.disposed) return;
+    this.tmux = mode === "tmux";
     this.dimensions = { cols, rows };
-    this.opening = tauriInvoke("terminal_open", { id: this.id, host, cols, rows, output: this.output });
+    this.opening = tauriInvoke("terminal_open", {
+      id: this.id, host, cols, rows, output: this.output, ...(this.tmux ? { tmux: true } : {}),
+    });
     try {
       await this.opening;
     } catch (error) { this.fail(error); }
     finally { this.opening = null; }
+  }
+  async selectTmux(target: TmuxSelection) {
+    if (this.disposed || !this.awaitingTmuxSelection) throw new Error("Connect to the host before selecting a tmux session.");
+    this.awaitingTmuxSelection = false;
+    await tauriInvoke("terminal_tmux_select", { id: this.id, target });
   }
   private async acknowledge() {
     if (this.acking || this.disposed) return;
@@ -93,7 +113,7 @@ export class EmbeddedTerminal {
     }
   }
   resize(cols: number, rows: number) {
-    if (this.disposed || cols < 1 || rows < 1) return;
+    if (this.disposed || this.tmux || cols < 1 || rows < 1) return;
     this.dimensions = { cols, rows };
     if (!this.opened) return;
     this.sent = this.sent.then(async () => {

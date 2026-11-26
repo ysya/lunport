@@ -9,6 +9,35 @@ const open = () => event({ type: "opened", session_id: "broker-session" });
 beforeEach(() => { mocks.invoke.mockReset().mockResolvedValue(undefined); mocks.channels.length = 0; });
 
 describe("embedded SSH transport", () => {
+  it("selects a tmux target on the discovered connection without resizing an SSH PTY", async () => {
+    const events = vi.fn();
+    const terminal = new EmbeddedTerminal(vi.fn(), events);
+    await terminal.start({ id: "host" }, 80, 24, "tmux");
+    const target = { kind: "attach", id: "$1", created: "1740000000", server: "427" } as const;
+    await expect(terminal.selectTmux(target)).rejects.toThrow();
+    const discovery = { type: "tmux_sessions", sessions: [{ id: "$1", name: "build", created: "1740000000", server: "427:1740000000", destroyUnattached: false }] };
+    event(discovery);
+    expect(events).toHaveBeenLastCalledWith(discovery);
+    await terminal.selectTmux(target);
+    open();
+    terminal.resize(120, 40);
+    await Promise.resolve();
+    expect(mocks.invoke).toHaveBeenCalledWith("terminal_open", expect.objectContaining({ tmux: true }));
+    expect(mocks.invoke).toHaveBeenCalledWith("terminal_tmux_select", { id: terminal.id, target });
+    expect(mocks.invoke.mock.calls.filter(([name]) => name === "terminal_tmux_select")).toHaveLength(1);
+    expect(mocks.invoke.mock.calls.some(([name]) => name === "terminal_resize")).toBe(false);
+    terminal.close();
+  });
+
+  it("rejects a tmux choice as soon as discovery loses its connection", async () => {
+    const terminal = new EmbeddedTerminal(vi.fn(), vi.fn());
+    await terminal.start({ id: "host" }, 80, 24, "tmux");
+    event({ type: "tmux_sessions", sessions: [] });
+    event({ type: "event", event: "disconnected", reason: "Connection lost" });
+    await expect(terminal.selectTmux({ kind: "create", name: "build" })).rejects.toThrow();
+    expect(mocks.invoke.mock.calls.some(([name]) => name === "terminal_tmux_select")).toBe(false);
+    terminal.close();
+  });
   it("acknowledges short output bursts together while writing them immediately", async () => {
     vi.useFakeTimers();
     try {

@@ -6,6 +6,7 @@ import {
   FolderInput,
   Pencil,
   Info,
+  SquareTerminal,
   Tag,
   Trash2,
 } from "lucide-react";
@@ -43,6 +44,7 @@ export function HostContextMenu({
   organizeDisabled,
   connectDisabled,
   connect,
+  connectTmux,
   edit,
   duplicate,
   inspect,
@@ -57,6 +59,7 @@ export function HostContextMenu({
   organizeDisabled: boolean;
   connectDisabled: boolean;
   connect?: () => void;
+  connectTmux?: () => void;
   edit?: () => void;
   duplicate?: () => void;
   inspect?: () => void;
@@ -173,6 +176,15 @@ export function HostContextMenu({
             <ArrowUpRight />
             Connect
           </ContextMenuItem>
+          {connectTmux && (
+            <ContextMenuItem disabled={disabled || connectDisabled} onSelect={() => {
+              openingDialog.current = true;
+              connectTmux();
+            }}>
+              <SquareTerminal />
+              Connect with tmux…
+            </ContextMenuItem>
+          )}
           <ContextMenuItem
             disabled={disabled || !edit}
             onSelect={() => {

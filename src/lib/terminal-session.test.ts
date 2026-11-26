@@ -37,6 +37,21 @@ beforeEach(() => {
 afterEach(() => { session.dispose(); vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe("terminal reconnect lifecycle", () => {
+  it("refreshes tmux choices on reconnect and discards discovery from an old connection", async () => {
+    const discovered = vi.fn();
+    session = new TerminalSession({ id: "saved-host" }, output, (state) => statuses.push(state), prepare, { tmuxSessions: discovered });
+    await session.start(80, 24);
+    const previous = current();
+    const sessions = [{ id: "$1", name: "build", created: "1740000000", server: "427:1740000000", destroyUnattached: false }];
+    previous.event({ type: "tmux_sessions", sessions });
+    expect(discovered).toHaveBeenCalledExactlyOnceWith(sessions);
+    expect(previous.start).toHaveBeenCalledWith({ id: "saved-host" }, 80, 24, "tmux");
+    open(); lost(); await vi.advanceTimersByTimeAsync(2000);
+    previous.event({ type: "tmux_sessions", sessions });
+    current().event({ type: "tmux_sessions", sessions: [] });
+    expect(discovered.mock.calls).toEqual([[sessions], [[]]]);
+    expect(status().kind).toBe("connecting");
+  });
   it("retains a missing-key error through EOF without retrying, and clears its cause on manual retry", async () => {
     await session.start(80, 24);
     const text = "simple needs key fc3f11fff708a1229b4e877f447dbf7f material on this device.";

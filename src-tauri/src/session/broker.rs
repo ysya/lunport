@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,8 +18,8 @@ use super::auth::{KeyStore, Owner, Reply};
 use super::connect::{CancelToken, ConnectFailure, Connector, HostKeyConfirmer, CANCELLED};
 use super::grants::GrantGates;
 use super::directory::HostDirectory;
-use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
-use super::relay::{run_shell, tell, tell_all, ClientLink, ShellControl, SETTLE};
+use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, TmuxTarget, PROTOCOL_VERSION};
+use super::relay::{run_terminal, tell, tell_all, ChannelRequest, ClientLink, ShellControl, SETTLE};
 use crate::ipc::peer::{self, ProcInfo};
 use crate::ipc::server::{Handler, Stream};
 use crate::ssh::{Hop, HostId, Pty, SshEngine};
@@ -80,6 +80,11 @@ struct Conn {
     control: Arc<ShellControl>,
     cancel: CancelToken,
     requester_id:Option<String>,
+}
+
+enum TerminalRequest {
+    Shell(Pty),
+    Tmux(Receiver<TmuxTarget>),
 }
 
 /// Who has given the client of a session that was still being connected the outcome of the connect. Whoever comes second leaves it
@@ -322,7 +327,8 @@ impl Broker {
         let (host, pty) = match first_frame(&mut reader) {
             First::Silent => return,
             First::Control(payload) => match decode::<ClientMessage>(&payload) {
-                Ok(ClientMessage::OpenShell { host, pty }) => (host, pty),
+                Ok(ClientMessage::OpenShell { host, pty }) => (host, Some(pty)),
+                Ok(ClientMessage::OpenTmux { host }) => (host, None),
                 Ok(ClientMessage::Exec {}) => return refuse(kinds::UNSUPPORTED, "Running a command through Lunport's sessions is not supported yet."),
                 Ok(_) | Err(_) => return refuse(kinds::PROTOCOL, "Lunport expected open_shell."),
             },
@@ -330,9 +336,20 @@ impl Broker {
         };
         let _ = set_read_timeout(&reader, None);
         let owner = Arc::new(ConnectionOwner::new(Arc::clone(&link)));
-        let control = Arc::new(ShellControl::new());
+        let (control, mut selection, request) = match pty {
+            Some(pty) => {
+                let control = ShellControl::new();
+                control.resize(pty.cols, pty.rows);
+                let pty = Pty { term: pty.term, cols: pty.cols, rows: pty.rows };
+                (control, None, TerminalRequest::Shell(pty))
+            }
+            None => {
+                let (sender, receiver) = mpsc::sync_channel(1);
+                (ShellControl::for_tmux(), Some(sender), TerminalRequest::Tmux(receiver))
+            }
+        };
+        let control = Arc::new(control);
         let cancel = CancelToken::default();
-        control.resize(pty.cols, pty.rows);
         let Ok(closer) = reader.try_clone() else { return };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let conn = Conn { id, link: Arc::clone(&link), closer: Arc::new(closer), owner: Arc::clone(&owner), control: Arc::clone(&control), cancel: cancel.clone(), requester_id:crate::mcp::RequestContext::from_peer(pid,None).requester_id };
@@ -342,10 +359,9 @@ impl Broker {
         }
         let worker = {
             let (broker, conn) = (Arc::clone(self), conn.clone());
-            let pty = Pty { term: pty.term, cols: pty.cols, rows: pty.rows };
             std::thread::Builder::new().name(crate::identity::thread_name("session")).spawn(move || {
                 let _over = SessionOver { broker: &broker, conn: &conn };
-                broker.run_session(&conn, &host, pty);
+                broker.run_session(&conn, &host, request);
             })
         };
         let Ok(worker) = worker else {
@@ -358,6 +374,11 @@ impl Broker {
                 Ok(Some(Frame::Control(payload))) => match decode::<ClientMessage>(&payload) {
                     Ok(ClientMessage::WindowChange { cols, rows }) => control.resize(cols, rows),
                     Ok(ClientMessage::Answer { question_id, value, cancel: cancelled }) => owner.answer(&question_id, value.map(Zeroizing::new), cancelled),
+                    Ok(ClientMessage::TmuxSelect { target }) if selection.is_some() => {
+                        if let Some(sender) = selection.take() {
+                            let _ = sender.try_send(target);
+                        }
+                    }
                     Ok(ClientMessage::Close) => break,
                     Ok(_) | Err(_) => refuse(kinds::PROTOCOL, "Lunport did not expect that message."),
                 },
@@ -366,6 +387,7 @@ impl Broker {
         }
         // The owner is gone: whatever waits for it gives up, and the shell (once it has printed something) and the session are closed.
         cancel.cancel();
+        drop(selection);
         owner.gone();
         control.owner_gone();
         let _ = worker.join();
@@ -482,7 +504,7 @@ impl Broker {
 
     /// The session thread: connects, then runs the shell. A failure is told to the client (unless it is gone) as an error and an exit
     /// without a status.
-    fn run_session(&self, conn: &Conn, host: &HostQuery, pty: Pty) {
+    fn run_session(&self, conn: &Conn, host: &HostQuery, request: TerminalRequest) {
         let info=locked(&self.table).entries.get(&conn.id).map(|e|e.info.clone());
         let log=ConnectLog{callback:locked(&self.audit).clone(),entry:Mutex::new(crate::mcp::McpAuditEntry{
             id:format!("connect-{}",conn.id),client:"connect".into(),alias:host.to_string(),host_id:info.as_ref().and_then(|i|i.host_id.as_ref().map(|h|h.as_str().into())),requested_by:info.and_then(|i|i.requested_by).unwrap_or_else(||vec!["Unknown".into()]),requester_id:conn.requester_id.clone(),outcome:"error".into(),..Default::default()
@@ -507,11 +529,34 @@ impl Broker {
         };
         let Some(destination) = connected.target.hops.last() else { return };
         {let mut entry=locked(&log.entry);entry.alias=destination.alias.clone();entry.host_id=Some(destination.id.as_str().into());entry.outcome="allowed".into();}
-        if !self.promote(conn.id, destination) {
+        let link = AuditLink { inner: conn.link.as_ref(), log: &log };
+        let request = match request {
+            TerminalRequest::Shell(pty) => ChannelRequest::Shell(pty),
+            TerminalRequest::Tmux(selection) => {
+                match super::tmux::select(connected.session.as_ref(), &link, &conn.cancel, selection) {
+                    Ok(Some(command)) => ChannelRequest::Tmux(command),
+                    outcome => {
+                        if conn.cancel.is_cancelled() {
+                            let mut entry = locked(&log.entry);
+                            entry.outcome = "canceled".into();
+                            entry.ended = Some("canceled".into());
+                        } else if let Err(text) = outcome {
+                            if self.claim(conn.id) {
+                                let kind = if connected.session.is_alive() { kinds::TMUX } else { kinds::CONNECT };
+                                could_not_open(&link, kind, &text);
+                            }
+                        }
+                        connected.session.close();
+                        return;
+                    }
+                }
+            }
+        };
+        if conn.cancel.is_cancelled() || !self.promote(conn.id, destination) {
             connected.session.close();
             return;
         }
-        run_shell(connected, pty, &AuditLink{inner:conn.link.as_ref(),log:&log}, &conn.control, &conn.id.to_string());
+        run_terminal(connected, request, &link, &conn.control, &conn.id.to_string());
         if conn.cancel.is_cancelled(){let mut e=locked(&log.entry);if e.exit_code.is_none() && e.signal.is_none(){e.outcome="canceled".into();e.ended=Some("canceled".into());}}
     }
 }
@@ -1068,6 +1113,22 @@ mod tests {
 
     fn no_status() -> ServerMessage {
         ServerMessage::Exited { code: None, signal: None }
+    }
+
+    #[test]
+    fn an_ssh_disconnect_while_choosing_tmux_is_retryable() {
+        let world = world(FakeEngine::new());
+        let mut client = Client::connect(&world.sock);
+        client.hello();
+        client.send(&ClientMessage::OpenTmux { host: HostQuery::Alias("web".into()) });
+        assert_eq!(client.next_message(), ServerMessage::TmuxSessions { sessions: Vec::new() });
+        world.engine.disconnect_now(DisconnectReason {
+            hop: Hop::new("id-web", "web", "web.example.com", 22, "deploy", AuthMethod::Password).reference(),
+            kind: DisconnectKind::ConnectionLost,
+            detail: "link lost".into(),
+        });
+        assert!(matches!(client.next_message(), ServerMessage::Event(Event::Error { kind, .. }) if kind == kinds::CONNECT));
+        assert_eq!(client.next_message(), no_status());
     }
 
     #[test]

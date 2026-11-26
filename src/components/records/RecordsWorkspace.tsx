@@ -243,12 +243,12 @@ export function RecordsWorkspace({
     setInspectedId(null);
     requestSelection({ kind: "new", nonce: ++nonce.current, duplicateSource: structuredClone(source) });
   };
-  const connect = async (id: string) => {
+  const connect = async (id: string, mode?: "tmux") => {
     if (connectInFlight.current || editorBusy) return;
     connectInFlight.current = true;
     setConnectingId(id);
     try {
-      await connectSavedHost(overview, id, terminalId, newTab);
+      await connectSavedHost(overview, id, terminalId, newTab, mode === "tmux" ? {} : undefined);
     } catch (error) {
       toast.error("Could not open connection", {
         description: revealHidden(String(error)),
@@ -492,6 +492,7 @@ export function RecordsWorkspace({
               onBusy={setEditorBusy}
               expand={() => setInspectedId(null)}
               connect={(id) => void connect(id)}
+              connectTmux={(id) => void connect(id, "tmux")}
               connectingId={connectingId}
               filter={filter}
               changeFilter={changeFilter}
@@ -505,6 +506,7 @@ export function RecordsWorkspace({
               host={inspected}
               overview={overview}
               connect={() => void connect(inspected.id)}
+              connectTmux={() => void connect(inspected.id, "tmux")}
               edit={() => editHost(inspected.id)}
               close={() => {
                 const previousId = inspectedId;

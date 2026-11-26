@@ -1120,13 +1120,22 @@ impl Session for RusshSession {
                 Ok(Err(error)) => return Err(channel_error(error)),
                 Ok(Ok(())) => {}
             }
-            let (read_half, write_half) = channel.split();
-            let write_half = Arc::new(write_half);
-            let (queue, exit) = (ByteQueue::new(self.options.shell_queue_bytes), ExitCell::new());
-            let (closed_by_us, closed) = watch::channel(false);
-            tokio::spawn(read_shell(read_half, Arc::clone(&write_half), Arc::clone(&queue), Arc::clone(&exit), closed));
-            let input = RusshShellInput { write_half, runtime: Arc::clone(&self.runtime), closed_by_us };
-            Ok(Box::new(QueuedShell::new(Box::new(input), queue, exit)) as Box<dyn ShellChannel>)
+            Ok(self.queue_channel(channel, true))
+        })
+    }
+
+    fn stream_exec(&self, command: &str) -> Result<Box<dyn ShellChannel>, SessionError> {
+        if !self.is_alive() {
+            return Err(SessionError::Closed);
+        }
+        let destination = self.connection.destination()?;
+        self.runtime.handle().block_on(async {
+            let channel = open_channel(destination, CHANNEL_SETUP_LIMIT).await?;
+            if let Err(error) = sent(channel.exec(true, command)).await {
+                let _ = sent(channel.close()).await;
+                return Err(error);
+            }
+            Ok(self.queue_channel(channel, false))
         })
     }
 
@@ -1189,6 +1198,19 @@ impl Session for RusshSession {
         }
         self.connection.closing.store(true, Ordering::SeqCst);
         self.runtime.handle().block_on(self.connection.disconnect_all());
+    }
+}
+
+impl RusshSession {
+    /// Both interactive shells and streaming commands have an independent bounded reader.
+    fn queue_channel(&self, channel: Channel<Msg>, pty: bool) -> Box<dyn ShellChannel> {
+        let (read_half, write_half) = channel.split();
+        let write_half = Arc::new(write_half);
+        let (queue, exit) = (ByteQueue::new(self.options.shell_queue_bytes), ExitCell::new());
+        let (closed_by_us, closed) = watch::channel(false);
+        tokio::spawn(read_shell(read_half, Arc::clone(&write_half), Arc::clone(&queue), Arc::clone(&exit), closed, pty));
+        let input = RusshShellInput { write_half, runtime: Arc::clone(&self.runtime), closed_by_us, pty };
+        Box::new(QueuedShell::new(Box::new(input), queue, exit))
     }
 }
 
@@ -1572,6 +1594,7 @@ struct RusshShellInput {
     /// Tells the reader task that the shell was closed from our side: russh never ends a channel's reads after the channel was closed
     /// locally (it ignores the server's close for it), so without this the reader would wait for ever.
     closed_by_us: watch::Sender<bool>,
+    pty: bool,
 }
 
 impl ShellInput for RusshShellInput {
@@ -1584,6 +1607,9 @@ impl ShellInput for RusshShellInput {
     }
 
     fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError> {
+        if !self.pty {
+            return Ok(());
+        }
         self.runtime.handle().block_on(sent(self.write_half.window_change(u32::from(cols), u32::from(rows), 0, 0)))
     }
 
@@ -1607,8 +1633,9 @@ impl Drop for RusshShellInput {
 /// The one task that reads a shell's channel (every channel has a reader, or russh stalls the whole connection). It moves the
 /// output into the queue without ever waiting for the consumer, and when the channel ends it records how, then closes the queue, in
 /// that order, so a consumer that sees the end of the output finds the exit.
-async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWriteHalf<Msg>>, queue: Arc<ByteQueue>, exit: Arc<ExitCell>, mut closed_by_us: watch::Receiver<bool>) {
+async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWriteHalf<Msg>>, queue: Arc<ByteQueue>, exit: Arc<ExitCell>, mut closed_by_us: watch::Receiver<bool>, pty: bool) {
     let (mut code, mut signal, mut refused) = (None, None, None);
+    let mut stderr = Vec::new();
     // The PTY request and the shell request both ask for a reply, and a server replies in the order of the requests: the first reply is
     // the PTY's.
     let mut replies = 0;
@@ -1619,6 +1646,19 @@ async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWrite
         };
         let Some(message) = message else { break };
         match message {
+            ChannelMsg::Data { data } if !pty => {
+                if !queue.push_strict(data.to_vec()) {
+                    refused = Some("The remote command produced too much output. Reconnect to resume.");
+                    let _ = sent(write_half.close()).await;
+                    break;
+                }
+            }
+            ChannelMsg::ExtendedData { data, ext: 1 } if !pty => {
+                const STDERR_LIMIT: usize = 4096;
+                let count = data.len().min(STDERR_LIMIT - stderr.len());
+                stderr.extend_from_slice(&data[..count]);
+            }
+            ChannelMsg::ExtendedData { .. } if !pty => {}
             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
                 queue.push(data.to_vec());
             }
@@ -1626,7 +1666,13 @@ async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWrite
             ChannelMsg::ExitSignal { signal_name: name, .. } => signal = Some(signal_name(&name)),
             ChannelMsg::Success => replies += 1,
             ChannelMsg::Failure => {
-                refused = Some(if replies == 0 { "the server refused to allocate a terminal (PTY)" } else { "the server refused to start a shell" });
+                refused = Some(if !pty {
+                    "the server refused to run the command"
+                } else if replies == 0 {
+                    "the server refused to allocate a terminal (PTY)"
+                } else {
+                    "the server refused to start a shell"
+                });
                 let _ = sent(write_half.close()).await;
                 break;
             }
@@ -1636,6 +1682,9 @@ async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWrite
     exit.set(match (signal, code, refused) {
         (Some(signal), _, _) => Exit::Signal(signal),
         (None, _, Some(refused)) => Exit::Refused(refused.to_string()),
+        (None, Some(code), None) if !pty && code != 0 && !stderr.is_empty() => {
+            Exit::Refused(String::from_utf8_lossy(&stderr).trim().to_string())
+        }
         (None, Some(code), None) => Exit::Code(code),
         (None, None, None) => Exit::Disconnected,
     });

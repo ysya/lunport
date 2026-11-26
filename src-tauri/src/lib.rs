@@ -416,6 +416,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_migration_pending,
             connect_list_terminals,
             session::embedded::terminal_open,
+            session::embedded::terminal_tmux_select,
             session::tunnels::tunnels_list,
             session::tunnels::tunnels_save,
             session::tunnels::tunnels_delete,
