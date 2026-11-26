@@ -94,9 +94,13 @@ An AI client can also manage saved databases (see [AI access through MCP](#ai-ac
 
 Every console tab is read-only, whatever the database's environment. Lunport opens the session with Cloud SQL's `cloudsql_session_read_only` lock, checks that the lock is on, closes the session if it cannot confirm that, and the status bar says "Read-only (locked)". A statement that writes is refused by the database. For an older instance without that flag, the tab says so and offers **Open read-only (not locked)**. That choice sets `default_transaction_read_only` instead, which a statement in the session could turn off, and the status bar says "Read-only (not locked)". Lunport never switches to it on its own.
 
+To browse a table or view, double-click its name in the schema tree, press Enter on the focused name, or use **Browse data** beside it. **Data** previews up to 200 rows and **Columns** lists column types and primary keys. The arrow in the tree expands the columns there. **SQL editor** brings back your query draft; running a query or opening another preview replaces the results currently shown.
+
 **Run** runs the selected statements, or the statement at the cursor when nothing is selected: ⌘↩ (Ctrl+↩ on Windows and Linux). **Run all** runs every statement in the editor: ⇧⌘↩ (Shift+Ctrl+↩). Run on a selection of several statements and Run all each start at most 50. Statements run one at a time, each in a result tab of its own. **Cancel** stops the running statement, as does Escape while it runs.
 
 A result shows 200 rows at a time, with **Previous** and **Next**. Lunport keeps at most 10,000 rows and at most 16 MiB of each result, and at most 64 MiB of results in all for a tab, so a later result of a Run all may get less room than the first. When it kept fewer rows than the statement answered, the pager below the grid says how many it kept. Add a `LIMIT` or a `WHERE` to see what lies past it.
+
+Select a row in a preview or query result to show its fields in **Row details**. You can expand long values and copy the original value from each field. JSON values are formatted for easier reading when they fit the display limit.
 
 **Export** writes the rows Lunport kept for that result, not the whole query and not a new run of it, as CSV or JSON to the file you choose. CSV has a header row, an empty field for NULL and `""` for an empty string. JSON is an array of objects keyed by column name, with each value as text exactly as PostgreSQL printed it, or `null`.
 

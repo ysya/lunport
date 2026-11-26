@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConsoleRun } from "@/bindings/ConsoleRun";
 import type { ResultTab } from "@/lib/database-console-session";
 import { DISABLED, buttonTag, text } from "@/components/keychain/test-markup";
-import { ResultTabs, cellText } from "./ResultTabs";
+import { cellText } from "./RecordDetails";
+import { ResultTabs } from "./ResultTabs";
 
 type Rows = Extract<ConsoleRun, { kind: "rows" }>;
 const statement = { from: 0, to: 21, text: "SELECT * FROM orders;" };
@@ -58,6 +59,11 @@ describe("ResultTabs", () => {
     expect(html).toMatch(/<th[^>]*>#<\/th>/);
     expect(html).toContain('title="int8"');
     expect(html).toContain('title="text"');
+  });
+
+  it("exposes a focusable details control for a result row", () => {
+    const html = render([result(1, rows({ row_count: 1, first_page: [["1", "pending"]] }))]);
+    expect(html).toMatch(/<button[^>]*aria-label="Inspect row 1"[^>]*aria-expanded="false"/);
   });
 
   it("null_is_a_muted_null_and_an_empty_string_an_empty_cell", () => {

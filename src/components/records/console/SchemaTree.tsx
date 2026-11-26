@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Folder, LoaderCircle, RotateCw, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, LoaderCircle, RotateCw, Search, Table2 } from "lucide-react";
 import type { RelationNode } from "@/bindings/RelationNode";
 import type { SchemaNode } from "@/bindings/SchemaNode";
 import type { SchemaTree as Tree } from "@/bindings/SchemaTree";
+import type { TablePreview } from "@/lib/database-console-session";
 import { revealHidden } from "@/lib/reveal-hidden";
 
 const TRUNCATED = "Lunport shows the first 5,000 tables and views.";
@@ -44,11 +45,14 @@ function Toggle({ open, onToggle, label, count, icon }: { open: boolean; onToggl
  * The schema of a console's database: schema, then Tables, Views and Functions, then a relation's columns with their types. Only
  * what is open is drawn, so a schema of thousands of tables stays quick to filter. The filter matches names on this computer.
  */
-export function SchemaTree({ tree, error, canRefresh, onRefresh, initialOpen = [] }: {
+export function SchemaTree({ tree, error, canRefresh, onRefresh, canBrowse, onBrowse, preview, initialOpen = [] }: {
   tree: Tree | null;
   error: string | null;
   canRefresh: boolean;
   onRefresh: () => void;
+  canBrowse: boolean;
+  onBrowse: (schema: string, relation: string) => void;
+  preview: TablePreview | null;
   /** `schema.relation` names drawn open at first. */
   initialOpen?: string[];
 }) {
@@ -110,9 +114,34 @@ export function SchemaTree({ tree, error, canRefresh, onRefresh, initialOpen = [
                     </li>)
                     : schema.relations.filter((relation) => groupOf(relation) === group).map((relation) => {
                       const key = relationKey(schema.name, relation.name);
+                      const expanded = isOpen(key);
+                      const active = preview?.schema === schema.name && preview.relation === relation.name;
+                      const name = revealHidden(relation.name);
+                      const qualifiedName = revealHidden(`${schema.name}.${relation.name}`);
+                      const Chevron = expanded ? ChevronDown : ChevronRight;
+                      const browse = () => onBrowse(schema.name, relation.name);
                       return <li key={relation.name}>
-                        <Toggle open={isOpen(key)} onToggle={() => toggle(key)} label={revealHidden(relation.name)} />
-                        {isOpen(key) && <ul className="console-tree-columns">
+                        <div className="console-tree-relation" data-active={active}>
+                          <button type="button" className="console-icon-button" aria-label={`${expanded ? "Collapse" : "Expand"} columns for ${name}`} aria-expanded={expanded} onClick={() => toggle(key)}>
+                            <Chevron className="size-3" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            className="console-tree-name"
+                            title={qualifiedName}
+                            aria-current={active ? "true" : undefined}
+                            disabled={!canBrowse}
+                            onClick={(event) => {
+                              if (event.detail === 0) browse();
+                              else event.currentTarget.focus();
+                            }}
+                            onDoubleClick={browse}
+                          >{name}</button>
+                          <button type="button" className="console-icon-button console-tree-browse" title="Browse data" aria-label={`Browse data in ${qualifiedName}`} disabled={!canBrowse} tabIndex={-1} onClick={browse}>
+                            <Table2 className="size-3.5" aria-hidden="true" />
+                          </button>
+                        </div>
+                        {expanded && <ul className="console-tree-columns">
                           {relation.columns.map((column) => <li key={column.name} className="console-tree-leaf">
                             <span className="console-tree-name" title={revealHidden(column.name)}>{revealHidden(column.name)}</span>
                             <span className="console-tree-type">{revealHidden(column.type_name)}{column.primary_key ? " · PK" : ""}</span>

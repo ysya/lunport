@@ -25,10 +25,12 @@ const state = (patch: Partial<ConsoleState> = {}): ConsoleState => ({
   activeResult: null,
   schema: { schemas: [], truncated: false },
   schemaError: null,
+  preview: null,
   ...patch,
 });
 const actions = (): ConsoleActions => ({
   run: vi.fn(),
+  browse: vi.fn(),
   cancel: vi.fn(),
   reconnect: vi.fn(),
   openNotLocked: vi.fn(),
@@ -103,6 +105,18 @@ describe("ConsoleView", () => {
   it("a_not_locked_session_says_so_in_the_pill", () => {
     const html = render(state({ opened: { read_only: "not_locked", iam_user: "frank@example.com", server_version: "16.3" } }));
     expect(text(html)).toContain("Read-only (not locked)");
+  });
+
+  it("gives a table preview the workspace and keeps the SQL editor mounted", () => {
+    const html = render(state({
+      preview: { schema: "public", relation: "orders" },
+    }));
+    expect(text(html)).toContain("public.orders");
+    expect(buttonTag(html, "Data")).toContain('aria-pressed="true"');
+    expect(buttonTag(html, "Columns")).toContain('aria-pressed="false"');
+    expect(buttonTag(html, "SQL editor")).toContain('aria-expanded="false"');
+    expect(html).toMatch(/class="console-editor" hidden=""/);
+    expect(text(html)).toContain("Read-only (locked)");
   });
 
   it("a_notice_shows_why_nothing_ran", () => {

@@ -93,6 +93,67 @@ describe("ConsoleSession", () => {
     expect(session.state.activeResult).toBe(session.state.results[0].key);
   });
 
+  it("browses a schema-qualified relation using one bounded query", async () => {
+    const relation = 'order."items';
+    route({ database_console_open: () => opened, database_console_schema: () => tree, database_console_run: () => rows(8) });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+
+    await session.browse("Sales Ops", relation);
+
+    expect(calls("database_console_run")).toEqual([
+      ["database_console_run", { id: "tab-1", sql: 'SELECT * FROM "Sales Ops"."order.""items" LIMIT 200;', fresh: true }],
+    ]);
+    expect(session.state.preview).toEqual({ schema: "Sales Ops", relation });
+    expect(session.state.results[0].page).toEqual([["1"]]);
+
+    await session.run([statement("SELECT 2;")]);
+
+    expect(session.state.preview).toBeNull();
+    expect(session.state.results[0].statement.text).toBe("SELECT 2;");
+  });
+
+  it("does not start a table preview while SQL is running", async () => {
+    let finish: (run: ConsoleRun) => void = () => {};
+    route({
+      database_console_open: () => opened,
+      database_console_schema: () => tree,
+      database_console_run: () => new Promise<ConsoleRun>((resolve) => { finish = resolve; }),
+    });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    const running = session.run([statement("SELECT 1;")]);
+    await vi.waitFor(() => expect(calls("database_console_run")).toHaveLength(1));
+
+    await session.browse("public", "orders");
+
+    expect(session.state.preview).toBeNull();
+    expect(calls("database_console_run")).toHaveLength(1);
+    finish(rows(1));
+    await running;
+  });
+
+  it("ignores a page failure from a result replaced by a table preview", async () => {
+    let rejectPage: (error: Error) => void = () => {};
+    route({
+      database_console_open: () => opened,
+      database_console_schema: () => tree,
+      database_console_run: () => rows(8),
+      database_console_page: () => new Promise((_, reject) => { rejectPage = reject; }),
+    });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    await session.run([statement("SELECT 1;")]);
+    const page = session.showPage(session.state.results[0].key, 200);
+
+    await session.browse("public", "orders");
+    rejectPage(new Error("That result is gone."));
+    await page;
+
+    expect(session.state.messages).toEqual([]);
+    expect(session.state.activeResult).toBe(session.state.results[0].key);
+  });
+
   it("a_failed_statement_stops_the_run", async () => {
     const answers: ConsoleRun[] = [
       rows(1),
