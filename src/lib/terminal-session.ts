@@ -1,4 +1,4 @@
-import { EmbeddedTerminal, type TerminalEvent, type TerminalHost } from "./embedded-terminal";
+import { EmbeddedTerminal, type TerminalEvent, type TerminalHost, type TmuxSelection, type TmuxSessionInfo } from "./embedded-terminal";
 import type { TerminalState } from "@/stores/terminals";
 
 export type TerminalStatus = { kind: TerminalState; text: string; failureKind?: string; retry?: number; question?: boolean; autoReconnect: boolean };
@@ -26,6 +26,7 @@ export class TerminalSession {
     private output: (bytes: Uint8Array) => void,
     private changed: (status: TerminalStatus) => void,
     private beforeReconnect: () => void,
+    private tmux?: { tmuxSessions: (sessions: TmuxSessionInfo[]) => void },
   ) {}
 
   start(cols: number, rows: number) {
@@ -77,6 +78,9 @@ export class TerminalSession {
           this.update({ kind: "open", text: "Connected" });
         } else if (event.type === "question") {
           this.update({ kind: "connecting", text: event.text, question: true });
+        } else if (event.type === "tmux_sessions") {
+          this.update({ kind: "connecting", text: "Choose a tmux session" });
+          this.tmux?.tmuxSessions(event.sessions);
         } else if (event.type === "event" && (event.event === "error" || event.event === "disconnected")) {
           retryable = event.event === "disconnected" || event.kind === "connect" || event.kind === "input";
           this.update({ kind: "error", text: event.text ?? event.reason ?? "Connection failed", failureKind: event.event === "error" ? event.kind : undefined });
@@ -87,7 +91,7 @@ export class TerminalSession {
         } else if (event.type === "exited") {
           exited = true;
           if (event.code !== null || event.signal !== null) retryable = false;
-          if (this.status.kind !== "error") this.update({ kind: "ended", text: event.signal ? `Ended (${event.signal})` : event.code === null ? "Disconnected" : `Shell exited (${event.code})` });
+          if (this.status.kind !== "error") this.update({ kind: "ended", text: event.signal ? `Ended (${event.signal})` : event.code === null ? "Disconnected" : `${this.tmux ? "tmux client" : "Shell"} exited (${event.code})` });
         } else if (event.type === "closed") {
           finished = true;
           if (!exited && this.status.kind !== "error") {
@@ -112,7 +116,13 @@ export class TerminalSession {
       },
     );
     this.transport = transport;
-    await transport.start(this.host, this.cols, this.rows);
+    if (this.tmux) await transport.start(this.host, this.cols, this.rows, "tmux");
+    else await transport.start(this.host, this.cols, this.rows);
+  }
+
+  async selectTmux(target: TmuxSelection) {
+    if (!this.tmux || !this.transport) throw new Error("The tmux connection has ended.");
+    return this.transport.selectTmux(target);
   }
 
   input(data: Uint8Array) { if (this.status.kind === "open") this.transport?.input(data); }

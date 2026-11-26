@@ -38,6 +38,12 @@ pub trait Session: Send + Sync {
     /// Opens a PTY shell on the destination host. Any number of channels can be open at once.
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError>;
 
+    /// Runs a bidirectional command without a PTY. Only stdout is returned as data.
+    /// If the output queue overflows, the command channel closes with an error.
+    fn stream_exec(&self, _command: &str) -> Result<Box<dyn ShellChannel>, SessionError> {
+        Err(SessionError::Channel("Streaming commands are unavailable in this SSH engine.".into()))
+    }
+
     /// Runs `command` without a PTY and collects its output, for at most `timeout`. Output beyond `output_cap` bytes (stdout and stderr
     /// together) is not read: the engine asks for the channel to be closed, sets `truncated` and ends the result as `Ended::Truncated`.
     /// The command's standard input is empty: it reads end-of-file at once, as with `ssh host command < /dev/null`. A timeout, the cap and

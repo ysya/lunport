@@ -79,5 +79,6 @@ pub(crate) mod os_identity;
 pub mod hostkey_window;
 pub mod protocol;
 pub mod relay;
+mod tmux;
 #[cfg(test)]
 pub mod testing;

@@ -4,6 +4,33 @@ const input = { kind: "terminal" as const, host: { id: "saved-host" }, name: "we
 const database = { kind: "database" as const, databaseId: "db-1", name: "orders", address: "orders-pg · acme-prod-123456", environment: "prod" as const, readOnly: "locked" as const };
 beforeEach(() => useTerminalStore.getState().reset());
 describe("terminal workspace", () => {
+  it("resumes a matching open tmux tab even when every tab slot is in use", () => {
+    const store = useTerminalStore.getState();
+    const session = { id: "$1", name: "build", created: "1740000000", server: "427:1740000000", destroyUnattached: false };
+    const openId = store.open({ ...input, mode: "tmux" });
+    store.claimTmuxSession(openId, session);
+    store.updateState(openId, "open");
+    for (let index = 0; index < 7; index++) store.open(input);
+    const resumed = store.open({ ...input, mode: "tmux", tmuxResume: { session: { ...session, name: "renamed" }, windowId: "@0", paneId: "%0" } });
+    expect(resumed).toBe(openId);
+    expect(useTerminalStore.getState().activeId).toBe(openId);
+    expect(useTerminalStore.getState().tabs).toHaveLength(8);
+  });
+
+  it("activates the existing workspace for the same host and tmux session", () => {
+    const store = useTerminalStore.getState();
+    const first = store.open({ ...input, mode: "tmux" });
+    const second = store.open({ ...input, mode: "tmux" });
+    const session = { id: "$1", name: "build", created: "1740000000", server: "427:1740000000", destroyUnattached: false };
+    expect(store.claimTmuxSession(first, session)).toBe(true);
+    expect(store.claimTmuxSession(second, { ...session, name: "renamed" })).toBe(false);
+    expect(useTerminalStore.getState().activeId).toBe(first);
+    expect(useTerminalStore.getState().tabs).toHaveLength(1);
+
+    const replacement = store.open({ ...input, mode: "tmux" });
+    expect(store.claimTmuxSession(replacement, { ...session, server: "724:1740000000" })).toBe(true);
+    expect(useTerminalStore.getState().tabs).toHaveLength(2);
+  });
   it("retains independent session tabs while Library is selected", () => {
     const store = useTerminalStore.getState();
     const first = store.open(input); const second = store.open(input);
