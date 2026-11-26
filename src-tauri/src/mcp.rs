@@ -871,6 +871,12 @@ fn tool_definitions() -> Value {
     tools.as_array_mut().unwrap().extend(transfers::tool_definitions());
     tools.as_array_mut().unwrap().extend(databases::tool_definitions());
     tools.as_array_mut().unwrap().extend(database_sql::tool_definitions());
+    // Every tool whose call may need a grant offers the same suggestion argument.
+    for tool in tools.as_array_mut().unwrap() {
+        if tool["name"].as_str().is_some_and(|name| records::GRANT_TOOLS.contains(&name)) {
+            tool["inputSchema"]["properties"]["grant"] = records::grant_property();
+        }
+    }
     tools
 }
 
@@ -975,6 +981,26 @@ mod tests {
         assert!(!display_safe_command("echo safe\u{202e}txt"));
         assert!(!display_safe_command(""));
         assert!(!display_safe_command("echo\0secret"));
+    }
+
+    #[test]
+    fn exactly_the_tools_that_can_need_a_grant_offer_the_grant_argument() {
+        let tools = tool_definitions();
+        let offering: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| tool["inputSchema"]["properties"].get("grant").is_some())
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let mut expected = records::GRANT_TOOLS.to_vec();
+        let mut offering_sorted = offering.clone();
+        expected.sort_unstable();
+        offering_sorted.sort_unstable();
+        assert_eq!(offering_sorted, expected);
+        for tool in tools.as_array().unwrap().iter().filter(|tool| offering.contains(&tool["name"].as_str().unwrap())) {
+            assert_eq!(tool["inputSchema"]["properties"]["grant"], records::grant_property(), "{}", tool["name"]);
+        }
     }
 
     #[test]

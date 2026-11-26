@@ -584,7 +584,7 @@ pub(super) fn delete(
 /// Starts a tunnel an AI client was allowed to start: the rule as approved, the route and keys it was approved for, the mode it was
 /// approved in and who started it. It answers the tunnel's entry, which `start` watches until the tunnel runs or fails.
 pub(super) type Launch<'a> =
-    dyn Fn(&TunnelRule, records::ApprovedTarget, ApprovalMode, String) -> Result<Arc<Entry>, String> + 'a;
+    dyn Fn(&TunnelRule, records::ApprovedTarget, ApprovalMode, AiAsker) -> Result<Arc<Entry>, String> + 'a;
 
 /// The most tunnels that run on one device at once (`Tunnels::prepare` refuses the next).
 const MAX_ACTIVE: usize = 16;
@@ -693,7 +693,7 @@ fn start_within(
             approved.check(connector, &query)
         };
         records::verify_unverified(runtime, connector, &query, &target, &noting, &declines, cancel, &host_still_allowed, &confirmer, (&context, mode), TUNNEL_STOPPED)?;
-        let entry = launch(&rule, approved.clone(), mode, records::client_label(&context))?;
+        let entry = launch(&rule, approved.clone(), mode, records::asker(&context, mode, Unreviewed::Tunnel))?;
         launched = Some(Arc::clone(&entry));
         // The answer is the tunnel as last seen, so that its state, the message and the audit agree.
         let seen = wait_for_start(&entry, cancel, wait)?;
@@ -837,13 +837,12 @@ fn access_ended(policy: &McpPolicy, authorize: impl FnOnce(&McpPolicy) -> Result
 
 /// What starts a tunnel in the app for `start_tunnel`: the panel's launch, guarded by what the client was approved for, and stopped
 /// when the client's access to the tunnel's host ends.
-pub(super) fn launcher(app: &AppHandle) -> impl Fn(&TunnelRule, records::ApprovedTarget, ApprovalMode, String) -> Result<Arc<Entry>, String> + '_ {
-    move |rule, approved, mode, started_by| {
+pub(super) fn launcher(app: &AppHandle) -> impl Fn(&TunnelRule, records::ApprovedTarget, ApprovalMode, AiAsker) -> Result<Arc<Entry>, String> + '_ {
+    move |rule, approved, mode, asker| {
         let host_id = rule.host_id.clone();
         let worker_app = app.clone();
-        // Who asks in the windows the tunnel's connection opens: the client, and in
-        // Auto-log that the tunnel then starts without review.
-        let asker = AiAsker { client: started_by, unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Tunnel), grant: None };
+        // Who asks in the windows the tunnel's connection opens: the client, in Auto-log that the tunnel then starts without review, and
+        // the grant suggestion its call sent.
         let for_worker = asker.clone();
         let work: crate::session::tunnels::Work = Box::new(move |rule, entry, connector, owner, account, needs_grant| {
             let state = worker_app.state::<AppState>();
