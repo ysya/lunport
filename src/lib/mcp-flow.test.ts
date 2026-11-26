@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseMcpMode, receiveAuthQuestion, authRemaining, takeAuthAnswer, grantFields, encodeGrantAnswer, grantAnswerReady } from "./mcp-flow";
+import { chooseMcpMode, receiveAuthQuestion, authRemaining, takeAuthAnswer, grantFields, encodeGrantAnswer, grantAnswerReady, grantMaxMinutes, oneLine } from "./mcp-flow";
 import type { AuthRequest } from "@/bindings/AuthRequest";
 
 const question: AuthRequest = {
@@ -60,7 +60,7 @@ describe("grant questions", () => {
   const grant: AuthRequest = {
     ...question, id: "g1", kind: "grant", echo: true, remaining_ms: 400000,
     text: "No active Privileged Access Manager grant for prod-operate on acme-prod-123456.",
-    grant: { project: "acme-prod-123456", entitlement: "prod-operate", minutes: 30, justification: "restart app-api" },
+    grant: { project: "acme-prod-123456", entitlement: "prod-operate", minutes: 30, justification: "restart app-api", max_minutes: null, suggested: null },
   };
 
   it("waits up to five minutes for a grant request, two for a server's question", () => {
@@ -76,6 +76,26 @@ describe("grant questions", () => {
     expect(grantFields("30\nrestart app-api")).toEqual({ minutes: "30", justification: "restart app-api" });
     expect(grantFields("")).toEqual({ minutes: "", justification: "" });
     expect(encodeGrantAnswer("45", "restart app-api")).toBe("45\nrestart app-api");
+  });
+
+  it("starts the form from an AI client's suggestion, each field it gave in place of the remembered one", () => {
+    const suggested = (justification: string | null, minutes: number | null) =>
+      receiveAuthQuestion({ ...grant, grant: { ...grant.grant!, suggested: { justification, minutes, capped_from: null } } }, now).answer;
+    expect(suggested("restart app-api after the deploy", 60)).toBe("60\nrestart app-api after the deploy");
+    expect(suggested(null, 60)).toBe("60\nrestart app-api");
+    expect(suggested("restart app-api after the deploy", null)).toBe("30\nrestart app-api after the deploy");
+  });
+
+  it("bounds the length by the entitlement's maximum when it is known", () => {
+    expect(grantMaxMinutes(grant.grant)).toBe(480);
+    expect(grantMaxMinutes({ ...grant.grant!, max_minutes: 60 })).toBe(60);
+    expect(grantMaxMinutes(null)).toBe(480);
+    expect(grantAnswerReady("61\nrestart app-api", 60)).toBe(false);
+    expect(grantAnswerReady("60\nrestart app-api", 60)).toBe(true);
+  });
+
+  it("keeps a pasted justification on one line", () => {
+    expect(oneLine("restart\napp-api\r\nafter the deploy")).toBe("restart app-api after the deploy");
   });
 
   it("lets Request go only with whole minutes from 1 to 480 and a justification with something in it", () => {
