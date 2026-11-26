@@ -3,13 +3,13 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Mu
 import { useQuery } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { EditorView } from "@codemirror/view";
-import { LoaderCircle, LockKeyhole, Play, Square } from "lucide-react";
+import { Code, LoaderCircle, LockKeyhole, Play, Square } from "lucide-react";
 import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
 import type { ExportFormat } from "@/bindings/ExportFormat";
 import type { ReadOnlyMode } from "@/bindings/ReadOnlyMode";
 import { Button } from "@/components/ui/button";
-import { exportResult } from "@/lib/database-console";
-import { ConsoleSession, type ConsoleState, type ResultTab } from "@/lib/database-console-session";
+import { exportResult, PAGE_ROWS } from "@/lib/database-console";
+import { ConsoleSession, type ConsoleState, type ResultTab, type TablePreview } from "@/lib/database-console-session";
 import { databaseGrantLine, databasePamStatusQuery, databasesQuery, routeSummary, type SavedDatabase } from "@/lib/databases";
 import { useRecordsStatus } from "@/lib/records";
 import { revealHidden } from "@/lib/reveal-hidden";
@@ -35,6 +35,7 @@ const TAB_STATES: Record<ConsoleState["status"], TerminalState> = {
 
 export type ConsoleActions = {
   run: (all: boolean) => void;
+  browse: (schema: string, relation: string) => void;
   cancel: () => void;
   reconnect: () => void;
   openNotLocked: () => void;
@@ -67,10 +68,24 @@ function Banner({ state, actions }: { state: ConsoleState; actions: ConsoleActio
   return null;
 }
 
-/**
- * A console as its state draws it: the schema on the left, the toolbar and editor on top, the results below, and `statusBar` under
- * everything. The editor stays whatever the status, so its text survives an ended session and a Reconnect.
- */
+function TableColumns({ tree, preview }: { tree: ConsoleState["schema"]; preview: TablePreview }) {
+  const schema = tree?.schemas.find((schema) => schema.name === preview.schema);
+  const relation = schema?.relations.find((relation) => relation.name === preview.relation);
+  if (!relation) return <p className="console-outcome">Column metadata is unavailable.</p>;
+  if (relation.columns.length === 0) return <p className="console-outcome">No columns.</p>;
+  return <div className="console-grid console-preview-columns">
+    <table aria-label="Table columns">
+      <thead><tr><th scope="col">Column</th><th scope="col">Type</th><th scope="col">Key</th></tr></thead>
+      <tbody>{relation.columns.map((column) => <tr key={column.name}>
+        <td>{revealHidden(column.name)}</td>
+        <td>{revealHidden(column.type_name)}</td>
+        <td>{column.primary_key ? "Primary key" : ""}</td>
+      </tr>)}</tbody>
+    </table>
+  </div>;
+}
+
+/** The console keeps the editor mounted when browsing data or reconnecting. */
 export function ConsoleView({ tab, state, mac, notice, viewRef, statusBar, actions }: {
   tab: DatabaseTab;
   state: ConsoleState;
@@ -82,39 +97,80 @@ export function ConsoleView({ tab, state, mac, notice, viewRef, statusBar, actio
   statusBar: ReactNode;
   actions: ConsoleActions;
 }) {
+  const [showSqlEditor, setShowSqlEditor] = useState(false);
+  const [previewPane, setPreviewPane] = useState<"data" | "columns">("data");
   const open = state.status === "open";
   const canRun = open && !state.running;
   const mode = state.opened?.read_only ?? tab.readOnly;
+  const preview = state.preview;
+  const editorVisible = !preview || showSqlEditor;
+  const previewName = preview ? revealHidden(preview.schema + "." + preview.relation) : null;
+
+  useEffect(() => {
+    if (!editorVisible) return;
+    viewRef.current?.requestMeasure();
+    if (showSqlEditor) viewRef.current?.focus();
+  }, [editorVisible, showSqlEditor, viewRef]);
+
+  function browse(schema: string, relation: string) {
+    setShowSqlEditor(false);
+    setPreviewPane("data");
+    actions.browse(schema, relation);
+  }
+
   return <div className="console-pane">
     <div className="console-body">
-      <SchemaTree tree={state.schema} error={state.schemaError} canRefresh={open} onRefresh={actions.refreshSchema} />
+      <SchemaTree
+        tree={state.schema}
+        error={state.schemaError}
+        canRefresh={open}
+        onRefresh={actions.refreshSchema}
+        canBrowse={canRun}
+        onBrowse={browse}
+        preview={preview}
+      />
       <section className="console-main" aria-label="Query">
         <div className="console-toolbar">
-          <Button size="sm" disabled={!canRun} onClick={() => actions.run(false)}>
-            <Play className="size-3" aria-hidden="true" />Run<kbd>{mac ? "⌘↩" : "Ctrl+↩"}</kbd>
-          </Button>
-          <Button size="sm" variant="outline" disabled={!canRun} onClick={() => actions.run(true)}>
-            Run all<kbd>{mac ? "⇧⌘↩" : "Shift+Ctrl+↩"}</kbd>
-          </Button>
-          <Button size="sm" variant="outline" disabled={!state.running} onClick={actions.cancel}>
+          {preview && <Button size="sm" variant="outline" aria-expanded={editorVisible} onClick={() => setShowSqlEditor(!editorVisible)}>
+            <Code className="size-3.5" aria-hidden="true" />SQL editor
+          </Button>}
+          {editorVisible && <>
+            <Button size="sm" disabled={!canRun} onClick={() => actions.run(false)}>
+              <Play className="size-3" aria-hidden="true" />Run<kbd>{mac ? "⌘↩" : "Ctrl+↩"}</kbd>
+            </Button>
+            <Button size="sm" variant="outline" disabled={!canRun} onClick={() => actions.run(true)}>
+              Run all<kbd>{mac ? "⇧⌘↩" : "Shift+Ctrl+↩"}</kbd>
+            </Button>
+          </>}
+          {(editorVisible || state.running) && <Button size="sm" variant="outline" disabled={!state.running} onClick={actions.cancel}>
             <Square className="size-3" aria-hidden="true" />Cancel
-          </Button>
+          </Button>}
           {(state.status === "opening" || state.running) && <LoaderCircle className="size-4 text-muted-foreground motion-safe:animate-spin" aria-label={state.running ? "Running" : "Connecting"} />}
           {notice && <span className="console-notice" role="status">{revealHidden(notice)}</span>}
           <span className="console-spacer" />
           <span className="console-read-only" data-mode={mode}><LockKeyhole className="size-3" aria-hidden="true" />{readOnlyLabel(mode)}</span>
         </div>
         <Banner state={state} actions={actions} />
-        <SqlEditor viewRef={viewRef} schema={state.schema} running={state.running} onRun={actions.run} onCancel={actions.cancel} />
-        <ResultTabs
+        <SqlEditor viewRef={viewRef} schema={state.schema} hidden={!editorVisible} running={state.running} onRun={actions.run} onCancel={actions.cancel} />
+        {previewName !== null && <div className="console-preview-header">
+          <h2 className="console-preview-title" title={previewName}>{previewName}</h2>
+          <div className="console-preview-views" role="group" aria-label="Table view">
+            <Button size="sm" variant={previewPane === "data" ? "secondary" : "ghost"} aria-pressed={previewPane === "data"} onClick={() => setPreviewPane("data")}>Data</Button>
+            <Button size="sm" variant={previewPane === "columns" ? "secondary" : "ghost"} aria-pressed={previewPane === "columns"} onClick={() => setPreviewPane("columns")}>Columns</Button>
+          </div>
+          {previewPane === "data" && <span className="console-preview-limit">Preview · up to {PAGE_ROWS} rows</span>}
+        </div>}
+        {preview && previewPane === "columns" ? <TableColumns tree={state.schema} preview={preview} /> : <ResultTabs
           results={state.results}
           messages={state.messages}
           activeResult={state.activeResult}
           live={open}
+          preview={preview !== null}
+          busy={state.running}
           onSelect={actions.showResult}
           onPage={actions.showPage}
           onExport={actions.exportResult}
-        />
+        />}
       </section>
     </div>
     {statusBar}
@@ -179,11 +235,23 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
     viewRef.current?.focus();
   }, [active]);
 
+  useEffect(() => {
+    if (!active || !state.preview || !state.running) return;
+    const cancelPreview = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.repeat || event.isComposing || viewRef.current?.hasFocus) return;
+      if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+      event.preventDefault();
+      void session.cancel();
+    };
+    window.addEventListener("keydown", cancelPreview);
+    return () => window.removeEventListener("keydown", cancelPreview);
+  }, [active, session, state.preview, state.running]);
+
   // A statement that failed at a position puts the cursor there, once.
   const placed = useRef(new Set<string>());
   useEffect(() => {
     const view = viewRef.current;
-    if (!view) return;
+    if (!view || state.preview) return;
     for (const result of state.results) {
       if (result.run?.kind !== "failed" || result.run.position === null || placed.current.has(result.key)) continue;
       placed.current.add(result.key);
@@ -191,7 +259,7 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
       view.dispatch({ selection: { anchor: at }, scrollIntoView: true });
       view.focus();
     }
-  }, [state.results]);
+  }, [state.preview, state.results]);
 
   const exportTo = async (result: ResultTab, index: number, format: ExportFormat) => {
     if (result.run?.kind !== "rows") return;
@@ -220,6 +288,10 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
       }
       setNotice(null);
       void session.run(found);
+    },
+    browse: (schema, relation) => {
+      setNotice(null);
+      void session.browse(schema, relation);
     },
     cancel: () => void session.cancel(),
     reconnect: () => {

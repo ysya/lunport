@@ -8,6 +8,7 @@ import {
   cancelStatement,
   closeConsole,
   openConsole,
+  PAGE_ROWS,
   readSchema,
   resultPage,
   runStatement,
@@ -24,12 +25,15 @@ export type ResultTab = {
   offset: number;
 };
 
+export type TablePreview = { schema: string; relation: string };
+
 export type ConsoleState = {
   status: "opening" | "open" | "lock_unsupported" | "ended" | "error";
   /** The sentence for lock_unsupported, ended and error. */
   message: string | null;
   opened: ConsoleOpened | null;
   running: boolean;
+  preview: TablePreview | null;
   results: ResultTab[];
   /** Lines such as `Result 2 · 42P01 relation "nope" does not exist` or `SET · 3 ms`. */
   messages: string[];
@@ -46,6 +50,7 @@ const initialState = (): ConsoleState => ({
   message: null,
   opened: null,
   running: false,
+  preview: null,
   results: [],
   messages: [],
   activeResult: null,
@@ -129,19 +134,25 @@ export class ConsoleSession {
     }
   }
 
-  async run(statements: StatementRange[]): Promise<void> {
+  browse(schema: string, relation: string): Promise<void> {
+    const quote = (identifier: string) => '"' + identifier.replace(/"/g, '""') + '"';
+    const text = `SELECT * FROM ${quote(schema)}.${quote(relation)} LIMIT ${PAGE_ROWS};`;
+    return this.run([{ text, from: 0, to: text.length }], { schema, relation });
+  }
+
+  async run(statements: StatementRange[], preview: TablePreview | null = null): Promise<void> {
     if (statements.length === 0 || this.current.running || this.current.status !== "open") return;
     const generation = this.generation;
     const run = ++this.runs;
     const results: ResultTab[] = statements.map((statement, index) => ({
       key: `run-${run}-${index + 1}`,
-      title: `Result ${index + 1}`,
+      title: preview ? "Preview" : `Result ${index + 1}`,
       statement,
       run: null,
       page: [],
       offset: 0,
     }));
-    this.update({ running: true, results: [...results], messages: [], activeResult: results[0].key });
+    this.update({ running: true, preview, results: [...results], messages: [], activeResult: results[0].key });
     for (let index = 0; index < results.length; index++) {
       if (this.current.status !== "open") break;
       let answer: ConsoleRun;
@@ -201,14 +212,15 @@ export class ConsoleSession {
     const tab = this.current.results.find((result) => result.key === key);
     if (!tab || tab.run?.kind !== "rows") return;
     const generation = this.generation;
+    const isCurrent = () => generation === this.generation && this.current.results.some((result) => result.key === key);
     try {
       const page = await resultPage(this.tabId, tab.run.result_id, offset);
-      if (generation !== this.generation) return;
+      if (!isCurrent()) return;
       this.update({
         results: this.current.results.map((result) => (result.key === key ? { ...result, page, offset } : result)),
       });
     } catch (error) {
-      if (generation === this.generation) this.update({ messages: [...this.current.messages, sentence(error)], activeResult: "messages" });
+      if (isCurrent()) this.update({ messages: [...this.current.messages, sentence(error)], activeResult: "messages" });
     }
   }
 

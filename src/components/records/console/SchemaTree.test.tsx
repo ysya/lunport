@@ -27,7 +27,7 @@ const tree = (truncated = false): Tree => ({
 });
 
 function render(props: Partial<Parameters<typeof SchemaTree>[0]> = {}) {
-  return renderToStaticMarkup(<SchemaTree tree={tree()} error={null} canRefresh onRefresh={vi.fn()} {...props} />);
+  return renderToStaticMarkup(<SchemaTree tree={tree()} error={null} canRefresh onRefresh={vi.fn()} canBrowse onBrowse={vi.fn()} preview={null} {...props} />);
 }
 
 describe("SchemaTree", () => {
@@ -47,6 +47,21 @@ describe("SchemaTree", () => {
 
   it("a_closed_table_keeps_its_columns_out_of_the_page", () => {
     expect(text(render())).not.toContain("bigint");
+  });
+
+  it("offers independent actions for browsing a table and expanding its columns", () => {
+    const html = render({ canBrowse: true });
+    expect(html).toMatch(/<button[^>]*aria-label="Expand columns for orders"[^>]*aria-expanded="false"/);
+    expect(html).toMatch(/<button[^>]*aria-label="Browse data in public.orders"[^>]*>/);
+  });
+
+  it("keeps the column toggle available while browsing is disabled", () => {
+    const html = render({ canBrowse: false });
+    const browse = html.match(/<button[^>]*aria-label="Browse data in public.orders"[^>]*>/)?.[0];
+    const expand = html.match(/<button[^>]*aria-label="Expand columns for orders"[^>]*>/)?.[0];
+    expect(browse).toContain(DISABLED);
+    expect(expand).toBeDefined();
+    expect(expand).not.toContain(DISABLED);
   });
 
   it("a_capped_tree_says_how_far_it_goes", () => {

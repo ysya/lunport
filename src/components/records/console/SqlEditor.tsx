@@ -14,10 +14,11 @@ const language = (tree: SchemaTree | null) =>
  * autocompletion's keymap, so an open completion list closes first. Keys the editor does not bind, such as the workspace's ⌘W and
  * Ctrl+Tab, pass through. The editor is made once; completion follows `schema` without remaking it.
  */
-export function SqlEditor({ viewRef, schema, running, onRun, onCancel }: {
+export function SqlEditor({ viewRef, schema, running, hidden, onRun, onCancel }: {
   viewRef: MutableRefObject<EditorView | null>;
   schema: SchemaTree | null;
   running: boolean;
+  hidden: boolean;
   onRun: (all: boolean) => void;
   onCancel: () => void;
 }) {
@@ -58,5 +59,5 @@ export function SqlEditor({ viewRef, schema, running, onRun, onCancel }: {
     view.dispatch({ effects: completion.current.reconfigure(language(schema)) });
   }, [schema, viewRef]);
 
-  return <div ref={host} className="console-editor" />;
+  return <div ref={host} className="console-editor" hidden={hidden} />;
 }

@@ -197,11 +197,22 @@ else {
     live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null, step: null, address: null },
     synced: true, blocked: false, removed: false, changed: false, environment: "prod",
   };
-  const consoleColumns: ConsoleColumn[] = [{ name: "id", type_name: "int8" }, { name: "customer", type_name: "text" }, { name: "total", type_name: "numeric" }, { name: "shipped_at", type_name: "timestamptz" }];
-  const consoleRows: (string | null)[][] = [["1", "Acme Retail", "129.00", "2027-01-04 09:12:00+00"], ["2", "Globex", "58.50", null], ["3", "Initech", "1042.75", "2027-01-05 14:30:00+00"]];
+  const consoleColumns: ConsoleColumn[] = [
+    { name: "id", type_name: "int8" },
+    { name: "customer", type_name: "text" },
+    { name: "total", type_name: "numeric" },
+    { name: "shipped_at", type_name: "timestamptz" },
+    { name: "metadata", type_name: "jsonb" },
+  ];
+  const consoleRows: (string | null)[][] = [
+    ["1", "Acme Retail", "129.00", "2027-01-04 09:12:00+00", '{"external_id":9007199254740993,"flags":{"gift":false}}'],
+    ["2", "Globex", "58.50", null, '{"note":"' + "a".repeat(2_300) + '"}'],
+    ["3", "Initech", "1042.75", "2027-01-05 14:30:00+00", null],
+  ];
   const consoleSchema: SchemaTree = { truncated: false, schemas: [{ name: "public", functions: [], relations: [{ name: "orders", kind: "table", columns: [
     { name: "id", type_name: "int8", primary_key: true }, { name: "customer", type_name: "text", primary_key: false },
     { name: "total", type_name: "numeric", primary_key: false }, { name: "shipped_at", type_name: "timestamptz", primary_key: false },
+    { name: "metadata", type_name: "jsonb", primary_key: false },
   ] }] }] };
   let callbackId = 1;
   const callbacks = new Map<number, unknown>();
@@ -231,7 +242,7 @@ else {
             ? { kind: "rows", result_id: 1, columns: consoleColumns, row_count: consoleRows.length, truncated: null, elapsed_ms: 12, first_page: consoleRows } satisfies ConsoleRun
             : { kind: "failed", message: "Only a SELECT is answered in this preview.", sqlstate: null, position: null, elapsed_ms: 1 } satisfies ConsoleRun;
           if (command === "database_console_page") return [];
-          if (["database_console_close", "database_console_cancel", "database_console_export"].includes(command)) return;
+          if (["database_console_close", "database_console_cancel", "database_console_export", "plugin:clipboard-manager|write_text"].includes(command)) return;
         }
         if (command === failure) throw new Error("Disposable fixture read failure. Retry after changing the preview scenario.");
         if (command === "secrets_has") return passwords.has(String(args.alias));
