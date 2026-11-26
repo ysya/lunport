@@ -939,7 +939,7 @@ pub(super) fn verify(
     };
     // The window names the AI client; nothing runs after a verification, so it says
     // nothing goes ahead without review.
-    let asker = crate::session::protocol::AiAsker { client: records::client_label(&context), unreviewed: None };
+    let asker = records::ai_asker(&context, None);
     let confirmer = records::ClientConfirmer::new(connector.confirmer, asker);
     // A jump host's credential or grant question the person declined or left unanswered is what stopped the verification.
     let declines = activity::Declines::default();

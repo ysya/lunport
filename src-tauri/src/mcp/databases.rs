@@ -634,7 +634,7 @@ pub(super) fn start(
             };
             records::verify_unverified(runtime, connector, &route.query, &route.target, &noting, &declines, cancel, &host_still_allowed, &confirmer, (&context, mode), DATABASE_STOPPED)?;
         }
-        let ai = AiAsker { client: records::client_label(&context), unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Database) };
+        let ai = records::asker(&context, mode, Unreviewed::Database);
         start_port(&database, ai)?;
         // The answer is the port as last seen, so that its state, the message and the audit agree.
         let seen = wait_for_start(ports, &database.id, cancel, wait)?;

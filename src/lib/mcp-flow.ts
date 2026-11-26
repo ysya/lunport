@@ -1,5 +1,6 @@
 import type { ApprovalMode } from "@/bindings/ApprovalMode";
 import type { AuthRequest } from "@/bindings/AuthRequest";
+import type { GrantPrompt } from "@/bindings/GrantPrompt";
 
 export type ClockSample = { wall: number; monotonic: number };
 export const sampleClock = (): ClockSample => ({
@@ -48,18 +49,29 @@ export function justificationAcceptable(justification: string): boolean {
   return words > 0 && words <= MAX_GRANT_JUSTIFICATION_CHARS && !/[\u0000-\u001f\u007f]/.test(justification.trim());
 }
 
-/** Whether Request may go: whole minutes from 1 to the limit, and a justification the broker accepts. */
-export function grantAnswerReady(answer: string): boolean {
-  const { minutes, justification } = grantFields(answer);
-  const whole = /^\d+$/.test(minutes.trim()) ? Number(minutes.trim()) : NaN;
-  return whole >= 1 && whole <= MAX_GRANT_MINUTES && justificationAcceptable(justification);
+/** The longest grant the form offers: the entitlement's maximum when Privileged Access Manager said it, else the form's own limit. */
+export function grantMaxMinutes(grant: GrantPrompt | null): number {
+  return grant?.max_minutes ?? MAX_GRANT_MINUTES;
 }
 
-/** A grant form starts from what this computer last asked for on the host (else the route's default length and no justification); every other question starts empty. */
+/** A justification typed or pasted over several lines, as the one line the broker accepts. */
+export function oneLine(text: string): string {
+  return text.replace(/[\r\n]+/g, " ");
+}
+
+/** Whether Request may go: whole minutes from 1 to `maxMinutes`, and a justification the broker accepts. */
+export function grantAnswerReady(answer: string, maxMinutes: number = MAX_GRANT_MINUTES): boolean {
+  const { minutes, justification } = grantFields(answer);
+  const whole = /^\d+$/.test(minutes.trim()) ? Number(minutes.trim()) : NaN;
+  return whole >= 1 && whole <= maxMinutes && justificationAcceptable(justification);
+}
+
+/** A grant form starts from what the AI client suggested, field by field, else from what this computer last asked for on the host
+ * (else the route's default length and no justification); every other question starts empty. */
 function initialAnswer(request: AuthRequest): string {
-  return request.kind === "grant" && request.grant
-    ? encodeGrantAnswer(String(request.grant.minutes), request.grant.justification ?? "")
-    : "";
+  if (request.kind !== "grant" || !request.grant) return "";
+  const { minutes, justification, suggested } = request.grant;
+  return encodeGrantAnswer(String(suggested?.minutes ?? minutes), suggested?.justification ?? justification ?? "");
 }
 
 /** Keep both clock bounds. Repeated snapshots can shorten but never renew a question. */

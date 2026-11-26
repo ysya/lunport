@@ -3,7 +3,7 @@
 use super::*;
 use crate::session::connect::CancelToken;
 use crate::session::database_query::{self, SqlError, SqlMode};
-use crate::session::protocol::{AiAsker, Unreviewed};
+use crate::session::protocol::Unreviewed;
 use crate::sync::{databases, record_runtime, records_v3::SyncStateV3};
 
 #[derive(Deserialize)]
@@ -177,11 +177,10 @@ pub(super) fn run(
             id: context.id.clone(),
         };
         current_database(app, &db).map_err(SqlError::Rejected)?;
-        let ai = AiAsker {
-            client: records::client_label(&context),
-            unreviewed: (policy.approval_mode == ApprovalMode::AutoLog && mode == SqlMode::Read)
-                .then_some(Unreviewed::DatabaseQuery),
-        };
+        let ai = records::ai_asker(
+            &context,
+            (policy.approval_mode == ApprovalMode::AutoLog && mode == SqlMode::Read).then_some(Unreviewed::DatabaseQuery),
+        );
         let check_app = app.clone();
         let check_db = db.clone();
         tauri::async_runtime::block_on(database_query::run_direct(

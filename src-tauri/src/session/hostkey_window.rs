@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn an_ai_clients_question_reaches_the_window_with_the_client() {
         use crate::session::protocol::{AiAsker, Unreviewed};
-        let asker = AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command) };
+        let asker = AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command), grant: None };
         for ai in [Some(asker), None] {
             let hub = Arc::new(HostKeyHub::default());
             let surface: Arc<dyn HostKeySurface> = Arc::new(Recorder::default());

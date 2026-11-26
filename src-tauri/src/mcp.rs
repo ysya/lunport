@@ -790,7 +790,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "lunport", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. ssh_sudo_exec always asks the person to approve one command, even in Auto-log, and asks for a sudo password only in Lunport's native window when needed. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments. Databases on a public IP, and databases reached through permitted hosts, can be listed; create_database, update_database and delete_database always need native human approval; start_database follows Ask or Auto-log like start_tunnel, and stop_database never asks. No tool returns or accepts a database port password."
+                "instructions": "Existing hosts are exposed when allowed individually or through an explicitly allowed Group and its descendants in Lunport AI Access. Records create_host always needs native human approval; a saved host can inherit access from an already allowed Group. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec, scp_upload and scp_download follow Ask or Auto-log; Auto-log skips per-operation approval. ssh_sudo_exec always asks the person to approve one command, even in Auto-log, and asks for a sudo password only in Lunport's native window when needed. SCP transfers one file at a time, with an absolute local path, and never overwrites an existing local download target. In both modes, credentials, a new or changed server key and a Privileged Access Manager grant the host needs are asked in Lunport's native windows, which name the AI client, and the call continues once the user agrees. Tools that may need a grant accept an optional grant argument ({justification, minutes}) that Lunport only prefills in its Request-a-grant window, capped at the entitlement's maximum; the user reviews it and presses Request, and Lunport never returns the justification the user sent or remembers. Tunnels through permitted hosts can be listed; create_tunnel, update_tunnel and delete_tunnel always need native human approval; start_tunnel follows Ask or Auto-log like ssh_exec, and stop_tunnel never asks. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments. Databases on a public IP, and databases reached through permitted hosts, can be listed; create_database, update_database and delete_database always need native human approval; start_database follows Ask or Auto-log like start_tunnel, and stop_database never asks. No tool returns or accepts a database port password."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -871,6 +871,12 @@ fn tool_definitions() -> Value {
     tools.as_array_mut().unwrap().extend(transfers::tool_definitions());
     tools.as_array_mut().unwrap().extend(databases::tool_definitions());
     tools.as_array_mut().unwrap().extend(database_sql::tool_definitions());
+    // Every tool whose call may need a grant offers the same suggestion argument.
+    for tool in tools.as_array_mut().unwrap() {
+        if tool["name"].as_str().is_some_and(|name| records::GRANT_TOOLS.contains(&name)) {
+            tool["inputSchema"]["properties"]["grant"] = records::grant_property();
+        }
+    }
     tools
 }
 
@@ -975,6 +981,26 @@ mod tests {
         assert!(!display_safe_command("echo safe\u{202e}txt"));
         assert!(!display_safe_command(""));
         assert!(!display_safe_command("echo\0secret"));
+    }
+
+    #[test]
+    fn exactly_the_tools_that_can_need_a_grant_offer_the_grant_argument() {
+        let tools = tool_definitions();
+        let offering: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| tool["inputSchema"]["properties"].get("grant").is_some())
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let mut expected = records::GRANT_TOOLS.to_vec();
+        let mut offering_sorted = offering.clone();
+        expected.sort_unstable();
+        offering_sorted.sort_unstable();
+        assert_eq!(offering_sorted, expected);
+        for tool in tools.as_array().unwrap().iter().filter(|tool| offering.contains(&tool["name"].as_str().unwrap())) {
+            assert_eq!(tool["inputSchema"]["properties"]["grant"], records::grant_property(), "{}", tool["name"]);
+        }
     }
 
     #[test]

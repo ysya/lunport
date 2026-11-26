@@ -272,7 +272,7 @@ fn explicit_verification_requires_host_permission_and_human_trust_even_in_auto_l
         // has no Auto-log note.
         assert_eq!(
             confirmer.asked().into_iter().map(|question| question.ai).collect::<Vec<_>>(),
-            [Some(crate::session::protocol::AiAsker { client: "An unidentified AI client".into(), unreviewed: None })],
+            [Some(crate::session::protocol::AiAsker { client: "An unidentified AI client".into(), unreviewed: None, grant: None })],
             "{mode:?}"
         );
         assert!(

@@ -14,7 +14,7 @@ use super::connect::CancelToken;
 use super::database_ports::NotReady;
 use super::directory::refusal_sentence;
 use super::grants::{self, ask_and_request, current_grant, pause, request_active_grant, GateKey, GrantGates, ACTIVE_WITHIN, POLL_EVERY};
-use super::protocol::GrantPrompt;
+use super::protocol::{cap_minutes, max_minutes_of, GrantPrompt};
 use crate::gcp::cloudsql::{ConnectSettings, EphemeralCert, EphemeralKey, InstanceRef, SqlAdmin, POSTGRES_VERSION_PREFIX};
 use crate::gcp::pam::{Entitlement, EntitlementName};
 use crate::gcp::rest::{GcpClient, GcpError};
@@ -62,6 +62,7 @@ pub(crate) fn obtain_grant(
     owner: &dyn Owner,
     state: &SyncStateV3,
     db: &SavedDatabase,
+    max_secs: &dyn Fn(Option<&str>, &str) -> Option<u32>,
     remember: &dyn Fn(&str, &str, u32),
     cancel: &CancelToken,
 ) -> Result<(), String> {
@@ -69,15 +70,19 @@ pub(crate) fn obtain_grant(
     let Some(first) = pam.entitlements.first() else { return Err("This database's grant check names no PAM entitlement.".to_string()) };
     let name = EntitlementName::in_project(&db.project, &pam.location, first).full();
     let memory = pam_records::memory(state, &name);
-    let prompt = GrantPrompt {
-        project: db.project.clone(),
-        entitlement: first.clone(),
-        minutes: memory.as_ref().map_or(pam.duration_secs, |memory| memory.duration_secs) / 60,
-        justification: memory.map(|memory| memory.justification),
-    };
     let key = gate_key(db, pam, first);
     let refusal = refusal_sentence(&pam.entitlements, first, &pam.location, &db.project);
     gates.obtain(key, owner, cancel, &refusal, || {
+        // Only the connection that asks looks up the entitlement's maximum.
+        let max_minutes = max_minutes_of(max_secs(db.account.as_deref(), &name));
+        let prompt = GrantPrompt {
+            project: db.project.clone(),
+            entitlement: first.clone(),
+            minutes: cap_minutes(memory.as_ref().map_or(pam.duration_secs, |memory| memory.duration_secs) / 60, max_minutes),
+            justification: memory.as_ref().map(|memory| memory.justification.clone()),
+            max_minutes,
+            suggested: None,
+        };
         ask_and_request(
             owner,
             &prompt,
@@ -481,7 +486,7 @@ mod tests {
     }
 
     fn obtain(gates: &GrantGates, google: &Google, owner: &dyn Owner, state: &SyncStateV3, memory: &Memory) -> Result<(), String> {
-        obtain_grant(gates, google, owner, state, &guarded(), &|name, justification, secs| memory.remember(name, justification, secs), &CancelToken::default())
+        obtain_grant(gates, google, owner, state, &guarded(), &|_, _| None, &|name, justification, secs| memory.remember(name, justification, secs), &CancelToken::default())
     }
 
     /// Two connections that need the same grant at the same moment, with `person` at the terminal of both.
@@ -625,7 +630,7 @@ mod tests {
         let mut person = Person::new(FakeOwner::typing(&[ANSWER]), &gates, 1);
         person.leaving = Some(lead_cancel.clone());
         let (lead, follower) = std::thread::scope(|scope| {
-            let lead = scope.spawn(|| obtain_grant(&gates, &google, &person, &state(), &guarded(), &|name, justification, secs| memory.remember(name, justification, secs), &lead_cancel));
+            let lead = scope.spawn(|| obtain_grant(&gates, &google, &person, &state(), &guarded(), &|_, _| None, &|name, justification, secs| memory.remember(name, justification, secs), &lead_cancel));
             let end = Instant::now() + Duration::from_secs(5);
             while !person.asking.load(Ordering::SeqCst) && Instant::now() < end {
                 std::thread::sleep(Duration::from_millis(2));
@@ -651,7 +656,7 @@ mod tests {
         assert!(wait > Duration::from_secs(290) && wait <= Duration::from_secs(300), "five minutes: {wait:?}");
         // With nothing remembered the window offers the database's own length and nothing to prefill.
         let prompt = GrantPrompt::from_text(&asked[0].text).expect("the question carries the prompt");
-        assert_eq!(prompt, GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None });
+        assert_eq!(prompt, GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None, max_minutes: None, suggested: None });
         // What the person answered is what was requested, for the entitlement the database lists first, as the account it is saved with.
         assert_eq!(google.created(), 1);
         assert!(google.calls().contains(&format!("create {ACCOUNT} prod-operate 1800 Check unpaid orders")), "{:?}", google.calls());
@@ -675,6 +680,24 @@ mod tests {
         let _ = obtain(&gates, &google, &owner, &other, &memory);
         let prompt = GrantPrompt::from_text(&owner.asked()[0].text).expect("the question carries the prompt");
         assert_eq!((prompt.minutes, prompt.justification), (30, None));
+    }
+
+    /// The question carries the entitlement's maximum, looked up for the entitlement it requests as the database's account, and a
+    /// remembered length above it is offered at the maximum.
+    #[test]
+    fn the_question_carries_the_entitlements_maximum_and_caps_the_remembered_length() {
+        let remembered = crate::sync::pam_records::remember(&state(), OPERATE, "restart orders-pg", 7200, None, 1).expect("a memory is written");
+        let (gates, google, memory) = (GrantGates::default(), Google::default(), Memory::default());
+        let owner = FakeOwner::answering(vec![Reply::Cancelled]);
+        let looked = Mutex::new(vec![]);
+        let max_secs = |account: Option<&str>, name: &str| {
+            looked.lock().unwrap().push((account.map(str::to_string), name.to_string()));
+            Some(3600)
+        };
+        let _ = obtain_grant(&gates, &google, &owner, &remembered, &guarded(), &max_secs, &|name, justification, secs| memory.remember(name, justification, secs), &CancelToken::default());
+        let prompt = GrantPrompt::from_text(&owner.asked()[0].text).expect("the question carries the prompt");
+        assert_eq!((prompt.max_minutes, prompt.minutes), (Some(60), 60));
+        assert_eq!(looked.lock().unwrap().clone(), vec![(Some(ACCOUNT.to_string()), OPERATE.to_string())]);
     }
 
     #[test]
@@ -717,7 +740,7 @@ mod tests {
     fn a_database_without_a_grant_check_has_nothing_to_request() {
         let (gates, google, memory) = (GrantGates::default(), Google::default(), Memory::default());
         let owner = FakeOwner::default();
-        let error = obtain_grant(&gates, &google, &owner, &state(), &database(ID), &|name, justification, secs| memory.remember(name, justification, secs), &CancelToken::default());
+        let error = obtain_grant(&gates, &google, &owner, &state(), &database(ID), &|_, _| None, &|name, justification, secs| memory.remember(name, justification, secs), &CancelToken::default());
         assert_eq!(error, Err("This database requires no grant.".to_string()));
         assert!(owner.asked().is_empty() && google.calls().is_empty());
     }

@@ -22,6 +22,8 @@ pub struct RequestContext {
     pub requested_by: Vec<String>,
     pub requester_id: Option<String>,
     pub client_info: McpClientInfo,
+    /// The grant suggestion the call sent (`take_grant`), for the Request-a-grant window its connection may open.
+    pub grant: Option<crate::session::protocol::GrantSuggestion>,
 }
 impl RequestContext {
     pub fn from_peer(pid: Option<u32>, info: Option<&Value>) -> Self {
@@ -42,6 +44,7 @@ impl RequestContext {
                 .unwrap_or_else(|| vec!["Unknown".into()]),
             requester_id: program.map(|p| p.identity),
             client_info: McpClientInfo::sanitize(info),
+            grant: None,
         }
     }
 }
@@ -156,7 +159,52 @@ pub(crate) fn client_label(context: &RequestContext) -> String {
 /// Who asks in Lunport's windows for an AI client's request in `mode`: the client, and in Auto-log what goes ahead without per-command
 /// review once the person agrees (`then`).
 pub(crate) fn asker(context: &RequestContext, mode: ApprovalMode, then: Unreviewed) -> AiAsker {
-    AiAsker { client: client_label(context), unreviewed: (mode == ApprovalMode::AutoLog).then_some(then) }
+    ai_asker(context, (mode == ApprovalMode::AutoLog).then_some(then))
+}
+
+/// Who asks in Lunport's windows for an AI client's request: the client, what goes ahead without per-command review once the person
+/// agrees (`unreviewed`), and the grant suggestion the call sent. Every window an AI request opens is asked as this.
+pub(crate) fn ai_asker(context: &RequestContext, unreviewed: Option<Unreviewed>) -> AiAsker {
+    AiAsker { client: client_label(context), unreviewed, grant: context.grant.clone() }
+}
+
+/// The tools whose call may need a Privileged Access Manager grant, and so take a `grant` suggestion.
+pub(crate) const GRANT_TOOLS: [&str; 9] =
+    ["ssh_exec", "ssh_sudo_exec", "scp_upload", "scp_download", "start_tunnel", "start_database", "query_database", "execute_database", "verify_host_key"];
+
+/// `params` without its `grant` suggestion, and the suggestion: only `GRANT_TOOLS` take one, and it must be one
+/// (`GrantSuggestion::parse`). Taken out before a tool reads its arguments, so that the tools that check theirs strictly accept it.
+pub(crate) fn take_grant(method: &str, params: &Value) -> Result<(Value, Option<crate::session::protocol::GrantSuggestion>), String> {
+    let given = match params.get("grant") {
+        None => return Ok((params.clone(), None)),
+        // A client that sends null for an optional argument sent none.
+        Some(Value::Null) => {
+            let mut params = params.clone();
+            params.as_object_mut().map(|object| object.remove("grant"));
+            return Ok((params, None));
+        }
+        Some(given) => given,
+    };
+    if !GRANT_TOOLS.contains(&method) {
+        return Err(format!("{method} does not take a grant suggestion."));
+    }
+    let grant = crate::session::protocol::GrantSuggestion::parse(given).map_err(|error| format!("grant: {error}"))?;
+    let mut params = params.clone();
+    params.as_object_mut().map(|object| object.remove("grant"));
+    Ok((params, Some(grant)))
+}
+
+/// The `grant` argument of `GRANT_TOOLS`, as each one's input schema offers it.
+pub(crate) fn grant_property() -> Value {
+    json!({
+        "type": "object",
+        "description": "Optional suggestion for a Privileged Access Manager grant this call may need. Lunport prefills it in its Request-a-grant window, marked as yours; the person reviews it and presses Request. It is never requested or stored unless they send it.",
+        "properties": {
+            "justification": {"type": "string", "maxLength": crate::session::protocol::MAX_GRANT_JUSTIFICATION_CHARS, "description": "One line: why the grant is needed."},
+            "minutes": {"type": "integer", "minimum": 1, "maximum": crate::session::protocol::MAX_GRANT_MINUTES, "description": "How long the grant should last. Lunport caps it at the entitlement's maximum."}
+        },
+        "additionalProperties": false
+    })
 }
 
 /// Lunport's host key window as an AI client's call asks it: every question goes to the window, a changed key in
@@ -449,6 +497,9 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
         self.0.request_grant(need, justification, duration_secs, cancel)
     }
+    fn grant_max_secs(&self, need: &crate::session::directory::GrantNeed) -> Option<u32> {
+        self.0.grant_max_secs(need)
+    }
 }
 
 #[cfg(test)]
@@ -645,7 +696,7 @@ fn execute_command_context(
     let mut decision = None;
     let declines = Declines::default();
     let owner = NotingOwner { inner: owner, declines: &declines };
-    let confirmer = ClientConfirmer::new(connector.confirmer, AiAsker { client: client_label(&context), unreviewed: if sudo { None } else { (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Command) } });
+    let confirmer = ClientConfirmer::new(connector.confirmer, ai_asker(&context, if sudo { None } else { (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Command) }));
     let result = std::thread::scope(|scope| {
         // Revoke/disable and disconnect wake native authentication and approval while the worker waits.
         scope.spawn(|| {
@@ -1017,6 +1068,9 @@ pub(crate) fn dispatch(
         return Ok(json!({"mode":"records"}));
     }
     validate_method(method)?;
+    let (params, grant) = take_grant(method, params)?;
+    let params = &params;
+    let context = RequestContext { grant, ..context };
     let policy = state.mcp.policy.lock().unwrap().clone();
     if !policy.enabled {
         return Err("MCP access is disabled in Lunport Settings → AI Access".into());
@@ -1189,7 +1243,7 @@ pub(crate) fn dispatch(
             }
             let owner = crate::session::auth_window::NativeOwner {
                 // Nothing runs after a verification: the windows only name the AI client.
-                ai: Some(AiAsker { client: client_label(&context), unreviewed: None }),
+                ai: Some(ai_asker(&context, None)),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -1242,7 +1296,7 @@ pub(crate) fn dispatch(
                     .ok_or("timeout_seconds must be an integer from 1 to 300")?,
             };
             let owner = crate::session::auth_window::NativeOwner {
-                ai: Some(if sudo { AiAsker { client: client_label(&context), unreviewed: None } } else { asker(&context, policy.approval_mode, Unreviewed::Command) }),
+                ai: Some(if sudo { ai_asker(&context, None) } else { asker(&context, policy.approval_mode, Unreviewed::Command) }),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -2081,16 +2135,74 @@ mod behavior_tests {
     /// Every host key window an AI request opens names the AI client as Lunport observed it, and in Auto-log says that the command runs
     /// without per-command review once the key is trusted.
     #[test]
+    fn take_grant_strips_the_suggestion_for_the_nine_tools() {
+        use crate::session::protocol::GrantSuggestion;
+        assert_eq!(
+            GRANT_TOOLS,
+            ["ssh_exec", "ssh_sudo_exec", "scp_upload", "scp_download", "start_tunnel", "start_database", "query_database", "execute_database", "verify_host_key"]
+        );
+        for tool in GRANT_TOOLS {
+            let (params, grant) = take_grant(tool, &json!({"alias": "web-1", "grant": {"minutes": 30}})).unwrap();
+            assert_eq!(params, json!({"alias": "web-1"}), "{tool}");
+            assert_eq!(grant, Some(GrantSuggestion { justification: None, minutes: Some(30) }), "{tool}");
+        }
+        let (params, grant) = take_grant("ssh_sudo_exec", &json!({"alias": "web-1", "command": "systemctl restart app-api", "grant": {"justification": "restart app-api"}})).unwrap();
+        assert_eq!(params, json!({"alias": "web-1", "command": "systemctl restart app-api"}));
+        assert_eq!(grant.and_then(|grant| grant.justification).as_deref(), Some("restart app-api"));
+        assert_eq!(take_grant("ssh_exec", &json!({"alias": "web-1"})).unwrap(), (json!({"alias": "web-1"}), None));
+        assert_eq!(take_grant("list_hosts", &json!({})).unwrap(), (json!({}), None));
+        // A client that sends null for an optional argument sent none.
+        assert_eq!(take_grant("ssh_exec", &json!({"alias": "web-1", "grant": null})).unwrap(), (json!({"alias": "web-1"}), None));
+        assert_eq!(take_grant("get_host", &json!({"alias": "web-1", "grant": null})).unwrap(), (json!({"alias": "web-1"}), None));
+    }
+
+    #[test]
+    fn take_grant_refuses_it_elsewhere_and_refuses_a_bad_one() {
+        assert_eq!(take_grant("get_host", &json!({"alias": "web-1", "grant": {"minutes": 30}})), Err("get_host does not take a grant suggestion.".to_string()));
+        let error = take_grant("ssh_exec", &json!({"alias": "web-1", "grant": {"justification": "secret\u{202E}terces"}})).unwrap_err();
+        assert!(error.starts_with("grant: ") && !error.contains("secret"), "{error}");
+        assert!(take_grant("start_tunnel", &json!({"tunnel": "Database", "grant": {"minutes": 0}})).unwrap_err().starts_with("grant: "));
+    }
+
+    /// A suggested justification goes to the window only: the call's result never repeats it.
+    #[test]
+    fn a_suggested_justification_never_appears_in_the_result() {
+        use crate::session::protocol::GrantSuggestion;
+        let r = runtime(ApprovalMode::AutoLog);
+        let e = FakeEngine::new();
+        let d = directory(AuthMethod::Password, false);
+        let window = FakeConfirmer::deciding(vec![Decision::Trust]);
+        let (keys, keychain) = (FakeKeys::new(), MemKeychain::default());
+        let connector = Connector { grants: crate::session::grants::GrantGates::for_tests(), engine: &e, directory: &d, keys: &keys, keychain: &keychain, confirmer: &window };
+        let grant = GrantSuggestion { justification: Some("restart app-api after the deploy".into()), minutes: Some(30) };
+        let context = RequestContext { requested_by: vec!["claude".into()], grant: Some(grant), ..Default::default() };
+        let owner = FakeOwner::typing(&["secret"]);
+        let value = execute_context(&r, &connector, "id-web", "uptime", 60, &CancelToken::default(), &owner, &|_| ApprovalDecision::Allow, context, &ensure_allowed).unwrap();
+        assert!(!value.to_string().contains("restart app-api"), "{value}");
+        assert_eq!(window.asked()[0].ai.as_ref().and_then(|ai| ai.grant.as_ref()).and_then(|grant| grant.minutes), Some(30), "the window was asked with it");
+    }
+
+    #[test]
+    fn ai_asker_carries_the_requests_suggestion() {
+        use crate::session::protocol::{GrantSuggestion, Unreviewed};
+        let grant = GrantSuggestion { justification: Some("restart app-api".into()), minutes: Some(30) };
+        let context = RequestContext { requested_by: vec!["claude".into()], grant: Some(grant.clone()), ..Default::default() };
+        let asked = ai_asker(&context, Some(Unreviewed::Command));
+        assert_eq!((asked.client.as_str(), asked.unreviewed, asked.grant.as_ref()), ("claude", Some(Unreviewed::Command), Some(&grant)));
+        assert_eq!(asker(&context, ApprovalMode::Ask, Unreviewed::Tunnel).grant, Some(grant));
+    }
+
+    #[test]
     fn the_host_key_window_names_the_ai_client_and_says_what_runs_unreviewed() {
         use crate::session::protocol::{AiAsker, Unreviewed};
         for (mode, requested_by, asker) in [
             (
                 ApprovalMode::AutoLog,
                 vec!["claude".to_string(), "node".to_string()],
-                AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command) },
+                AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command), grant: None },
             ),
-            (ApprovalMode::Ask, vec!["claude".to_string()], AiAsker { client: "claude".into(), unreviewed: None }),
-            (ApprovalMode::AutoLog, vec![], AiAsker { client: "An unidentified AI client".into(), unreviewed: Some(Unreviewed::Command) }),
+            (ApprovalMode::Ask, vec!["claude".to_string()], AiAsker { client: "claude".into(), unreviewed: None, grant: None }),
+            (ApprovalMode::AutoLog, vec![], AiAsker { client: "An unidentified AI client".into(), unreviewed: Some(Unreviewed::Command), grant: None }),
         ] {
             let r = runtime(mode);
             let e = FakeEngine::new();

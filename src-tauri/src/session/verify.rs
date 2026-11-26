@@ -125,6 +125,9 @@ impl HostDirectory for ProbeDirectory<'_> {
         self.checked()?;
         self.inner.request_grant(need, justification, duration_secs, cancel)
     }
+    fn grant_max_secs(&self, need: &super::directory::GrantNeed) -> Option<u32> {
+        self.inner.grant_max_secs(need)
+    }
 }
 
 struct StopBeforeLogin<'a> {

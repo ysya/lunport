@@ -158,7 +158,7 @@ fn the_tunnels_of_hosts_the_client_may_not_use_answer_as_unknown() {
         confirmer: &connector_parts.4,
         grants: crate::session::grants::GrantGates::for_tests(),
     };
-    let no_launch = |_: &TunnelRule, _: records::ApprovedTarget, _: ApprovalMode, _: String| -> Result<Arc<Entry>, String> { panic!("nothing starts") };
+    let no_launch = |_: &TunnelRule, _: records::ApprovedTarget, _: ApprovalMode, _: crate::session::protocol::AiAsker| -> Result<Arc<Entry>, String> { panic!("nothing starts") };
     for result in [
         update(&d.env(), &r, &tunnels, &json!({"tunnel": "00000000000000f2", "port": 1}), RequestContext::default(), &CancelToken::default(), &never),
         delete(&d.env(), &r, &tunnels, &by_id, RequestContext::default(), &CancelToken::default(), &never),
@@ -566,18 +566,22 @@ struct Launches<'a> {
     tunnels: &'a Tunnels,
     then: Option<TunnelLive>,
     given: Mutex<Vec<(ApprovalMode, String)>>,
+    /// The grant suggestion each launch's asker carried.
+    grants: Mutex<Vec<Option<crate::session::protocol::GrantSuggestion>>>,
     /// A window the worker's connection noted on the entry as declined before it stood in `then`, as a refused password is.
     declined: Option<(McpStopKind, McpWindow)>,
 }
 impl<'a> Launches<'a> {
     fn new(d: &'a TestDevice, tunnels: &'a Tunnels, then: Option<TunnelLive>) -> Self {
-        Launches { d, tunnels, then, given: Mutex::new(Vec::new()), declined: None }
+        Launches { d, tunnels, then, given: Mutex::new(Vec::new()), grants: Mutex::new(Vec::new()), declined: None }
     }
     /// The launch whose worker notes `window` as declined (`kind`) before the tunnel stands in `then`.
     fn declining(self, kind: McpStopKind, window: McpWindow) -> Self {
         Launches { declined: Some((kind, window)), ..self }
     }
-    fn launch(&self, rule: &TunnelRule, _: records::ApprovedTarget, mode: ApprovalMode, started_by: String) -> Result<Arc<Entry>, String> {
+    fn launch(&self, rule: &TunnelRule, _: records::ApprovedTarget, mode: ApprovalMode, asker: crate::session::protocol::AiAsker) -> Result<Arc<Entry>, String> {
+        let started_by = asker.client.clone();
+        self.grants.lock().unwrap().push(asker.grant);
         self.given.lock().unwrap().push((mode, started_by.clone()));
         let (_, entry, _) = self.tunnels.prepare(&snapshot(self.d), rule, None, Some(started_by.clone()))?;
         if let Some(mut then) = self.then.clone() {
@@ -623,12 +627,31 @@ fn starting_in_ask_mode_asks_with_the_route_and_answers_where_it_listens() {
     .unwrap();
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     assert_eq!(launches.given(), vec![(ApprovalMode::Ask, "Terminal → claude".to_string())]);
+    assert_eq!(launches.grants.lock().unwrap().clone(), vec![None], "no suggestion was sent");
     assert_eq!(value["tunnel"]["state"], "running");
     assert_eq!(value["tunnel"]["listening"], "127.0.0.1:15432");
     assert_eq!(value["tunnel"]["started_by_ai_client"], true);
     assert_eq!(value["message"], "Tunnel running; connect to 127.0.0.1:15432 on this computer.");
     assert_eq!(last_outcome(&r), "tunnel_started");
     assert!(r.records_active.lock().unwrap().is_empty());
+}
+
+/// The grant suggestion the client sent travels with the asker the tunnel's connection asks its windows as.
+#[test]
+fn the_launch_carries_the_clients_grant_suggestion() {
+    use crate::session::protocol::GrantSuggestion;
+    let d = device();
+    let r = runtime(ApprovalMode::AutoLog);
+    let tunnels = Tunnels::default();
+    let web = host(&d, &r, "web-1", true);
+    created(&d, &r, &tunnels);
+    let verified = Route::to(&web, true);
+    let launches = Launches::new(&d, &tunnels, Some(running(15432, None)));
+    let launch = |rule: &TunnelRule, approved, mode, who| launches.launch(rule, approved, mode, who);
+    let grant = GrantSuggestion { justification: Some("inspect orders-pg".into()), minutes: Some(30) };
+    let context = RequestContext { grant: Some(grant.clone()), ..Default::default() };
+    start(&d.env(), &r, &tunnels, &verified.connector(), &FakeOwner::default(), &json!({"tunnel": "Database"}), context, &CancelToken::default(), &never, &launch).unwrap();
+    assert_eq!(launches.grants.lock().unwrap().clone(), vec![Some(grant)]);
 }
 
 #[test]

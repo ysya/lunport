@@ -1321,7 +1321,7 @@ fn the_warm_up_asks_in_the_ai_clients_name() {
         recording.lock().unwrap().push(ai.cloned());
         Box::new(Shared(Arc::clone(&owner)))
     });
-    let claude = AiAsker { client: "Claude".into(), unreviewed: None };
+    let claude = AiAsker { client: "Claude".into(), unreviewed: None, grant: None };
     let cancel = CancelToken::default();
     // The grant the database asks for: nobody answers, for the AI client's start or for an app's connection.
     assert!(upstream.warm(&guarded(), &cancel, Some(&claude), &|_| {}).is_err());

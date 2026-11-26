@@ -9,7 +9,8 @@ import {
   encodeGrantAnswer,
   grantAnswerReady,
   grantFields,
-  MAX_GRANT_MINUTES,
+  grantMaxMinutes,
+  oneLine,
   receiveAuthQuestion,
   sampleClock,
   takeAuthAnswer,
@@ -26,6 +27,7 @@ import { useApplyTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 export type AuthenticationCardViewProps = {
   request: AuthRequest;
@@ -43,7 +45,7 @@ export function AuthenticationCardView({
   request, busy, armed, remainingMs, answer, abandoned = false, error, onChange, onAnswer,
 }: AuthenticationCardViewProps) {
   const cancel = useRef<HTMLButtonElement>(null);
-  const justification = useRef<HTMLInputElement>(null);
+  const justification = useRef<HTMLTextAreaElement>(null);
   const answerId = useId();
   const minutesId = useId();
   const [shown, setShown] = useState(false);
@@ -57,12 +59,20 @@ export function AuthenticationCardView({
   useEffect(() => { (isGrant ? justification.current : cancel.current)?.focus(); }, [request.id, isGrant]);
   const expired = remainingMs <= 0;
   const inactive = expired || abandoned;
-  const cannotSubmit = busy || !armed || inactive || (isGrant && !grantAnswerReady(answer));
+  const maxMinutes = grantMaxMinutes(grant);
+  const cannotSubmit = busy || !armed || inactive || (isGrant && !grantAnswerReady(answer, maxMinutes));
   const fields = grantFields(answer);
+  // An AI client's suggestion is marked as the client's for as long as the field still holds it.
+  const suggested = grant?.suggested ?? null;
+  const suggestedBy = request.ai ? `Suggested by ${revealHidden(request.ai.client)}` : null;
+  const justificationSuggested = suggestedBy !== null && suggested?.justification != null && fields.justification === suggested.justification;
+  const minutesSuggested = suggestedBy !== null && suggested?.minutes != null && fields.minutes === String(suggested.minutes);
+  const remembered = grant?.justification ?? null;
+  const offerRemembered = suggested?.justification != null && remembered !== null && fields.justification !== remembered;
   const answerLabel = isSudo ? "Sudo password" : request.kind === "password" ? "Password" : request.kind === "passphrase" ? "Key passphrase" : "Authentication answer";
   const seconds = Math.ceil(Math.max(0, remainingMs) / 1000);
   const meta = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
-  const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
+  const submitOnEnter = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
     if (!event.nativeEvent.isComposing && !cannotSubmit) onAnswer(answer);
@@ -92,19 +102,26 @@ export function AuthenticationCardView({
           <>
           <div className="space-y-1">
             <Label htmlFor={answerId}>Justification</Label>
-            <Input
+            {/* Wraps, so that a long justification is seen whole before it is sent; it stays one line. */}
+            <Textarea
               id={answerId}
               ref={justification}
               aria-label="Justification"
-              type="text"
+              rows={2}
+              className="min-h-0 resize-none"
               value={fields.justification}
               autoFocus
               autoComplete="off"
               maxLength={512}
               disabled={busy}
-              onChange={event => onChange(encodeGrantAnswer(fields.minutes, event.target.value))}
+              onChange={event => onChange(encodeGrantAnswer(fields.minutes, oneLine(event.target.value)))}
               onKeyDown={submitOnEnter}
             />
+            {justificationSuggested && <p className="text-muted-foreground">{suggestedBy}</p>}
+            {offerRemembered && (
+              <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={busy}
+                onClick={() => onChange(encodeGrantAnswer(fields.minutes, remembered))}>Use my last justification</Button>
+            )}
           </div>
           <div className="space-y-1">
             <Label htmlFor={minutesId}>Duration (minutes)</Label>
@@ -114,7 +131,7 @@ export function AuthenticationCardView({
               type="number"
               inputMode="numeric"
               min={1}
-              max={MAX_GRANT_MINUTES}
+              max={maxMinutes}
               step={1}
               className="w-28"
               value={fields.minutes}
@@ -122,6 +139,9 @@ export function AuthenticationCardView({
               onChange={event => onChange(encodeGrantAnswer(event.target.value, fields.justification))}
               onKeyDown={submitOnEnter}
             />
+            {minutesSuggested && <p className="text-muted-foreground">{suggestedBy}</p>}
+            {suggested?.capped_from != null && <p className="text-muted-foreground">Capped at {maxMinutes} minutes, the entitlement’s maximum.</p>}
+            {grant?.max_minutes == null && <p className="text-muted-foreground">The entitlement’s maximum is unknown; Lunport allows up to {maxMinutes} minutes.</p>}
           </div>
           <p className="text-muted-foreground">Requested as you through Privileged Access Manager, for at most what the entitlement allows. The justification is kept for next time.</p>
           </>

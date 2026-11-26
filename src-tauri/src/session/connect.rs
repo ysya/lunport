@@ -427,7 +427,9 @@ impl Connector<'_> {
     /// for it to become active, and tells the terminal what was got. Cancel, no answer in time, a client that went away or an answer that
     /// is not one end with the refusal that names the gcloud command, and with the person's no or no answer (`Declined`).
     fn request_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<GrantReceipt, (ConnectFailure, Option<Declined>)> {
-        let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes: need.duration_secs / 60, justification: need.justification.clone() };
+        let max_minutes = super::protocol::max_minutes_of(self.directory.grant_max_secs(need));
+        let minutes = super::protocol::cap_minutes(need.duration_secs / 60, max_minutes);
+        let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes, justification: need.justification.clone(), max_minutes, suggested: None };
         ask_and_request(
             owner,
             &prompt,
@@ -1810,17 +1812,20 @@ mod tests {
         need: Option<GrantNeed>,
         grants: Mutex<VecDeque<Result<GrantReceipt, DirectoryError>>>,
         requested: Mutex<Vec<(String, u32)>>,
+        /// The entitlement's maximum the directory reports, and how often it was asked for it.
+        max_secs: Option<u32>,
+        max_asked: AtomicUsize,
     }
 
     impl<'a> Preparing<'a> {
         fn answering(inner: &'a FakeDirectory, answer: Result<Prepared, DirectoryError>) -> Preparing<'a> {
-            Preparing { inner, prepared: Default::default(), answer, need: None, grants: Default::default(), requested: Default::default() }
+            Preparing { inner, prepared: Default::default(), answer, need: None, grants: Default::default(), requested: Default::default(), max_secs: None, max_asked: AtomicUsize::new(0) }
         }
 
         /// Needs `need`'s grant; once one was requested, the target is prepared as a grant given moments ago.
         fn needing(inner: &'a FakeDirectory, need: GrantNeed, grants: Vec<Result<GrantReceipt, DirectoryError>>) -> Preparing<'a> {
             let answer = Ok(Prepared { recent_grant: true, granted_at: Some(SystemTime::now()) });
-            Preparing { inner, prepared: Default::default(), answer, need: Some(need), grants: Mutex::new(grants.into()), requested: Default::default() }
+            Preparing { inner, prepared: Default::default(), answer, need: Some(need), grants: Mutex::new(grants.into()), requested: Default::default(), max_secs: None, max_asked: AtomicUsize::new(0) }
         }
 
         fn requested(&self) -> Vec<(String, u32)> {
@@ -1854,6 +1859,10 @@ mod tests {
         fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, _cancel: &CancelToken) -> Result<GrantReceipt, DirectoryError> {
             locked(&self.requested).push((justification.to_string(), duration_secs));
             locked(&self.grants).pop_front().unwrap_or_else(|| Ok(receipt(need)))
+        }
+        fn grant_max_secs(&self, _need: &GrantNeed) -> Option<u32> {
+            self.max_asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.max_secs
         }
     }
 
@@ -1954,6 +1963,18 @@ mod tests {
         assert!(notices[0].starts_with("Requested a 45-minute prod-operate grant on acme-prod-123456; active until ") && notices[0].ends_with('.'), "{}", notices[0]);
         assert_eq!(locked(&directory.prepared).len(), 2, "checked again after the grant");
         assert_eq!(world.engine.attempts(), 1);
+    }
+
+    /// The question carries the entitlement's maximum, and a remembered length above it is offered at the maximum.
+    #[test]
+    fn the_grant_question_carries_the_maximum_and_caps_the_remembered_length() {
+        let world = world(FakeEngine::new(), pinned_password_web()).with_saved_password().typing(&["60\nrestart app-api"]);
+        let mut directory = Preparing::needing(&world.directory, GrantNeed { duration_secs: 7200, ..need() }, vec![]);
+        directory.max_secs = Some(3600);
+        world.connect_through(&directory, &web(), &world.owner).expect("connects once the grant is active");
+        let prompt = GrantPrompt::from_text(&world.owner.asked()[0].text).expect("the question carries the prompt");
+        assert_eq!((prompt.max_minutes, prompt.minutes), (Some(60), 60));
+        assert_eq!(directory.max_asked.load(std::sync::atomic::Ordering::SeqCst), 1, "looked up once, by the connection that asks");
     }
 
     #[test]

@@ -390,6 +390,10 @@ impl HostDirectory for RecordDirectory {
     fn request_grant(&self, need: &GrantNeed, justification: &str, duration_secs: u32, cancel: &super::connect::CancelToken) -> Result<GrantReceipt, DirectoryError> {
         self.request_grant_with(need, justification, duration_secs, cancel, super::grants::POLL_EVERY, super::grants::ACTIVE_WITHIN)
     }
+    fn grant_max_secs(&self, need: &GrantNeed) -> Option<u32> {
+        let name = crate::gcp::pam::EntitlementName::in_project(&need.project, &need.location, &need.entitlement).full();
+        super::grants::entitlement_max_secs(self.gcp.clone()?, need.account.as_deref(), &name, super::grants::MAX_LOOKUP_WAIT)
+    }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?
             .host

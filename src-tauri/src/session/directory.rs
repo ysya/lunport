@@ -147,6 +147,12 @@ pub trait HostDirectory: Send + Sync {
         Err(DirectoryError::Unsupported("Requesting a grant is not available here.".into()))
     }
 
+    /// The most Privileged Access Manager lets the grant `need` names be requested for, in seconds, for the Request-a-grant window;
+    /// `None` when it is not known in time. Asked only by the connection that asks the person. A directory without Google knows none.
+    fn grant_max_secs(&self, _need: &GrantNeed) -> Option<u32> {
+        None
+    }
+
     /// Handshake-only identity verification must not require destination login credentials.
     /// Jump hosts still require their normal credentials to reach the destination.
     fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
