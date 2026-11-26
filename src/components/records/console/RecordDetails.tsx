@@ -53,7 +53,7 @@ export function RecordDetails({ id, rowNumber, columns, row, onClose }: {
   row: (string | null)[];
   onClose: () => void;
 }) {
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState<{ row: number; column: number } | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   useEffect(() => closeButton.current?.focus({ preventScroll: true }), []);
   const formatted = useMemo(() => columns.map((column, index) => {
@@ -90,7 +90,7 @@ export function RecordDetails({ id, rowNumber, columns, row, onClose }: {
         const name = revealHidden(column.name);
         const value = row[index] ?? null;
         const display = formatted[index];
-        const full = expanded === index;
+        const full = expanded?.row === rowNumber && expanded.column === index;
         return <div key={index} className="console-record-field">
           <dt>
             <span className="console-record-name">{name}</span>
@@ -108,7 +108,7 @@ export function RecordDetails({ id, rowNumber, columns, row, onClose }: {
               size="xs"
               variant="outline"
               aria-expanded={full}
-              onClick={() => setExpanded(full ? null : index)}
+              onClick={() => setExpanded(full ? null : { row: rowNumber, column: index })}
             >{full ? "Show less" : "Show full value"}</Button>}
           </dd>
         </div>;

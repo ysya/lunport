@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ArrowLeftRight, Bot, Cloud, Database, KeyRound, Server } from "lucide-react";
 import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
-import { useUiStore } from "@/stores/ui";
 import { CLOUD_PROVIDERS } from "@/lib/cloud";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { LibraryFilter } from "./library-view";
@@ -39,11 +38,10 @@ function NavigationItem({ label, icon, active, action, count, collapsed }: {
   );
 }
 
-export function LibraryNavigation({ overview, panel, navigate, changeFilter }: {
-  overview: RecordOverview; panel: WorkspacePanel;
+export function LibraryNavigation({ overview, panel, collapsed, navigate, changeFilter }: {
+  overview: RecordOverview; panel: WorkspacePanel | null; collapsed: boolean;
   navigate: (panel: WorkspacePanel) => void; changeFilter: (filter: LibraryFilter) => void;
 }) {
-  const collapsed = useUiStore((s) => s.librarySidebarCollapsed);
   const row = (label: string, icon: ReactNode, active: boolean, action: () => void, count?: number) => (
     <NavigationItem label={label} icon={icon} active={active} action={action} count={count} collapsed={collapsed} />
   );

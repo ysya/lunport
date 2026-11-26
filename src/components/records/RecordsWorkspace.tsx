@@ -97,8 +97,8 @@ export function RecordsWorkspace({
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
   const setPaletteOpen = useUiStore((state) => state.setPaletteOpen);
-  const sidebarCollapsed = useUiStore((state) => state.librarySidebarCollapsed);
-  const toggleSidebar = useUiStore((state) => state.toggleLibrarySidebar);
+  const librarySidebarCollapsed = useUiStore((state) => state.librarySidebarCollapsed);
+  const toggleLibrarySidebar = useUiStore((state) => state.toggleLibrarySidebar);
   const openSettings = (category: "general" | "ai") => {
     setSettingsCategory(category);
     setSettingsOpen(true);
@@ -106,6 +106,9 @@ export function RecordsWorkspace({
   const client = useQueryClient();
   const [panel, setPanel] = useState<WorkspacePanel>("hosts");
   const activeTerminal = useTerminalStore((state) => state.activeId);
+  const databaseActive = useTerminalStore((state) => state.tabs.some((tab) => tab.id === state.activeId && tab.kind === "database"));
+  const [databaseSidebarCollapsed, setDatabaseSidebarCollapsed] = useState(true);
+  const sidebarCollapsed = databaseActive ? databaseSidebarCollapsed : librarySidebarCollapsed;
   const setActiveTerminal = useTerminalStore((state) => state.activate);
   const [filter, setFilter] = useState<LibraryFilter>({ kind: "all" });
   const [inspectedId, setInspectedId] = useState<string | null>(null);
@@ -350,7 +353,8 @@ export function RecordsWorkspace({
         </header>
         <LibraryNavigation
           overview={overview}
-          panel={panel}
+          panel={databaseActive ? null : panel}
+          collapsed={sidebarCollapsed}
           navigate={(next) => { setActiveTerminal(null); setPanel(next); }}
           changeFilter={(next) => { setActiveTerminal(null); changeFilter(next); }}
         />
@@ -367,7 +371,8 @@ export function RecordsWorkspace({
           data-has-sessions={!!tabs}
         >
           <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleSidebar}>
+            aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID}
+            onClick={databaseActive ? () => setDatabaseSidebarCollapsed((collapsed) => !collapsed) : toggleLibrarySidebar}>
             {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
           </Button>
           {tabs ?? <button
