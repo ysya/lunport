@@ -312,7 +312,7 @@ impl GrantSuggestion {
             None => None,
             Some(text) => {
                 let text = text.as_str().map(str::trim).ok_or("The suggested justification must be text.")?;
-                let unprintable = text.chars().any(|c| c.is_control() || super::auth::is_deceptive_format(c));
+                let unprintable = text.chars().any(|c| c.is_control() || super::auth::is_deceptive_format(c) || is_unseen(c));
                 if text.is_empty() || unprintable || text.chars().count() > MAX_GRANT_JUSTIFICATION_CHARS {
                     return Err(format!("The suggested justification must be one line of up to {MAX_GRANT_JUSTIFICATION_CHARS} printable characters."));
                 }
@@ -334,6 +334,21 @@ impl GrantSuggestion {
         }
         Ok(GrantSuggestion { justification, minutes })
     }
+}
+
+/// Characters a person cannot see, or cannot tell from a plain space, in the Request-a-grant window: format characters, the default
+/// ignorable code points (zero-width characters, variation selectors, the tag block that can spell invisible ASCII), the spaces other
+/// than the plain one, and the blanks the window's own reveal shows (`reveal-hidden.ts`). A suggested justification with one of them
+/// could send text the person did not read.
+fn is_unseen(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00A0}' | '\u{00AD}' | '\u{034F}' | '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{08E2}' | '\u{115F}' | '\u{1160}'
+            | '\u{1680}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}' | '\u{2000}'..='\u{200F}' | '\u{202F}' | '\u{205F}'..='\u{206F}'
+            | '\u{2800}' | '\u{3000}' | '\u{303F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{13442}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D159}' | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
 }
 
 /// The entitlement's maximum (`max_duration_secs`, as Privileged Access Manager states it) in the whole minutes the window offers,
@@ -515,6 +530,11 @@ mod tests {
         );
         assert_eq!(GrantSuggestion::parse(&json!({"minutes": 60})), Ok(GrantSuggestion { justification: None, minutes: Some(60) }));
         assert_eq!(
+            GrantSuggestion::parse(&json!({"justification": "重啟 app-api（部署後）"})).map(|s| s.justification),
+            Ok(Some("重啟 app-api（部署後）".to_string())),
+            "visible text in any script is a justification"
+        );
+        assert_eq!(
             GrantSuggestion::parse(&json!({"justification": "x".repeat(512), "minutes": 480})).map(|s| s.minutes),
             Ok(Some(480))
         );
@@ -529,6 +549,13 @@ mod tests {
             json!({"justification": "secret\u{7}"}),
             json!({"justification": "s".repeat(513)}),
             json!({"justification": "secret\u{202E}tpircs"}),
+            json!({"justification": "secret\u{200B}zero width"}),
+            json!({"justification": "secret\u{E0041}tag"}),
+            json!({"justification": "secret\u{FEFF}bom"}),
+            json!({"justification": "secret\u{00AD}soft hyphen"}),
+            json!({"justification": "secret\u{FE0F}selector"}),
+            json!({"justification": "secret\u{00A0}no-break space"}),
+            json!({"justification": "secret\u{2800}braille blank"}),
             json!({"justification": 5}),
             json!({"other": "secret"}),
             json!("secret"),

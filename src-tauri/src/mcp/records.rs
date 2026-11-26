@@ -175,7 +175,16 @@ pub(crate) const GRANT_TOOLS: [&str; 9] =
 /// `params` without its `grant` suggestion, and the suggestion: only `GRANT_TOOLS` take one, and it must be one
 /// (`GrantSuggestion::parse`). Taken out before a tool reads its arguments, so that the tools that check theirs strictly accept it.
 pub(crate) fn take_grant(method: &str, params: &Value) -> Result<(Value, Option<crate::session::protocol::GrantSuggestion>), String> {
-    let Some(given) = params.get("grant") else { return Ok((params.clone(), None)) };
+    let given = match params.get("grant") {
+        None => return Ok((params.clone(), None)),
+        // A client that sends null for an optional argument sent none.
+        Some(Value::Null) => {
+            let mut params = params.clone();
+            params.as_object_mut().map(|object| object.remove("grant"));
+            return Ok((params, None));
+        }
+        Some(given) => given,
+    };
     if !GRANT_TOOLS.contains(&method) {
         return Err(format!("{method} does not take a grant suggestion."));
     }
@@ -2142,6 +2151,9 @@ mod behavior_tests {
         assert_eq!(grant.and_then(|grant| grant.justification).as_deref(), Some("restart app-api"));
         assert_eq!(take_grant("ssh_exec", &json!({"alias": "web-1"})).unwrap(), (json!({"alias": "web-1"}), None));
         assert_eq!(take_grant("list_hosts", &json!({})).unwrap(), (json!({}), None));
+        // A client that sends null for an optional argument sent none.
+        assert_eq!(take_grant("ssh_exec", &json!({"alias": "web-1", "grant": null})).unwrap(), (json!({"alias": "web-1"}), None));
+        assert_eq!(take_grant("get_host", &json!({"alias": "web-1", "grant": null})).unwrap(), (json!({"alias": "web-1"}), None));
     }
 
     #[test]
