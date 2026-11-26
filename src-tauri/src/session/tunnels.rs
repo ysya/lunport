@@ -1156,6 +1156,7 @@ mod tests {
         crate::session::protocol::AiAsker {
             client: "Claude".into(),
             unreviewed: auto_log.then_some(crate::session::protocol::Unreviewed::Tunnel),
+            grant: None,
         }
     }
 

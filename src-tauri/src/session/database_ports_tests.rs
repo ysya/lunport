@@ -1167,7 +1167,7 @@ fn a_warm_up_that_breaks_ends_failed() {
 fn the_ai_asker_reaches_the_warm_up() {
     let upstream = fake();
     let ports = DatabasePorts::new(upstream.clone());
-    let claude = AiAsker { client: "Claude".into(), unreviewed: None };
+    let claude = AiAsker { client: "Claude".into(), unreviewed: None, grant: None };
     start_orders(&ports, Box::new(()), Some(claude.clone()));
     runs(&ports, ID);
     // The person starts another one.

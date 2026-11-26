@@ -427,7 +427,7 @@ impl Connector<'_> {
     /// for it to become active, and tells the terminal what was got. Cancel, no answer in time, a client that went away or an answer that
     /// is not one end with the refusal that names the gcloud command, and with the person's no or no answer (`Declined`).
     fn request_grant(&self, need: &GrantNeed, owner: &dyn Owner, cancel: &CancelToken) -> Result<GrantReceipt, (ConnectFailure, Option<Declined>)> {
-        let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes: need.duration_secs / 60, justification: need.justification.clone() };
+        let prompt = GrantPrompt { project: need.project.clone(), entitlement: need.entitlement.clone(), minutes: need.duration_secs / 60, justification: need.justification.clone(), max_minutes: None, suggested: None };
         ask_and_request(
             owner,
             &prompt,

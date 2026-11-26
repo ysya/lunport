@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn a_changed_server_key_is_asked_in_the_name_of_whoever_starts_the_database() {
         let pinned = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
-        let claude = AiAsker { client: "Claude".into(), unreviewed: Some(Unreviewed::Database) };
+        let claude = AiAsker { client: "Claude".into(), unreviewed: Some(Unreviewed::Database), grant: None };
         for ai in [Some(claude), None] {
             let directory = FakeDirectory::new().with_host("web-1", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web-1", pinned.clone());
             let (engine, keys, keychain, grants) = (FakeEngine::new(), FakeKeys::new(), MemKeychain::default(), GrantGates::default());

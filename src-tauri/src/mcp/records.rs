@@ -156,7 +156,7 @@ pub(crate) fn client_label(context: &RequestContext) -> String {
 /// Who asks in Lunport's windows for an AI client's request in `mode`: the client, and in Auto-log what goes ahead without per-command
 /// review once the person agrees (`then`).
 pub(crate) fn asker(context: &RequestContext, mode: ApprovalMode, then: Unreviewed) -> AiAsker {
-    AiAsker { client: client_label(context), unreviewed: (mode == ApprovalMode::AutoLog).then_some(then) }
+    AiAsker { client: client_label(context), unreviewed: (mode == ApprovalMode::AutoLog).then_some(then), grant: None }
 }
 
 /// Lunport's host key window as an AI client's call asks it: every question goes to the window, a changed key in
@@ -645,7 +645,7 @@ fn execute_command_context(
     let mut decision = None;
     let declines = Declines::default();
     let owner = NotingOwner { inner: owner, declines: &declines };
-    let confirmer = ClientConfirmer::new(connector.confirmer, AiAsker { client: client_label(&context), unreviewed: if sudo { None } else { (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Command) } });
+    let confirmer = ClientConfirmer::new(connector.confirmer, AiAsker { client: client_label(&context), unreviewed: if sudo { None } else { (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Command) }, grant: None });
     let result = std::thread::scope(|scope| {
         // Revoke/disable and disconnect wake native authentication and approval while the worker waits.
         scope.spawn(|| {
@@ -1189,7 +1189,7 @@ pub(crate) fn dispatch(
             }
             let owner = crate::session::auth_window::NativeOwner {
                 // Nothing runs after a verification: the windows only name the AI client.
-                ai: Some(AiAsker { client: client_label(&context), unreviewed: None }),
+                ai: Some(AiAsker { client: client_label(&context), unreviewed: None, grant: None }),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -1242,7 +1242,7 @@ pub(crate) fn dispatch(
                     .ok_or("timeout_seconds must be an integer from 1 to 300")?,
             };
             let owner = crate::session::auth_window::NativeOwner {
-                ai: Some(if sudo { AiAsker { client: client_label(&context), unreviewed: None } } else { asker(&context, policy.approval_mode, Unreviewed::Command) }),
+                ai: Some(if sudo { AiAsker { client: client_label(&context), unreviewed: None, grant: None } } else { asker(&context, policy.approval_mode, Unreviewed::Command) }),
                 hub: state.session.auth_questions.clone(),
                 surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
                     app: app.clone(),
@@ -2087,10 +2087,10 @@ mod behavior_tests {
             (
                 ApprovalMode::AutoLog,
                 vec!["claude".to_string(), "node".to_string()],
-                AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command) },
+                AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command), grant: None },
             ),
-            (ApprovalMode::Ask, vec!["claude".to_string()], AiAsker { client: "claude".into(), unreviewed: None }),
-            (ApprovalMode::AutoLog, vec![], AiAsker { client: "An unidentified AI client".into(), unreviewed: Some(Unreviewed::Command) }),
+            (ApprovalMode::Ask, vec!["claude".to_string()], AiAsker { client: "claude".into(), unreviewed: None, grant: None }),
+            (ApprovalMode::AutoLog, vec![], AiAsker { client: "An unidentified AI client".into(), unreviewed: Some(Unreviewed::Command), grant: None }),
         ] {
             let r = runtime(mode);
             let e = FakeEngine::new();

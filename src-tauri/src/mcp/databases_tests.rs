@@ -659,7 +659,7 @@ fn start_in_ask_mode_asks_then_starts_naming_the_client() {
     }, &|database, ai| starts.start(database, ai), WAIT)
     .unwrap();
     assert_eq!(asked.load(Ordering::SeqCst), 1);
-    let client = AiAsker { client: "Terminal → claude".into(), unreviewed: None };
+    let client = AiAsker { client: "Terminal → claude".into(), unreviewed: None, grant: None };
     assert_eq!(starts.given(), vec![client.clone()]);
     assert_eq!(*upstream.warmed_for.lock().unwrap(), vec![Some(client)], "the questions on the way name the client");
     let port = ports.live(STAGING).port.unwrap();
@@ -689,7 +689,7 @@ fn start_in_auto_log_mode_starts_without_asking() {
     }, WAIT)
     .unwrap();
     assert_eq!(value["database"]["status"]["phase"], "running");
-    assert_eq!(starts.given(), vec![AiAsker { client: "Terminal → claude".into(), unreviewed: Some(Unreviewed::Database) }]);
+    assert_eq!(starts.given(), vec![AiAsker { client: "Terminal → claude".into(), unreviewed: Some(Unreviewed::Database), grant: None }]);
     assert!(route.confirmer.asked().is_empty(), "a database on its public IP has no route host to verify");
     let entry = last_entry(&r);
     assert_eq!((entry.outcome.as_str(), entry.review), ("database_started", Some(McpReview::AutoLog)));
@@ -829,7 +829,7 @@ fn a_new_server_key_of_the_route_host_is_asked_naming_the_client_before_the_data
         .unwrap();
         let asked = route.confirmer.asked();
         assert_eq!((asked.len(), asked[0].alias.as_str()), (1, "web-1"), "{mode:?}");
-        let client = AiAsker { client: "Terminal → claude".into(), unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Database) };
+        let client = AiAsker { client: "Terminal → claude".into(), unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Database), grant: None };
         assert_eq!(asked[0].ai, Some(client), "{mode:?}");
         assert_eq!(route.directory.pinned(&HostId::from(web.as_str())).unwrap().map(|pin| pin.key), Some(default_server_key()), "{mode:?}");
         assert_eq!(outcomes(&r)[..2], ["database_started", "host_key_verified"], "{mode:?}");

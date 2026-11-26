@@ -843,7 +843,7 @@ pub(super) fn launcher(app: &AppHandle) -> impl Fn(&TunnelRule, records::Approve
         let worker_app = app.clone();
         // Who asks in the windows the tunnel's connection opens: the client, and in
         // Auto-log that the tunnel then starts without review.
-        let asker = AiAsker { client: started_by, unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Tunnel) };
+        let asker = AiAsker { client: started_by, unreviewed: (mode == ApprovalMode::AutoLog).then_some(Unreviewed::Tunnel), grant: None };
         let for_worker = asker.clone();
         let work: crate::session::tunnels::Work = Box::new(move |rule, entry, connector, owner, account, needs_grant| {
             let state = worker_app.state::<AppState>();

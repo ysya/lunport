@@ -6,11 +6,11 @@ import type { Unreviewed } from "./Unreviewed";
  * key window and the authentication window name it, and in Auto-log say what goes ahead without per-command review once the person
  * agrees.
  */
-export type AiAsker = {
+export type AiAsker = { 
 /**
  * The AI client as Lunport observed it (the requester chain the Tunnels panel shows), never what the client says of itself.
  */
-client: string,
+client: string, 
 /**
  * What goes ahead without per-command review once the person agrees (Auto-log); `None` in Ask mode and for `verify_host_key`.
  */

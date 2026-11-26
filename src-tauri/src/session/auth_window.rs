@@ -375,7 +375,7 @@ mod tests {
         use crate::session::protocol::GrantAnswer;
         let hub = Arc::new(AuthHub::default());
         let owner = NativeOwner { ai: None, hub: hub.clone(), surface: Arc::new(Surface::default()), request_id: "terminal-7".into(), cancel: CancelToken::default() };
-        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()), max_minutes: None, suggested: None };
         let text = prompt.to_text();
         let worker = std::thread::spawn(move || owner.ask(QuestionKind::Grant, &text, true, Some(Instant::now() + Duration::from_secs(3600))));
         wait(&hub);
@@ -397,8 +397,8 @@ mod tests {
     #[test]
     fn an_ai_clients_questions_name_the_client() {
         use crate::session::protocol::{AiAsker, Unreviewed};
-        let asker = AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command) };
-        let grant = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None }.to_text();
+        let asker = AiAsker { client: "claude → node".into(), unreviewed: Some(Unreviewed::Command), grant: None };
+        let grant = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None, max_minutes: None, suggested: None }.to_text();
         for (ai, kind, text) in [
             (Some(asker.clone()), QuestionKind::Grant, grant.clone()),
             (Some(asker), QuestionKind::Password, "Password".to_string()),

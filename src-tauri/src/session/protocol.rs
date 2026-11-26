@@ -269,9 +269,94 @@ pub struct GrantPrompt {
     pub entitlement: String,
     pub minutes: u32,
     pub justification: Option<String>,
+    /// The most the entitlement lets a request ask for, in whole minutes (never above `MAX_GRANT_MINUTES`); `None` when Privileged
+    /// Access Manager did not say in time.
+    #[serde(default)]
+    pub max_minutes: Option<u32>,
+    /// What the AI client whose request asks suggested, as the window shows it (its length already capped to `max_minutes`); `None`
+    /// for a person's connection and for a client that suggested nothing.
+    #[serde(default)]
+    pub suggested: Option<SuggestedGrant>,
+}
+
+/// An AI client's suggestion as the Request-a-grant window shows it: each field the client gave, the length capped to the
+/// entitlement's maximum, and the length it asked for when that was more (`capped_from`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct SuggestedGrant {
+    pub justification: Option<String>,
+    pub minutes: Option<u32>,
+    pub capped_from: Option<u32>,
+}
+
+/// The justification and length an AI client suggests for a grant its call may need (the `grant` argument). Lunport only prefills
+/// them in its window: the person reviews them and sends what they choose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantSuggestion {
+    pub justification: Option<String>,
+    pub minutes: Option<u32>,
+}
+
+impl GrantSuggestion {
+    /// The suggestion in `value`: an object with a `justification`, a `minutes` or both, and nothing else. A justification is trimmed
+    /// and must be what `GrantAnswer::decode` accepts (something in it, one line, at most `MAX_GRANT_JUSTIFICATION_CHARS`, no control
+    /// characters), with none of the characters that make text read in another order than it is sent; the length is whole minutes from
+    /// 1 to `MAX_GRANT_MINUTES`. The refusal names the field, never the text.
+    pub fn parse(value: &serde_json::Value) -> Result<GrantSuggestion, String> {
+        let object = value.as_object().ok_or("Send the grant suggestion as an object with justification and minutes.")?;
+        if object.keys().any(|key| key != "justification" && key != "minutes") {
+            return Err("A grant suggestion takes only justification and minutes.".into());
+        }
+        let justification = match object.get("justification") {
+            None => None,
+            Some(text) => {
+                let text = text.as_str().map(str::trim).ok_or("The suggested justification must be text.")?;
+                let unprintable = text.chars().any(|c| c.is_control() || super::auth::is_deceptive_format(c));
+                if text.is_empty() || unprintable || text.chars().count() > MAX_GRANT_JUSTIFICATION_CHARS {
+                    return Err(format!("The suggested justification must be one line of up to {MAX_GRANT_JUSTIFICATION_CHARS} printable characters."));
+                }
+                Some(text.to_string())
+            }
+        };
+        let minutes = match object.get("minutes") {
+            None => None,
+            Some(minutes) => Some(
+                minutes
+                    .as_u64()
+                    .filter(|minutes| (1..=u64::from(MAX_GRANT_MINUTES)).contains(minutes))
+                    .map(|minutes| minutes as u32)
+                    .ok_or(format!("The suggested minutes must be a whole number from 1 to {MAX_GRANT_MINUTES}."))?,
+            ),
+        };
+        if justification.is_none() && minutes.is_none() {
+            return Err("A grant suggestion needs a justification, minutes or both.".into());
+        }
+        Ok(GrantSuggestion { justification, minutes })
+    }
+}
+
+/// The entitlement's maximum (`max_duration_secs`, as Privileged Access Manager states it) in the whole minutes the window offers,
+/// rounded down and never above `MAX_GRANT_MINUTES`; `None` when unknown or under a minute.
+pub fn max_minutes_of(max_duration_secs: Option<u32>) -> Option<u32> {
+    max_duration_secs.map(|secs| secs / 60).filter(|minutes| *minutes >= 1).map(|minutes| minutes.min(MAX_GRANT_MINUTES))
+}
+
+/// `minutes`, at least one and at most `max_minutes` (`MAX_GRANT_MINUTES` when the maximum is unknown).
+pub fn cap_minutes(minutes: u32, max_minutes: Option<u32>) -> u32 {
+    minutes.min(max_minutes.unwrap_or(MAX_GRANT_MINUTES)).max(1)
 }
 
 impl GrantPrompt {
+    /// The prompt with an AI client's suggestion to show (`suggested`), its length capped to `max_minutes`; unchanged without one.
+    pub fn with_suggestion(self, suggestion: Option<&GrantSuggestion>) -> GrantPrompt {
+        let Some(suggestion) = suggestion else { return self };
+        let minutes = suggestion.minutes.map(|minutes| cap_minutes(minutes, self.max_minutes));
+        let capped_from = suggestion.minutes.filter(|asked| Some(*asked) != minutes);
+        let suggested = SuggestedGrant { justification: suggestion.justification.clone(), minutes, capped_from };
+        GrantPrompt { suggested: Some(suggested), ..self }
+    }
+
     pub fn to_text(&self) -> String {
         serde_json::to_string(self).expect("a grant prompt is plain data")
     }
@@ -297,6 +382,11 @@ pub struct AiAsker {
     pub client: String,
     /// What goes ahead without per-command review once the person agrees (Auto-log); `None` in Ask mode and for `verify_host_key`.
     pub unreviewed: Option<Unreviewed>,
+    // What the client suggested for a grant its call may need, for the Request-a-grant window only: never serialized, so no other
+    // window's data carries it.
+    #[serde(skip)]
+    #[cfg_attr(test, ts(skip))]
+    pub grant: Option<GrantSuggestion>,
 }
 
 /// What an Auto-log request does without per-command review once the person has agreed in a window.
@@ -417,6 +507,85 @@ mod tests {
     }
 
     #[test]
+    fn a_grant_suggestion_takes_either_field_and_refuses_the_rest() {
+        use serde_json::json;
+        assert_eq!(
+            GrantSuggestion::parse(&json!({"justification": " restart app-api "})),
+            Ok(GrantSuggestion { justification: Some("restart app-api".into()), minutes: None })
+        );
+        assert_eq!(GrantSuggestion::parse(&json!({"minutes": 60})), Ok(GrantSuggestion { justification: None, minutes: Some(60) }));
+        assert_eq!(
+            GrantSuggestion::parse(&json!({"justification": "x".repeat(512), "minutes": 480})).map(|s| s.minutes),
+            Ok(Some(480))
+        );
+        let refused = [
+            json!({}),
+            json!({"minutes": 0}),
+            json!({"minutes": 481}),
+            json!({"minutes": 1.5}),
+            json!({"minutes": "30"}),
+            json!({"justification": "  "}),
+            json!({"justification": "secret one\nsecret two"}),
+            json!({"justification": "secret\u{7}"}),
+            json!({"justification": "s".repeat(513)}),
+            json!({"justification": "secret\u{202E}tpircs"}),
+            json!({"justification": 5}),
+            json!({"other": "secret"}),
+            json!("secret"),
+        ];
+        for value in refused {
+            let error = GrantSuggestion::parse(&value).expect_err(&value.to_string());
+            assert!(!error.contains("secret") && !error.contains("sss"), "{error}");
+        }
+    }
+
+    #[test]
+    fn max_minutes_rounds_down_and_stays_within_the_window_limit() {
+        assert_eq!(max_minutes_of(Some(3600)), Some(60));
+        assert_eq!(max_minutes_of(Some(3659)), Some(60));
+        assert_eq!(max_minutes_of(Some(30)), None);
+        assert_eq!(max_minutes_of(None), None);
+        assert_eq!(max_minutes_of(Some(86400)), Some(480));
+        assert_eq!(cap_minutes(120, Some(60)), 60);
+        assert_eq!(cap_minutes(45, Some(60)), 45);
+        assert_eq!(cap_minutes(600, None), MAX_GRANT_MINUTES);
+        assert_eq!(cap_minutes(0, None), 1);
+    }
+
+    #[test]
+    fn a_suggestion_is_capped_to_the_maximum_and_says_from_what() {
+        let prompt = GrantPrompt {
+            project: "acme-prod-123456".into(),
+            entitlement: "prod-operate".into(),
+            minutes: 30,
+            justification: Some("check app-api".into()),
+            max_minutes: Some(60),
+            suggested: None,
+        };
+        let both = GrantSuggestion { justification: Some("restart app-api".into()), minutes: Some(120) };
+        let shown = prompt.clone().with_suggestion(Some(&both));
+        assert_eq!(shown.suggested, Some(SuggestedGrant { justification: Some("restart app-api".into()), minutes: Some(60), capped_from: Some(120) }));
+        assert_eq!(shown.justification.as_deref(), Some("check app-api"), "the remembered justification stays for the swap button");
+        assert_eq!(shown.minutes, 30);
+        let within = GrantSuggestion { justification: None, minutes: Some(45) };
+        assert_eq!(prompt.clone().with_suggestion(Some(&within)).suggested, Some(SuggestedGrant { justification: None, minutes: Some(45), capped_from: None }));
+        let reason = GrantSuggestion { justification: Some("restart app-api".into()), minutes: None };
+        assert_eq!(prompt.clone().with_suggestion(Some(&reason)).suggested.and_then(|s| s.minutes), None);
+        assert_eq!(prompt.clone().with_suggestion(None), prompt);
+    }
+
+    #[test]
+    fn the_ai_asker_never_serializes_its_grant_suggestion() {
+        let asker = AiAsker {
+            client: "claude".into(),
+            unreviewed: None,
+            grant: Some(GrantSuggestion { justification: Some("restart app-api".into()), minutes: Some(30) }),
+        };
+        let value = serde_json::to_value(&asker).unwrap();
+        assert_eq!(value, serde_json::json!({"client": "claude", "unreviewed": null}));
+    }
+
+    #[test]
     fn a_grant_answer_round_trips_and_rejects_nonsense() {
         let answer = GrantAnswer { minutes: 30, justification: "restart app-api".into() };
         assert_eq!(answer.encode(), "30\nrestart app-api");
@@ -431,7 +600,7 @@ mod tests {
         // The window's limits are the grant memory's, so that an answer can always be remembered on this computer.
         assert_eq!(MAX_GRANT_MINUTES * 60, crate::sync::transports::MAX_DURATION_SECS);
         assert_eq!(MAX_GRANT_JUSTIFICATION_CHARS, crate::sync::transports::MAX_JUSTIFICATION_CHARS);
-        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()) };
+        let prompt = GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: Some("restart app-api".into()), max_minutes: None, suggested: None };
         assert_eq!(GrantPrompt::from_text(&prompt.to_text()), Some(prompt));
         assert_eq!(GrantPrompt::from_text("No active grant."), None);
         assert_eq!(serde_json::to_string(&QuestionKind::Grant).unwrap(), r#""grant""#);

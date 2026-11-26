@@ -181,6 +181,7 @@ pub(super) fn run(
             client: records::client_label(&context),
             unreviewed: (policy.approval_mode == ApprovalMode::AutoLog && mode == SqlMode::Read)
                 .then_some(Unreviewed::DatabaseQuery),
+            grant: None,
         };
         let check_app = app.clone();
         let check_db = db.clone();

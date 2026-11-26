@@ -74,6 +74,8 @@ pub(crate) fn obtain_grant(
         entitlement: first.clone(),
         minutes: memory.as_ref().map_or(pam.duration_secs, |memory| memory.duration_secs) / 60,
         justification: memory.map(|memory| memory.justification),
+        max_minutes: None,
+        suggested: None,
     };
     let key = gate_key(db, pam, first);
     let refusal = refusal_sentence(&pam.entitlements, first, &pam.location, &db.project);
@@ -651,7 +653,7 @@ mod tests {
         assert!(wait > Duration::from_secs(290) && wait <= Duration::from_secs(300), "five minutes: {wait:?}");
         // With nothing remembered the window offers the database's own length and nothing to prefill.
         let prompt = GrantPrompt::from_text(&asked[0].text).expect("the question carries the prompt");
-        assert_eq!(prompt, GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None });
+        assert_eq!(prompt, GrantPrompt { project: "acme-prod-123456".into(), entitlement: "prod-operate".into(), minutes: 30, justification: None, max_minutes: None, suggested: None });
         // What the person answered is what was requested, for the entitlement the database lists first, as the account it is saved with.
         assert_eq!(google.created(), 1);
         assert!(google.calls().contains(&format!("create {ACCOUNT} prod-operate 1800 Check unpaid orders")), "{:?}", google.calls());
