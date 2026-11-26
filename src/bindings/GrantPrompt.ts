@@ -6,12 +6,12 @@ import type { SuggestedGrant } from "./SuggestedGrant";
  * window (what this computer last asked for on the host, else the route's default length and no justification). It travels as the
  * question's `text` (JSON) and, with the `kind` word `grant`, in `AuthRequest`.
  */
-export type GrantPrompt = { project: string, entitlement: string, minutes: number, justification: string | null, 
+export type GrantPrompt = { project: string, entitlement: string, minutes: number, justification: string | null,
 /**
  * The most the entitlement lets a request ask for, in whole minutes (never above `MAX_GRANT_MINUTES`); `None` when Privileged
  * Access Manager did not say in time.
  */
-max_minutes: number | null, 
+max_minutes: number | null,
 /**
  * What the AI client whose request asks suggested, as the window shows it (its length already capped to `max_minutes`); `None`
  * for a person's connection and for a client that suggested nothing.
