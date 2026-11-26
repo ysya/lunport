@@ -449,6 +449,9 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         (self.1)().map_err(crate::session::directory::DirectoryError::Failed)?;
         self.0.request_grant(need, justification, duration_secs, cancel)
     }
+    fn grant_max_secs(&self, need: &crate::session::directory::GrantNeed) -> Option<u32> {
+        self.0.grant_max_secs(need)
+    }
 }
 
 #[cfg(test)]

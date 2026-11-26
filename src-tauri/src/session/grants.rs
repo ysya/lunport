@@ -298,6 +298,24 @@ pub(crate) fn pause(cancel: &CancelToken, span: Duration) -> bool {
     }
 }
 
+/// How long the Request-a-grant window waits for the entitlement's maximum before it opens without it.
+pub(crate) const MAX_LOOKUP_WAIT: Duration = Duration::from_secs(3);
+
+/// The longest grant Privileged Access Manager lets `account` request on the entitlement `name` (its full name), as its search for
+/// entitlements the caller may request states it. `None` when the name is not an entitlement's, the search fails or finds nothing that
+/// says, or it has not answered within `wait`: the search goes on by itself on a thread of its own, and its late answer is dropped.
+pub(crate) fn entitlement_max_secs(gcp: Arc<dyn GcpClient>, account: Option<&str>, name: &str, wait: Duration) -> Option<u32> {
+    let parts = EntitlementName::parse(name)?;
+    let scope = format!("{}/locations/{}", parts.parent, parts.location);
+    let (account, name) = (account.map(str::to_string), name.to_string());
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let found = gcp.search_entitlements(account.as_deref(), &scope).ok().and_then(|found| found.into_iter().find(|info| info.name == name));
+        let _ = tx.send(found.and_then(|info| info.max_duration_secs));
+    });
+    rx.recv_timeout(wait).ok().flatten()
+}
+
 /// The lead's part of a grant request: asks the person for a justification and a length (Lunport's Request-a-grant window, five
 /// minutes), has `request` ask for the grant with what they answered, and tells them what was got. Cancel, no answer in time, a client
 /// that went away or an answer that is not one end with `refused`, and with the person's no or no answer (`Declined`), which
@@ -310,7 +328,8 @@ pub(crate) fn ask_and_request<E>(
     request: impl FnOnce(&GrantAnswer) -> Result<GrantReceipt, E>,
 ) -> Result<GrantReceipt, (E, Option<Declined>)> {
     let answer = match owner.ask(QuestionKind::Grant, &prompt.to_text(), true, Some(Instant::now() + GRANT_QUESTION_WAIT)) {
-        Reply::Answer(text) => GrantAnswer::decode(&text).ok_or(None),
+        // An answer above the entitlement's maximum is not one: the window does not let it be sent, and PAM would refuse it.
+        Reply::Answer(text) => GrantAnswer::decode(&text).filter(|answer| prompt.max_minutes.is_none_or(|max| answer.minutes <= max)).ok_or(None),
         reply => Err(Declined::of(&reply)),
     };
     let answer = answer.map_err(|declined| (refused(), declined))?;
@@ -432,6 +451,86 @@ mod tests {
         assert!(matches!(gates.enter(key("slow"), &cancelled, Duration::from_secs(5)), Entry::Outcome(Err(no)) if no == NoGrant::said(CANCELLED)));
         assert_eq!(gates.waiting(), 0);
         let _ = HostId::from("unused");
+    }
+
+    /// A Privileged Access Manager that only searches entitlements: what it finds, an error, or an answer after `delay`.
+    struct Search {
+        found: Result<Vec<pam::EntitlementInfo>, ()>,
+        delay: Duration,
+        scopes: Mutex<Vec<String>>,
+    }
+
+    impl GcpClient for Search {
+        fn login_profile(&self, _: Option<&str>, _: &str) -> Result<crate::gcp::oslogin::LoginProfile, GcpError> {
+            unreachable!()
+        }
+        fn import_ssh_public_key(&self, _: Option<&str>, _: &str, _: &str) -> Result<crate::gcp::oslogin::LoginProfile, GcpError> {
+            unreachable!()
+        }
+        fn grants(&self, _: Option<&str>, _: &str) -> Result<Vec<pam::Grant>, GcpError> {
+            unreachable!()
+        }
+        fn create_grant(&self, _: Option<&str>, _: &str, _: u32, _: &str) -> Result<pam::Grant, GcpError> {
+            unreachable!()
+        }
+        fn get_grant(&self, _: Option<&str>, _: &str) -> Result<pam::Grant, GcpError> {
+            unreachable!()
+        }
+        fn search_entitlements(&self, _: Option<&str>, scope: &str) -> Result<Vec<pam::EntitlementInfo>, GcpError> {
+            self.scopes.lock().unwrap().push(scope.to_string());
+            std::thread::sleep(self.delay);
+            self.found.clone().map_err(|()| GcpError::Http { api: "Privileged Access Manager", status: 500 })
+        }
+    }
+
+    const OPERATE: &str = "projects/acme-prod-123456/locations/global/entitlements/prod-operate";
+
+    fn search(found: Result<Vec<pam::EntitlementInfo>, ()>, delay: Duration) -> Arc<Search> {
+        Arc::new(Search { found, delay, scopes: Mutex::new(vec![]) })
+    }
+
+    fn info(name: &str, max: Option<u32>) -> pam::EntitlementInfo {
+        pam::EntitlementInfo { name: name.into(), max_duration_secs: max, needs_approval: false, roles: vec![] }
+    }
+
+    #[test]
+    fn the_maximum_is_the_searched_entitlements_or_none() {
+        let wait = Duration::from_secs(2);
+        let found = search(Ok(vec![info(&OPERATE.replace("operate", "admin"), Some(600)), info(OPERATE, Some(3600))]), Duration::ZERO);
+        assert_eq!(entitlement_max_secs(found.clone(), None, OPERATE, wait), Some(3600));
+        assert_eq!(found.scopes.lock().unwrap().as_slice(), ["projects/acme-prod-123456/locations/global"]);
+        assert_eq!(entitlement_max_secs(search(Ok(vec![info(OPERATE, None)]), Duration::ZERO), None, OPERATE, wait), None);
+        assert_eq!(entitlement_max_secs(search(Ok(vec![]), Duration::ZERO), None, OPERATE, wait), None);
+        assert_eq!(entitlement_max_secs(search(Err(()), Duration::ZERO), None, OPERATE, wait), None);
+        assert_eq!(entitlement_max_secs(search(Ok(vec![]), Duration::ZERO), None, "not a name", wait), None);
+        let slow = search(Ok(vec![info(OPERATE, Some(3600))]), Duration::from_millis(500));
+        let started = Instant::now();
+        assert_eq!(entitlement_max_secs(slow, None, OPERATE, Duration::from_millis(50)), None);
+        assert!(started.elapsed() < Duration::from_millis(300), "a slow search is not waited out");
+        assert_eq!(MAX_LOOKUP_WAIT, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn an_answer_above_the_entitlements_maximum_is_refused() {
+        let prompt = GrantPrompt {
+            project: "acme-prod-123456".into(),
+            entitlement: "prod-operate".into(),
+            minutes: 30,
+            justification: None,
+            max_minutes: Some(60),
+            suggested: None,
+        };
+        let requested = Mutex::new(vec![]);
+        let request = |answer: &GrantAnswer| {
+            requested.lock().unwrap().push(answer.minutes);
+            Ok::<_, String>(receipt())
+        };
+        let over = ask_and_request(&crate::session::testing::FakeOwner::typing(&["61\nrestart app-api"]), &prompt, || "refused".to_string(), request);
+        assert!(matches!(over, Err((ref refusal, None)) if refusal == "refused"), "{over:?}");
+        assert!(requested.lock().unwrap().is_empty(), "nothing is requested above the maximum");
+        let within = ask_and_request(&crate::session::testing::FakeOwner::typing(&["60\nrestart app-api"]), &prompt, || "refused".to_string(), request);
+        assert!(within.is_ok());
+        assert_eq!(requested.lock().unwrap().as_slice(), [60]);
     }
 
     /// The Access tab, a host's route and the connections all request a grant at this pace: it is named once.

@@ -342,7 +342,8 @@ impl CloudSqlUpstream {
         let library = (self.library)()?;
         let owner = self.owner(cancel, asking);
         let remember = |name: &str, justification: &str, duration_secs: u32| (self.remember)(name, justification, duration_secs);
-        obtain_grant(&self.gates, self.gcp.as_ref(), owner.as_ref(), &library, db, &remember, cancel)
+        let max_secs = |account: Option<&str>, name: &str| super::grants::entitlement_max_secs(self.gcp.clone(), account, name, super::grants::MAX_LOOKUP_WAIT);
+        obtain_grant(&self.gates, self.gcp.as_ref(), owner.as_ref(), &library, db, &max_secs, &remember, cancel)
     }
 
     /// The database user of `db`'s connections as `account`, the number of the material to dial it with and the instance address it dials,

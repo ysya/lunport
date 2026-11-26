@@ -105,6 +105,10 @@ impl HostDirectory for FormatDirectory {
         // The request waits on Google for up to a minute: choose the directory under lifecycle, call it outside, as `prepare` does.
         self.chosen()?.request_grant(need, justification, duration_secs, cancel)
     }
+    fn grant_max_secs(&self, need: &GrantNeed) -> Option<u32> {
+        // Google may take seconds to answer: choose the directory under lifecycle, call it outside.
+        self.chosen().ok()?.grant_max_secs(need)
+    }
     fn saved_password(&self, hop: &HopRef, keychain: &dyn crate::sync::env::Keychain) -> Result<Option<crate::ssh::Secret>, DirectoryError> {
         // Records' native reader owns lifecycle while checking its exact saved owner. Never
         // hold this adapter's lifecycle across that protected read or an OS authorization.
