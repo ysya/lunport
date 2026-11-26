@@ -1,11 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionTabBar, completeTerminalClose, requestTerminalClose } from "./TerminalWorkspace";
-import type { TerminalTab } from "@/stores/terminals";
+import type { DatabaseTab, TerminalTab } from "@/stores/terminals";
 import { useTerminalStore } from "@/stores/terminals";
 import { useSettingsStore } from "@/stores/settings";
 
-const tab: TerminalTab = { id: "t1", host: {} as TerminalTab["host"], name: "web-1", address: "frank@192.0.2.8:22", historyKey: "k", state: "open" };
+const tab: TerminalTab = { kind: "terminal", id: "t1", host: {} as TerminalTab["host"], name: "web-1", address: "frank@192.0.2.8:22", historyKey: "k", state: "open" };
 
 describe("the session tab strip in the title bar", () => {
   it("drags the window from the strip, between and around the tabs, but not from the tabs' buttons", () => {
@@ -20,13 +20,22 @@ describe("the session tab strip in the title bar", () => {
   });
 });
 
+describe("a database tab in the strip", () => {
+  it("carries its environment mark and a console close label", () => {
+    const database: DatabaseTab = { kind: "database", id: "d1", databaseId: "db-1", name: "orders", address: "orders-pg · acme-prod-123456", environment: "prod", readOnly: "locked", state: "open" };
+    const html = renderToStaticMarkup(<SessionTabBar tabs={[database]} activeId="d1" activate={() => {}} requestClose={() => {}} strip={{ current: null }} />);
+    expect(html).toContain('data-environment="prod"');
+    expect(html).toContain('aria-label="Close console orders"');
+  });
+});
+
 afterEach(() => {
   useTerminalStore.getState().reset();
   useSettingsStore.getState().setConfirmTerminalClose(true);
 });
 
 describe("closing a terminal tab", () => {
-  const openTab = () => useTerminalStore.getState().open({ host: tab.host, name: tab.name, address: tab.address, historyKey: tab.historyKey });
+  const openTab = () => useTerminalStore.getState().open({ kind: "terminal", host: tab.host, name: tab.name, address: tab.address, historyKey: tab.historyKey });
 
   it("asks before closing an active session until a confirmed close opts out", () => {
     const id = openTab();

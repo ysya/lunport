@@ -1,13 +1,15 @@
 import "./databases.css";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, SquareTerminal, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { TaskDialogContent } from "@/components/app/TaskDialog";
+import { toast } from "sonner";
+import { useTerminalStore } from "@/stores/terminals";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { cn, errorMessage } from "@/lib/utils";
 import type { RecordOverview } from "@/lib/records";
@@ -119,6 +121,19 @@ function DatabaseAiAccess({ database }: { database: SavedDatabase }) {
   </section>;
 }
 
+/** Opens a read-only console tab for the database in the workspace; a refusal (too many tabs) is shown as a toast. The console connects on its own, so the local port is not involved. */
+export function openDatabaseConsole(row: DatabaseView) {
+  const { database } = row;
+  try {
+    useTerminalStore.getState().open({
+      kind: "database", databaseId: database.id, name: database.name, address: `${database.instance} · ${database.project}`,
+      environment: row.environment, readOnly: "locked",
+    });
+  } catch (error) {
+    toast.error(errorMessage(error));
+  }
+}
+
 /**
  * One saved database. Its name and detail button select its details. A database that runs here although its record is gone (deleted on
  * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
@@ -127,7 +142,7 @@ function DatabaseAiAccess({ database }: { database: SavedDatabase }) {
  * another device changed it says that its port applies the change once it is started again, and its badge and its lock follow the
  * environment its port locks by (`row.environment`), which stays prod until then. A database reached
  * through a host names it after where it is, by `hostAlias`; one whose host is not in the library (no alias) says that the host is
- * unavailable, in the warning color. While a database starts its Status says the step its start is at. No hooks: exported for the tests.
+ * unavailable, in the warning color. Every row that is not removed has Open console, whatever its port is doing. While a database starts its Status says the step its start is at. No hooks: exported for the tests.
  */
 export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
@@ -172,6 +187,7 @@ export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: Da
     </td>
     <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
       {details && <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={details.open} aria-controls={detailsPanelId(database.id)} onClick={details.toggle}>{details.open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</Button>}
+      {!row.removed && <Button size="sm" variant="outline" aria-label={`Open console for ${name}`} onClick={() => openDatabaseConsole(row)}><SquareTerminal className="size-3" />Open console</Button>}
       {controllable && <Button size="sm" variant={active ? "outline" : "secondary"} aria-label={`${verb} ${name}`} disabled={busy || live.phase === "stopping"} onClick={toggle}>{active ? <Square className="size-3" /> : <Play className="size-3" />}{verb}</Button>}
     </div></td>
   </tr>;

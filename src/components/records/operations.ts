@@ -19,7 +19,7 @@ export async function connectSavedHost(
     throw new Error("Resolve this host's key or settings before connecting.");
   if (terminalId === IN_APP_TERMINAL) {
     const payload = host.effective_payload;
-    useTerminalStore.getState().open({ host: { id: hostId }, name: payload.alias, address: `${payload.user}@${payload.hostname}:${payload.port}`, historyKey: recentHostKey(hostId) });
+    useTerminalStore.getState().open({ kind: "terminal", host: { id: hostId }, name: payload.alias, address: `${payload.user}@${payload.hostname}:${payload.port}`, historyKey: recentHostKey(hostId) });
     return;
   }
   await connectRecordHost(hostId, terminalId, newTab);
