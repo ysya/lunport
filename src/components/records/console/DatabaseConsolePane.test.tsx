@@ -35,7 +35,7 @@ function render(current: ConsoleState, { mac = true, notice = null as string | n
   return renderToStaticMarkup(
     <ConsoleView state={current} mac={mac} notice={notice} viewRef={{ current: null }} actions={actions()}
       connectionStatus={<ConsoleStatusBar environment="prod" database={null} route={{ alias: null, iap: false }}
-        iamUser={current.opened?.iam_user ?? null} readOnly={current.opened?.read_only ?? null} grant={null} />} />,
+        username={current.opened?.iam_user ?? null} readOnly={current.opened?.read_only ?? null} grant={null} />} />,
   );
 }
 

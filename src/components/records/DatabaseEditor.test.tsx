@@ -1,3 +1,4 @@
+import { DatabaseRouteHostPicker, type DatabaseRouteHostPickerProps } from "./DatabaseRouteHostPicker";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RadioGroup } from "radix-ui";
@@ -693,23 +694,27 @@ describe("the route of a database in the dialog", () => {
     transports: [hostTransport({ project: DEV }, WEB_1), hostTransport({ project: PROD }, WEB_2)],
   });
   const newInDev: DatabaseDraft = { ...newDatabase(), account: "frank@example.com", project: DEV, environment: "dev" };
-  const items = (tree: ReactNode) => elementsOf(tree, CommandItem);
+  const picker = (tree: ReactNode) => {
+    const component = elementsOf(tree, DatabaseRouteHostPicker)[0];
+    return component ? DatabaseRouteHostPicker(propsOf<DatabaseRouteHostPickerProps>(component)) : null;
+  };
+  const items = (tree: ReactNode) => elementsOf(picker(tree), CommandItem);
   const hostItem = (tree: ReactNode, id: string) => {
     const found = items(tree).find((item) => String(propsOf<{ value: string }>(item).value).includes(id));
     if (!found) throw new Error(`no ${id} host`);
     return propsOf<{ onSelect: () => void; "data-checked": boolean; value: string }>(found);
   };
   const chooseHost = (tree: ReactNode, id: string) => hostItem(tree, id).onSelect();
-  const searchHost = (tree: ReactNode, query: string) => propsOf<{ onValueChange: (value: string) => void }>(elementsOf(tree, CommandInput)[0]).onValueChange(query);
+  const searchHost = (tree: ReactNode, query: string) => propsOf<{ onValueChange: (value: string) => void }>(elementsOf(picker(tree), CommandInput)[0]).onValueChange(query);
   const press = (tree: ReactNode, label: string) => buttonsIn(tree).find((button) => textIn(button) === label)!.props.onClick!();
 
   it("separates the route type from a searchable, bounded host list", () => {
     const dialog = editor(SAVED, { overview: LIBRARY });
     expect(groupOf(dialog.tree(), "Route").value).toBe("public");
-    expect(elementsOf(dialog.tree(), CommandInput)).toHaveLength(0);
+    expect(elementsOf(picker(dialog.tree()), CommandInput)).toHaveLength(0);
     groupOf(dialog.tree(), "Route").onValueChange("private");
     expect(dialog.kept.draft.network).toBe("private");
-    expect(elementsOf(dialog.tree(), CommandInput)).toHaveLength(1);
+    expect(elementsOf(picker(dialog.tree()), CommandInput)).toHaveLength(1);
     expect(dialog.markup()).toContain("max-h-60");
     expect(items(dialog.tree()).map((item) => textIn(item))).toEqual([expect.stringContaining("web-2")]);
     searchHost(dialog.tree(), "web-1");
@@ -749,7 +754,7 @@ describe("the route of a database in the dialog", () => {
     expect(groupOf(dialog.tree(), "Route").value).toBe("private");
     expect(text(dialog.markup())).toContain("Private IP only · Choose a host");
     expect(text(dialog.markup())).toContain("Choose a host to connect through.");
-    const groups = elementsOf(dialog.tree(), CommandGroup);
+    const groups = elementsOf(picker(dialog.tree()), CommandGroup);
     expect(propsOf<{ heading: string }>(groups[0]).heading).toBe("Suggested for this project");
     expect(elementsOf(groups[0], CommandItem)).toHaveLength(2);
     submit(dialog.tree());
@@ -808,10 +813,10 @@ describe("the route of a database in the dialog", () => {
     const grouped = hostView({ id: WEB_3, payload: hostPayload({ alias: "web-3", hostname: "reporting.internal", group_id: ops.id }) });
     const overview = recordOverview({ hosts: [host(WEB_1, "web-1"), grouped], groups: [ops], transports: [hostTransport({ project: PROD }, WEB_1)] });
     const dialog = editor({ ...SAVED, network: "private", via_host: WEB_1 }, { overview });
-    const groups = elementsOf(dialog.tree(), CommandGroup);
+    const groups = elementsOf(picker(dialog.tree()), CommandGroup);
     expect(propsOf<{ heading: string }>(groups[0]).heading).toBe("Suggested for this project");
     searchHost(dialog.tree(), "Operations");
-    expect(propsOf<{ heading: string }>(elementsOf(dialog.tree(), CommandGroup)[0]).heading).toBe("Matching hosts");
+    expect(propsOf<{ heading: string }>(elementsOf(picker(dialog.tree()), CommandGroup)[0]).heading).toBe("Matching hosts");
     expect(hostItem(dialog.tree(), WEB_3).value).toContain("reporting.internal");
     expect(hostItem(dialog.tree(), WEB_3).value).toContain("Operations");
     expect(hostItem(dialog.tree(), WEB_3).value).toContain("web-3");

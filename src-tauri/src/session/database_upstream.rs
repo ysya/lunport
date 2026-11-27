@@ -453,7 +453,7 @@ impl CloudSqlUpstream {
     fn forward(&self, db: &SavedDatabase, route: &Route, alias: &str, ip: IpAddr) -> Result<(), NotReady> {
         let mut path = locked(&route.path);
         let forwarded = match path.as_mut() {
-            Some(path) => path.forward_to(ip).map(drop),
+            Some(path) => path.forward_to(&ip.to_string(), cloudsql_tls::PORT).map(drop),
             // Only a database that stops, or is saved anew, takes the path away meanwhile.
             None => Err(PATH_CLOSED.to_string()),
         };
@@ -576,7 +576,7 @@ fn through_host(route: &Route, alias: &str, ip: IpAddr, error: io::Error) -> io:
     let Some(path) = path.as_ref().filter(|path| path.alive()) else {
         return io::Error::new(kind, format!("The connection through {} ended. Connect again.", label(alias)));
     };
-    let reason = path.forward_error(ip).filter(|reason| ![forward::SESSION_ENDED, forward::AT_LIMIT].contains(&reason.as_str()));
+    let reason = path.forward_error(&ip.to_string(), cloudsql_tls::PORT).filter(|reason| ![forward::SESSION_ENDED, forward::AT_LIMIT].contains(&reason.as_str()));
     match reason {
         Some(reason) => io::Error::new(kind, format!("{} could not reach {instance}: {reason}", label(alias))),
         None if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::UnexpectedEof) => {
@@ -634,7 +634,7 @@ impl Upstream for CloudSqlUpstream {
         }
         // Through a host, the connection dials the loopback end of the path's forward to the instance. This runs in async code: the forward
         // is looked up here, never opened.
-        let forward = locked(&route.path).as_ref().and_then(|path| Some((path.port_for(ip)?, path.alias().to_string())));
+        let forward = locked(&route.path).as_ref().and_then(|path| Some((path.port_for(&ip.to_string(), cloudsql_tls::PORT)?, path.alias().to_string())));
         let Some((port, alias)) = forward else {
             // Not dialled with, the material stays for the next connection.
             return failing(io::ErrorKind::NotConnected, PATH_NOT_OPEN);

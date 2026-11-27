@@ -1,4 +1,4 @@
-import { queryOptions, type QueryClient } from "@tanstack/react-query";
+import { queryOptions, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { tauriInvoke } from "./ipc";
 import { firstHop, grantHeld, isProjectId, pamStatusOptions, transportFor, tunnelGrantLine, type PamCheck, type PamStatusView } from "./transports";
 import type { RecordOverview } from "./records";
@@ -349,13 +349,13 @@ export function databaseGrantLine(status: PamStatusView, pam: PamCheck, now = Da
  * again: a delete can fail once the record is already gone (its password could not be removed from the keychain), and a row that still
  * showed the deleted database would only be refused when tried again.
  */
-export async function runDatabaseAction(client: QueryClient, run: () => Promise<void>): Promise<string | null> {
+export async function runDatabaseAction(client: QueryClient, run: () => Promise<void>, queryKey: QueryKey = databasesKey): Promise<string | null> {
   try {
     await run();
     return null;
   } catch (failure) {
     return revealHidden(errorMessage(failure));
   } finally {
-    await client.invalidateQueries({ queryKey: databasesKey, refetchType: "all" });
+    await client.invalidateQueries({ queryKey, refetchType: "all" });
   }
 }

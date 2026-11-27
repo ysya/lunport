@@ -17,22 +17,22 @@ export type TerminalTab = {
   tmuxSession?: TmuxSessionInfo;
   state: TerminalState;
 };
-export type DatabaseTab = {
+type DatabaseTabOptions = {
   kind: "database";
-  id: string;
   databaseId: string;
   name: string;
   address: string;
-  environment: DatabaseEnvironment;
-  readOnly: ReadOnlyMode;
-  state: TerminalState;
-};
+} & (
+  | { environment: DatabaseEnvironment; readOnly: Exclude<ReadOnlyMode, "standard">; postgresRevision?: never }
+  | { environment: null; readOnly: "standard"; postgresRevision: string }
+);
+export type DatabaseTab = DatabaseTabOptions & { id: string; state: TerminalState };
 export type SessionTab = TerminalTab | DatabaseTab;
 type TerminalStore = {
   tabs: SessionTab[];
   activeId: string | null;
-  open: (tab: Omit<TerminalTab, "id" | "state" | "tmuxSession"> | Omit<DatabaseTab, "id" | "state">) => string;
-  setReadOnly: (id: string, readOnly: ReadOnlyMode) => void;
+  open: (tab: Omit<TerminalTab, "id" | "state" | "tmuxSession"> | DatabaseTabOptions) => string;
+  setReadOnly: (id: string, readOnly: Exclude<ReadOnlyMode, "standard">) => void;
   activate: (id: string | null) => void;
   updateState: (id: string, state: TerminalState) => void;
   claimTmuxSession: (id: string, session?: TmuxSessionInfo) => boolean;
@@ -65,7 +65,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
     return id;
   },
-  setReadOnly: (id, readOnly) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.kind === "database" && tab.readOnly !== readOnly ? { ...tab, readOnly } : tab) })),
+  setReadOnly: (id, readOnly) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.kind === "database" && tab.environment !== null && tab.readOnly !== readOnly ? { ...tab, readOnly } : tab) })),
   activate: (id) => set((current) => id === null || current.tabs.some((tab) => tab.id === id) ? { activeId: id } : {}),
   updateState: (id, state) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.state !== state ? { ...tab, state } : tab) })),
   claimTmuxSession: (id, session) => {

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseAccess, DatabaseRow, DatabasesPanel, RouteGrant, StopDatabaseDialog, openDatabaseConsole } from "./DatabasesPanel";
+import { DatabaseAccess, DatabaseRow, DatabasesPanel, RouteGrant, StopDatabaseDialog, NewDatabaseType, openDatabaseConsole, openStandardPostgresConsole } from "./DatabasesPanel";
 import { useTerminalStore } from "@/stores/terminals";
 import { toast } from "sonner";
 import { EnvironmentBadge } from "./DatabaseBadges";
@@ -72,6 +72,7 @@ afterEach(() => vi.restoreAllMocks());
 function render(rows?: DatabaseView[], overview = recordOverview(), ai?: McpStatus) {
   const client = new QueryClient();
   if (rows) client.setQueryData(databasesKey, rows);
+  client.setQueryData(["standard-postgres"], []);
   if (ai) client.setQueryData(mcpStatusKey, ai);
   return renderToStaticMarkup(<QueryClientProvider client={client}><DatabasesPanel overview={overview} createIapHost={vi.fn()} /></QueryClientProvider>);
 }
@@ -109,6 +110,50 @@ const grantLineTag = (html: string) => html.match(/<span class="mt-1 flex[^"]*"[
 const classesOf = (html: string) => new Set((html.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/));
 
 describe("the Databases page", () => {
+  it("offers local PostgreSQL even when sync blocks new Cloud SQL profiles", () => {
+    const onChoose = vi.fn();
+    const choice = NewDatabaseType({ cloudBlocked: true, onChoose, onCancel: vi.fn() });
+    const options = buttonsIn(choice);
+    expect(options[0].props.disabled).toBeUndefined();
+    expect(options[1].props.disabled).toBe(true);
+    options[0].props.onClick?.();
+    expect(onChoose).toHaveBeenCalledWith("postgres");
+  });
+
+  it("binds the active standard console tab to the selected profile revision", () => {
+    useTerminalStore.getState().reset();
+    openStandardPostgresConsole({
+      id: "postgres-a1", name: "Reports", host: "reports.example.com", port: 5432, database: "reports",
+      username: "reader", via_host: null, has_password: true, revision: "rev-a1", route_unavailable: false, route_revision: null,
+    });
+    const store = useTerminalStore.getState();
+    const [tab] = store.tabs;
+    expect(tab).toEqual({ id: store.activeId, kind: "database", name: "Reports", address: "reports.example.com:5432",
+      databaseId: "postgres-a1", environment: null, readOnly: "standard", postgresRevision: "rev-a1", state: "connecting" });
+    store.activate(null);
+    store.setReadOnly(tab.id, "not_locked");
+    store.activate(tab.id);
+    expect(useTerminalStore.getState().tabs[0]).toEqual(tab);
+    useTerminalStore.getState().reset();
+  });
+
+  it("shows device-local PostgreSQL without exposing Cloud SQL grant, port or AI actions", () => {
+    const client = new QueryClient();
+    client.setQueryData(databasesKey, []);
+    client.setQueryData(["standard-postgres"], [{
+      id: "postgres-a1", name: "Reports", host: "reports.example.com", port: 5432, database: "reports",
+      username: "reader", via_host: null, has_password: false, revision: "a1", route_unavailable: false, route_revision: null,
+    }]);
+    const html = renderToStaticMarkup(<QueryClientProvider client={client}>
+      <DatabasesPanel overview={recordOverview()} createIapHost={vi.fn()} />
+    </QueryClientProvider>);
+    expect(html).toContain('aria-label="Open console for Reports"');
+    expect(text(html)).toContain("reports.example.com:5432");
+    expect(text(html)).toContain("Password required");
+    expect(text(html)).toContain("On this device");
+    expect(text(html)).not.toMatch(/Access grants|AI access|Local port|Copy password/);
+  });
+
   it("summarizes direct SQL and links to Settings even without a local port", () => {
     const ai: McpStatus = {
       enabled: true, bridge_active: true, approval_mode: "auto_log", max_transfer_mib: 1024,
@@ -154,8 +199,8 @@ describe("the Databases page", () => {
   it("renders_a_prod_database_with_its_badge_route_and_grant_line", async () => {
     const { html } = await renderWithGrants([row()]);
     const shown = text(html);
-    expect(shown).toContain("Cloud SQL 1");
-    expect(shown).toContain("Cloud SQL connections that Lunport signs in to for your other apps.");
+    expect(shown).toContain("Databases 1");
+    expect(shown).toContain("Google Cloud SQL (IAM)");
     expect(shown).toMatch(/Orders\s+PROD/);
     expect(shown).toContain("PostgreSQL · acme-prod-123456 · asia-east1 · orders-pg");
     expect(shown).toContain("127.0.0.1:6543");
@@ -171,18 +216,18 @@ describe("the Databases page", () => {
     expect(buttonTag(html, "New database")).not.toContain(DISABLED);
     expect(html).toContain('id="databases-search"');
     expect(html).toContain('placeholder="Search databases or projects…"');
-    expect(text(html)).toMatch(/Database\s+Local address\s+Status\s+Actions/);
+    expect(text(html)).toMatch(/Database\s+Address\s+Status\s+Actions/);
   });
 
   it("loads_before_it_lists_and_explains_an_empty_list", () => {
     expect(text(render())).toContain("Loading databases…");
-    expect(text(render([]))).toContain("Your Cloud SQL databases, within reach");
+    expect(text(render([]))).toContain("No databases saved");
     expect(render([])).toContain('id="new-database-button"');
   });
 
-  it("holds_back_a_new_database_while_the_library_is_paused", () => {
+  it("allows_a_new_local_database_while_the_library_is_paused", () => {
     const paused = recordOverview({ account: { chain_id: "c".repeat(32), device_name: "laptop" }, shared_writes_blocked: true });
-    expect(buttonTag(render([row()], paused), "New database")).toContain(DISABLED);
+    expect(buttonTag(render([row()], paused), "New database")).not.toContain(DISABLED);
     // Without an account nothing is shared, so nothing is paused.
     expect(buttonTag(render([row()], recordOverview({ shared_writes_blocked: true })), "New database")).not.toContain(DISABLED);
   });
@@ -257,22 +302,22 @@ describe("the Databases page", () => {
     );
     const html = navigation("hosts");
     const library = html.slice(html.indexOf('aria-label="Workspace sections"'), html.indexOf('aria-label="Cloud providers"'));
-    const order = ["Hosts (1)", "Keys (0)", "AI activity", "Tunnels", "Cloud SQL"].map((label) => library.indexOf(`aria-label="${label}"`));
+    const order = ["Hosts (1)", "Keys (0)", "AI activity", "Tunnels", "Databases"].map((label) => library.indexOf(`aria-label="${label}"`));
     expect(order.every((at) => at >= 0), "every row is there").toBe(true);
     expect(order, "in this order").toEqual([...order].sort((a, b) => a - b));
     // It shows no count, as Tunnels shows none, and is the current page only on its own page.
-    expect(html).not.toContain('aria-label="Cloud SQL (');
-    expect(html).not.toContain('aria-current="page" aria-label="Cloud SQL"');
-    expect(navigation("databases")).toContain('aria-current="page" aria-label="Cloud SQL"');
+    expect(html).not.toContain('aria-label="Databases (');
+    expect(html).not.toContain('aria-current="page" aria-label="Databases"');
+    expect(navigation("databases")).toContain('aria-current="page" aria-label="Databases"');
     expect(navigation("databases")).not.toContain('aria-current="page" aria-label="Tunnels"');
   });
 
-  it("groups tunnels and Cloud SQL as connections", () => {
+  it("groups tunnels and Databases as connections", () => {
     const html = renderToStaticMarkup(
       <LibraryNavigation collapsed={false} overview={recordOverview()} panel="databases" navigate={vi.fn()} changeFilter={vi.fn()} />,
     );
     expect(text(html)).toContain("Connections");
-    expect(html).toContain('aria-current="page" aria-label="Cloud SQL"');
+    expect(html).toContain('aria-current="page" aria-label="Databases"');
   });
 
   it("a_grant_ending_within_five_minutes_warns_without_a_request_button", async () => {

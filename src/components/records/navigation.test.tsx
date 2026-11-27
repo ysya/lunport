@@ -63,7 +63,7 @@ describe("Records navigation controls", () => {
 
   it("keeps Library destinations available without marking one current during a database session", () => {
     const html = navigation(true, null);
-    expect(html).toContain('aria-label="Cloud SQL"');
+    expect(html).toContain('aria-label="Databases"');
     expect(html).not.toContain('aria-current="page"');
   });
 

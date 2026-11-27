@@ -1471,3 +1471,87 @@ async fn a_refused_copy_that_starts_a_run_drops_earlier_results() {
     assert_eq!(console.page(result_id, 0).unwrap_err(), "This result is no longer kept. Run the statement again.");
     fake.await.unwrap();
 }
+
+#[tokio::test]
+async fn standard_postgres_runs_original_text_in_a_read_only_transaction() {
+    let sql = "/* browse */ SELECT NULL, '', 'NULL', ARRAY[1, 2]; -- comment";
+    let (client, mut peer) = tokio::io::duplex(64 * 1024);
+    let (result, ()) = tokio::join!(
+        async {
+            let (console, opened, _) = ConsoleConnection::open(
+                Box::new(client),
+                login(ReadOnlyMode::Standard),
+                unreachable_dial(),
+            ).await.unwrap();
+            assert_eq!(opened.read_only, ReadOnlyMode::Standard);
+            console.run(sql, true).await
+        },
+        async {
+            let startup = accept_startup(&mut peer).await;
+            assert!(startup.contains("default_transaction_read_only=on"));
+            assert!(!startup.contains("cloudsql_session_read_only"));
+            answer_show(&mut peer, "default_transaction_read_only", "on").await;
+            assert_eq!(expect_query(&mut peer).await, "BEGIN READ ONLY");
+            peer.write_all(&frame(b'C', b"BEGIN\0")).await.unwrap();
+            peer.write_all(&frame(b'Z', b"T")).await.unwrap();
+            let columns = [("null", 25), ("empty", 25), ("literal", 25), ("array", 1007)];
+            answer_statement(&mut peer, sql, &columns, &[vec![
+                None, Some(String::new()), Some("NULL".into()), Some("{1,2}".into()),
+            ]]).await;
+            assert_eq!(expect_query(&mut peer).await, "ROLLBACK");
+            peer.write_all(&frame(b'C', b"ROLLBACK\0")).await.unwrap();
+            peer.write_all(&frame(b'Z', b"I")).await.unwrap();
+        }
+    );
+    let ConsoleRun::Rows { first_page, columns, .. } = result.unwrap() else {
+        panic!("expected rows");
+    };
+    assert_eq!(columns[3].type_name, "_int4");
+    assert_eq!(first_page, [vec![None, Some("".to_string()), Some("NULL".to_string()), Some("{1,2}".to_string())]]);
+}
+
+#[test]
+fn standard_postgres_limits_the_manual_query_forms() {
+    for sql in ["select 1; -- hi", "/* nested /* block */ ok */ WITH x AS (SELECT 1) SELECT * FROM x", "VALUES (';')", "TABLE orders", "SELECT ';' AS \"into\""] {
+        assert!(standard_query_form(sql), "{sql}");
+    }
+    for sql in ["BEGIN", "SET default_transaction_read_only=off", "INSERT INTO orders VALUES (1)", "/* hi */ COPY orders TO STDOUT", "SELECT 1 INTO example", "SELECT a INTO TEMP t FROM x"] {
+        assert!(!standard_query_form(sql), "{sql}");
+    }
+}
+
+#[tokio::test]
+async fn failed_automatic_cancel_closes_a_standard_console() {
+    let sql = "SELECT id FROM orders";
+    let (client, mut peer) = tokio::io::duplex(64 * 1024);
+    let (response, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            async {
+                let (console, _, ended) = ConsoleConnection::open(
+                    Box::new(client),
+                    login(ReadOnlyMode::Standard),
+                    unreachable_dial(),
+                ).await.unwrap();
+                assert!(console.run(sql, true).await.is_err());
+                ended.await
+            },
+            async {
+                accept_startup(&mut peer).await;
+                answer_show(&mut peer, "default_transaction_read_only", "on").await;
+                assert_eq!(expect_query(&mut peer).await, "BEGIN READ ONLY");
+                peer.write_all(&frame(b'C', b"BEGIN\0")).await.unwrap();
+                peer.write_all(&frame(b'Z', b"T")).await.unwrap();
+                let columns = [("id", 23)];
+                answer_prepare(&mut peer, &columns).await;
+                assert_eq!(expect_query(&mut peer).await, sql);
+                let mut answer = frame(b'T', &row_description(&columns));
+                for _ in 0..=MAX_RESULT_ROWS {
+                    answer.extend(frame(b'D', &data_row(&[Some("1")])));
+                }
+                peer.write_all(&answer).await.unwrap();
+                read_until_closed(&mut peer).await;
+            }
+        )
+    }).await.expect("a failed cancel must end the session without waiting for the query");
+    assert!(response.contains("could not send the PostgreSQL cancellation"), "{response}");
+}

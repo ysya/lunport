@@ -12,23 +12,25 @@ function routeLabel(database: SavedDatabase, route: RouteSummary): string {
   return route.alias ? "via " + revealHidden(route.alias) : HOST_UNAVAILABLE;
 }
 
-export function ConsoleStatusBar({ environment, database, route, iamUser, readOnly, grant }: {
-  environment: DatabaseEnvironment;
+export function ConsoleStatusBar({ environment, database, route, username, readOnly, grant }: {
+  environment: DatabaseEnvironment | null;
   database: SavedDatabase | null;
   route: RouteSummary;
-  iamUser: string | null;
+  username: string | null;
   readOnly: ReadOnlyMode | null;
   grant: DatabaseGrantLine | null;
 }) {
-  const label = ENVIRONMENT_LABELS[environment];
-  const lock = readOnly === "locked" ? "Read-only (locked)" : readOnly === "not_locked" ? "Read-only (not locked)" : null;
-  return <div className="console-status" data-environment={environment}>
+  const postgres = environment === null;
+  const label = postgres ? "PostgreSQL" : ENVIRONMENT_LABELS[environment];
+  const modeLabel = readOnly === "locked" ? "Read-only (locked)" : readOnly === "not_locked" ? "Read-only (not locked)"
+    : readOnly === "standard" ? "Read only" : null;
+  return <div className="console-status" data-environment={environment ?? undefined}>
     {grant?.tone === "warning" && <span className="console-status-grant" title={grant.note}>{revealHidden(grant.text)}</span>}
     <Popover.Root>
       <Popover.Trigger asChild>
-        <button type="button" className="console-status-trigger" data-mode={readOnly ?? undefined} aria-label={["Connection details", label, lock].filter(Boolean).join(", ")}>
+        <button type="button" className="console-status-trigger" data-mode={readOnly ?? undefined} aria-label={["Connection details", label, modeLabel].filter(Boolean).join(", ")}>
           <span className="console-status-environment">{label}</span>
-          {lock && <span className="console-lock"><LockKeyhole className="size-3" aria-hidden="true" />{lock}</span>}
+          {modeLabel && <span className="console-lock">{!postgres && <LockKeyhole className="size-3" aria-hidden="true" />}{modeLabel}</span>}
           <ChevronDown className="size-3" aria-hidden="true" />
         </button>
       </Popover.Trigger>
@@ -39,7 +41,7 @@ export function ConsoleStatusBar({ environment, database, route, iamUser, readOn
               <dt>Instance</dt><dd>{revealHidden(database.instance)}</dd>
               <dt>Project</dt><dd>{revealHidden(database.project)}</dd>
             </>}
-            <dt>IAM account</dt><dd>{iamUser ? revealHidden(iamUser) : "Not signed in"}</dd>
+            <dt>{postgres ? "Username" : "IAM account"}</dt><dd>{username ? revealHidden(username) : "Not signed in"}</dd>
             {database && <><dt>Route</dt><dd>{routeLabel(database, route)}</dd></>}
             {grant && <><dt>Grant</dt><dd>{revealHidden(grant.text)}{grant.note && <p>{revealHidden(grant.note)}</p>}</dd></>}
           </dl>

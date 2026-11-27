@@ -26,7 +26,7 @@ function render(props: Partial<Parameters<typeof ConsoleStatusBar>[0]> = {}) {
       environment="prod"
       database={ORDERS}
       route={routeSummary(recordOverview(), ORDERS)}
-      iamUser="frank@example.com"
+      username="frank@example.com"
       readOnly="locked"
       grant={null}
       {...props}
@@ -35,6 +35,13 @@ function render(props: Partial<Parameters<typeof ConsoleStatusBar>[0]> = {}) {
 }
 
 describe("ConsoleStatusBar", () => {
+  it("identifies a standard PostgreSQL connection without a Cloud SQL environment or lock", () => {
+    const html = render({ environment: null, database: null, readOnly: "standard", username: "reader" });
+    expect(html).toContain('aria-label="Connection details, PostgreSQL, Read only"');
+    expect(html).not.toContain('data-environment=');
+    expect(html).not.toContain('lucide-lock-keyhole');
+  });
+
   it("shows the lock and environment while leaving connection metadata behind a disclosure", () => {
     const html = render();
     expect(html).toMatch(/<button[^>]*aria-label="Connection details[^"]*"[^>]*>/);

@@ -12,8 +12,10 @@ export const PAGE_ROWS = 200;
 /** Most statements one Run all may start. */
 export const MAX_RUN_ALL = 50;
 
-export function openConsole(id: string, databaseId: string, readOnly: ReadOnlyMode, events: Channel<ConsoleEvent>): Promise<ConsoleOpen> {
-  return tauriInvoke<ConsoleOpen>("database_console_open", { id, databaseId, readOnly, events });
+export const POSTGRES_CONNECTION_CHANGED = "The PostgreSQL connection changed. Reopen it from Databases.";
+
+export function openConsole(id: string, databaseId: string, readOnly: ReadOnlyMode, events: Channel<ConsoleEvent>, expectedRevision?: string, password?: string): Promise<ConsoleOpen> {
+  return tauriInvoke<ConsoleOpen>("database_console_open", { id, databaseId, readOnly, events, ...(expectedRevision === undefined ? {} : { expectedRevision }), ...(password === undefined ? {} : { password }) });
 }
 
 export function closeConsole(id: string): Promise<void> {

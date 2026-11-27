@@ -57,7 +57,7 @@ export function LibraryNavigation({ overview, panel, collapsed, navigate, change
         <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Connections</div>
         <nav aria-label="Connections" className="space-y-1">
           {row("Tunnels", <ArrowLeftRight className="size-4" />, panel === "tunnels", () => navigate("tunnels"))}
-          {row("Cloud SQL", <Database className="size-4" />, panel === "databases", () => navigate("databases"))}
+          {row("Databases", <Database className="size-4" />, panel === "databases", () => navigate("databases"))}
         </nav>
         <div className="library-nav-heading library-workspace-label" aria-hidden={collapsed}>Cloud</div>
         <nav aria-label="Cloud providers" className="space-y-1">

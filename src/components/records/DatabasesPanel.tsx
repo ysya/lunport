@@ -1,18 +1,18 @@
 import "./databases.css";
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, SquareTerminal, Trash2, X } from "lucide-react";
+import { useQuery, useQueryClient, type QueryKey, type UseQueryResult } from "@tanstack/react-query";
+import { ChevronDown, ChevronUp, Cloud, Database, LoaderCircle, LockKeyhole, PencilLine, Play, Plus, Search, Square, SquareTerminal, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/app/PageHeader";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
-import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { TaskDialogContent } from "@/components/app/TaskDialog";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { TaskDialogBody, TaskDialogContent } from "@/components/app/TaskDialog";
 import { toast } from "sonner";
 import { useTerminalStore } from "@/stores/terminals";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { cn, errorMessage } from "@/lib/utils";
-import type { RecordOverview } from "@/lib/records";
+import { recordKeyDestinationKey, type RecordOverview } from "@/lib/records";
 import { useLastNonNull } from "@/lib/use-last-non-null";
 import { useNow } from "@/lib/use-now";
 import { gcloudAccountsQuery, pamStatusQuery, type PamCheck, type PamStatusView } from "@/lib/transports";
@@ -55,6 +55,9 @@ import { useUiStore } from "@/stores/ui";
 import { McpDatabaseAccessSummary } from "@/components/McpDatabaseAccess";
 import { EnvironmentBadge } from "./DatabaseBadges";
 import { DatabaseEditor } from "./DatabaseEditor";
+import { StandardPostgresEditor } from "./StandardPostgresEditor";
+import { deleteStandardPostgres, postgresAddress, postgresRouteHost, saveStandardPostgres, standardPostgresQuery,
+  type StandardPostgresDraft, type StandardPostgresProfile } from "@/lib/standard-postgres";
 
 /**
  * A grant line in a database's details, from the grant `read` found: the line itself, in the warning color when the grant is missing or
@@ -131,6 +134,68 @@ export function openDatabaseConsole(row: DatabaseView) {
   }
 }
 
+export function openStandardPostgresConsole(profile: StandardPostgresProfile) {
+  try {
+    useTerminalStore.getState().open({
+      kind: "database", databaseId: profile.id, name: profile.name, address: postgresAddress(profile),
+      environment: null, readOnly: "standard", postgresRevision: profile.revision,
+    });
+  } catch (error) {
+    toast.error(errorMessage(error));
+  }
+}
+
+function StandardPostgresRow({ profile, hostAlias, open, toggle }: {
+  profile: StandardPostgresProfile; hostAlias: string | null; open: boolean; toggle: () => void;
+}) {
+  const name = revealHidden(profile.name);
+  const address = postgresAddress(profile);
+  const unavailable = (profile.via_host !== null || profile.route_unavailable === true) && hostAlias === null;
+  return <tr className={cn("border-b last:border-0 hover:bg-muted/20", open && "bg-primary/5")}>
+    <td className="max-w-72 px-4 py-3">
+      <button type="button" className="block max-w-full truncate text-left font-medium hover:text-primary" title={name}
+        aria-expanded={open} aria-controls={detailsPanelId(profile.id)} onClick={toggle}>{name}</button>
+      <span className="mt-1 block truncate text-xs text-muted-foreground">PostgreSQL{hostAlias ? ` · via ${revealHidden(hostAlias)}` : ""}</span>
+      <span className="database-address-compact mt-1 truncate font-mono text-xs text-muted-foreground" title={address}>{address}</span>
+    </td>
+    <td className="database-address-column max-w-60 px-4 py-3">
+      <span className="block truncate font-mono text-xs" title={address}>{address}</span>
+      <span className="mt-1 block text-xs text-muted-foreground">On this device</span>
+    </td>
+    <td className={cn("px-4 py-3", unavailable && "text-warning")}>
+      {unavailable ? HOST_UNAVAILABLE : profile.has_password ? "Password saved" : "Password required"}
+    </td>
+    <td className="px-3 py-3"><div className="flex items-center justify-end gap-1">
+      <Button size="icon-sm" variant="ghost" aria-label={`Connection details for ${name}`} aria-expanded={open} aria-controls={detailsPanelId(profile.id)} onClick={toggle}>
+        {open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+      </Button>
+      <Button size="sm" variant="outline" aria-label={`Open console for ${name}`} disabled={unavailable} onClick={() => openStandardPostgresConsole(profile)}>
+        <SquareTerminal className="size-3" />Open console
+      </Button>
+    </div></td>
+  </tr>;
+}
+
+export function NewDatabaseType({ cloudBlocked, onChoose, onCancel }: {
+  cloudBlocked: boolean; onChoose: (type: "cloud" | "postgres") => void; onCancel: () => void;
+}) {
+  return <>
+    <TaskDialogBody className="grid gap-3 sm:grid-cols-2">
+      <Button type="button" variant="outline" className="h-auto min-h-18 justify-start gap-3 whitespace-normal py-3 text-left" onClick={() => onChoose("postgres")}>
+        <Database aria-hidden="true" /><span>PostgreSQL<span className="block text-xs font-normal text-muted-foreground">Connect directly or through an SSH host.</span></span>
+      </Button>
+      <div className="space-y-2">
+        <Button type="button" variant="outline" className="h-auto min-h-18 w-full justify-start gap-3 whitespace-normal py-3 text-left"
+          disabled={cloudBlocked} onClick={() => onChoose("cloud")}>
+          <Cloud aria-hidden="true" /><span>Google Cloud SQL (IAM)<span className="block text-xs font-normal text-muted-foreground">Sign in with your Google account.</span></span>
+        </Button>
+        {cloudBlocked && <p className="text-xs text-warning">Resolve the library's sync issues before adding Cloud SQL.</p>}
+      </div>
+    </TaskDialogBody>
+    <DialogFooter><Button type="button" variant="outline" onClick={onCancel}>Cancel</Button></DialogFooter>
+  </>;
+}
+
 /**
  * One saved database. Its name and detail button select its details. A database that runs here although its record is gone (deleted on
  * another device) is shown by its name and Stop alone: there is nothing to change in it, no grant to read for it, and stopping it is what
@@ -144,7 +209,7 @@ export function openDatabaseConsole(row: DatabaseView) {
 export function DatabaseRow({ row, hostAlias, busy, toggle, details }: { row: DatabaseView; hostAlias: string | null; busy: boolean; toggle: () => void; details?: { open: boolean; toggle: () => void } }) {
   const { database, live } = row;
   const name = revealHidden(database.name);
-  const route = revealHidden(databaseRoute(database, hostAlias));
+  const route = `Google Cloud SQL (IAM) · ${revealHidden(databaseRoute(database, hostAlias))}`;
   const unavailable = routeHost(database) !== null && hostAlias === null;
   const address = localAddress(row);
   const active = databaseBusy(row);
@@ -214,7 +279,15 @@ export function DatabaseAccess({ row, route }: { row: DatabaseView; route: Route
 /** The Databases page. `createIapHost` opens the host editor for a new host that connects through IAP, which the editor's New IAP host asks for. */
 export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOverview; createIapHost: () => void }) {
   const query = useQuery(databasesQuery);
+  const postgresQuery = useQuery(standardPostgresQuery);
   const client = useQueryClient();
+  const routeSource = JSON.stringify([recordKeyDestinationKey(overview), overview.generation]);
+  const previousRouteSource = useRef(routeSource);
+  useEffect(() => {
+    if (previousRouteSource.current === routeSource) return;
+    previousRouteSource.current = routeSource;
+    void client.invalidateQueries({ queryKey: standardPostgresQuery.queryKey });
+  }, [client, routeSource]);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLElement>(null);
   const savedFocus = useRef<string | null>(null);
@@ -222,7 +295,7 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const [busy, setBusy] = useState(false);
   const flight = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<DatabaseView | null>(null);
+  const [deleting, setDeleting] = useState<DatabaseView | StandardPostgresProfile | null>(null);
   // The running database whose Stop asks first, because connections are open through its port.
   const [stopping, setStopping] = useState<DatabaseView | null>(null);
   // The selected database has its connection details beside the list. Undefined selects the first row; null closes the details.
@@ -230,7 +303,10 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   const [focusAfterSelection, setFocusAfterSelection] = useState<string | null>(null);
   // The database in the editor, the one it is compared against when saved (none for a new one) and which opening of the dialog this is,
   // while the dialog is open. The opening keys the editor, so that one that is still mounted never shows the draft of an earlier opening.
-  const [editing, setEditing] = useState<{ key: number; initial: DatabaseDraft; expected: SavedDatabase | null } | null>(null);
+  type Editor = { kind: "choose" } |
+    { kind: "cloud"; key: number; initial: DatabaseDraft; expected: SavedDatabase | null } |
+    { kind: "postgres"; key: number; profile: StandardPostgresProfile | null };
+  const [editing, setEditing] = useState<Editor | null>(null);
   const openings = useRef(0);
   const [editorError, setEditorError] = useState<string | null>(null);
   // Whether what is in the editor differs from what it opened with, and whether closing it is being asked about.
@@ -241,26 +317,33 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   // The dialog takes a moment to animate out once `editing` is null; its title and body keep what they showed until then.
   const shown = useLastNonNull(editing);
   const rows = query.data ?? [];
+  const profiles = postgresQuery.data ?? [];
+  const count = rows.length + profiles.length;
+  const cloudBlocked = !!overview.account && overview.shared_writes_blocked;
   const needle = search.trim().toLowerCase();
   const visible = rows.filter((r) => `${r.database.name} ${r.database.project} ${r.database.region} ${r.database.instance}`.toLowerCase().includes(needle));
   const selectable = visible.filter((row) => !row.removed);
-  const selected = selectedId === null ? null : selectable.find((row) => row.database.id === selectedId) ?? selectable[0] ?? null;
+  const visiblePostgres = profiles.filter((profile) => `${profile.name} ${profile.host} ${profile.database} ${profile.username}`.toLowerCase().includes(needle));
+  const preferredVisible = selectable.some((row) => row.database.id === selectedId) || visiblePostgres.some((profile) => profile.id === selectedId);
+  const shownId = selectedId === null || preferredVisible ? selectedId : selectable[0]?.database.id ?? visiblePostgres[0]?.id ?? null;
+  const selected = selectable.find((row) => row.database.id === shownId);
+  const selectedPostgres = visiblePostgres.find((profile) => profile.id === shownId);
   const selectedVia = selected ? routeHostGrant(overview, selected.database) : null;
   useEffect(() => {
-    if (focusAfterSelection !== null && selected?.database.id === focusAfterSelection) {
+    if (focusAfterSelection !== null && shownId === focusAfterSelection) {
       if (workspaceRef.current && workspaceRef.current.clientWidth < 1100) {
         detailRef.current?.focus();
         detailRef.current?.scrollIntoView({ block: "start" });
       }
       setFocusAfterSelection(null);
     }
-  }, [focusAfterSelection, selected?.database.id]);
+  }, [focusAfterSelection, shownId]);
   // One change at a time. Whatever came of it the list is read again, and the sentence it failed with is shown: in the dialog for a
   // save, which stays open with what was typed, and on the page for the rest. A save that worked closes the dialog.
-  const action = async (run: () => Promise<void>, inEditor = false) => {
+  const action = async (run: () => Promise<void>, inEditor = false, queryKey?: QueryKey) => {
     if (flight.current) return;
     flight.current = true; setBusy(true); setError(null); setEditorError(null);
-    const failure = await runDatabaseAction(client, run);
+    const failure = await runDatabaseAction(client, run, queryKey);
     if (!inEditor) setError(failure);
     else if (failure === null) { setEditing(null); setDirty(false); }
     else setEditorError(failure);
@@ -271,7 +354,13 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     setEditorError(null);
     setDirty(false);
     openings.current += 1;
-    setEditing({ key: openings.current, ...(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null }) });
+    setEditing({ kind: "cloud", key: openings.current, ...(row ? { initial: row.database, expected: row.database } : { initial: newDatabase(), expected: null }) });
+  };
+  const editPostgres = (profile: StandardPostgresProfile | null) => {
+    setEditorError(null);
+    setDirty(false);
+    openings.current += 1;
+    setEditing({ kind: "postgres", key: openings.current, profile });
   };
   // Cancel, the X, Escape and a click outside all close the dialog from here: not while a save is under way, and only once the person
   // has said that changes may be lost. New IAP host closes it the same way, and `then` opens the host editor once it is closed: never over
@@ -287,12 +376,21 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     setDiscarding(false); setDirty(false); setEditing(null);
     then?.();
   };
-  const save = (next: SavedDatabase) => { if (editing) void action(async () => {
+  const save = (next: SavedDatabase) => { if (editing?.kind === "cloud") void action(async () => {
     const saved = await saveDatabase(next, editing.expected);
     setSearch("");
     setSelectedId(saved.id);
     savedFocus.current = saved.id;
   }, true); };
+  const savePostgres = (draft: StandardPostgresDraft, password: string | null, forgetPassword: boolean, expectedRoute?: string) => {
+    if (editing?.kind !== "postgres") return;
+    void action(async () => {
+      const saved = await saveStandardPostgres(editing.profile, draft, password, forgetPassword, expectedRoute);
+      setSearch("");
+      setSelectedId(saved.id);
+      savedFocus.current = saved.id;
+    }, true, standardPostgresQuery.queryKey);
+  };
   // The grant is read again so that the selected details show what was requested.
   const requestGrant = (id: string) => void action(async () => {
     try { await requestDatabaseGrant(id); }
@@ -304,16 +402,18 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
     finally { await client.invalidateQueries({ queryKey: pamStatusQuery(hostId).queryKey }); }
   });
   const toggleDetails = (id: string) => {
-    const closing = selected?.database.id === id;
+    const closing = shownId === id;
     setSelectedId(closing ? null : id);
     setFocusAfterSelection(closing ? null : id);
   };
   // A delete can fail once the record is gone, and a dialog that stayed open would offer to delete it again: it closes either way, and
   // the failure is shown on the page beside the list that was read again.
-  const remove = (row: DatabaseView) => void action(async () => {
-    try { await deleteDatabase(row.database); }
-    finally { setDeleting(null); }
-  });
+  const remove = (row: DatabaseView | StandardPostgresProfile) => void action(async () => {
+    try {
+      if ("live" in row) await deleteDatabase(row.database);
+      else await deleteStandardPostgres(row);
+    } finally { setDeleting(null); }
+  }, false, "live" in row ? undefined : standardPostgresQuery.queryKey);
   // Start starts at once. Stop asks first while connections are open through the port, since they close with it, and stops at once
   // otherwise. The question closes once the stop is done, whether it worked or not.
   const toggle = (row: DatabaseView) => {
@@ -326,21 +426,28 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
   });
   // The question counts the connections the list shows now, which may have changed since Stop was pressed.
   const askedToStop = stopping && (rows.find((row) => row.database.id === stopping.database.id) ?? stopping);
+  const postgresHost = selectedPostgres ? postgresRouteHost(overview, selectedPostgres) : null;
+  const deleteName = deleting && ("live" in deleting ? deleting.database.name : deleting.name);
+  const dialogTitle = shown?.kind === "postgres" ? (shown.profile ? "Edit PostgreSQL" : "New PostgreSQL database")
+    : shown?.kind === "cloud" && shown.expected ? "Edit database" : "New database";
+  const refresh = () => void Promise.all([query.refetch(), postgresQuery.refetch()]);
   return <div className="databases-panel space-y-5">
-    <PageHeader title="Cloud SQL" count={rows.length} description="Cloud SQL connections that Lunport signs in to for your other apps."
-      actions={<Button id="new-database-button" onClick={() => edit(null)} disabled={busy || !!overview.account && overview.shared_writes_blocked}><Plus className="size-4" />New database</Button>} />
+    <PageHeader title="Databases" count={count}
+      actions={<Button id="new-database-button" onClick={() => setEditing({ kind: "choose" })} disabled={busy}><Plus className="size-4" />New database</Button>} />
     <div className="flex flex-wrap items-center gap-3">
       <div className="relative min-w-48 flex-1"><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="databases-search" aria-label="Search databases" placeholder="Search databases or projects…" className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
-      <span className="text-xs text-muted-foreground">{overview.account ? "Databases sync · Start separately on each device" : "Databases sync when you connect an account"}</span>
     </div>
-    {(error || query.error) && <p role="alert" className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error ?? revealHidden(String(query.error))}<Button variant="ghost" size="sm" onClick={() => void query.refetch()}>Refresh</Button></p>}
-    {query.isPending ? <p role="status" className="py-12 text-center text-sm text-muted-foreground">Loading databases…</p> : rows.length === 0 ?
+    {(error || query.error) && <p role="alert" className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error ?? revealHidden(String(query.error))}<Button variant="ghost" size="sm" onClick={error ? refresh : () => void query.refetch()}>Refresh</Button></p>}
+    {postgresQuery.error && <p role="alert" className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">
+      {revealHidden(errorMessage(postgresQuery.error))}<Button variant="ghost" size="sm" onClick={() => void postgresQuery.refetch()}>Refresh PostgreSQL</Button>
+    </p>}
+    {count === 0 && (query.isPending || postgresQuery.isPending) ? <p role="status" className="py-12 text-center text-sm text-muted-foreground">Loading databases…</p> : count === 0 ?
       <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-14 text-center">
-        <Database className="size-7 text-muted-foreground" /><h2 className="font-medium">Your Cloud SQL databases, within reach</h2>
-        <p className="max-w-sm text-sm text-muted-foreground">Save a PostgreSQL instance and Lunport offers it to your other apps on a local port, signed in with your Google account.</p>
-      </div> : <div ref={workspaceRef} className={cn("database-workspace", selected && "has-details")}>
+        <Database className="size-7 text-muted-foreground" /><h2 className="font-medium">No databases saved</h2>
+        <p className="max-w-sm text-sm text-muted-foreground">Add a PostgreSQL or Google Cloud SQL connection to browse tables and run queries.</p>
+      </div> : <div ref={workspaceRef} className={cn("database-workspace", shownId && "has-details")}>
       <div className="database-list overflow-x-auto rounded-lg border">
-      <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Local address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
+      <table className="w-full text-left text-sm"><thead className="border-b bg-muted/30 text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Database</th><th className="database-address-column px-4 py-3 font-medium">Address</th><th className="px-4 py-3 font-medium">Status</th><th className="px-4 py-3"><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>{visible.map((row) => {
           const id = row.database.id;
           const open = selected?.database.id === id;
@@ -348,13 +455,17 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
           return <DatabaseRow key={id} row={row} hostAlias={route.alias} busy={busy}
               toggle={() => toggle(row)}
               details={!row.removed ? { open, toggle: () => toggleDetails(id) } : undefined} />;
-        })}</tbody></table>
-      {!visible.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
+        })}
+        {visiblePostgres.map((profile) => <StandardPostgresRow key={profile.id} profile={profile}
+          hostAlias={postgresRouteHost(overview, profile)?.payload.alias ?? null} open={shownId === profile.id} toggle={() => toggleDetails(profile.id)} />)}
+        </tbody></table>
+      {!visible.length && !visiblePostgres.length && <p className="p-8 text-center text-sm text-muted-foreground">No databases match this search.</p>}
       </div>
       {selected && <aside ref={detailRef} id={detailsPanelId(selected.database.id)} tabIndex={-1} className="database-detail space-y-4" aria-label="Database details">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-1">
             <h2 className="break-words text-base font-semibold">{revealHidden(selected.database.name)}</h2>
+            <p className="text-xs text-muted-foreground">Google Cloud SQL (IAM)</p>
             <p className="text-xs text-muted-foreground">{revealHidden(databaseRoute(selected.database, routeSummary(overview, selected.database).alias))}</p>
           </div>
           <Button size="icon-sm" variant="ghost" aria-label="Close database details" onClick={() => setSelectedId(null)}><X className="size-4" /></Button>
@@ -385,6 +496,26 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
           <Button variant="outline" size="sm" aria-label={`Delete ${revealHidden(selected.database.name)}`} disabled={databaseBusy(selected) || busy || selected.blocked} onClick={() => setDeleting(selected)}><Trash2 className="size-3.5" />Delete</Button>
         </div>}
       </aside>}
+      {selectedPostgres && <aside ref={detailRef} id={detailsPanelId(selectedPostgres.id)} tabIndex={-1} className="database-detail space-y-4" aria-label="Database details">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <h2 className="break-words text-base font-semibold">{revealHidden(selectedPostgres.name)}</h2>
+            <p className="text-xs text-muted-foreground">PostgreSQL · On this device</p>
+          </div>
+          <Button size="icon-sm" variant="ghost" aria-label="Close database details" onClick={() => setSelectedId(null)}><X className="size-4" /></Button>
+        </div>
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 rounded-lg border p-3 text-sm">
+          <dt className="text-muted-foreground">Address</dt><dd className="break-words font-mono">{postgresAddress(selectedPostgres)}</dd>
+          <dt className="text-muted-foreground">Database</dt><dd className="break-words">{revealHidden(selectedPostgres.database)}</dd>
+          <dt className="text-muted-foreground">Username</dt><dd className="break-words">{revealHidden(selectedPostgres.username)}</dd>
+          <dt className="text-muted-foreground">Route</dt><dd className="break-words">{postgresHost ? `via ${revealHidden(postgresHost.payload.alias)}`
+            : selectedPostgres.via_host !== null || selectedPostgres.route_unavailable ? HOST_UNAVAILABLE : "Direct"}</dd>
+        </dl>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" aria-label={`Edit ${revealHidden(selectedPostgres.name)}`} disabled={busy} onClick={() => editPostgres(selectedPostgres)}><PencilLine className="size-3.5" />Edit</Button>
+          <Button variant="outline" size="sm" aria-label={`Delete ${revealHidden(selectedPostgres.name)}`} disabled={busy} onClick={() => setDeleting(selectedPostgres)}><Trash2 className="size-3.5" />Delete</Button>
+        </div>
+      </aside>}
     </div>}
     <Dialog open={editing !== null} onOpenChange={(open) => { if (!open) closeEditor(); }}><TaskDialogContent className="sm:max-w-xl" onCloseAutoFocus={(event) => {
       const id = savedFocus.current;
@@ -396,11 +527,17 @@ export function DatabasesPanel({ overview, createIapHost }: { overview: RecordOv
         detailRef.current.scrollIntoView({ block: "start" });
       } else setFocusAfterSelection(id);
     }}>
-      <DialogHeader><DialogTitle>{shown?.expected ? "Edit database" : "New database"}</DialogTitle><DialogDescription>Lunport signs in with your Google account, asks for a PAM grant when the database needs one, and can open a local port for your other apps.</DialogDescription></DialogHeader>
-      {shown && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} overview={overview} busy={busy} error={editorError} onSave={save} onCancel={() => closeEditor()} createIapHost={() => closeEditor(createIapHost)} onDirty={setDirty} />}
+      <DialogHeader><DialogTitle>{dialogTitle}</DialogTitle><DialogDescription>{shown?.kind === "cloud"
+        ? "Lunport signs in with your Google account and can open a local port for your other apps."
+        : shown?.kind === "postgres" ? "This profile is saved on this device. PostgreSQL connections require verified TLS."
+        : "Choose how to connect."}</DialogDescription></DialogHeader>
+      {shown?.kind === "choose" && <NewDatabaseType cloudBlocked={cloudBlocked} onChoose={(type) => type === "cloud" ? edit(null) : editPostgres(null)} onCancel={() => closeEditor()} />}
+      {shown?.kind === "cloud" && <DatabaseEditor key={shown.key} initial={shown.initial} existing={otherDatabases(rows, shown.initial.id)} overview={overview} busy={busy} error={editorError} onSave={save} onCancel={() => closeEditor()} createIapHost={() => closeEditor(createIapHost)} onDirty={setDirty} />}
+      {editing?.kind === "postgres" && <StandardPostgresEditor key={editing.key} initial={editing.profile} overview={overview} busy={busy}
+        error={editorError} onSave={savePostgres} onCancel={() => closeEditor()} onDirty={setDirty} />}
     </TaskDialogContent></Dialog>
     <AlertDialog open={discarding} onOpenChange={setDiscarding}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard database changes?</AlertDialogTitle><AlertDialogDescription>Your unsaved changes will be lost.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={discard}>Discard</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <StopDatabaseDialog row={askedToStop} busy={busy} onCancel={() => setStopping(null)} onStop={stop} />
-    <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleting && revealHidden(deleting.database.name)}?</AlertDialogTitle><AlertDialogDescription>{deleting?.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open && !busy) setDeleting(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {deleteName && revealHidden(deleteName)}?</AlertDialogTitle><AlertDialogDescription>{deleting && "live" in deleting && deleting.synced ? "This removes the saved database from your synced devices. A database already running on another device keeps running there until it is stopped." : deleting && !("live" in deleting) ? "This removes the local profile and its saved password." : "This removes the saved database."}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel><Button variant="destructive" disabled={busy} onClick={() => { if (deleting) remove(deleting); }}>Delete database</Button></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>;
 }

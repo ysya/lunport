@@ -4,7 +4,6 @@ import { LoaderCircle, Plus } from "lucide-react";
 import { RadioGroup } from "radix-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -18,7 +17,6 @@ import {
   connectionName,
   databaseInstancesQuery,
   jumpHostCandidates,
-  libraryHosts,
   parseConnectionName,
   routeHost,
   suggestPort,
@@ -30,7 +28,7 @@ import {
 } from "@/lib/databases";
 import { isProjectId, newPamCheck } from "@/lib/transports";
 import { RecordField } from "./form";
-import { groupPath, recordHostSearchText } from "./group-tree";
+import { DatabaseRouteHostPicker } from "./DatabaseRouteHostPicker";
 import { choice, EntitlementsInput, EntitlementSuggestions, GoogleAccountField, segmented } from "./IapRouteFields";
 
 /*
@@ -292,27 +290,8 @@ export function DatabaseEditorView(props: DatabaseEditorViewProps) {
   const ready = located(draft) && draft.environment !== null;
   const unreadable = connection.trim() !== "" && parseConnectionName(connection) === null;
   const candidates = jumpHostCandidates(overview, draft.project);
-  const hosts = libraryHosts(overview);
   const host = chosenHost(draft);
-  const selectedEntry = overview.hosts.find((entry) => entry.id === host);
-  const selectedPath = selectedEntry ? groupPath(overview, selectedEntry.payload.group_id, selectedEntry.scope) : "";
-  const routeWords = routeSearch.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-  const initialSuggested = candidates.slice(0, 6);
-  const initialIds = new Set(initialSuggested.map((candidate) => candidate.id));
-  const selectedOther = hosts.find((candidate) => candidate.id === host && !initialIds.has(candidate.id));
-  const matchingHosts = routeWords.length ? hosts.filter((candidate) => {
-    const entry = overview.hosts.find((item) => item.id === candidate.id);
-    return entry && routeWords.every((word) => recordHostSearchText(overview, entry).toLocaleLowerCase().includes(word));
-  }) : [];
-  const routeSections = routeWords.length
-    ? [{ label: "Matching hosts", hosts: matchingHosts }]
-    : [
-      { label: "Selected host", hosts: selectedOther ? [selectedOther] : [] },
-      { label: "Suggested for this project", hosts: initialSuggested },
-    ];
   const missing = hostless(draft);
-  // A host the library no longer has stays the route until another is chosen, and the field shows it as unavailable.
-  const unavailable = host !== null && !hosts.some((candidate) => candidate.id === host);
   const alert = hostMissing && missing ? NO_HOST : error;
   const chooseMode = (next: Mode) => {
     onMode(next);
@@ -384,31 +363,8 @@ export function DatabaseEditorView(props: DatabaseEditorViewProps) {
                   <RadioGroup.Item value="private" className={choice}>Through a host</RadioGroup.Item>
                 </RadioGroup.Root>
                 {draft.network === "private" && <div className="space-y-2">
-                  <p className={cn("text-xs", unavailable ? "text-warning" : "text-muted-foreground")}>
-                    {unavailable ? HOST_UNAVAILABLE : host ? `Selected host: ${revealHidden([selectedEntry?.payload.alias, selectedPath].filter(Boolean).join(" · "))}` : "Choose a host to connect through."}
-                  </p>
-                  <Command shouldFilter={false} className="h-auto rounded-lg border bg-background">
-                    <CommandInput aria-label="Search route hosts" placeholder="Search hosts by name, address or Group…" disabled={busy}
-                      value={routeSearch} onValueChange={onRouteSearch} />
-                    <CommandList className="max-h-60">
-                      <CommandEmpty>{routeWords.length ? "No matching hosts." : hosts.length ? "Search to find other hosts." : "No hosts available."}</CommandEmpty>
-                      {routeSections.map((section) => section.hosts.length > 0 && <CommandGroup key={section.label} heading={section.label}>
-                        {section.hosts.map((candidate) => {
-                          const entry = overview.hosts.find((item) => item.id === candidate.id)!;
-                          const group = groupPath(overview, entry.payload.group_id, entry.scope);
-                          return <CommandItem key={candidate.id} value={recordHostSearchText(overview, entry)} data-checked={host === candidate.id} disabled={busy}
-                            onSelect={() => { onDraft(throughHost(draft, candidate.id)); onRouteSearch(""); }}>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate font-medium">{revealHidden(candidate.alias)}</span>
-                              <span className="block truncate text-xs text-muted-foreground">{revealHidden([entry.effective_payload.hostname, group].filter(Boolean).join(" · "))}</span>
-                            </span>
-                          </CommandItem>;
-                        })}
-                      </CommandGroup>)}
-                    </CommandList>
-                  </Command>
-                  {!routeWords.length && hosts.length > initialSuggested.length + (selectedOther ? 1 : 0) &&
-                    <p className="text-xs text-muted-foreground">Search to find other hosts by name, address, or Group path.</p>}
+                  <DatabaseRouteHostPicker overview={overview} selectedId={host} suggested={candidates} query={routeSearch} onQuery={onRouteSearch}
+                    onSelect={(id) => onDraft(throughHost(draft, id))} busy={busy} />
                   {missing && candidates.length === 0 && <Button type="button" variant="outline" size="sm" className="w-fit" onClick={createIapHost}>
                     <Plus />New IAP host
                   </Button>}

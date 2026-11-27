@@ -18,9 +18,11 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
+use tokio_postgres::config::SslMode;
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tauri::Manager;
 use tokio_postgres::{CancelToken as QueryCancelToken, Client, Config, NoTls, SimpleQueryMessage};
+use zeroize::Zeroizing;
 
 use super::connect::CancelToken;
 use super::database_console_schema::{csv, json, read_schema, write_replacing, ExportFormat, SchemaTree};
@@ -28,11 +30,12 @@ use super::database_ports::{unreachable, BoxStream, Dialling, NotReady, Prepared
 use super::database_query::valid_sql_within;
 use super::database_upstream::CloudSqlUpstream;
 use super::databases::started_broker;
+use super::{postgres_transport, standard_postgres_profiles};
 use super::tunnels::{main_only, snapshot};
 use crate::state::AppState;
 use crate::sync::databases::SavedDatabase;
 
-/// Whether the session holds Cloud SQL's read-only lock, or only defaults its transactions to read-only.
+/// How the console keeps a session read-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
@@ -40,6 +43,7 @@ use crate::sync::databases::SavedDatabase;
 pub enum ReadOnlyMode {
     Locked,
     NotLocked,
+    Standard,
 }
 
 /// A console session that signed in and confirmed it is read-only.
@@ -365,6 +369,7 @@ struct Inner {
     wire: Arc<Wire>,
     ended: Arc<Ended>,
     driver: tokio::task::AbortHandle,
+    read_only: ReadOnlyMode,
 }
 
 impl Inner {
@@ -448,7 +453,10 @@ impl Inner {
         closed: oneshot::Sender<()>,
         by_person: bool,
     ) -> Result<(), String> {
-        let mut stream = (self.cancel_dial)().await.map_err(|_| CANCEL_UNREACHABLE.to_string())?;
+        let mut stream = match (self.cancel_dial)().await {
+            Ok(stream) => stream,
+            Err(_) => return self.cancel_delivery_failed(&target),
+        };
         if !self.is_running(&target) {
             return Ok(());
         }
@@ -460,7 +468,7 @@ impl Inner {
             if by_person && !was_person {
                 target.by_person.store(false, Ordering::SeqCst);
             }
-            return Err(CANCEL_UNREACHABLE.to_string());
+            return self.cancel_delivery_failed(&target);
         }
         target.cancel_sent.send_if_modified(|sent| {
             if sent.is_some() {
@@ -478,6 +486,18 @@ impl Inner {
             let _ = closed.send(());
         });
         Ok(())
+    }
+
+    fn cancel_delivery_failed(&self, target: &Arc<Running>) -> Result<(), String> {
+        if self.read_only != ReadOnlyMode::Standard {
+            return Err(CANCEL_UNREACHABLE.to_string());
+        }
+        if !self.is_running(target) {
+            return Ok(());
+        }
+        let message = "Lunport could not send the PostgreSQL cancellation, so it closed the session.";
+        self.end(message);
+        Err(message.to_string())
     }
 
     /// Sends `sql` as a simple query and keeps its rows up to `caps`. Past a cap it sends a cancel request and reads the
@@ -623,7 +643,7 @@ fn console_config(login: &ConsoleLogin) -> Config {
         .application_name(APPLICATION_NAME)
         .options(match login.read_only {
             ReadOnlyMode::Locked => "-c cloudsql_session_read_only=locked",
-            ReadOnlyMode::NotLocked => "-c default_transaction_read_only=on",
+            ReadOnlyMode::NotLocked | ReadOnlyMode::Standard => "-c default_transaction_read_only=on",
         });
     config
 }
@@ -646,7 +666,7 @@ fn sign_in_error(error: &tokio_postgres::Error, mode: ReadOnlyMode) -> OpenError
 async fn confirm_read_only(client: &Client, mode: ReadOnlyMode) -> Result<(), OpenError> {
     let (setting, expected) = match mode {
         ReadOnlyMode::Locked => (LOCK_FLAG, "locked"),
-        ReadOnlyMode::NotLocked => ("default_transaction_read_only", "on"),
+        ReadOnlyMode::NotLocked | ReadOnlyMode::Standard => ("default_transaction_read_only", "on"),
     };
     let not_confirmed = || OpenError::Failed(NOT_CONFIRMED.to_string());
     let messages = client.simple_query(&format!("SHOW {setting}")).await.map_err(|_| not_confirmed())?;
@@ -803,6 +823,65 @@ fn copies_through_the_client(sql: &str) -> bool {
     direction.is_some_and(|index| matches!(tokens.get(index + 1), Some(Token::Word(word)) if word == "STDOUT" || word == "STDIN"))
 }
 
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(driver) = self.0.take() {
+            driver.abort();
+        }
+    }
+}
+
+const STANDARD_QUERY_FORMS: &str = "Run one read query (SELECT, WITH, VALUES, or TABLE).";
+const ROLLBACK_FAILED: &str = "Lunport could not finish the read-only transaction, so it closed the session.";
+
+fn standard_query_form(sql: &str) -> bool {
+    let tokens = top_level_tokens(sql);
+    matches!(tokens.first(), Some(Token::Word(word)) if matches!(word.as_str(), "SELECT" | "WITH" | "VALUES" | "TABLE"))
+        && !tokens.iter().any(|token| matches!(token, Token::Word(word) if word == "INTO"))
+}
+
+/// The console owns this transaction, including when the IPC task is dropped while it is open.
+struct ReadTransaction<'a> {
+    inner: &'a Inner,
+    finished: bool,
+}
+
+impl ReadTransaction<'_> {
+    async fn rollback(mut self) -> Result<(), String> {
+        let inner = self.inner;
+        if inner.ended.is_set() {
+            return Err(ENDED.to_string());
+        }
+        // Stop new cancels from targeting the transaction cleanup and wait for ones already sent.
+        let closing = {
+            let mut state = inner.state.lock().unwrap();
+            state.running = None;
+            std::mem::take(&mut state.closing)
+        };
+        tokio::time::timeout(CANCEL_WITHIN, async {
+            join_all(closing).await;
+            inner.wire.reset();
+            inner.client.batch_execute("ROLLBACK").await
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(|| ROLLBACK_FAILED.to_string())?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for ReadTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.inner.end(ROLLBACK_FAILED);
+        }
+    }
+}
+
 /// A persistent read-only PostgreSQL session on one stream.
 pub(crate) struct ConsoleConnection {
     inner: Arc<Inner>,
@@ -837,7 +916,7 @@ impl ConsoleConnection {
         login: ConsoleLogin,
         cancel_dial: CancelDial,
     ) -> Result<(ConsoleConnection, ConsoleOpened, BoxFuture<'static, String>), OpenError> {
-        Self::open_within(stream, login, cancel_dial, MAX_STATEMENT_INBOUND).await
+        Self::open_within(stream, login, cancel_dial, MAX_STATEMENT_INBOUND, None).await
     }
 
     /// `open` with a smaller read budget per statement.
@@ -848,7 +927,7 @@ impl ConsoleConnection {
         cancel_dial: CancelDial,
         inbound: usize,
     ) -> Result<(ConsoleConnection, ConsoleOpened, BoxFuture<'static, String>), OpenError> {
-        Self::open_within(stream, login, cancel_dial, inbound).await
+        Self::open_within(stream, login, cancel_dial, inbound, None).await
     }
 
     async fn open_within(
@@ -856,6 +935,7 @@ impl ConsoleConnection {
         login: ConsoleLogin,
         cancel_dial: CancelDial,
         inbound: usize,
+        password: Option<String>,
     ) -> Result<(ConsoleConnection, ConsoleOpened, BoxFuture<'static, String>), OpenError> {
         let deadline = Instant::now() + SIGN_IN_WITHIN;
         let ended = Arc::new(Ended::new());
@@ -866,27 +946,39 @@ impl ConsoleConnection {
             ended: ended.clone(),
         });
         let budgeted = StatementBudget { inner: stream, wire: wire.clone() };
-        let (client, connection) = tokio::time::timeout_at(deadline, console_config(&login).connect_raw(budgeted, NoTls))
+        let mut config = console_config(&login);
+        if login.read_only == ReadOnlyMode::Standard {
+            // The standard transport has already negotiated and verified TLS.
+            config.ssl_mode(SslMode::Disable);
+            if let Some(password) = password {
+                let password = Zeroizing::new(password);
+                config.password(password.as_bytes());
+            }
+        }
+        let (client, connection) = tokio::time::timeout_at(deadline, config.connect_raw(budgeted, NoTls))
             .await
             .map_err(|_| OpenError::Failed(SIGN_IN_TIMED_OUT.to_string()))?
-            .map_err(|error| sign_in_error(&error, login.read_only))?;
+            .map_err(|error| {
+                if login.read_only == ReadOnlyMode::Standard {
+                    OpenError::Failed("PostgreSQL sign-in failed. Check the database, user, and password.".to_string())
+                } else {
+                    sign_in_error(&error, login.read_only)
+                }
+            })?;
         let server_version = connection.parameter("server_version").unwrap_or_default().to_string();
         let driver_ended = ended.clone();
-        let driver = tokio::spawn(async move {
+        let mut driver = AbortOnDrop(Some(tokio::spawn(async move {
             let sentence = match connection.await {
                 Ok(()) => ENDED_CLEANLY.to_string(),
                 Err(error) => ended_sentence(&error),
             };
             driver_ended.set(&sentence);
         })
-        .abort_handle();
+        .abort_handle()));
         let confirmed = tokio::time::timeout_at(deadline, confirm_read_only(&client, login.read_only))
             .await
             .unwrap_or_else(|_| Err(OpenError::Failed(SIGN_IN_TIMED_OUT.to_string())));
-        if let Err(error) = confirmed {
-            driver.abort();
-            return Err(error);
-        }
+        confirmed?;
         let opened = ConsoleOpened {
             read_only: login.read_only,
             iam_user: login.iam_user,
@@ -902,7 +994,8 @@ impl ConsoleConnection {
             results: Mutex::new(Results::default()),
             wire,
             ended,
-            driver,
+            driver: driver.0.take().expect("the new console has a driver"),
+            read_only: login.read_only,
         });
         Ok((ConsoleConnection { inner }, opened, ended_future))
     }
@@ -928,12 +1021,19 @@ impl ConsoleConnection {
         if inner.ended.is_set() {
             return Err(ENDED.to_string());
         }
-        // Refused before anything is sent; a refusal that starts a run still drops the run before it, as any statement does.
-        if copies_through_the_client(sql) {
+        let standard = inner.read_only == ReadOnlyMode::Standard;
+        let refused = if standard && !standard_query_form(sql) {
+            Some(STANDARD_QUERY_FORMS)
+        } else if !standard && copies_through_the_client(sql) {
+            Some(NO_COPY)
+        } else {
+            None
+        };
+        if let Some(message) = refused {
             if fresh {
                 inner.drop_results();
             }
-            return Ok(ConsoleRun::Failed { message: NO_COPY.to_string(), sqlstate: None, position: None, elapsed_ms: 0 });
+            return Ok(ConsoleRun::Failed { message: message.to_string(), sqlstate: None, position: None, elapsed_ms: 0 });
         }
         let Some(running) = inner.begin(Some(&canceled)).await else {
             return Ok(ConsoleRun::Canceled { elapsed_ms: 0 });
@@ -945,10 +1045,45 @@ impl ConsoleConnection {
         let started = Instant::now();
         let mut bound = Box::pin(cancel_bound(running.cancel_sent.subscribe()));
 
+        if standard {
+            let transaction = ReadTransaction { inner, finished: false };
+            let result = tokio::select! {
+                begin = inner.client.batch_execute("BEGIN READ ONLY") => match begin {
+                    Ok(()) => {
+                        if canceled.load(Ordering::SeqCst) {
+                            Ok(ConsoleRun::Canceled { elapsed_ms: elapsed_ms(started) })
+                        } else {
+                            self.run_query(sql, &running, started, &mut bound).await
+                        }
+                    }
+                    Err(error) if error.as_db_error().is_some() => Ok(server_error(&error, &running, started)),
+                    Err(_) => Err(inner.lost()),
+                },
+                () = &mut bound => {
+                    inner.end(CANCEL_DID_NOT_STOP);
+                    Err(CANCEL_DID_NOT_STOP.to_string())
+                }
+            };
+            if !inner.ended.is_set() {
+                transaction.rollback().await?;
+            }
+            return result;
+        }
+        self.run_query(sql, &running, started, &mut bound).await
+    }
+
+    async fn run_query(
+        &self,
+        sql: &str,
+        running: &Arc<Running>,
+        started: Instant,
+        bound: &mut (impl std::future::Future<Output = ()> + Unpin),
+    ) -> Result<ConsoleRun, String> {
+        let inner = &self.inner;
         // Preparing first refuses a second statement in the same text and names the result's columns.
         let prepared = tokio::select! {
             prepared = inner.client.prepare(sql) => prepared,
-            () = &mut bound => {
+            () = &mut *bound => {
                 inner.end(CANCEL_DID_NOT_STOP);
                 return Err(CANCEL_DID_NOT_STOP.to_string());
             }
@@ -959,15 +1094,23 @@ impl ConsoleConnection {
                 .iter()
                 .map(|column| ConsoleColumn { name: column.name().to_string(), type_name: column.type_().name().to_string() })
                 .collect(),
-            Err(error) if error.as_db_error().is_some() => return Ok(server_error(&error, &running, started)),
+            Err(error) if error.as_db_error().is_some() => return Ok(server_error(&error, running, started)),
             Err(_) => return Err(inner.lost()),
         };
 
+        if inner.read_only == ReadOnlyMode::Standard {
+            if columns.is_empty() {
+                return Ok(ConsoleRun::Failed { message: STANDARD_QUERY_FORMS.to_string(), sqlstate: None, position: None, elapsed_ms: elapsed_ms(started) });
+            }
+            if inner.state.lock().unwrap().person.as_ref().is_some_and(|canceled| canceled.load(Ordering::SeqCst)) {
+                return Ok(ConsoleRun::Canceled { elapsed_ms: elapsed_ms(started) });
+            }
+        }
         let room = MAX_RESULT_BYTES.min(MAX_KEPT_BYTES.saturating_sub(inner.results.lock().unwrap().bytes));
-        let streamed = inner.stream(sql, &running, &mut bound, Caps { rows: MAX_RESULT_ROWS, bytes: room }).await?;
+        let streamed = inner.stream(sql, running, bound, Caps { rows: MAX_RESULT_ROWS, bytes: room }).await?;
         if let Some(error) = &streamed.error {
             if streamed.truncated.is_none() {
-                return Ok(server_error(error, &running, started));
+                return Ok(server_error(error, running, started));
             }
         }
         if columns.is_empty() {
@@ -1194,15 +1337,18 @@ impl Drop for OpeningGuard<'_> {
 /// A tab's open session, and the upstream it was dialled through, which is the tab's own.
 pub(crate) struct ConsoleSession {
     pub connection: ConsoleConnection,
-    upstream: Arc<dyn Upstream>,
-    db_id: String,
+    cloud_route: Option<(Arc<dyn Upstream>, String)>,
     /// Whether the route was released: by `end`, or by the drop.
     released: AtomicBool,
 }
 
 impl ConsoleSession {
     pub(crate) fn new(connection: ConsoleConnection, upstream: Arc<dyn Upstream>, db_id: String) -> ConsoleSession {
-        ConsoleSession { connection, upstream, db_id, released: AtomicBool::new(false) }
+        ConsoleSession { connection, cloud_route: Some((upstream, db_id)), released: AtomicBool::new(false) }
+    }
+
+    fn standard(connection: ConsoleConnection) -> ConsoleSession {
+        ConsoleSession { connection, cloud_route: None, released: AtomicBool::new(false) }
     }
 
     /// Ends the session as its tab closes: a statement of the person's still running is canceled, the connection closes and the route is
@@ -1225,22 +1371,29 @@ impl ConsoleSession {
         let Some(token) = self.connection.running_person_statement() else {
             return false;
         };
-        let Dialling { material, stream } = self.upstream.connect(&self.db_id, None);
-        if material.is_none() {
-            return false;
-        }
+        let (stream, release) = match &self.cloud_route {
+            Some((upstream, db_id)) => {
+                let Dialling { material, stream } = upstream.connect(db_id, None);
+                if material.is_none() {
+                    return false;
+                }
+                (stream, Some((upstream.clone(), db_id.clone())))
+            }
+            None => ((self.connection.inner.cancel_dial)(), None),
+        };
         if self.released.swap(true, Ordering::SeqCst) {
             // Released already: the path the stream would go through is closed.
             return true;
         }
-        let (upstream, db_id) = (Arc::clone(&self.upstream), self.db_id.clone());
         tauri::async_runtime::spawn(async move {
             let _ = tokio::time::timeout(CANCEL_WITHIN, async move {
                 let mut stream = stream.await?;
                 token.cancel_query_raw(&mut stream, NoTls).await.map_err(io::Error::other)
             })
             .await;
-            upstream.release(&db_id);
+            if let Some((upstream, db_id)) = release {
+                upstream.release(&db_id);
+            }
         });
         true
     }
@@ -1249,7 +1402,9 @@ impl ConsoleSession {
     /// thread of its own.
     fn release(&self) {
         if !self.released.swap(true, Ordering::SeqCst) {
-            self.upstream.release(&self.db_id);
+            if let Some((upstream, db_id)) = &self.cloud_route {
+                upstream.release(db_id);
+            }
         }
     }
 }
@@ -1304,7 +1459,7 @@ pub(crate) fn dial_for_cancel(
 }
 
 /// Resolves once `cancel` is set, looking every `CLOSED_POLL`.
-async fn cancelled(cancel: &CancelToken) {
+pub(super) async fn cancelled(cancel: &CancelToken) {
     while !cancel.is_cancelled() {
         tokio::time::sleep(CLOSED_POLL).await;
     }
@@ -1372,8 +1527,43 @@ fn consoles(app: &tauri::AppHandle) -> Arc<Consoles> {
     Arc::clone(&app.state::<AppState>().session.consoles)
 }
 
-/// Opens the tab `id`'s session to the saved database `database_id`, read-only as `read_only` says, through a Cloud SQL upstream of the
-/// tab's own. `events` is told when the session ends.
+type OpenedSession = (ConsoleSession, ConsoleOpened, BoxFuture<'static, String>);
+
+async fn open_standard(
+    app: tauri::AppHandle,
+    id: String,
+    password: Option<String>,
+    expected_revision: Option<String>,
+    cancel: &CancelToken,
+) -> Result<OpenedSession, String> {
+    let lookup = app.clone();
+    let (profile, password) = tokio::task::spawn_blocking(move || {
+        standard_postgres_profiles::open_profile(&lookup, &id, expected_revision.as_deref(), password)
+    })
+    .await
+    .map_err(|_| "Could not load the PostgreSQL connection.".to_string())??;
+    let mut password = Zeroizing::new(password);
+    let (stream, cancel_dial) = postgres_transport::open(&app, &profile, cancel).await?;
+    let check = profile.clone();
+    tokio::task::spawn_blocking(move || standard_postgres_profiles::check_current(&app, &check))
+        .await
+        .map_err(|_| "Could not verify the PostgreSQL connection.".to_string())??;
+    if cancel.is_cancelled() {
+        return Err(OPEN_CANCELLED.to_string());
+    }
+    let login = ConsoleLogin { iam_user: profile.username, database: profile.database, read_only: ReadOnlyMode::Standard };
+    let (connection, opened, ended) = tokio::select! {
+        result = ConsoleConnection::open_within(stream, login, cancel_dial, MAX_STATEMENT_INBOUND, Some(std::mem::take(&mut *password))) => {
+            result.map_err(|error| match error {
+                OpenError::Failed(message) | OpenError::LockUnsupported(message) => message,
+            })?
+        }
+        () = cancelled(cancel) => return Err(OPEN_CANCELLED.to_string()),
+    };
+    Ok((ConsoleSession::standard(connection), opened, ended))
+}
+
+/// Opens a tab's read-only session to a saved database through a route of its own. `events` is told when the session ends.
 #[tauri::command]
 pub async fn database_console_open(
     app: tauri::AppHandle,
@@ -1381,12 +1571,42 @@ pub async fn database_console_open(
     id: String,
     database_id: String,
     read_only: ReadOnlyMode,
+    password: Option<String>,
+    expected_revision: Option<String>,
     events: tauri::ipc::Channel<ConsoleEvent>,
 ) -> Result<ConsoleOpen, String> {
     main_only(&window, "Database")?;
     let consoles = consoles(&app);
     let (ticket, cancel) = consoles.begin(&id)?;
     let _opening = OpeningGuard { consoles: &consoles, id: &id, ticket };
+    let (session, opened, ended) = if database_id.starts_with("postgres-") {
+        open_standard(app, database_id, password, expected_revision, &cancel).await?
+    } else {
+        if read_only == ReadOnlyMode::Standard || password.is_some() || expected_revision.is_some() {
+            return Err("Choose a matching database connection type.".to_string());
+        }
+        match open_cloud(app, database_id, read_only, &cancel).await {
+            Ok(session) => session,
+            Err(OpenError::LockUnsupported(message)) => return Ok(ConsoleOpen::LockUnsupported { message }),
+            Err(OpenError::Failed(message)) => return Err(message),
+        }
+    };
+    if !consoles.finish(&id, ticket, Arc::new(session)) {
+        return Err(CONSOLE_CLOSED.to_string());
+    }
+    tauri::async_runtime::spawn(async move {
+        let message = ended.await;
+        let _ = events.send(ConsoleEvent::Ended { message });
+    });
+    Ok(ConsoleOpen::Opened(opened))
+}
+
+async fn open_cloud(
+    app: tauri::AppHandle,
+    database_id: String,
+    read_only: ReadOnlyMode,
+    cancel: &CancelToken,
+) -> Result<OpenedSession, OpenError> {
     let preparing = cancel.clone();
     let (upstream, db, prepared) = tauri::async_runtime::spawn_blocking(move || {
         let db = saved_database(&app, &database_id)?;
@@ -1401,26 +1621,16 @@ pub async fn database_console_open(
         }
     })
     .await
-    .map_err(|error| error.to_string())??;
-    let (connection, opened, ended) = match sign_in(&upstream, &db, prepared, read_only, &cancel).await {
+    .map_err(|error| OpenError::Failed(error.to_string()))?
+    .map_err(OpenError::Failed)?;
+    let (connection, opened, ended) = match sign_in(&upstream, &db, prepared, read_only, cancel).await {
         Ok(signed_in) => signed_in,
         Err(error) => {
             upstream.release(&db.id);
-            return match error {
-                OpenError::LockUnsupported(message) => Ok(ConsoleOpen::LockUnsupported { message }),
-                OpenError::Failed(message) => Err(message),
-            };
+            return Err(error);
         }
     };
-    let session = Arc::new(ConsoleSession::new(connection, upstream, db.id));
-    if !consoles.finish(&id, ticket, session) {
-        return Err(CONSOLE_CLOSED.to_string());
-    }
-    tauri::async_runtime::spawn(async move {
-        let message = ended.await;
-        let _ = events.send(ConsoleEvent::Ended { message });
-    });
-    Ok(ConsoleOpen::Opened(opened))
+    Ok((ConsoleSession::new(connection, upstream, db.id), opened, ended))
 }
 
 #[tauri::command]

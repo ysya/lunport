@@ -28,7 +28,7 @@ export type ResultTab = {
 export type TablePreview = { schema: string; relation: string };
 
 export type ConsoleState = {
-  status: "opening" | "open" | "lock_unsupported" | "ended" | "error";
+  status: "opening" | "open" | "lock_unsupported" | "password_required" | "ended" | "error";
   /** The sentence for lock_unsupported, ended and error. */
   message: string | null;
   opened: ConsoleOpened | null;
@@ -43,6 +43,7 @@ export type ConsoleState = {
   schemaError: string | null;
 };
 
+const PASSWORD_REQUIRED = "Enter the PostgreSQL password to connect.";
 const ENDED_SENTENCE = "The connection ended. Reconnect to go on.";
 
 const initialState = (): ConsoleState => ({
@@ -75,6 +76,7 @@ export class ConsoleSession {
   constructor(
     private readonly tabId: string,
     private readonly databaseId: string,
+    private readonly expectedRevision?: string,
   ) {}
 
   get state(): ConsoleState {
@@ -93,7 +95,7 @@ export class ConsoleSession {
     for (const listener of [...this.listeners]) listener();
   }
 
-  async open(readOnly: ReadOnlyMode): Promise<void> {
+  async open(readOnly: ReadOnlyMode, password?: string): Promise<void> {
     this.readOnly = readOnly;
     const generation = ++this.generation;
     this.current = initialState();
@@ -105,10 +107,12 @@ export class ConsoleSession {
     };
     let answer;
     try {
-      answer = await openConsole(this.tabId, this.databaseId, readOnly, events);
+      answer = await openConsole(this.tabId, this.databaseId, readOnly, events, this.expectedRevision, password);
     } catch (error) {
       if (generation !== this.generation) return;
-      this.update({ status: "error", message: sentence(error) });
+      const message = sentence(error);
+      if (readOnly === "standard" && message === PASSWORD_REQUIRED) this.update({ status: "password_required" });
+      else this.update({ status: "error", message });
       return;
     }
     if (generation !== this.generation) return;

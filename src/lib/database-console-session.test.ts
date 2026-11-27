@@ -44,6 +44,52 @@ beforeEach(() => {
 });
 
 describe("ConsoleSession", () => {
+  it("asks for a PostgreSQL password each time native open needs one", async () => {
+    const password = "synthetic-password";
+    route({
+      database_console_open: (args) => {
+        if (args.password !== password || args.expectedRevision !== "rev-a1") throw "Enter the PostgreSQL password to connect.";
+        return { ...opened, read_only: "standard", iam_user: "reader" };
+      },
+      database_console_schema: () => tree,
+    });
+    const session = new ConsoleSession("tab-1", "postgres-a1", "rev-a1");
+    await session.open("standard");
+    expect(session.state.status).toBe("password_required");
+
+    await session.open("standard", password);
+    expect(session.state.opened).toMatchObject({ read_only: "standard", iam_user: "reader" });
+    expect(JSON.stringify(session)).not.toContain(password);
+
+    await session.reconnect();
+    expect(session.state.status).toBe("password_required");
+    expect(calls("database_console_open").map(([, args]) => args)).toEqual([
+      { id: "tab-1", databaseId: "postgres-a1", readOnly: "standard", events: expect.anything(), expectedRevision: "rev-a1" },
+      { id: "tab-1", databaseId: "postgres-a1", readOnly: "standard", events: expect.anything(), password, expectedRevision: "rev-a1" },
+      { id: "tab-1", databaseId: "postgres-a1", readOnly: "standard", events: expect.anything(), expectedRevision: "rev-a1" },
+    ]);
+  });
+
+  it("reconnect keeps the PostgreSQL tab revision and refuses a replaced profile", async () => {
+    let revision = "rev-a1";
+    route({
+      database_console_open: (args) => {
+        if (args.expectedRevision !== revision) throw "The PostgreSQL connection changed. Reopen it from Databases.";
+        return { ...opened, read_only: "standard", iam_user: "reader" };
+      },
+      database_console_schema: () => tree,
+    });
+    const session = new ConsoleSession("tab-1", "postgres-a1", revision);
+    await session.open("standard");
+    expect(session.state.status).toBe("open");
+    revision = "rev-a2";
+    await session.reconnect();
+    expect(session.state.status).toBe("error");
+    expect(session.state.message).toBe("The PostgreSQL connection changed. Reopen it from Databases.");
+    expect(calls("database_console_open")[1][1]).toMatchObject({ expectedRevision: "rev-a1" });
+    expect(calls("database_console_open")[1][1]).not.toHaveProperty("password");
+  });
+
   it("open_reads_the_schema_once_open", async () => {
     route({ database_console_open: () => opened, database_console_schema: () => tree });
     const session = new ConsoleSession("tab-1", "db-1");

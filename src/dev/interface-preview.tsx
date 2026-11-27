@@ -28,6 +28,8 @@ import type { ConsoleRun } from "@/bindings/ConsoleRun";
 import type { ConsoleColumn } from "@/bindings/ConsoleColumn";
 import type { SchemaTree } from "@/bindings/SchemaTree";
 import type { DatabaseView } from "@/lib/databases";
+import { POSTGRES_CONNECTION_CHANGED } from "@/lib/database-console";
+import type { StandardPostgresDraft, StandardPostgresProfile } from "@/lib/standard-postgres";
 import { useTerminalStore } from "@/stores/terminals";
 import "@/index.css";
 
@@ -209,6 +211,13 @@ else {
     },
   };
   if (scenario === "ai-access") mcp = { ...mcp, enabled: true, allowed_databases: [privateDatabase.database.id] };
+  let postgresProfiles: StandardPostgresProfile[] = scenario === "standard-postgres" ? [
+    { id: "postgres-preview-1", revision: "1", name: "Reports", host: "reports.example.com", port: 5432,
+      database: "reports", username: "reader", via_host: null, has_password: false, route_unavailable: false, route_revision: null },
+    { id: "postgres-preview-2", revision: "1", name: "Inventory replica", host: "inventory.example.com", port: 5432,
+      database: "inventory", username: "reader", via_host: overview.hosts[1].id, has_password: true, route_unavailable: false, route_revision: "fixture-route" },
+  ] : [];
+  let postgresSequence = postgresProfiles.length;
   const consoleColumns: ConsoleColumn[] = [
     { name: "id", type_name: "int8" },
     { name: "customer", type_name: "text" },
@@ -246,10 +255,39 @@ else {
           return;
         }
         if (scenario === "terminal-missing-key" && ["terminal_close", "terminal_ack"].includes(command)) return;
-        if (scenario === "ai-access" && command === "databases_list") return [consoleDatabase, privateDatabase];
-        if (scenario === "database-console") {
-          if (command === "databases_list") return [consoleDatabase];
-          if (command === "database_console_open") return { kind: "opened", read_only: args.readOnly as ReadOnlyMode, iam_user: "frank@example.com", server_version: "PostgreSQL 16.4" } satisfies ConsoleOpen;
+        if (command === "databases_list") return scenario === "ai-access" ? [consoleDatabase, privateDatabase]
+          : scenario === "database-console" || scenario === "standard-postgres" ? [consoleDatabase] : [];
+        if (command === "standard_postgres_list") return postgresProfiles;
+        if (scenario === "standard-postgres" && command === "standard_postgres_save") {
+          const draft = args.draft as StandardPostgresDraft;
+          const previous = postgresProfiles.find((profile) => profile.id === args.id);
+          const connectionChanged = previous && (previous.host !== draft.host || previous.port !== draft.port || previous.via_host !== draft.via_host ||
+            previous.database !== draft.database || previous.username !== draft.username);
+          const profile: StandardPostgresProfile = {
+            ...draft, id: previous?.id ?? `postgres-preview-${++postgresSequence}`, revision: String(Number(previous?.revision ?? 0) + 1),
+            has_password: !!args.password || !!(previous?.has_password && !args.forgetPassword && !connectionChanged),
+            route_unavailable: false,
+            route_revision: draft.via_host ? "fixture-route" : null,
+          };
+          postgresProfiles = [...postgresProfiles.filter((other) => other.id !== profile.id), profile];
+          return profile;
+        }
+        if (scenario === "standard-postgres" && command === "standard_postgres_delete") {
+          postgresProfiles = postgresProfiles.filter((profile) => profile.id !== args.id);
+          return;
+        }
+        if (scenario === "database-console" || scenario === "standard-postgres") {
+          if (command === "database_console_open") {
+            let username = "frank@example.com";
+            if (args.readOnly === "standard") {
+              const profile = postgresProfiles.find((profile) => profile.id === args.databaseId);
+              if (!profile) throw "This PostgreSQL profile is unavailable.";
+              if (!profile.has_password && !args.password) throw "Enter the PostgreSQL password to connect.";
+              if (args.expectedRevision !== profile.revision) throw POSTGRES_CONNECTION_CHANGED;
+              username = profile.username;
+            }
+            return { kind: "opened", read_only: args.readOnly as ReadOnlyMode, iam_user: username, server_version: "PostgreSQL 16.4" } satisfies ConsoleOpen;
+          }
           if (command === "database_console_schema") return consoleSchema;
           if (command === "database_console_run") return /^\s*select\b/i.test(String(args.sql))
             ? { kind: "rows", result_id: 1, columns: consoleColumns, row_count: consoleRows.length, truncated: null, elapsed_ms: 12, first_page: consoleRows } satisfies ConsoleRun

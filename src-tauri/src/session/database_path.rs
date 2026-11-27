@@ -1,14 +1,10 @@
 //! The way to a saved database reached through a host of the library: one SSH session to that host, opened as connecting to the host opens
 //! it (its jump hosts, its Google Cloud IAP route, the questions its login asks), and a local forward on it from a port the system picks on
-//! 127.0.0.1 to the instance's private address on Cloud SQL's port. The database's connections dial that port with TLS, so Cloud SQL still
-//! takes only the client certificate it signed for them.
-
-use std::net::IpAddr;
+//! 127.0.0.1 to the database endpoint. The host resolves the database name and the database's TLS is negotiated over the resulting stream.
 
 use super::auth::Owner;
 use super::connect::{CancelToken, Connector};
 use super::protocol::{AiAsker, HostQuery};
-use crate::gcp::cloudsql_tls;
 use crate::identity::thread_name;
 use crate::mcp::records::ClientConfirmer;
 use crate::ssh::forward::{ForwardKind, ForwardSpec, Forwarder};
@@ -55,7 +51,8 @@ pub(crate) fn open_on(base: &Connector<'_>, host_id: &str, owner: &dyn Owner, ca
 
 /// A forward a path keeps, and the address it leads to.
 struct Forward {
-    target: IpAddr,
+    host: String,
+    port: u16,
     forwarder: Box<dyn Forwarder>,
 }
 
@@ -84,39 +81,39 @@ impl HostPath {
         self.session_alive() && self.forward.as_ref().is_none_or(|forward| forward.forwarder.status().running)
     }
 
-    /// The loopback port of a forward to Cloud SQL's port at `target`: the one that runs, else one opened now from a port the system picks
+    /// The loopback port of a forward to `host` at `port`: the one that runs, else one opened now from a port the system picks
     /// on 127.0.0.1. A forward that stopped, or that leads elsewhere, is stopped on a thread of its own. Opening one blocks briefly (the
     /// engine binds its listener), so it runs on a blocking thread.
-    pub(crate) fn forward_to(&mut self, target: IpAddr) -> Result<u16, String> {
-        if let Some(port) = self.port_for(target) {
-            return Ok(port);
+    pub(crate) fn forward_to(&mut self, host: &str, port: u16) -> Result<u16, String> {
+        if let Some(local_port) = self.port_for(host, port) {
+            return Ok(local_port);
         }
         if let Some(before) = self.forward.take() {
             close_later(Some(before.forwarder), None);
         }
         let session = self.session.as_ref().ok_or_else(|| SessionError::Closed.to_string())?;
-        let spec = ForwardSpec { kind: ForwardKind::Local, bind_address: "127.0.0.1".into(), port: 0, target_host: target.to_string(), target_port: cloudsql_tls::PORT };
+        let spec = ForwardSpec { kind: ForwardKind::Local, bind_address: "127.0.0.1".into(), port: 0, target_host: host.into(), target_port: port };
         let forwarder = session.forward(&spec).map_err(|error| error.to_string())?;
-        let port = forwarder.status().port;
-        if port == 0 {
+        let local_port = forwarder.status().port;
+        if local_port == 0 {
             close_later(Some(forwarder), None);
             return Err(NO_PORT.to_string());
         }
-        self.forward = Some(Forward { target, forwarder });
-        Ok(port)
+        self.forward = Some(Forward { host: host.into(), port, forwarder });
+        Ok(local_port)
     }
 
-    /// The loopback port of its forward to `target`, while the forward runs and the session lives. It only looks, so async code may ask.
-    pub(crate) fn port_for(&self, target: IpAddr) -> Option<u16> {
-        let forward = self.forward.as_ref().filter(|forward| forward.target == target)?;
+    /// The loopback port of its forward to `host` and `port`, while the forward runs and the session lives. It only looks, so async code may ask.
+    pub(crate) fn port_for(&self, host: &str, port: u16) -> Option<u16> {
+        let forward = self.forward.as_ref().filter(|forward| forward.host == host && forward.port == port)?;
         let status = forward.forwarder.status();
         (status.running && self.session_alive()).then_some(status.port)
     }
 
-    /// The most recent error of a connection its forward to `target` carried, as the forward reports it: why the host could not reach
+    /// The most recent error of a connection its forward to `host` and `port` carried, as the forward reports it: why the host could not reach
     /// the instance, when it could not.
-    pub(crate) fn forward_error(&self, target: IpAddr) -> Option<String> {
-        self.forward.as_ref().filter(|forward| forward.target == target)?.forwarder.status().error
+    pub(crate) fn forward_error(&self, host: &str, port: u16) -> Option<String> {
+        self.forward.as_ref().filter(|forward| forward.host == host && forward.port == port)?.forwarder.status().error
     }
 
     fn session_alive(&self) -> bool {

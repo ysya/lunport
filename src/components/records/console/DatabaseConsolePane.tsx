@@ -8,10 +8,14 @@ import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
 import type { ExportFormat } from "@/bindings/ExportFormat";
 import type { ReadOnlyMode } from "@/bindings/ReadOnlyMode";
 import { Button } from "@/components/ui/button";
-import { exportResult } from "@/lib/database-console";
+import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { exportResult, POSTGRES_CONNECTION_CHANGED } from "@/lib/database-console";
 import { ConsoleSession, type ConsoleState, type ResultTab, type TablePreview } from "@/lib/database-console-session";
 import { databaseGrantLine, databasePamStatusQuery, databasesQuery, routeSummary, type SavedDatabase } from "@/lib/databases";
 import { useRecordsStatus } from "@/lib/records";
+import { postgresAddress, standardPostgresQuery } from "@/lib/standard-postgres";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { statementsToRun } from "@/lib/sql-statements";
 import { useNow } from "@/lib/use-now";
@@ -31,6 +35,7 @@ const TAB_STATES: Record<ConsoleState["status"], TerminalState> = {
   ended: "ended",
   error: "error",
   lock_unsupported: "error",
+  password_required: "connecting",
 };
 
 export type ConsoleActions = {
@@ -58,10 +63,12 @@ function Banner({ state, actions }: { state: ConsoleState; actions: ConsoleActio
     </div>;
   }
   if (state.status === "ended" || state.status === "error") {
+    const profileChanged = state.message === POSTGRES_CONNECTION_CHANGED;
     return <div className="console-banner" role="alert">
       {state.message && <p>{revealHidden(state.message)}</p>}
       <div className="console-banner-actions">
-        <Button size="sm" onClick={actions.reconnect}>Reconnect</Button>
+        {profileChanged ? <Button size="sm" onClick={actions.close}>Close console</Button>
+          : <Button size="sm" onClick={actions.reconnect}>Reconnect</Button>}
       </div>
     </div>;
   }
@@ -191,11 +198,11 @@ export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, act
   </div>;
 }
 
-/** Connection details from the saved database and its current IAM grant. */
-function ConsoleConnection({ environment, database, iamUser, readOnly }: {
+/** Cloud SQL connection details from the saved database and its current IAM grant. */
+function ConsoleConnection({ environment, database, username, readOnly }: {
   environment: DatabaseEnvironment;
   database: SavedDatabase | null;
-  iamUser: string | null;
+  username: string | null;
   readOnly: ReadOnlyMode | null;
 }) {
   const overview = useRecordsStatus().data?.overview ?? null;
@@ -204,7 +211,49 @@ function ConsoleConnection({ environment, database, iamUser, readOnly }: {
   const now = useNow(1000);
   const route = database && overview ? routeSummary(overview, database) : { alias: null, iap: false };
   const grant = pam && read.data && !read.isError ? databaseGrantLine(read.data, pam, now) : null;
-  return <ConsoleStatusBar environment={environment} database={database} route={route} iamUser={iamUser} readOnly={readOnly} grant={grant} />;
+  return <ConsoleStatusBar environment={environment} database={database} route={route} username={username} readOnly={readOnly} grant={grant} />;
+}
+
+/** An unsaved credential lasts only until the current open attempt. */
+function PostgresPasswordDialog({ databaseId, revision, connect, cancel }: {
+  databaseId: string; revision: string; connect: (password: string) => void; cancel: () => void;
+}) {
+  const id = useId();
+  const input = useRef<HTMLInputElement>(null);
+  const query = useQuery({ ...standardPostgresQuery, refetchOnMount: "always", select: (rows) => rows.find((row) => row.id === databaseId) ?? null });
+  const profile = query.data;
+  const changed = !!profile && profile.revision !== revision;
+  const ready = !query.isFetching && !query.isError && !!profile && !changed;
+  // A fresh profile revision must not inherit the input for the previous endpoint.
+  const formKey = profile ? `${profile.id}:${profile.revision}` : undefined;
+  useEffect(() => { if (ready) input.current?.focus(); }, [ready, formKey]);
+  return <Dialog open onOpenChange={(open) => { if (!open) cancel(); }}>
+    <DialogContent onCloseAutoFocus={(event) => event.preventDefault()}>
+      <DialogTitle>{ready ? `Connect to ${revealHidden(profile.name)}` : "Connect to PostgreSQL"}</DialogTitle>
+      <DialogDescription>{ready
+        ? `Enter the password for ${revealHidden(profile.username)} on ${revealHidden(postgresAddress(profile))} · ${revealHidden(profile.database)}.`
+        : query.isPending || query.isFetching ? "Loading connection details…"
+        : query.isError ? revealHidden(errorMessage(query.error))
+        : changed ? POSTGRES_CONNECTION_CHANGED : "This PostgreSQL profile is unavailable."}</DialogDescription>
+      <form key={formKey} className="space-y-4" onSubmit={(event) => {
+        event.preventDefault();
+        if (!ready || !input.current?.value) return;
+        const password = input.current.value;
+        input.current.value = "";
+        connect(password);
+      }}>
+        {ready && <div className="space-y-2">
+          <Label htmlFor={id}>Password</Label>
+          <Input ref={input} id={id} type="password" autoComplete="off" required />
+        </div>}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={cancel}>{changed ? "Close console" : "Cancel"}</Button>
+          {ready && <Button type="submit">Connect</Button>}
+          {query.isError && <Button type="button" onClick={() => void query.refetch()}>Retry</Button>}
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  </Dialog>;
 }
 
 /**
@@ -212,13 +261,16 @@ function ConsoleConnection({ environment, database, iamUser, readOnly }: {
  * the tab's state in the workspace in step with the session's.
  */
 export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active: boolean }) {
-  const [session] = useState(() => new ConsoleSession(tab.id, tab.databaseId));
+  const [session] = useState(() => new ConsoleSession(tab.id, tab.databaseId, tab.postgresRevision));
   const subscribe = useCallback((listener: () => void) => session.subscribe(listener), [session]);
   const state = useSyncExternalStore(subscribe, () => session.state);
   const viewRef = useRef<EditorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const mac = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
-  const database = useQuery({ ...databasesQuery, select: (rows) => rows.find((row) => row.database.id === tab.databaseId)?.database ?? null }).data ?? null;
+  const { environment } = tab;
+  const postgres = environment === null;
+  const databaseResult = useQuery({ ...databasesQuery, enabled: !postgres, select: (rows) => rows.find((row) => row.database.id === tab.databaseId)?.database ?? null });
+  const database = postgres ? null : databaseResult.data ?? null;
 
   // The close waits a turn: StrictMode unmounts and mounts a pane again at once, and that mount keeps the session it already opened
   // rather than closing it and opening the same tab id a second time.
@@ -313,6 +365,7 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
       void session.reconnect();
     },
     openNotLocked: () => {
+      if (postgres) return;
       useTerminalStore.getState().setReadOnly(tab.id, "not_locked");
       void session.open("not_locked");
     },
@@ -324,14 +377,20 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
   };
 
   const mode = state.status === "open" ? state.opened?.read_only ?? null : null;
-  return <ConsoleView
-    state={state}
-    mac={mac}
-    notice={notice}
-    viewRef={viewRef}
-    actions={actions}
-    connectionStatus={<ConsoleConnection environment={tab.environment} database={database} iamUser={state.opened?.iam_user ?? null} readOnly={mode} />}
-  />;
+  return <>
+    <ConsoleView
+      state={state}
+      mac={mac}
+      notice={notice}
+      viewRef={viewRef}
+      actions={actions}
+      connectionStatus={environment === null
+        ? <ConsoleStatusBar environment={null} database={null} route={{ alias: null, iap: false }} username={state.opened?.iam_user ?? null} readOnly={mode} grant={null} />
+        : <ConsoleConnection environment={environment} database={database} username={state.opened?.iam_user ?? null} readOnly={mode} />}
+    />
+    {active && tab.environment === null && state.status === "password_required" && <PostgresPasswordDialog databaseId={tab.databaseId} revision={tab.postgresRevision}
+      connect={(password) => void session.open("standard", password)} cancel={actions.close} />}
+  </>;
 }
 
 export default DatabaseConsolePane;
