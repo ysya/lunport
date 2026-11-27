@@ -31,6 +31,15 @@ cargo test --locked --lib sync::central::server_change -- --test-threads=2
 
 Development/test builds optimize the existing OpenSSH PEM/base64 parsers as well as the crypto primitives. Application code keeps debug assertions and overflow checks; fixture sizes and validation remain unchanged. CI runs the actual Production and Development release-library boundaries in parallel with the complete debug suites. Windows runs each migration/publication/console test once in the complete suite; the separate Win32 handle/DACL probe remains.
 
+CI runs the complete suites with the `ci` Cargo profile (`[profile.ci]` in `src-tauri/Cargo.toml`). It inherits `dev` and builds the dependencies at optimisation level 1; the application crate stays unoptimised, so it compiles as fast as under `dev`, and debug assertions and overflow checks stay on in every crate. The complete safe suite takes about a third less time with it, and the central sync tests about half. To run the suite the way CI does:
+
+```bash
+cd src-tauri
+cargo test --locked --profile ci --lib -- --test-threads=2 --skip secrets::tests::round_trip_set_get_delete --skip ssh::engine_tests::login_methods::pam
+```
+
+The profile builds in `target/ci`, beside the `dev` build in `target/debug` that `pnpm tauri:dev`, `cargo build` and a plain `cargo test` keep using, so its first run compiles the dependencies once more. Level 1 is deliberate: rustc shares a dependency's generic instantiations with an unoptimised crate only up to that level, and at level 2 the central sync tests gained 15% instead of half.
+
 ## Isolated Development profile
 
 `pnpm tauri:dev` runs **Lunport Dev**. `pnpm tauri:build:dev` builds a release-mode Development bundle. The Development profile uses `dev.ysya.lunport.dev`, the `Lunport Development` credential service and a sandbox home under its data directory. It can run beside Production. Writes remain in that sandbox; updater and login integration are disabled. Selected external import sources are read and copied, preserving the originals.

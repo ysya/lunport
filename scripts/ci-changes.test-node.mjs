@@ -174,6 +174,33 @@ test("workflows pass each selection on under its own name, and their conditions 
   assert.equal(selectChecks(["scripts/windows-console-helper.mjs"], noRead).windows, true);
 });
 
+// A pull request restores a Rust cache saved by its own branch or by main. rust-cache.yml saves one on main for the three test jobs,
+// which only works while all four name the same cache and compile the same build on the same runners.
+test("the cache workflow on main saves what the Rust test jobs restore", () => {
+  const read = name => readFileSync(`.github/workflows/${name}`, "utf8");
+  const job = (name, id) => {
+    const found = read(name).split(/^(?= {2}[\w-]+:\r?$)/m).find(part => new RegExp(`^ {2}${id}:\\r?$`, "m").test(part));
+    assert.ok(found, `${name} has no ${id} job`);
+    return found;
+  };
+  const cache = text => [...text.matchAll(/^ {6}- uses: Swatinem\/rust-cache@v2\r?\n(?: {8}id: \w+\r?\n)? {8}with:\r?\n((?: {10}.*\r?\n)+)/gm)].map(match => match[1].split(/\r?\n/).filter(Boolean).map(line => line.trim()));
+  const seed = job("rust-cache.yml", "seed");
+  assert.deepEqual(cache(seed), [['workspaces: "./src-tauri -> target"', "shared-key: rust-tests"]]);
+  assert.match(seed, /^ {8}run: cargo test --locked --profile ci --lib --no-run\r?$/m);
+  const runners = /^ {8}os: \[(.*)\]\r?$/m.exec(seed)?.[1].split(", ");
+  for (const [name, id] of [["test-engine.yml", "macos"], ["test-engine.yml", "linux"], ["test-windows.yml", "slots"]]) {
+    const tests = job(name, id);
+    const [settings] = cache(tests);
+    assert.deepEqual(settings.filter(line => line !== "cache-on-failure: true"), cache(seed)[0], `${name} ${id}`);
+    assert.match(tests, /cargo(?: |", ")test(?: |", ")--locked(?: |", ")--profile(?: |", ")ci(?: |", ")--lib\b/, `${name} ${id}`);
+    assert.ok(runners?.includes(/^ {4}runs-on: (.*?)\r?$/m.exec(tests)?.[1]), `${name} ${id} runs on a system rust-cache.yml does not fill a cache for`);
+  }
+  // Other builds keep caches of their own: a release build saved under the shared key would replace the test build.
+  for (const name of readdirSync(".github/workflows").filter(name => name.endsWith(".yml"))) {
+    assert.equal(read(name).split("shared-key: rust-tests").length - 1, { "rust-cache.yml": 1, "test-engine.yml": 2, "test-windows.yml": 1 }[name] ?? 0, name);
+  }
+});
+
 test("a stale lock or release manifest fails the cheap version gate", () => {
   const read = path => readFileSync(path, "utf8");
   assert.equal(validateVersions(read), JSON.parse(read("package.json")).version);

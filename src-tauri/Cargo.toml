@@ -210,3 +210,17 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+
+# CI runs the Rust test suites with this profile (`--profile ci`); `tauri dev`, `cargo build` and a plain `cargo test` keep `dev`.
+# The suites are CPU-bound in debug code: central sync tests sign, verify, encrypt and encode real libraries under the production
+# request deadlines. Dependencies are built at level 1, the highest level at which rustc still shares their generic
+# instantiations with an unoptimised crate; from level 2 the application crate compiles its own unoptimised copies and the tests
+# gain far less. The application crate stays at level 0, so it compiles as fast as under `dev`. Build scripts
+# and procedural macros are not optimised either. Debug assertions and overflow checks stay on everywhere, and the crates `dev`
+# optimises above keep level 3. Line tables are enough for the backtrace of a failed test and make the build and its cache smaller.
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+debug = "line-tables-only"
+[profile.ci.package.lunport]
+opt-level = 0

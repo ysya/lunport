@@ -1,0 +1,74 @@
+# Fills the Rust dependency caches that the pull request test jobs restore: `Rust and SSH (macOS)` and `Rust, SSH and PAM (Linux)` in
+# test-engine.yml, and `Rust, SSH and native smoke (Windows)` in test-windows.yml.
+#
+# A pull request run can restore a cache saved by its own branch or by `main`, never one saved by another pull request. The test
+# workflows run on pull requests only, so without this workflow `main` holds no cache for them and the first run of every pull
+# request compiles the whole dependency graph. This workflow compiles the same test build on `main` and saves it under the key those
+# jobs ask for: the cache key holds the shared key, the runner's system, the Rust version, the cargo configuration and the
+# dependencies in Cargo.toml and Cargo.lock, and no workflow or job name. A pull request that leaves the dependencies alone then
+# finds the exact key, compiles only the application crate and saves no cache of its own.
+#
+# It compiles and runs no test: merging still does not repeat the suites.
+name: CI - Rust cache
+
+on:
+  push:
+    branches: [main]
+    # What the cache key is computed from, and this workflow.
+    paths:
+      - src-tauri/Cargo.toml
+      - src-tauri/Cargo.lock
+      - .cargo/config.toml
+      - .github/workflows/rust-cache.yml
+  # A new stable Rust changes the key without any push, and GitHub removes a cache nothing has read for seven days.
+  schedule:
+    - cron: "17 3 * * 1,4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  seed:
+    name: Rust test dependencies (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The runners of the three test jobs.
+        os: [macos-latest, ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      # The packages the Linux test job compiles the app against.
+      - name: Install system packages
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: dtolnay/rust-toolchain@stable
+      # The same `workspaces` and `shared-key` as the test jobs: scripts/ci-changes.test-node.mjs compares them.
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: rust-tests
+      # With the exact key restored there is nothing to add, and the restore itself keeps the cache from expiring.
+      - name: Placeholder frontend
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ../dist
+          echo '<!doctype html>' > ../dist/index.html
+      # The command the test jobs compile with. The action saves the dependencies when the job ends, without the application crate.
+      - name: Compile the test build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo test --locked --profile ci --lib --no-run
