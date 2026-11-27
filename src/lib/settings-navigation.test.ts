@@ -17,6 +17,8 @@ describe("settings navigation", () => {
     expect(searchSettings(" FONT  size ")[0].target).toBe("settings-display");
     expect(searchSettings("export JSON")[0].target).toBe("settings-preferences-transfer");
     expect(searchSettings("Auto-log")[0].category).toBe("ai");
+    expect(searchSettings("AI SQL access")[0].target).toBe("settings-cloud-sql-access");
+    expect(searchSettings("file transfer limit")[0].category).toBe("connection");
     expect(searchSettings(" ")).toEqual([]);
     expect(searchSettings("no-such-preference")).toEqual([]);
   });

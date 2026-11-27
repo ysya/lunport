@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Folder, Search, Server, ShieldCheck, X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, ChevronDown, ChevronRight, Database, Folder, Search, Server, ShieldCheck, X } from "lucide-react";
 import type { McpStatus } from "@/bindings/McpStatus";
 import type { HostScope } from "@/lib/records";
 import { useSetMcpGroupAllowed, useSetMcpHostAllowed } from "@/lib/mcp";
@@ -23,13 +23,14 @@ export type McpAccessGroup = {
 type Filter = "all" | "allowed" | "blocked";
 
 /** Display the effective permission and its source separately from the grant being edited. */
-export function McpHostAccess({ hosts, groups, generation, records, status, unavailable }: {
+export function McpHostAccess({ hosts, groups, generation, records, status, unavailable, cloudSql, showDatabases }: {
   hosts: McpAccessHost[]; groups: McpAccessGroup[]; generation?: string;
   records: boolean; status?: McpStatus; unavailable: boolean;
+  cloudSql?: ReactNode; showDatabases?: boolean;
 }) {
   const hostMutation = useSetMcpHostAllowed();
   const groupMutation = useSetMcpGroupAllowed();
-  const [view, setView] = useState(records && groups.length ? "groups" : "hosts");
+  const [view, setView] = useState(showDatabases && cloudSql ? "databases" : records && groups.length ? "groups" : "hosts");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [within, setWithin] = useState<string | null>(null);
@@ -130,34 +131,35 @@ export function McpHostAccess({ hosts, groups, generation, records, status, unav
   </Badge>;
   const empty = (text: string) => <p className="px-4 py-8 text-center text-sm text-muted-foreground">{text}</p>;
 
-  return <Section title="Allowed hosts" description={records ? "Choose Groups or individual hosts. Group access includes subgroups and future members." : "Choose the host aliases your AI tools may use."}>
+  return <Section title={cloudSql ? "Resource access" : "Allowed hosts"} description={records ? "Group access includes subgroups and future members." : "Choose the host aliases your AI tools may use."}>
     <div className="overflow-hidden rounded-xl border bg-card/30">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3">
+      {view !== "databases" && <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <ShieldCheck aria-hidden="true" className="size-5 shrink-0 text-primary" />
           <p role="status" className="text-sm font-medium">{unknown ? (unavailable ? "Permissions unavailable" : "Loading permissions…") : `${allowedCount} of ${hosts.length} hosts allowed`}</p>
         </div>
         <span className="text-xs text-muted-foreground">{!unknown && !status.enabled ? "AI access is off · Rules are saved" : "On this device"}</span>
-      </div>
+      </div>}
       <Tabs value={view} onValueChange={(value) => { setView(value); }} className="flex-col gap-0">
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
-          <TabsList aria-label="Access by Group or host" className="h-8">
+          <TabsList aria-label="Resource types" className="h-8">
             {records && <TabsTrigger ref={groupsTab} value="groups" className="h-7 flex-none gap-2 px-3 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"><Folder className="size-3.5" />Groups <span className="text-xs opacity-60">{groups.length}</span></TabsTrigger>}
             <TabsTrigger ref={hostsTab} value="hosts" className="h-7 flex-none gap-2 px-3 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"><Server className="size-3.5" />Hosts <span className="text-xs opacity-60">{hosts.length}</span></TabsTrigger>
+            {cloudSql && <TabsTrigger value="databases" className="h-7 flex-none gap-2 px-3"><Database className="size-3.5" aria-hidden="true" />Cloud SQL</TabsTrigger>}
           </TabsList>
-          <Select value={filter} onValueChange={(value) => setFilter(value as Filter)}>
+          {view !== "databases" && <Select value={filter} onValueChange={(value) => setFilter(value as Filter)}>
             <SelectTrigger aria-label="Filter access" className="h-8 w-36"><SelectValue /></SelectTrigger>
             <SelectContent><SelectItem value="all">All access</SelectItem><SelectItem value="allowed">Allowed</SelectItem><SelectItem value="blocked">Not allowed</SelectItem></SelectContent>
-          </Select>
+          </Select>}
         </div>
-        <div className="px-4 py-3">
+        {view !== "databases" && <div className="px-4 py-3">
           <div className="relative">
             <Search aria-hidden="true" className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
             <Input aria-label="Search AI permissions" placeholder={view === "groups" ? "Search Groups or member hosts…" : "Search hosts, destinations or Groups…"} value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 pl-8 pr-9" />
             {search && <Button variant="ghost" size="icon-xs" className="absolute right-1.5 top-1.5" aria-label="Clear permission search" onClick={() => setSearch("")}><X /></Button>}
           </div>
           {view === "hosts" && within && <div className="mt-2 flex items-center gap-1 text-xs text-muted-foreground"><Folder aria-hidden="true" className="size-3.5 shrink-0" /><span className="min-w-0 truncate">In {byKey.get(within)?.path ?? "Group"} and subgroups</span><Button variant="ghost" size="icon-xs" aria-label="Show all hosts" onClick={() => setWithin(null)}><X /></Button></div>}
-        </div>
+        </div>}
         <TabsContent value="groups" className="m-0 border-t">
           {!groups.length ? <div className="px-4 py-6 text-center"><p className="mb-3 text-sm text-muted-foreground">No Groups yet. Allow individual hosts instead.</p><Button variant="outline" size="sm" onClick={() => { setView("hosts"); hostsTab.current?.focus(); }}>Choose hosts</Button></div> : !ordered.length ? empty("No Groups match this search and filter.") : <ul aria-label="Group access" className="divide-y">
             {ordered.map((group) => {
@@ -213,10 +215,11 @@ export function McpHostAccess({ hosts, groups, generation, records, status, unav
             })}
           </ul>}
         </TabsContent>
+        {cloudSql && <TabsContent value="databases" className="m-0">{cloudSql}</TabsContent>}
       </Tabs>
-      <div className="border-t bg-muted/10 px-4 py-2.5 text-xs text-muted-foreground">
+      {view !== "databases" && <div className="border-t bg-muted/10 px-4 py-2.5 text-xs text-muted-foreground">
         {view === "groups" ? "Group grants apply to current and future members, including synced hosts." : records ? "Removing a direct grant keeps any access provided by a Group." : "Only allowed aliases are available to local AI tools."}
-      </div>
+      </div>}
     </div>
     {notice && <p role="status" className="mt-2 flex items-start gap-1.5 text-xs text-success"><Check aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />{notice}</p>}
     {(hostMutation.isError || groupMutation.isError) && <p role="alert" className="mt-2 text-xs text-destructive">Could not update access. Refresh the library and try again.</p>}

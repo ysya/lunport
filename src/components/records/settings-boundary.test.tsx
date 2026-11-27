@@ -62,9 +62,11 @@ describe("records settings compatibility", () => {
       expect(text(html)).not.toContain("Legacy SSH config mounted");
       if (category === "ai") {
         expect(text(html)).toContain("MCP");
-        expect(text(html)).toContain(
-          "Only allowed hosts, Group members and Cloud SQL databases are available",
-        );
+        expect(html).toContain("Enable AI access");
+        expect(html).toMatch(/role="tab"[^>]*>Resources<\/button>/);
+        expect(html).toMatch(/role="tab"[^>]*>Approvals<\/button>/);
+        expect(html).toMatch(/role="tab"[^>]*>Clients<\/button>/);
+        expect(text(html)).toContain("Cloud SQL");
         expect(html).toContain("Allow host web");
       }
     }

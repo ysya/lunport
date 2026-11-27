@@ -109,17 +109,20 @@ const grantLineTag = (html: string) => html.match(/<span class="mt-1 flex[^"]*"[
 const classesOf = (html: string) => new Set((html.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/));
 
 describe("the Databases page", () => {
-  it("keeps per-database AI SQL access beside the selected database even without a local port", () => {
+  it("summarizes direct SQL and links to Settings even without a local port", () => {
     const ai: McpStatus = {
       enabled: true, bridge_active: true, approval_mode: "auto_log", max_transfer_mib: 1024,
       noninteractive_credentials_supported: false, noninteractive_credentials_notice: "", audit_error: null,
       allowed_hosts: [], allowed_groups: [], allowed_databases: [ORDERS.id], pending: [], recent: [], executable: "lunport", last_client_at_ms: null,
     };
     const html = render([row({}, { local_port: null, pam: null })], recordOverview(), ai);
-    expect(html).toContain('aria-label="AI SQL access"');
-    expect(html).toContain('aria-label="Allow AI SQL access to Orders"');
-    expect(html).toContain("Every write asks for confirmation");
-    expect(html).toContain("No local port is shared");
+    expect(text(html)).toContain("Direct SQL Allowed");
+    expect(text(html)).toContain("Local port No port configured");
+    expect(text(html)).toContain("Manage AI access");
+    expect(html).not.toContain('role="switch"');
+    const blocked = text(render([row({ blocked: true }, { pam: null })], recordOverview(), ai));
+    expect(blocked).toContain("Direct SQL Allowed");
+    expect(blocked).toContain("Local port Needs sync review to start");
   });
   it("shows the selected database in a separate details area", () => {
     const html = render([row({}, { pam: null })]);

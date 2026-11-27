@@ -2,7 +2,8 @@ import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tansta
 import { toast } from "sonner";
 
 import type { ApprovalMode } from "@/bindings/ApprovalMode";
-import type { HostScope } from "@/lib/records";
+import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
+import { groupAncestors } from "@/components/records/group-tree";
 import type { McpActivityLog } from "@/bindings/McpActivityLog";
 import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import type { McpStatus } from "@/bindings/McpStatus";
@@ -85,6 +86,13 @@ export function useSetMcpDatabaseAllowed() {
 
 export function mcpGroupKey(scope: HostScope, id: string): string {
   return scope.kind === "local" ? `local/${id}` : `space/${scope.space_id}/${id}`;
+}
+
+/** Only valid Group ancestry can provide inherited host access. */
+export function mcpHostGroups(overview: RecordOverview, host: RecordHostView) {
+  if (host.group_error) return [];
+  const chain = groupAncestors(overview, host.payload.group_id, host.scope);
+  return chain.error ? [] : chain.groups;
 }
 
 export function useSetMcpGroupAllowed() {

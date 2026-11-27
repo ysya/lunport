@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, Check, Copy, Download, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
@@ -31,7 +31,7 @@ export function setupAction(state: string | undefined, client: McpSetupClient): 
   return `Add to ${mcpSetupClients.find(item => item.id === client)?.name ?? "tool"}`;
 }
 
-export function McpClientSetup({ fallbackExecutable, accessControl, connectionNote }: { fallbackExecutable?: string; accessControl?: ReactNode; connectionNote?: string }) {
+export function McpClientSetup({ fallbackExecutable, connectionNote }: { fallbackExecutable?: string; connectionNote?: string }) {
   const queryClient = useQueryClient();
   const platform = usePlatform();
   const setup = useQuery({ queryKey: mcpSetupKey, queryFn: () => tauriInvoke<SetupOverview>("mcp_setup_overview"), staleTime: 10_000 });
@@ -60,8 +60,7 @@ export function McpClientSetup({ fallbackExecutable, accessControl, connectionNo
     catch (error) { toast.error("Could not copy", { description: String(error) }); }
   };
   const statusLabel = (value: string | undefined) => value === "configured" ? "Configured" : value === "needs_repair" ? "Needs repair" : value === "disabled" ? "Disabled" : value === "unavailable" ? "Manual setup" : value === "external" ? "Open in app" : "Not added";
-  return <Section title="Connect an AI tool" description="Choose your tool to add Lunport. Then choose which hosts it can use below.">
-    {accessControl && <div className="mb-3">{accessControl}</div>}
+  return <Section title="Connect an AI tool" description="Add Lunport to a local AI tool. Manage its shared policy in Resources and Approvals.">
     {setup.data?.sandbox && <p className="mb-3 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">Development preview uses sandbox client settings. External app installation is disabled.</p>}
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" role="group" aria-label="AI tools">
       {mcpSetupClients.map(client => {
@@ -87,7 +86,7 @@ export function McpClientSetup({ fallbackExecutable, accessControl, connectionNo
         <Button variant="ghost" size="sm" disabled={setup.isFetching || add.isPending} onClick={() => void setup.refetch()}><RefreshCw className={cn("size-3.5", setup.isFetching && "motion-safe:animate-spin")} />Refresh status</Button>
       </div>}
       {backup && <p className="text-xs text-muted-foreground">Original settings backed up. The backup location is available under Manual setup.</p>}
-      <p className="text-xs text-muted-foreground">Configured means the settings are saved. Open your AI tool to load Lunport; host access and command review remain controlled here.</p>
+      <p className="text-xs text-muted-foreground">Configured means the settings are saved. Open your AI tool to load Lunport; resource access and approvals are managed in their own tabs.</p>
       {connectionNote && <p role="status" className="text-xs text-muted-foreground">{connectionNote}</p>}
     </div>
     <details open={manual} onToggle={event => setManual(event.currentTarget.open)} className="mt-4 border-t pt-3">

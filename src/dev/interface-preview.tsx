@@ -63,7 +63,7 @@ else {
   let passwordSaveFailed = false;
   // Aliases without spaces, which the host editor accepts on save.
   if (scenario === "password" || scenario === "password-save-retry" || scenario === "host-duplicate" || scenario === "iap") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
-  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", max_transfer_mib: 1024, allowed_hosts: [] as string[], allowed_groups: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/lunport", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", max_transfer_mib: 1024, allowed_hosts: [] as string[], allowed_groups: [] as string[], allowed_databases: [] as string[], pending: [], recent: [] as McpAuditEntry[], audit_error: null, executable: "/fixture/lunport", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Both Ask and Auto-log can request native credential authorization." };
   // The `mcp-audit` scenario: AI activity of every kind, today and yesterday, on the fixture hosts and on one no longer in the library.
   let activity: McpAuditEntry[] = [];
   if (scenario === "mcp-audit") {
@@ -197,6 +197,18 @@ else {
     live: { phase: "stopped", port: null, connections: 0, writable_until_ms: null, error: null, step: null, address: null },
     synced: true, blocked: false, removed: false, changed: false, environment: "prod",
   };
+  const privateDatabase: DatabaseView = {
+    ...consoleDatabase,
+    database: {
+      ...consoleDatabase.database,
+      id: "00000000000000a2",
+      name: "Inventory",
+      instance: "inventory-pg",
+      network: "private",
+      via_host: overview.hosts[0].id,
+    },
+  };
+  if (scenario === "ai-access") mcp = { ...mcp, enabled: true, allowed_databases: [privateDatabase.database.id] };
   const consoleColumns: ConsoleColumn[] = [
     { name: "id", type_name: "int8" },
     { name: "customer", type_name: "text" },
@@ -234,6 +246,7 @@ else {
           return;
         }
         if (scenario === "terminal-missing-key" && ["terminal_close", "terminal_ack"].includes(command)) return;
+        if (scenario === "ai-access" && command === "databases_list") return [consoleDatabase, privateDatabase];
         if (scenario === "database-console") {
           if (command === "databases_list") return [consoleDatabase];
           if (command === "database_console_open") return { kind: "opened", read_only: args.readOnly as ReadOnlyMode, iam_user: "frank@example.com", server_version: "PostgreSQL 16.4" } satisfies ConsoleOpen;
@@ -444,6 +457,8 @@ else {
           return mcp = { ...mcp, allowed_groups: args.allowed ? [...new Set([...mcp.allowed_groups, key])] : mcp.allowed_groups.filter((id) => id !== key) };
         }
         if (command === "mcp_set_host_allowed") return mcp = { ...mcp, allowed_hosts: args.allowed ? [...new Set([...mcp.allowed_hosts, String(args.alias)])] : mcp.allowed_hosts.filter((id) => id !== args.alias) };
+        if (command === "mcp_set_database_allowed") return mcp = { ...mcp, allowed_databases: args.allowed
+          ? [...new Set([...mcp.allowed_databases, String(args.id)])] : mcp.allowed_databases.filter((id) => id !== args.id) };
         if (command === "mcp_set_approval_mode") return mcp = { ...mcp, approval_mode: String(args.approvalMode) };
         if (command === "mcp_set_transfer_limit") return mcp = { ...mcp, max_transfer_mib: Number(args.maxTransferMib) };
         if (command === "records_key_generate" || command === "records_key_import" || command === "records_key_import_file") {

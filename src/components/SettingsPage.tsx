@@ -50,6 +50,7 @@ import {
   useMcpStatus,
   useSetMcpEnabled,
   mcpGroupKey,
+  mcpHostGroups,
   useSetMcpApprovalMode,
   useSetMcpTransferLimit,
 } from "@/lib/mcp";
@@ -74,7 +75,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { searchSettings, settingsDestinations } from "@/lib/settings-navigation";
+import { searchSettings, settingsDestinations, settingsSectionId } from "@/lib/settings-navigation";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { revealHidden } from "@/lib/reveal-hidden";
 import { chooseMcpMode } from "@/lib/mcp-flow";
@@ -85,6 +86,8 @@ import { groupComparator } from "@/components/records/group-order";
 import type { RecordOverview } from "@/lib/records";
 import { KnownHostsManager } from "@/components/records/KnownHostsManager";
 import { ColorThemePicker } from "@/components/ColorThemePicker";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { McpDatabaseAccess } from "@/components/McpDatabaseAccess";
 import { McpClientSetup } from "@/components/McpClientSetup";
 import { McpHostAccess, type McpAccessHost, type McpAccessGroup } from "@/components/McpHostAccess";
 
@@ -95,8 +98,12 @@ export function SettingsCategoryPane({
   onOpenDataTools,
   onOpenSync,
   onOpenActivity,
+  initialAiSection,
+  aiDatabaseId,
 }: {
   category: SettingsCategory;
+  initialAiSection?: string | null;
+  aiDatabaseId?: string | null;
   recordOverview: RecordOverview;
   onOpenImport?: () => void;
   onOpenDataTools?: () => void;
@@ -121,7 +128,11 @@ export function SettingsCategoryPane({
   if (category === "ai")
     return (
       <McpPane
+        key={initialAiSection ?? aiDatabaseId ?? "ai"}
         records
+        recordOverview={recordOverview}
+        databaseId={initialAiSection ? null : aiDatabaseId ?? null}
+        initialSection={initialAiSection}
         openActivity={onOpenActivity}
         generation={recordOverview.generation}
         groups={[...recordOverview.groups].sort(groupComparator(recordOverview.group_order?.ids ?? [])).map((group) => {
@@ -141,10 +152,7 @@ export function SettingsCategoryPane({
           user: revealHidden(host.effective_payload.user),
           port: host.effective_payload.port,
           groupPath: revealHidden(groupPath(recordOverview, host.payload.group_id, host.scope)),
-          groupKeys: host.group_error ? [] : (() => {
-            const chain = groupAncestors(recordOverview, host.payload.group_id, host.scope);
-            return chain.error ? [] : chain.groups.map((group) => mcpGroupKey(group.scope, group.id));
-          })(),
+          groupKeys: mcpHostGroups(recordOverview, host).map((group) => mcpGroupKey(group.scope, group.id)),
         }))}
       />
     );
@@ -162,7 +170,7 @@ export function SettingsCategoryPane({
   return <>
     <DiagnosticsPane />
     <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Use hosts and keys locally without an account, or enable encrypted library sync across your approved devices.">
-      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Cloud SQL databases can be allowed individually from their details; direct SQL writes always require confirmation. Connection defaults alone never grant AI access. Both modes can request credentials through Lunport’s native windows for the current connection.</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect hosts allowed individually or through explicitly allowed Groups, and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Cloud SQL databases can be allowed individually in AI access; direct SQL writes always require confirmation. Connection defaults alone never grant AI access. Both modes can request credentials through Lunport’s native windows for the current connection.</p>
     </Section>
   </>;
 }
@@ -192,6 +200,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const category = useUiStore((s) => s.settingsCategory);
+  const aiDatabaseId = useUiStore((s) => s.settingsAiDatabaseId);
   const setCategory = useUiStore((s) => s.setSettingsCategory);
   const platform = usePlatform();
 
@@ -199,9 +208,10 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
     if (!open) return;
     const origin = document.activeElement;
     returnFocusRef.current = origin instanceof HTMLElement && origin !== document.body && !contentRef.current?.contains(origin) ? origin : null;
-    const frame = requestAnimationFrame(() => contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]')?.focus());
+    const frame = useUiStore.getState().settingsAiDatabaseId ? null
+      : requestAnimationFrame(() => contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]')?.focus());
     return () => {
-      cancelAnimationFrame(frame);
+      if (frame !== null) cancelAnimationFrame(frame);
       requestAnimationFrame(() => {
         const previous = returnFocusRef.current;
         if (previous?.isConnected && !previous.closest("[inert]")) previous.focus();
@@ -238,10 +248,10 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
     if (open && active.id === "files") setFilesVisited(true);
   }, [open, active.id]);
   useEffect(() => {
-    if (!open) { setSearch(""); setFilesVisited(false); }
+    if (!open) { setSearch(""); setTarget(null); setFilesVisited(false); }
   }, [open]);
   useEffect(() => {
-    if (!open || searching) return;
+    if (!open || searching || (active.id === "ai" && aiDatabaseId && !target)) return;
     const frame = requestAnimationFrame(() => {
       if (target) {
         const section = contentRef.current?.querySelector<HTMLElement>(`#${target}`);
@@ -250,7 +260,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
       } else scrollRef.current?.scrollTo({ top: 0 });
     });
     return () => cancelAnimationFrame(frame);
-  }, [active.id, open, searching, target]);
+  }, [active.id, aiDatabaseId, open, searching, target]);
   const close = (next: boolean) => setOpen(next);
   const navigate = (next: SettingsCategory) => { setSearch(""); setTarget(null); setCategory(next); };
   const jump = (next: SettingsCategory, anchor: string | null) => { navigate(next); setTarget(anchor ?? "settings-category-title"); };
@@ -305,7 +315,7 @@ export function SettingsPage({ recordOverview, onOpenImport, onOpenDataTools, on
                   <span><small>{result.categoryLabel}</small><strong>{result.title}</strong><span>{result.detail}</span></span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
                 </button>) : <div className="app-empty-state"><h2>No matching settings</h2><p>Try a preference name such as “theme”, “terminal” or “logs”.</p><Button variant="outline" size="sm" onClick={() => { setSearch(""); searchRef.current?.focus(); }}>Clear search</Button></div>}
               </div> : <>
-                {active.id !== "files" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} onOpenActivity={onOpenActivity} /></div>}
+                {active.id !== "files" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenDataTools={onOpenDataTools} onOpenSync={onOpenSync} onOpenActivity={onOpenActivity} initialAiSection={target} aiDatabaseId={aiDatabaseId} /></div>}
               </>}
             </div>
           </div>
@@ -692,24 +702,15 @@ function ConnectionPane({ recordOverview }: { recordOverview: RecordOverview }) 
       </SettingsGroup>
       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Switching tabs keeps SSH connected. Closing a tab, reloading the workspace, quitting or installing an update ends its session. Reconnect starts a new shell.</p>
     </Section>
+    <FileTransferSettings />
     <Section title="Known hosts" description="Inspect trusted server fingerprints and manage local OpenSSH host keys.">
       <SettingsGroup><SettingsRow label="Saved server identities" description="Review fingerprints, verify a server again, or forget an old identity."><KnownHostsManager overview={recordOverview} /></SettingsRow></SettingsGroup>
     </Section></>
   );
 }
 
-export function McpPane({ hosts, groups = [], generation, records = false, openActivity }: {
-  hosts: McpAccessHost[];
-  generation?: string;
-  groups?: McpAccessGroup[];
-  records?: boolean;
-  /** Opens the AI activity page, where every AI request and its result is. */
-  openActivity?: () => void;
-}) {
-  const status = useMcpStatus(2_000);
-  const now = useNow();
-  const setEnabled = useSetMcpEnabled();
-  const setMode = useSetMcpApprovalMode();
+function FileTransferSettings() {
+  const status = useMcpStatus();
   const setTransferLimit = useSetMcpTransferLimit();
   const [transferLimitInput, setTransferLimitInput] = useState(() => String(status.data?.max_transfer_mib ?? 1024));
   useEffect(() => {
@@ -717,9 +718,45 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
   }, [status.data?.max_transfer_mib]);
   const transferLimit = Number(transferLimitInput);
   const transferLimitValid = /^\d+$/.test(transferLimitInput) && Number.isSafeInteger(transferLimit) && transferLimit >= 1 && transferLimit <= 10_240;
+  return <Section title="File transfers" description="Set the largest single file you or an AI client can upload or download through Lunport SCP on this device.">
+    <SettingsGroup>
+      <SettingsRow id="set-mcp-transfer-limit" label="Single-file transfer limit" description="1–10,240 MiB. The default is 1,024 MiB; changing the limit cancels active AI transfers and applies to new Files transfers.">
+        <form className="flex items-center gap-2" onSubmit={(event) => {
+          event.preventDefault();
+          if (transferLimitValid && !status.isError && status.data && transferLimit !== status.data.max_transfer_mib) setTransferLimit.mutate(transferLimit);
+        }}>
+          <Input aria-label="Single-file transfer limit in MiB" type="number" min={1} max={10_240} step={1} value={transferLimitInput}
+            onChange={(event) => setTransferLimitInput(event.target.value)} className="w-28" disabled={!status.data || status.isError || setTransferLimit.isPending} />
+          <span className="text-sm text-muted-foreground">MiB</span>
+          <Button type="submit" size="sm" variant="outline" disabled={!status.data || status.isError || setTransferLimit.isPending || !transferLimitValid || transferLimit === status.data.max_transfer_mib}>Save limit</Button>
+        </form>
+      </SettingsRow>
+    </SettingsGroup>
+  </Section>;
+}
+
+export function McpPane({
+  hosts, groups = [], generation, records = false, recordOverview, initialSection, databaseId = null, openActivity,
+}: {
+  hosts: McpAccessHost[];
+  generation?: string;
+  groups?: McpAccessGroup[];
+  records?: boolean;
+  recordOverview?: RecordOverview;
+  initialSection?: string | null;
+  databaseId?: string | null;
+  openActivity?: () => void;
+}) {
+  const status = useMcpStatus(2_000);
+  const now = useNow();
+  const setEnabled = useSetMcpEnabled();
+  const setMode = useSetMcpApprovalMode();
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
-  const allowedDatabaseCount = status.data?.allowed_databases?.length ?? 0;
+  const policy = status.isError ? undefined : status.data;
+  const tab = initialSection === settingsSectionId("AI operation approval") && records ? "approvals"
+    : initialSection === settingsSectionId("Connect an AI tool") ? "clients" : "resources";
+
   const applyMode = (approvalMode: "ask" | "auto_log", riskAcknowledged: boolean) =>
     setMode.mutate({ approvalMode, riskAcknowledged }, {
       onSuccess: () => {
@@ -728,136 +765,123 @@ export function McpPane({ hosts, groups = [], generation, records = false, openA
       },
     });
 
-
-  return (
-    <>
-      <McpClientSetup fallbackExecutable={status.data?.executable} connectionNote={
-        !status.data ? undefined : !status.data.enabled ? "AI access is off. Turn it on when you’re ready to use connected tools."
-          : !status.data.bridge_active ? "The local AI service is unavailable. Restart Lunport and refresh the tool’s setup."
-          : status.data.last_client_at_ms ? `Last AI tool activity ${new Date(status.data.last_client_at_ms).toLocaleString()}`
-          : "Ready for a local AI tool to connect."
-      } accessControl={
-        <SettingsGroup>
-          {status.isError && <div role="alert" className="space-y-2 p-3"><p className="text-sm text-destructive">AI access status is unavailable.</p><Button size="sm" variant="outline" onClick={() => void status.refetch()}>Retry</Button></div>}
-          <SettingsRow
-            id="set-mcp-enabled"
-            label="Enable AI access"
-            description={records ? "Only allowed hosts, Group members and Cloud SQL databases are available. Turning this off cancels pending requests." : "Only selected host aliases are available. Turning this off cancels pending requests."}
-          >
-            <Switch
-              id="set-mcp-enabled"
-              checked={status.data?.enabled === true}
-              disabled={!status.data || status.isError || setEnabled.isPending}
-              onCheckedChange={(enabled) => setEnabled.mutate(enabled)}
-            />
-          </SettingsRow>
-          {records && status.data && <p className="px-3 pb-2 text-xs text-muted-foreground">{allowedDatabaseCount} Cloud SQL {allowedDatabaseCount === 1 ? "database" : "databases"} allowed for direct AI SQL on this device. Manage each one in its Cloud SQL details.</p>}
-        </SettingsGroup>
-      } />
-
-      {records && (
-        <Section
-          title="AI operation approval"
-          description="Ask reviews commands, transfers and direct SQL queries before execution. SQL writes always ask in both modes. Switching mode cancels active requests."
+  return <>
+    <div id={settingsSectionId("MCP access")} tabIndex={-1}>
+      <SettingsGroup>
+        <SettingsRow
+          id="set-mcp-enabled"
+          label="Enable AI access"
+          description="Controls local MCP requests on this device. Turning it off cancels pending requests and keeps your saved rules."
         >
-          <div className="flex flex-wrap items-center gap-2">
+          <Switch id="set-mcp-enabled" checked={policy?.enabled === true} disabled={!policy || setEnabled.isPending}
+            onCheckedChange={(enabled) => setEnabled.mutate(enabled)} />
+        </SettingsRow>
+        {status.isError && <div role="alert" className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm text-destructive">
+          AI access status is unavailable.<Button size="sm" variant="outline" onClick={() => void status.refetch()}>Retry</Button>
+        </div>}
+        {policy?.enabled && !policy.bridge_active && <p role="status" className="px-3 py-2 text-xs text-warning">The local AI service is unavailable. Restart Lunport to connect tools.</p>}
+      </SettingsGroup>
+    </div>
+    <Tabs defaultValue={tab} aria-label="AI access settings" className="gap-4">
+      <TabsList variant="line" aria-label="AI access settings" className="w-full justify-start border-b pb-1">
+        <TabsTrigger value="resources" className="flex-none px-3">Resources</TabsTrigger>
+        {records && <TabsTrigger value="approvals" className="flex-none px-3">Approvals</TabsTrigger>}
+        <TabsTrigger value="clients" className="flex-none px-3">Clients</TabsTrigger>
+      </TabsList>
+      <TabsContent value="resources">
+        <McpHostAccess
+          hosts={hosts}
+          groups={groups}
+          generation={generation}
+          records={records}
+          status={policy}
+          unavailable={status.isError}
+          showDatabases={databaseId !== null || initialSection === settingsSectionId("Cloud SQL access")}
+          cloudSql={recordOverview && <McpDatabaseAccess overview={recordOverview} status={policy} databaseId={databaseId} />}
+        />
+      </TabsContent>
+      {records && <TabsContent value="approvals">
+        <Section title="AI operation approval" description="Choose how this device reviews requests from its AI tools. Switching mode cancels active requests.">
+          <div role="group" aria-label="Approval mode" className="flex flex-wrap items-center gap-2">
             <Button
-              variant={status.data?.approval_mode === "ask" ? "secondary" : "outline"}
-              aria-pressed={status.data?.approval_mode === "ask"}
-              disabled={!status.data || setMode.isPending}
-              onClick={() => {
-                setRiskOpen(false);
-                setRiskAcknowledged(false);
-                chooseMcpMode("ask", false, applyMode);
-              }}
+              variant={policy?.approval_mode === "ask" ? "secondary" : "outline"}
+              aria-pressed={policy?.approval_mode === "ask"}
+              disabled={!policy || setMode.isPending}
+              onClick={() => chooseMcpMode("ask", false, applyMode)}
             >Ask</Button>
             <Button
-              variant={status.data?.approval_mode === "auto_log" ? "secondary" : "outline"}
-              aria-pressed={status.data?.approval_mode === "auto_log"}
-              disabled={!status.data || setMode.isPending || status.data.approval_mode === "auto_log"}
+              variant={policy?.approval_mode === "auto_log" ? "secondary" : "outline"}
+              aria-pressed={policy?.approval_mode === "auto_log"}
+              disabled={!policy || setMode.isPending || policy.approval_mode === "auto_log"}
               onClick={() => {
                 setRiskAcknowledged(false);
                 if (chooseMcpMode("auto_log", false, applyMode)) setRiskOpen(true);
               }}
             >Auto-log</Button>
           </div>
-          <p className="mt-2 break-words text-xs text-muted-foreground">
-            {status.data?.noninteractive_credentials_notice}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log skips ordinary SSH command and file transfer review, and starts tunnels and databases without an approval window. Direct SQL queries also skip per-query review in Auto-log; SQL writes always ask you to approve each statement. The dedicated sudo tool still asks you to approve each command. Passwords, key passphrases, 2FA, a new or changed server key and a Privileged Access Manager grant are still asked in Lunport’s native windows, which name the AI client and say what then runs without review.
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
-          </p>
+          <dl className="mt-4 divide-y rounded-lg border bg-card/30">
+            <div className="space-y-1 px-3 py-2.5">
+              <dt className="text-sm font-medium">Follows the selected mode</dt>
+              <dd className="text-xs text-muted-foreground">Ask shows the command, paths or SQL before it runs. Auto-log runs ordinary SSH commands, transfers, direct SQL reads and tunnel or database starts without per-operation review.</dd>
+            </div>
+            <div className="space-y-1 px-3 py-2.5">
+              <dt className="text-sm font-medium">Always asks</dt>
+              <dd className="text-xs text-muted-foreground">Direct SQL writes, dedicated sudo commands and changes to saved connection records require approval. Production SQL writes also request system authorization where available.</dd>
+            </div>
+            <div className="space-y-1 px-3 py-2.5">
+              <dt className="text-sm font-medium">Connection prompts</dt>
+              <dd className="text-xs text-muted-foreground">Lunport may ask for credentials, 2FA, server identity verification or a PAM grant in either mode.</dd>
+              {policy?.noninteractive_credentials_notice && <dd className="text-xs text-muted-foreground">{policy.noninteractive_credentials_notice}</dd>}
+            </div>
+          </dl>
         </Section>
-      )}
-      {records && (
-        <Section title="File transfers" description="Set the largest single file you or an AI client can upload or download through Lunport SCP on this device.">
-          <SettingsGroup>
-            <SettingsRow id="set-mcp-transfer-limit" label="Single-file transfer limit" description="1–10,240 MiB. The default is 1,024 MiB; changing the limit cancels active AI transfers and applies to new Files transfers.">
-              <form className="flex items-center gap-2" onSubmit={(event) => {
-                event.preventDefault();
-                if (transferLimitValid && status.data && transferLimit !== status.data.max_transfer_mib) setTransferLimit.mutate(transferLimit);
-              }}>
-                <Input aria-label="Single-file transfer limit in MiB" type="number" min={1} max={10_240} step={1} value={transferLimitInput}
-                  onChange={(event) => setTransferLimitInput(event.target.value)} className="w-28" disabled={!status.data || setTransferLimit.isPending} />
-                <span className="text-sm text-muted-foreground">MiB</span>
-                <Button type="submit" size="sm" variant="outline" disabled={!status.data || setTransferLimit.isPending || !transferLimitValid || transferLimit === status.data.max_transfer_mib}>Save limit</Button>
-              </form>
-            </SettingsRow>
-          </SettingsGroup>
-        </Section>
-      )}
-      <AlertDialog
-        open={riskOpen}
-        onOpenChange={open => {
-          setRiskOpen(open);
-          if (!open) setRiskAcknowledged(false);
-        }}
-      >
-        <AlertDialogContent onEscapeKeyDown={event => { if (setMode.isPending) event.preventDefault(); }}>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Allow AI operations without review?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Auto-log lets local MCP clients execute ordinary shell commands and transfer files on every allowed host, including current and future members of allowed Groups, and start saved tunnels and databases, without asking you first. The dedicated sudo tool still asks each time, but ordinary commands can also use sudo if the remote account permits it. Commands can delete files or change services, and transfers can replace remote files or copy files to this computer. The audit records public metadata, not command output or file contents; logging cannot undo an action.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={riskAcknowledged}
-              disabled={setMode.isPending}
-              onChange={event => setRiskAcknowledged(event.target.checked)}
-            />
-            I understand that commands and file transfers can change or expose data without per-operation review.
-          </label>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={setMode.isPending}>Cancel</AlertDialogCancel>
-            <Button
-              disabled={!riskAcknowledged || setMode.isPending}
-              onClick={() => chooseMcpMode("auto_log", riskAcknowledged, applyMode)}
-            >{setMode.isPending ? "Applying…" : "Enable Auto-log"}</Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <McpHostAccess hosts={hosts} groups={groups} generation={generation} records={records} status={status.data} unavailable={status.isError} />
-
-      <Section title="Activity" description="What AI clients did, with each result, is on its own page.">
-        {status.data?.audit_error && <p role="alert" className="mb-2 break-words text-xs text-destructive">Audit persistence error: {status.data.audit_error}. Completed commands are not retried.</p>}
-        {status.isError && <p role="alert" className="mb-2 text-xs text-destructive">AI access status is unavailable. Retry after the app reconnects.</p>}
-        <SettingsGroup>
-          <McpActivitySummary latest={status.data?.recent[0]} now={now} open={openActivity} />
-        </SettingsGroup>
-      </Section>
-
-      <p className="text-xs text-muted-foreground">
-        This controls requests made through Lunport MCP. It cannot prevent software running as
-        your OS account from invoking another SSH client directly.
-      </p>
-    </>
-  );
+      </TabsContent>}
+      <TabsContent value="clients">
+        <McpClientSetup fallbackExecutable={policy?.executable} connectionNote={
+          !policy ? undefined : !policy.enabled ? "AI access is off. Turn it on when you’re ready to use connected tools."
+            : !policy.bridge_active ? "The local AI service is unavailable."
+            : policy.last_client_at_ms ? "Last AI tool activity " + new Date(policy.last_client_at_ms).toLocaleString()
+            : "Ready for a local AI tool to connect."
+        } />
+      </TabsContent>
+    </Tabs>
+    <AlertDialog
+      open={riskOpen}
+      onOpenChange={open => {
+        setRiskOpen(open);
+        if (!open) setRiskAcknowledged(false);
+      }}
+    >
+      <AlertDialogContent onEscapeKeyDown={event => { if (setMode.isPending) event.preventDefault(); }}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Allow AI operations without review?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Auto-log lets local MCP clients execute ordinary shell commands and transfer files on allowed hosts, including current and future Group members. It also lets them start tunnels or databases and run direct SQL reads on allowed databases without asking you first. The dedicated sudo tool still asks each time, but ordinary commands can also use sudo if the remote account permits it. Commands can delete files or change services, and transfers can replace remote files or copy files to this computer. The audit records public metadata, not command output or file contents; logging cannot undo an action.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={riskAcknowledged}
+            disabled={setMode.isPending}
+            onChange={event => setRiskAcknowledged(event.target.checked)}
+          />
+          I understand that Auto-log can change or expose data without per-operation review.
+        </label>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={setMode.isPending}>Cancel</AlertDialogCancel>
+          <Button
+            disabled={!riskAcknowledged || setMode.isPending}
+            onClick={() => chooseMcpMode("auto_log", riskAcknowledged, applyMode)}
+          >{setMode.isPending ? "Applying…" : "Enable Auto-log"}</Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    <Section title="Activity" description="See the outcome of each recorded AI request.">
+      {policy?.audit_error && <p role="alert" className="mb-2 break-words text-xs text-destructive">Audit persistence error: {revealHidden(policy.audit_error)}. Completed commands are not retried.</p>}
+      <SettingsGroup><McpActivitySummary latest={policy?.recent[0]} now={now} open={openActivity} /></SettingsGroup>
+    </Section>
+  </>;
 }
 
 const THEME_OPTIONS: { value: ThemePref; label: string; icon: typeof Sun }[] = [

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SettingsCategoryPane } from "./SettingsPage";
 import { recordOverview, hostView, hostPayload, groupView } from "./records/fixtures";
 import { mcpStatusKey } from "@/lib/mcp";
+import { settingsSectionId } from "@/lib/settings-navigation";
 import type { McpAuditEntry } from "@/bindings/McpAuditEntry";
 import type { McpStatus } from "@/bindings/McpStatus";
 
@@ -24,11 +25,11 @@ const status: McpStatus = {
   }],
   executable: "/fixture/lunport", last_client_at_ms: null,
 };
-function render(overview = recordOverview(), data: McpStatus = status, onOpenActivity?: () => void) {
+function render(overview = recordOverview(), data: McpStatus = status, onOpenActivity?: () => void, initialAiSection?: string) {
   const client = new QueryClient();
   client.setQueryData(mcpStatusKey, data);
   return renderToStaticMarkup(
-    <QueryClientProvider client={client}><SettingsCategoryPane category="ai" recordOverview={overview} onOpenActivity={onOpenActivity} /></QueryClientProvider>,
+    <QueryClientProvider client={client}><SettingsCategoryPane category="ai" recordOverview={overview} onOpenActivity={onOpenActivity} initialAiSection={initialAiSection} /></QueryClientProvider>,
   );
 }
 /** The text a person reads: no tags, entities decoded. */
@@ -36,20 +37,25 @@ const text = (html: string) => html.replace(/<[^>]*>/g, "").replace(/&quot;/g, "
 
 describe("Records AI Access", () => {
   it("shows the current file transfer limit as an editable MiB setting", () => {
-    const html = render();
+    const client = new QueryClient();
+    client.setQueryData(mcpStatusKey, status);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client}><SettingsCategoryPane category="connection" recordOverview={recordOverview()} /></QueryClientProvider>,
+    );
     expect(html).toContain("Single-file transfer limit");
     expect(html).toMatch(/type="number"[^>]*value="1024"/);
     expect(html).toContain("Save limit");
   });
   it("offers Ask and Auto-log and shows the actual platform credential capability", () => {
-    const html = render();
+    const html = render(recordOverview(), status, undefined, settingsSectionId("AI operation approval"));
     expect(html).toContain("Auto-log");
     expect(html).toContain(status.noninteractive_credentials_notice);
   });
   it("says that Auto-log starts tunnels and databases without the approval window", () => {
-    expect(text(render())).toContain(
-      "Auto-log skips ordinary SSH command and file transfer review, and starts tunnels and databases without an approval window.",
-    );
+    const html = render(recordOverview(), status, undefined, settingsSectionId("AI operation approval"));
+    expect(text(html)).toContain("Auto-log runs ordinary SSH commands, transfers, direct SQL reads and tunnel or database starts without per-operation review.");
+    expect(text(html)).toContain("Direct SQL writes, dedicated sudo commands and changes to saved connection records require approval.");
+    expect(html).not.toContain("Single-file transfer limit");
   });
 
   it("shows the audit persistence error above the activity summary", () => {
@@ -67,7 +73,7 @@ describe("Records AI Access", () => {
     };
     const html = render(recordOverview(), { ...status, recent: [latest] }, () => {});
     expect(html).toMatch(/<h2[^>]*>Activity<\/h2>/);
-    expect(html).toContain("What AI clients did, with each result, is on its own page.");
+    expect(html).toContain("See the outcome of each recorded AI request.");
     const clock = completed.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     expect(text(html)).toContain(`Last: today ${clock} · Ran a command on web-1 · Succeeded`);
     expect(html).toContain("Open AI activity");
@@ -91,7 +97,7 @@ describe("Records AI Access", () => {
       groups: [parent, child],
       hosts: [hostView({ payload: hostPayload({ user: "fallback", group_id: "group-2" }), effective_payload: hostPayload({ user: "ops", port: 2222 }) })],
     }));
-    expect(html).toContain("Access by Group or host");
+    expect(html).toContain("Resource types");
     expect(html).toContain("Operations / Fleet");
     expect(html).not.toContain("fallback@");
     expect((html.match(/role="switch"/g) ?? []).length).toBe(1);
@@ -119,7 +125,7 @@ describe("Records AI Access", () => {
 
   it("shows the host destination and direct action while keeping technical IDs out of the access list", () => {
     const html = render();
-    const access = html.slice(html.indexOf('id="settings-allowed-hosts"'), html.indexOf('id="settings-activity"'));
+    const access = html.slice(html.indexOf('id="settings-resource-access"'), html.indexOf('id="settings-activity"'));
     expect(access).toContain("deploy@fixture.invalid:22");
     expect(access).toContain("Individual grant");
     expect(access).toContain("Remove individual grant for web");

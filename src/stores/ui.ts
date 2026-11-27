@@ -36,6 +36,8 @@ interface UiState {
   /** Settings category selected by toolbar shortcuts; session-only. */
   settingsCategory: SettingsCategory;
   setSettingsCategory: (category: SettingsCategory) => void;
+  settingsAiDatabaseId: string | null;
+  openDatabaseAiSettings: (id: string) => void;
   /** Whether the ⌘K command palette is open (also driven by the global quick-connect hotkey). */
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
@@ -63,9 +65,11 @@ export const useUiStore = create<UiState>()(
       hostPreviewWidth: DEFAULT_HOST_PREVIEW_WIDTH,
       setHostPreviewWidth: (width) => set({ hostPreviewWidth: clampHostPreviewWidth(width) }),
       settingsOpen: false,
-      setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+      setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen } : { settingsOpen, settingsAiDatabaseId: null }),
       settingsCategory: "general",
-      setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
+      setSettingsCategory: (settingsCategory) => set({ settingsCategory, settingsAiDatabaseId: null }),
+      settingsAiDatabaseId: null,
+      openDatabaseAiSettings: (id) => set({ settingsOpen: true, settingsCategory: "ai", settingsAiDatabaseId: id }),
       paletteOpen: false,
       setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
     }),
