@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.2.0](https://github.com/ysya/lunport/compare/v2.1.0...v2.2.0) (2026-11-27)
+
+
+### Features
+
+* **console:** add the console pane with schema tree, editor and paged results ([f8d8c9b](https://github.com/ysya/lunport/commit/f8d8c9b1816600ef00a458798fe4d93a1b04d9e7))
+* **console:** add the console session controller, statement splitting and schema completion ([b6390d0](https://github.com/ysya/lunport/commit/b6390d08c61aa92172c67479e35891a318a35b2c))
+* **console:** open database tabs beside terminal tabs ([7d3a540](https://github.com/ysya/lunport/commit/7d3a5400e34baf0684103743ba860633aa7ce926))
+* **console:** open the console from Databases and describe it in the guide ([17b29b9](https://github.com/ysya/lunport/commit/17b29b9fe17ba11a86993dce62b208f9a24f9fc8))
+* **console:** read-only database console ([c066f9e](https://github.com/ysya/lunport/commit/c066f9e93be4b13efb228c9e286aee822aee91ae))
+* **database:** hold a persistent read-only console session on the Cloud SQL stream ([4b39402](https://github.com/ysya/lunport/commit/4b3940257602c4a62816946782ec12691017741b))
+* **database:** open console sessions from the app and close them with the workspace ([b197715](https://github.com/ysya/lunport/commit/b1977152d3e690ab0acb1b2c3283a6441bb14b55))
+* **database:** read the schema tree and export kept results as CSV or JSON ([bd7ae34](https://github.com/ysya/lunport/commit/bd7ae342c6a56ea1d5233383c3ec1bad44fd1335))
+* **mcp:** add per-database SQL access policy ([0c754a8](https://github.com/ysya/lunport/commit/0c754a8271a33bee158affe243c840cd1a713bfe))
+* **mcp:** direct Cloud SQL queries and approved writes ([aa96162](https://github.com/ysya/lunport/commit/aa96162595e72ad48a546e5a09c0709e26a75cdd))
+* **mcp:** enable direct Cloud SQL queries and approved writes ([9d9ed24](https://github.com/ysya/lunport/commit/9d9ed24ab2fcab942a8f62a6c6424d58d1b331ab))
+* **mcp:** let an AI client suggest a grant's justification and length ([#23](https://github.com/ysya/lunport/issues/23)) ([745e48e](https://github.com/ysya/lunport/commit/745e48e1e55acb9768f832a59a554388d1eab8fb))
+* **terminal:** add remote tmux workspaces ([a4ff27d](https://github.com/ysya/lunport/commit/a4ff27d3da9e5992e399f8a5a86bbdc9618738e4))
+* **terminal:** remote tmux workspaces ([4d643c5](https://github.com/ysya/lunport/commit/4d643c5afdfd309fbeb1b50c2a844cd5e9f5dd41))
+
+
+### Bug Fixes
+
+* **console:** cancel a running query on close, refuse COPY through the client, and say what was kept ([5a1b72e](https://github.com/ysya/lunport/commit/5a1b72eb355611507ca0f1f380b04aa72e1b22b3))
+* **console:** keep a closed tab closed, widen the cursor rule, and publish immutable run state ([d472038](https://github.com/ysya/lunport/commit/d472038c8fa58125bed44660c9983a796e73347b))
+* **console:** release a closed tab's route after its cancel request goes out ([714e3dc](https://github.com/ysya/lunport/commit/714e3dc82425df64502c0998e723fddcc1ce867a))
+* **database:** cancel only the person's console run and name why a session ended ([ad5641c](https://github.com/ysya/lunport/commit/ad5641c15caad0a10b2237938fcb3ea105dfca2f))
+* **database:** end a closed tab's session at once and refresh a cancel past its grant ([44bef7d](https://github.com/ysya/lunport/commit/44bef7d12330d0c49557d267d041a20fa8f06ee1))
+* **terminal:** draw prompt glyphs and upgrade dependencies ([c09f1a7](https://github.com/ysya/lunport/commit/c09f1a7d49ddbabdc4d0b01e59212e2d8f36049d))
+* **terminal:** find Homebrew tmux over SSH ([40a0b96](https://github.com/ysya/lunport/commit/40a0b9662d8177a7baae1a5eb68d7ceb5008e102))
+
 ## [2.1.0](https://github.com/ysya/lunport/compare/v2.0.0...v2.1.0) (2026-11-13)
 
 
