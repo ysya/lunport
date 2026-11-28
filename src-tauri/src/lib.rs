@@ -442,6 +442,7 @@ fn run_app(host: bool, start_hidden: bool) {
             session::database_console::database_console_open,
             session::database_console::database_console_close,
             session::database_console::database_console_run,
+            session::database_console::database_console_discard_document,
             session::database_console::database_console_page,
             session::database_console::database_console_cancel,
             session::database_console::database_console_schema,

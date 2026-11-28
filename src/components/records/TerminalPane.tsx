@@ -20,7 +20,7 @@ import { isImeKey } from "@/lib/ime";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 
-export function TerminalPane({ tab, active, openKeys }: { tab: TerminalTab; active: boolean; openKeys?: () => void }) {
+export function TerminalPane({ tab, active, docked, openKeys }: { tab: TerminalTab; active: boolean; docked?: boolean; openKeys?: () => void }) {
   const element = useRef<HTMLDivElement>(null);
   const terminal = useRef<WTerm | null>(null);
   const connection = useRef<TerminalSession | null>(null);
@@ -42,10 +42,14 @@ export function TerminalPane({ tab, active, openKeys }: { tab: TerminalTab; acti
   const [size, setSize] = useState({ cols: 80, rows: 24 });
   const activeRef = useRef(active);
   activeRef.current = active;
+  const dockedRef = useRef(docked);
+  dockedRef.current = docked;
   const modifierLabel = typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
   const statusLabel = state === "error" ? recovery.title : connectionState.question ? "Authentication required" : status;
   const restoreFocus = useCallback(() => {
     if (!activeRef.current || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+    // An SSH connect or reconnect can finish while the person is typing in a visible SQL editor.
+    if (dockedRef.current && !element.current?.closest("[data-terminal-dock]")?.contains(document.activeElement)) return;
     if (searchInput.current) searchInput.current.focus();
     else terminal.current?.focus();
   }, []);
@@ -134,8 +138,11 @@ export function TerminalPane({ tab, active, openKeys }: { tab: TerminalTab; acti
   useEffect(() => {
     if (!active) return;
     const keydown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const inTerminal = target && element.current?.parentElement?.contains(target);
+      if (!inTerminal && (docked || target?.closest('input, textarea, [contenteditable="true"]'))) return;
+      if (target?.closest('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
       if (isImeKey({ nativeEvent: event, keyCode: event.keyCode }) || event.defaultPrevented) return;
-      if (event.target instanceof Element && (event.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"]') || !element.current?.parentElement?.contains(event.target) && event.target.closest('input, textarea, [contenteditable="true"]'))) return;
       if (event.key === "Enter" && event.target instanceof Node && element.current?.contains(event.target)) {
         if (reconnectKeyHeld.current) { event.preventDefault(); event.stopPropagation(); return; }
         if ((state === "ended" || state === "error" || retry) && !event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
@@ -158,7 +165,7 @@ export function TerminalPane({ tab, active, openKeys }: { tab: TerminalTab; acti
     window.addEventListener("keydown", keydown, true);
     window.addEventListener("keyup", keyup, true);
     return () => { window.removeEventListener("keydown", keydown, true); window.removeEventListener("keyup", keyup, true); };
-  }, [active, setFontSize, state, retry, reconnect]);
+  }, [active, docked, setFontSize, state, retry, reconnect]);
   useEffect(() => { if (!active) reconnectKeyHeld.current = false; }, [active]);
 
   const copy = async () => {

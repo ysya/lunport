@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { SchemaTree as Tree } from "@/bindings/SchemaTree";
 import { DISABLED, text } from "@/components/keychain/test-markup";
-import { SchemaTree } from "./SchemaTree";
+import { filterSchemaTree, SchemaTree, SchemaTreeBranches } from "./SchemaTree";
 
 const tree = (truncated = false): Tree => ({
   truncated,
@@ -77,5 +77,24 @@ describe("SchemaTree", () => {
     const html = render({ canRefresh: false });
     expect(html).toMatch(new RegExp(`<button[^>]*aria-label="Refresh schema"[^>]*${DISABLED}|<button[^>]*${DISABLED}[^>]*aria-label="Refresh schema"`));
     expect(html).toContain('aria-label="Filter tables"');
+  });
+});
+
+describe("workspace schema branches", () => {
+  it("reveals an active view outside the default table group without opening its metadata", () => {
+    const html = renderToStaticMarkup(<SchemaTreeBranches tree={tree()} canBrowse onBrowse={vi.fn()}
+      preview={{ schema: "public", relation: "open_orders" }} browseOnClick />);
+    expect(html).toMatch(/aria-current="true"[^>]*>[\s\S]*?>open_orders<\/span><\/button>/);
+    expect(html).toContain('aria-label="Expand columns for open_orders"');
+    expect(text(html)).not.toContain("bigint");
+  });
+
+  it("keeps only the branches and objects matching a workspace filter", () => {
+    const source = tree();
+    const matching = filterSchemaTree(source, (schema, object) => schema === "audit" && object === "touch");
+    const html = renderToStaticMarkup(<SchemaTreeBranches tree={source} matching={matching}
+      canBrowse onBrowse={vi.fn()} preview={null} browseOnClick />);
+    expect(text(html)).toMatch(/audit Functions 1 touch/);
+    expect(text(html)).not.toMatch(/public|orders/);
   });
 });

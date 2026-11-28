@@ -44,6 +44,52 @@ beforeEach(() => {
 });
 
 describe("ConsoleSession", () => {
+  it("keeps SQL and same-named tables in independent documents on a single connection", async () => {
+    let next = 0;
+    route({ database_console_open: () => opened, database_console_schema: () => tree, database_console_run: () => rows(++next) });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    session.showDocument("sql", null);
+    await session.run([statement("SELECT 1;")]);
+    session.showDocument("public-orders", { schema: "public", relation: "orders" });
+    await session.browse("public", "orders");
+    session.showDocument("audit-orders", { schema: "audit", relation: "orders" });
+    await session.browse("audit", "orders");
+
+    session.showDocument("public-orders", { schema: "public", relation: "orders" });
+    expect(session.state.results[0].run).toMatchObject({ result_id: 2 });
+    session.showDocument("sql", null);
+    expect(session.state.preview).toBeNull();
+    expect(session.state.results[0].run).toMatchObject({ result_id: 1 });
+    expect(calls("database_console_open")).toHaveLength(1);
+    expect(calls("database_console_run").map(([, args]) => args.document)).toEqual(["sql", "public-orders", "audit-orders"]);
+  });
+
+  it("settles and releases a closed table run without replacing the visible query results", async () => {
+    let finish!: (result: ConsoleRun) => void;
+    route({
+      database_console_open: () => opened, database_console_schema: () => tree,
+      database_console_run: ({ document }) => document === "sql" ? rows(1) : new Promise<ConsoleRun>((resolve) => { finish = resolve; }),
+    });
+    const session = new ConsoleSession("tab-1", "db-1");
+    await session.open("locked");
+    session.showDocument("sql", null);
+    await session.run([statement("SELECT 1;")]);
+    session.showDocument("order-table", { schema: "public", relation: "orders" });
+    const browsing = session.browse("public", "orders");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(session.runningHere).toBe(true);
+    session.showDocument("sql", null);
+    expect(session.runningHere).toBe(false);
+    session.closeDocument("order-table");
+    expect(calls("database_console_discard_document")).toHaveLength(0);
+    finish(rows(2));
+    await browsing;
+    expect(session.state.running).toBe(false);
+    expect(session.state.results[0].run).toMatchObject({ result_id: 1 });
+    expect(calls("database_console_discard_document")).toEqual([["database_console_discard_document", { id: "tab-1", document: "order-table" }]]);
+  });
+
   it("asks for a PostgreSQL password each time native open needs one", async () => {
     const password = "synthetic-password";
     route({

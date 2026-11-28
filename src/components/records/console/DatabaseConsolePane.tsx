@@ -1,9 +1,9 @@
 import "./database-console.css";
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type MutableRefObject, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { EditorView } from "@codemirror/view";
-import { Code, LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, Square } from "lucide-react";
+import { Code, LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, RotateCw, Square } from "lucide-react";
 import type { DatabaseEnvironment } from "@/bindings/DatabaseEnvironment";
 import type { ExportFormat } from "@/bindings/ExportFormat";
 import type { ReadOnlyMode } from "@/bindings/ReadOnlyMode";
@@ -25,6 +25,7 @@ import { ConsoleStatusBar } from "./ConsoleStatusBar";
 import { ResultTabs } from "./ResultTabs";
 import { SchemaTree } from "./SchemaTree";
 import { SqlEditor } from "./SqlEditor";
+import { SQL_DOCUMENT, type RelationDocument } from "./use-database-workspace";
 
 const LOCK_OFFER = "You can open it read-only without the lock: Lunport sets default_transaction_read_only, which a statement in the session could turn off.";
 
@@ -93,7 +94,7 @@ function TableColumns({ tree, preview }: { tree: ConsoleState["schema"]; preview
 }
 
 /** The console keeps the editor mounted when browsing data or reconnecting. */
-export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, actions }: {
+export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, actions, workspace }: {
   state: ConsoleState;
   /** Whether the keys read as macOS keys. */
   mac: boolean;
@@ -102,15 +103,18 @@ export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, act
   viewRef: MutableRefObject<EditorView | null>;
   connectionStatus: ReactNode;
   actions: ConsoleActions;
+  workspace?: { document?: RelationDocument; openQuery: () => void; runningHere?: boolean };
 }) {
   const [showSqlEditor, setShowSqlEditor] = useState(false);
   const [schemaHidden, setSchemaHidden] = useState(false);
   const schemaId = useId();
-  const [previewPane, setPreviewPane] = useState<"data" | "columns">("data");
+  const [previewView, setPreviewView] = useState<{ id: string | undefined; pane: "data" | "columns" }>({ id: undefined, pane: "data" });
+  const previewPane = previewView.id === workspace?.document?.id ? previewView.pane : "data";
   const open = state.status === "open";
   const canRun = open && !state.running;
+  const runningHere = state.running && (workspace?.runningHere ?? true);
   const preview = state.preview;
-  const editorVisible = !preview || showSqlEditor;
+  const editorVisible = !preview || (!workspace && showSqlEditor);
   const previewName = preview ? revealHidden(preview.schema + "." + preview.relation) : null;
 
   useEffect(() => {
@@ -121,11 +125,11 @@ export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, act
 
   function browse(schema: string, relation: string) {
     setShowSqlEditor(false);
-    setPreviewPane("data");
+    setPreviewView({ id: undefined, pane: "data" });
     actions.browse(schema, relation);
   }
 
-  const cancel = state.running && <Button size="sm" variant="outline" onClick={actions.cancel}>
+  const cancel = runningHere && <Button size="sm" variant="outline" onClick={actions.cancel}>
     <Square className="size-3" aria-hidden="true" />Cancel
   </Button>;
   const runControls = <>
@@ -140,7 +144,7 @@ export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, act
 
   return <div className="console-pane">
     <div className="console-body">
-      <SchemaTree
+      {!workspace && <SchemaTree
         id={schemaId}
         hidden={schemaHidden}
         tree={state.schema}
@@ -150,10 +154,10 @@ export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, act
         canBrowse={canRun}
         onBrowse={browse}
         preview={preview}
-      />
+      />}
       <section className="console-main" aria-label="Query">
         <div className="console-toolbar">
-          <button
+          {!workspace && <button
             type="button"
             className="console-icon-button"
             aria-label={schemaHidden ? "Show schema" : "Hide schema"}
@@ -163,26 +167,31 @@ export function ConsoleView({ state, mac, notice, viewRef, connectionStatus, act
             onClick={() => setSchemaHidden(!schemaHidden)}
           >
             {schemaHidden ? <PanelLeftOpen className="size-4" aria-hidden="true" /> : <PanelLeftClose className="size-4" aria-hidden="true" />}
-          </button>
+          </button>}
           {previewName !== null ? <>
             <h2 className="console-preview-title" title={previewName}>{previewName}</h2>
             <div className="console-preview-views" role="group" aria-label="Table view">
-              <Button size="sm" variant={previewPane === "data" ? "secondary" : "ghost"} aria-pressed={previewPane === "data"} onClick={() => setPreviewPane("data")}>Data</Button>
-              <Button size="sm" variant={previewPane === "columns" ? "secondary" : "ghost"} aria-pressed={previewPane === "columns"} onClick={() => setPreviewPane("columns")}>Columns</Button>
+              <Button size="sm" variant={previewPane === "data" ? "secondary" : "ghost"} aria-pressed={previewPane === "data"} onClick={() => setPreviewView({ id: workspace?.document?.id, pane: "data" })}>Data</Button>
+              <Button size="sm" variant={previewPane === "columns" ? "secondary" : "ghost"} aria-pressed={previewPane === "columns"} onClick={() => setPreviewView({ id: workspace?.document?.id, pane: "columns" })}>Columns</Button>
             </div>
-            <Button size="sm" variant="outline" aria-expanded={editorVisible} onClick={() => setShowSqlEditor(!editorVisible)}>
+            {workspace && preview && <Button size="sm" variant="ghost" disabled={!canRun} onClick={() => actions.browse(preview.schema, preview.relation)}>
+              <RotateCw className="size-3.5" aria-hidden="true" />Refresh data
+            </Button>}
+            <Button size="sm" variant="outline" aria-expanded={workspace ? undefined : editorVisible} onClick={() => workspace ? workspace.openQuery() : setShowSqlEditor(!editorVisible)}>
               <Code className="size-3.5" aria-hidden="true" />SQL editor
             </Button>
             {!editorVisible && cancel}
           </> : runControls}
-          {(state.status === "opening" || state.running) && <LoaderCircle className="size-4 text-muted-foreground motion-safe:animate-spin" aria-label={state.running ? "Running" : "Connecting"} />}
+          {(state.status === "opening" || state.running) && <LoaderCircle className="size-4 text-muted-foreground motion-safe:animate-spin"
+            aria-label={state.running ? runningHere ? "Running" : "Running in another tab" : "Connecting"} />}
           {connectionStatus}
         </div>
         {notice && <p className="console-notice" role="status">{revealHidden(notice)}</p>}
         <Banner state={state} actions={actions} />
         {preview && editorVisible && <div className="console-run-toolbar">{runControls}</div>}
-        <SqlEditor viewRef={viewRef} schema={state.schema} hidden={!editorVisible} running={state.running} onRun={actions.run} onCancel={actions.cancel} />
+        <SqlEditor viewRef={viewRef} schema={state.schema} hidden={!editorVisible} running={runningHere} onRun={actions.run} onCancel={actions.cancel} />
         {preview && previewPane === "columns" ? <TableColumns tree={state.schema} preview={preview} /> : <ResultTabs
+          key={workspace?.document?.id ?? SQL_DOCUMENT}
           results={state.results}
           messages={state.messages}
           activeResult={state.activeResult}
@@ -260,7 +269,11 @@ function PostgresPasswordDialog({ databaseId, revision, connect, cancel }: {
  * The console of a database tab. It holds one session for the tab, opened when the pane mounts and closed when it unmounts, and keeps
  * the tab's state in the workspace in step with the session's.
  */
-export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active: boolean }) {
+export function DatabaseConsolePane({ tab, active, workspace }: { tab: DatabaseTab; active: boolean; workspace?: {
+  document?: RelationDocument;
+  openQuery: () => void;
+  register: (id: string, session: ConsoleSession) => () => void;
+} }) {
   const [session] = useState(() => new ConsoleSession(tab.id, tab.databaseId, tab.postgresRevision));
   const subscribe = useCallback((listener: () => void) => session.subscribe(listener), [session]);
   const state = useSyncExternalStore(subscribe, () => session.state);
@@ -271,6 +284,20 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
   const postgres = environment === null;
   const databaseResult = useQuery({ ...databasesQuery, enabled: !postgres, select: (rows) => rows.find((row) => row.database.id === tab.databaseId)?.database ?? null });
   const database = postgres ? null : databaseResult.data ?? null;
+  const register = workspace?.register;
+  const documentView = workspace?.document;
+  const workspaceMode = !!workspace;
+
+  useLayoutEffect(() => {
+    if (workspaceMode) session.showDocument(documentView?.id ?? SQL_DOCUMENT, documentView ?? null);
+  }, [session, workspaceMode, documentView]);
+  useEffect(() => register?.(tab.id, session), [register, tab.id, session]);
+
+  useEffect(() => {
+    if (!active || !documentView || state.status !== "open" || state.running || state.results.length || state.messages.length) return;
+    if (state.preview?.schema !== documentView.schema || state.preview.relation !== documentView.relation) return;
+    void session.browse(documentView.schema, documentView.relation);
+  }, [active, documentView, session, state]);
 
   // The close waits a turn: StrictMode unmounts and mounts a pane again at once, and that mount keeps the session it already opened
   // rather than closing it and opening the same tab id a second time.
@@ -296,16 +323,17 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
   }, [tab.id, state.status]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || documentView) return;
     viewRef.current?.requestMeasure();
     viewRef.current?.focus();
-  }, [active]);
+  }, [active, documentView]);
 
   useEffect(() => {
     if (!active || !state.preview || !state.running) return;
     const cancelPreview = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || event.repeat || event.isComposing || viewRef.current?.hasFocus) return;
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+      if (!session.runningHere || !(event.target instanceof Node) || !viewRef.current?.dom.closest(".console-pane")?.contains(event.target)) return;
       event.preventDefault();
       void session.cancel();
     };
@@ -323,7 +351,6 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
       placed.current.add(result.key);
       const at = Math.min(Math.max(0, result.statement.from + result.run.position - 1), view.state.doc.length);
       view.dispatch({ selection: { anchor: at }, scrollIntoView: true });
-      view.focus();
     }
   }, [state.preview, state.results]);
 
@@ -359,7 +386,7 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
       setNotice(null);
       void session.browse(schema, relation);
     },
-    cancel: () => void session.cancel(),
+    cancel: () => { if (session.runningHere) void session.cancel(); },
     reconnect: () => {
       setNotice(null);
       void session.reconnect();
@@ -384,6 +411,7 @@ export function DatabaseConsolePane({ tab, active }: { tab: DatabaseTab; active:
       notice={notice}
       viewRef={viewRef}
       actions={actions}
+      workspace={workspace && { ...workspace, runningHere: session.runningHere }}
       connectionStatus={environment === null
         ? <ConsoleStatusBar environment={null} database={null} route={{ alias: null, iap: false }} username={state.opened?.iam_user ?? null} readOnly={mode} grant={null} />
         : <ConsoleConnection environment={environment} database={database} username={state.opened?.iam_user ?? null} readOnly={mode} />}

@@ -148,3 +148,28 @@
 @container (max-width: 560px) {
     .console-record-details { position: absolute; z-index: 3; inset: 0 0 0 auto; width: min(100%, 340px); box-shadow: var(--shadow-md); }
 }
+
+/* Workspace database explorer */
+.database-workspace-explorer { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; border-inline-end: 1px solid var(--border); background: var(--sidebar); }
+.database-workspace-explorer[hidden], .database-workspace-sources > li[hidden], .database-workspace-source-content[hidden] { display: none; }
+.database-workspace-explorer-tools { flex: 0 0 auto; display: grid; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }
+.database-workspace-explorer-heading { display: flex; align-items: center; justify-content: space-between; padding-inline-start: 6px; }
+.database-workspace-explorer-heading h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+.database-workspace-tree { flex: 1 1 auto; min-height: 0; padding: 5px 8px 8px; overflow: auto; overscroll-behavior: contain; }
+.database-workspace-sources > li + li { margin-top: 2px; }
+.database-workspace-source { min-height: 29px; }
+.database-workspace-source:disabled { opacity: 0.55; cursor: default; }
+.database-workspace-source[data-active="true"] { color: var(--sidebar-primary); }
+.database-workspace-source[data-environment="prod"] .console-status-environment { background: var(--console-env-prod-bg); color: var(--console-env-prod-fg); }
+.database-workspace-source[data-environment="staging"] .console-status-environment { background: var(--console-env-staging-bg); color: var(--console-env-staging-fg); }
+.database-workspace-source[data-environment="dev"] .console-status-environment { background: var(--console-env-dev-bg); color: var(--console-env-dev-fg); }
+.database-workspace-source-content { padding-inline-start: 12px; }
+.database-workspace-source-content .console-tree { padding-left: 0; }
+.database-workspace-source-content .console-tree ul { padding-left: 10px; }
+.database-workspace-source-content .console-tree ul.console-tree-columns { padding-left: 14px; }
+.database-workspace-source-content .console-schema-note { padding-block: 4px; overflow-wrap: anywhere; }
+.database-workspace-source-actions { display: flex; align-items: center; gap: 4px; }
+.database-workspace-source-actions .console-tree-toggle { width: auto; flex: 1 1 auto; min-width: 0; }
+.database-workspace-sources:has(> li:not([hidden])) + .database-workspace-no-matches { display: none; }
+.database-workspace-source-content .console-tree-relation[data-active="true"] { color: var(--sidebar-primary); background: color-mix(in oklab, var(--sidebar-primary) 12%, var(--sidebar)); }
+.database-workspace-source-content .console-tree-relation button.console-tree-name { display: flex; align-items: center; gap: 5px; padding-inline-end: 4px; }

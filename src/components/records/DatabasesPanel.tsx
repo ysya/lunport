@@ -125,7 +125,7 @@ function DatabaseAiAccess({ row, overview }: { row: DatabaseView; overview: Reco
 export function openDatabaseConsole(row: DatabaseView) {
   const { database } = row;
   try {
-    useTerminalStore.getState().open({
+    return useTerminalStore.getState().open({
       kind: "database", databaseId: database.id, name: database.name, address: `${database.instance} · ${database.project}`,
       environment: row.environment, readOnly: "locked",
     });
@@ -136,7 +136,7 @@ export function openDatabaseConsole(row: DatabaseView) {
 
 export function openStandardPostgresConsole(profile: StandardPostgresProfile) {
   try {
-    useTerminalStore.getState().open({
+    return useTerminalStore.getState().open({
       kind: "database", databaseId: profile.id, name: profile.name, address: postgresAddress(profile),
       environment: null, readOnly: "standard", postgresRevision: profile.revision,
     });

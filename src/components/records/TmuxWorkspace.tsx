@@ -92,7 +92,7 @@ function TmuxSessionPicker({ inputId, sessions, remembered, onChoose }: {
   </div>;
 }
 
-export function TmuxWorkspace({ tab, active }: { tab: TerminalTab; active: boolean }) {
+export function TmuxWorkspace({ tab, active, docked }: { tab: TerminalTab; active: boolean; docked?: boolean }) {
   const [status, setStatus] = useState(initialStatus);
   const [sessions, setSessions] = useState<TmuxSessionInfo[] | null>(null);
   const [remembered, setRemembered] = useState<TmuxWorkspaceLocation | null>(() => readTmuxWorkspace(tab.historyKey));
@@ -537,7 +537,8 @@ export function TmuxWorkspace({ tab, active }: { tab: TerminalTab; active: boole
     if (!active || !hasLayout) return;
     const keydown = (event: KeyboardEvent) => {
       if (isImeKey({ nativeEvent: event, keyCode: event.keyCode }) || event.defaultPrevented || document.querySelector(dialogSelector)) return;
-      if (event.target instanceof Element && !workspace.current?.contains(event.target) && event.target.closest('input, textarea, [contenteditable="true"]')) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if ((!target || !workspace.current?.contains(target)) && (docked || target?.closest('input, textarea, [contenteditable="true"]'))) return;
       const modifier = /Mac/.test(navigator.platform) ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
       if (!modifier || event.altKey) return;
       const key = event.key.toLowerCase();
@@ -555,7 +556,7 @@ export function TmuxWorkspace({ tab, active }: { tab: TerminalTab; active: boole
     };
     window.addEventListener("keydown", keydown, true);
     return () => window.removeEventListener("keydown", keydown, true);
-  }, [active, hasLayout, setFontSize]);
+  }, [active, docked, hasLayout, setFontSize]);
 
   const closeTab = () => useTerminalStore.getState().close(tab.id);
   const detach = () => snapshot?.destroyUnattached ? setConfirmation({ kind: "detach" }) : closeTab();

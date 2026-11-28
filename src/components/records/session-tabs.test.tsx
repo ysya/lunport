@@ -21,6 +21,18 @@ describe("the session tab strip in the title bar", () => {
 });
 
 describe("a database tab in the strip", () => {
+  it("labels a table by its schema and source and associates it with the source's panel", () => {
+    const database: DatabaseTab = { kind: "database", id: "d1", databaseId: "db-1", name: "orders", address: "orders-pg · acme-prod-123456", environment: "prod", readOnly: "locked", state: "open" };
+    const document = { id: "view-1", sessionId: database.id, schema: "audit", relation: "events" };
+    const html = renderToStaticMarkup(<SessionTabBar tabs={[database, { ...database, id: document.id, document, sourceName: database.name }]}
+      activeId={document.id} activate={() => {}} requestClose={() => {}} strip={{ current: null }} />);
+    const active = html.match(/<button[^>]*id="terminal-tab-view-1"[^>]*>/)?.[0];
+    expect(active).toContain('aria-selected="true"');
+    expect(active).toContain('aria-controls="terminal-panel-d1"');
+    expect(active).toContain('aria-label="audit.events · orders, open"');
+    expect(html).toContain('aria-label="Close table audit.events · orders"');
+  });
+
   it("carries its environment mark and a console close label", () => {
     const database: DatabaseTab = { kind: "database", id: "d1", databaseId: "db-1", name: "orders", address: "orders-pg · acme-prod-123456", environment: "prod", readOnly: "locked", state: "open" };
     const html = renderToStaticMarkup(<SessionTabBar tabs={[database]} activeId="d1" activate={() => {}} requestClose={() => {}} strip={{ current: null }} />);

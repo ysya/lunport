@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ArrowUpRight, Server, SquareTerminal } from "lucide-react";
+import { ArrowUpRight, Server, SquareTerminal, Terminal } from "lucide-react";
 import {
   Command,
   CommandDialog,
@@ -21,7 +21,7 @@ import { recordHostSearchText } from "./group-tree";
 import { useSettingsStore } from "@/stores/settings";
 import { recentHostKey } from "./library-view";
 import { isImeKey } from "@/lib/ime";
-import { useTerminalStore } from "@/stores/terminals";
+import { useTerminalStore, type TerminalTab } from "@/stores/terminals";
 
 export function RecordsCommandPalette({
   overview,
@@ -30,7 +30,8 @@ export function RecordsCommandPalette({
   editorBusy,
   edit,
   create,
-  connectHost,
+  hostsOnly = false,
+  onClose,
 }: {
   overview: RecordOverview;
   terminalId: string | null;
@@ -38,10 +39,19 @@ export function RecordsCommandPalette({
   editorBusy: boolean;
   edit: (id: string) => void;
   create: () => void;
-  connectHost?: (id: string) => Promise<void>;
+  hostsOnly?: boolean;
+  onClose?: () => void;
 }) {
   const open = useUiStore((state) => state.paletteOpen);
   const setOpen = useUiStore((state) => state.setPaletteOpen);
+  const changeOpen = useCallback((next: boolean) => {
+    setOpen(next);
+    if (!next) onClose?.();
+  }, [onClose, setOpen]);
+  const tabs = useTerminalStore((state) => state.tabs);
+  const activeId = useTerminalStore((state) => state.activeId);
+  const dock = hostsOnly && tabs.some((tab) => tab.id === activeId && tab.kind === "database");
+  const liveSessions = hostsOnly ? tabs.filter((tab): tab is TerminalTab => tab.kind === "terminal" && (tab.state === "open" || tab.state === "connecting")) : [];
   const setSettingsOpen = useUiStore((state) => state.setSettingsOpen);
   const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
   const [busy, setBusy] = useState(false);
@@ -71,20 +81,19 @@ export function RecordsCommandPalette({
         !event.altKey
       ) {
         event.preventDefault();
-        setOpen(!useUiStore.getState().paletteOpen);
+        changeOpen(!useUiStore.getState().paletteOpen);
       }
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [setOpen]);
+  }, [changeOpen]);
   const connect = async (id: string, tmux?: { resume?: TmuxWorkspaceLocation }) => {
     if (inFlight.current || editorBusy) return;
     inFlight.current = true;
     setBusy(true);
     try {
-      if (connectHost && !tmux) await connectHost(id);
-      else await connectSavedHost(overview, id, terminalId, newTab, tmux);
-      setOpen(false);
+      await connectSavedHost(overview, id, terminalId, newTab, tmux, dock ? "dock" : undefined);
+      changeOpen(false);
     } catch (error) {
       toast.error("Could not connect", {
         description: revealHidden(String(error)),
@@ -108,7 +117,7 @@ export function RecordsCommandPalette({
             onSelect={() => {
               if (ready) void connect(host.id);
               else {
-                setOpen(false);
+                changeOpen(false);
                 edit(host.id);
               }
             }}
@@ -131,9 +140,11 @@ export function RecordsCommandPalette({
   return (
     <CommandDialog
       open={open}
-      onOpenChange={setOpen}
-      title="Quick connect"
-      description="Press Enter to connect or resume a tmux workspace. Shift Enter opens the tmux picker for a host. Command or Control Enter edits the host."
+      onOpenChange={changeOpen}
+      title={hostsOnly ? "Hosts" : "Quick connect"}
+      description={hostsOnly
+        ? "Press Enter to connect or open a running session. Shift Enter opens the tmux picker for a host. Command or Control Enter edits the host."
+        : "Press Enter to connect or resume a tmux workspace. Shift Enter opens the tmux picker for a host. Command or Control Enter edits the host."}
     >
       <Command
         onKeyDownCapture={(event) => {
@@ -153,13 +164,41 @@ export function RecordsCommandPalette({
             if (selected?.dataset.tmuxReady === "true") void connect(id, {});
             return;
           }
-          setOpen(false);
+          changeOpen(false);
           edit(id);
         }}
       >
-        <CommandInput placeholder="Search hosts, tmux sessions, or settings…" />
+        <CommandInput placeholder={hostsOnly ? "Search hosts or SSH sessions…" : "Search hosts, tmux sessions, or settings…"} />
         <CommandList ref={list}>
-          <CommandEmpty>No matching hosts, tmux workspaces, or commands.</CommandEmpty>
+          <CommandEmpty>{hostsOnly ? "No matching hosts or SSH sessions." : "No matching hosts, tmux workspaces, or commands."}</CommandEmpty>
+          {liveSessions.length > 0 && <CommandGroup heading="Open SSH sessions">
+            {liveSessions.map((tab) => {
+              const host = "id" in tab.host ? selectHost(overview.hosts, tab.host.id) : null;
+              const label = tab.tmuxSession ? `${tab.name} / ${tab.tmuxSession.name}` : tab.name;
+              return <CommandItem
+                key={tab.id}
+                data-host-id={host?.id}
+                data-tmux-ready={host?.readiness.kind === "ready" && !host.group_error}
+                data-tmux-resume={tab.mode === "tmux" || undefined}
+                value={`${label} ${tab.address} SSH ${tab.mode ?? ""} ${tab.id}`}
+                keywords={host ? [recordHostSearchText(overview, host)] : undefined}
+                disabled={busy || editorBusy}
+                onSelect={() => {
+                  const sessions = useTerminalStore.getState();
+                  if (dock) sessions.showDock(tab.id);
+                  else sessions.activate(tab.id);
+                  changeOpen(false);
+                }}
+              >
+                {tab.mode === "tmux" ? <SquareTerminal /> : <Terminal />}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{revealHidden(label)}</span>
+                  <span className="block truncate font-mono text-xs text-muted-foreground">{revealHidden(tab.address)}</span>
+                </span>
+                <span className="text-xs text-muted-foreground">{tab.state === "open" ? "Connected" : "Connecting…"}</span>
+              </CommandItem>;
+            })}
+          </CommandGroup>}
           {hostGroup("Recent", recentHosts)}
           {recentTmux.length > 0 && <CommandGroup heading="Recent tmux workspaces">
             {recentTmux.map(({ host, workspace }) => {
@@ -184,30 +223,32 @@ export function RecordsCommandPalette({
             <CommandItem
               disabled={busy || editorBusy}
               onSelect={() => {
-                setOpen(false);
+                changeOpen(false);
                 create();
               }}
             >
               New host
             </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                setOpen(false);
-                setSettingsCategory("general");
-                setSettingsOpen(true);
-              }}
-            >
-              Settings
-            </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                setOpen(false);
-                setSettingsCategory("ai");
-                setSettingsOpen(true);
-              }}
-            >
-              AI access (MCP)
-            </CommandItem>
+            {!hostsOnly && <>
+              <CommandItem
+                onSelect={() => {
+                  changeOpen(false);
+                  setSettingsCategory("general");
+                  setSettingsOpen(true);
+                }}
+              >
+                Settings
+              </CommandItem>
+              <CommandItem
+                onSelect={() => {
+                  changeOpen(false);
+                  setSettingsCategory("ai");
+                  setSettingsOpen(true);
+                }}
+              >
+                AI access (MCP)
+              </CommandItem>
+            </>}
           </CommandGroup>
         </CommandList>
         <p className="border-t px-3 py-2 text-xs text-muted-foreground"><kbd>Shift</kbd> + <kbd>Enter</kbd> to connect with tmux</p>

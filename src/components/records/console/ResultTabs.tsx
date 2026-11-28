@@ -85,11 +85,17 @@ function ResultPage(props: ResultPageProps) {
             {page.map((row, rowIndex) => {
               const rowNumber = offset + rowIndex + 1;
               const selected = rowIndex === selectedRow;
-              return <tr key={rowNumber} data-selected={selected} onClick={(event) => {
+              return <tr key={rowNumber} data-selected={selected} onMouseDown={(event) => {
+                if (event.button === 0 && event.shiftKey) event.preventDefault();
+              }} onClick={(event) => {
                 // Dragging across cells to select text should keep the grid in place.
                 const selection = event.currentTarget.ownerDocument.getSelection();
-                if (event.detail !== 0 && selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) return;
+                if (!event.shiftKey && event.detail !== 0 && selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) return;
                 setSelectedRow(rowIndex);
+                if (event.shiftKey) {
+                  openedFromRow.current = true;
+                  setDetailsOpen(true);
+                }
                 if (event.detail !== 0) event.currentTarget.querySelector("button")?.focus({ preventScroll: true });
               }}>
                 <td className="console-row-number">

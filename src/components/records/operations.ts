@@ -11,6 +11,7 @@ export async function connectSavedHost(
   terminalId: string | null,
   newTab: boolean,
   tmux?: { resume?: TmuxWorkspaceLocation },
+  placement?: "dock",
 ): Promise<void> {
   const host = selectHost(overview.hosts, hostId);
   if (!host)
@@ -19,16 +20,24 @@ export async function connectSavedHost(
     );
   if (host.readiness.kind !== "ready" || host.group_error)
     throw new Error("Resolve this host's key or settings before connecting.");
-  if (tmux || terminalId === IN_APP_TERMINAL) {
+  const sessions = useTerminalStore.getState();
+  if (placement === "dock" && !tmux) {
+    const existing = sessions.tabs.find((tab) => tab.kind === "terminal" && !tab.mode && "id" in tab.host && tab.host.id === hostId && (tab.state === "open" || tab.state === "connecting"));
+    if (existing) {
+      sessions.showDock(existing.id);
+      return;
+    }
+  }
+  if (placement === "dock" || tmux || terminalId === IN_APP_TERMINAL) {
     const payload = host.effective_payload;
-    useTerminalStore.getState().open({
+    sessions.open({
       kind: "terminal",
       host: { id: hostId },
       name: payload.alias,
       address: `${payload.user}@${payload.hostname}:${payload.port}`,
       historyKey: recentHostKey(hostId),
       ...(tmux && { mode: "tmux", tmuxResume: tmux.resume }),
-    });
+    }, placement);
     return;
   }
   await connectRecordHost(hostId, terminalId, newTab);

@@ -22,8 +22,12 @@ export function closeConsole(id: string): Promise<void> {
   return tauriInvoke<void>("database_console_close", { id });
 }
 
-export function runStatement(id: string, sql: string, fresh: boolean): Promise<ConsoleRun> {
-  return tauriInvoke<ConsoleRun>("database_console_run", { id, sql, fresh });
+export function runStatement(id: string, sql: string, fresh: boolean, document?: string): Promise<ConsoleRun> {
+  return tauriInvoke<ConsoleRun>("database_console_run", { id, sql, fresh, ...(document === undefined ? {} : { document }) });
+}
+
+export function discardConsoleDocument(id: string, document: string): Promise<void> {
+  return tauriInvoke<void>("database_console_discard_document", { id, document });
 }
 
 export function resultPage(id: string, resultId: number, offset: number): Promise<(string | null)[][]> {

@@ -7,6 +7,7 @@ import type { SchemaTree } from "@/bindings/SchemaTree";
 import {
   cancelStatement,
   closeConsole,
+  discardConsoleDocument,
   openConsole,
   PAGE_ROWS,
   readSchema,
@@ -46,15 +47,17 @@ export type ConsoleState = {
 const PASSWORD_REQUIRED = "Enter the PostgreSQL password to connect.";
 const ENDED_SENTENCE = "The connection ended. Reconnect to go on.";
 
+type DocumentResults = Pick<ConsoleState, "preview" | "results" | "messages" | "activeResult">;
+const emptyDocument = (preview: TablePreview | null = null): DocumentResults => ({
+  preview, results: [], messages: [], activeResult: null,
+});
+
 const initialState = (): ConsoleState => ({
   status: "opening",
   message: null,
   opened: null,
   running: false,
-  preview: null,
-  results: [],
-  messages: [],
-  activeResult: null,
+  ...emptyDocument(),
   schema: null,
   schemaError: null,
 });
@@ -72,6 +75,9 @@ export class ConsoleSession {
   /** Counts opens, reconnects and closes. Anything started under an earlier count is ignored. */
   private generation = 0;
   private runs = 0;
+  private document: string | undefined;
+  private readonly documents = new Map<string, DocumentResults>();
+  private pending: { document: string | undefined; discarded: boolean } | null = null;
 
   constructor(
     private readonly tabId: string,
@@ -81,6 +87,10 @@ export class ConsoleSession {
 
   get state(): ConsoleState {
     return this.current;
+  }
+
+  get runningHere(): boolean {
+    return this.pending !== null && !this.pending.discarded && this.pending.document === this.document && this.current.running;
   }
 
   subscribe(listener: () => void): () => void {
@@ -95,10 +105,50 @@ export class ConsoleSession {
     for (const listener of [...this.listeners]) listener();
   }
 
+  showDocument(id: string, preview: TablePreview | null): void {
+    if (this.document === id) return;
+    const results = this.documents.get(id) ?? emptyDocument(preview);
+    this.documents.set(id, results);
+    this.document = id;
+    this.update(results);
+  }
+
+  closeDocument(id: string): void {
+    this.documents.delete(id);
+    if (this.pending?.document === id) this.pending.discarded = true;
+    else void this.discard(id);
+  }
+
+  private async discard(id: string): Promise<void> {
+    try {
+      await discardConsoleDocument(this.tabId, id);
+    } catch {
+      // An ended connection already released its results.
+    }
+  }
+
+  private resultsFor(id: string | undefined): DocumentResults | undefined {
+    return id === undefined ? this.current : this.documents.get(id);
+  }
+
+  private updateResults(id: string | undefined, change: Partial<DocumentResults>, sessionChange?: Partial<ConsoleState>) {
+    if (id !== undefined) {
+      const previous = this.documents.get(id);
+      if (!previous) return;
+      this.documents.set(id, { ...previous, ...change });
+    }
+    if (id === this.document) this.update({ ...change, ...sessionChange });
+    else if (sessionChange) this.update(sessionChange);
+  }
+
   async open(readOnly: ReadOnlyMode, password?: string): Promise<void> {
     this.readOnly = readOnly;
     const generation = ++this.generation;
-    this.current = initialState();
+    const results = this.document === undefined ? emptyDocument() : emptyDocument(this.current.preview);
+    this.documents.clear();
+    if (this.document !== undefined) this.documents.set(this.document, results);
+    this.pending = null;
+    this.current = { ...initialState(), ...results };
     this.update({});
     const events = new Channel<ConsoleEvent>();
     events.onmessage = (event) => {
@@ -148,6 +198,9 @@ export class ConsoleSession {
     if (statements.length === 0 || this.current.running || this.current.status !== "open") return;
     const generation = this.generation;
     const run = ++this.runs;
+    const document = this.document;
+    const pending = { document, discarded: false };
+    this.pending = pending;
     const results: ResultTab[] = statements.map((statement, index) => ({
       key: `run-${run}-${index + 1}`,
       title: preview ? "Preview" : `Result ${index + 1}`,
@@ -156,30 +209,33 @@ export class ConsoleSession {
       page: [],
       offset: 0,
     }));
-    this.update({ running: true, preview, results: [...results], messages: [], activeResult: results[0].key });
-    for (let index = 0; index < results.length; index++) {
-      if (this.current.status !== "open") break;
-      let answer: ConsoleRun;
-      try {
-        answer = await runStatement(this.tabId, results[index].statement.text, index === 0);
-      } catch (error) {
-        if (generation !== this.generation) return;
-        const text = sentence(error);
-        if (text === ENDED_SENTENCE) this.update({ status: "ended", message: text, running: false });
-        else this.update({ running: false, messages: [...this.current.messages, text], activeResult: "messages" });
-        return;
+    this.updateResults(document, { preview, results: [...results], messages: [], activeResult: results[0].key }, { running: true });
+    try {
+      for (let index = 0; index < results.length; index++) {
+        if (this.current.status !== "open" || pending.discarded) break;
+        const answer = await runStatement(this.tabId, results[index].statement.text, index === 0, document);
+        if (generation !== this.generation || pending.discarded) return;
+        const tab: ResultTab = { ...results[index], run: answer, page: answer.kind === "rows" ? answer.first_page : [] };
+        results[index] = tab;
+        const line = this.lineFor(tab.title, answer);
+        const messages = this.resultsFor(document)?.messages ?? [];
+        this.updateResults(document, { results: [...results], messages: line ? [...messages, line] : messages });
+        if (answer.kind === "failed" || answer.kind === "canceled") break;
       }
+    } catch (error) {
       if (generation !== this.generation) return;
-      const tab: ResultTab = { ...results[index], run: answer, page: answer.kind === "rows" ? answer.first_page : [] };
-      results[index] = tab;
-      const line = this.lineFor(tab.title, answer);
-      this.update({
-        results: [...results],
-        messages: line ? [...this.current.messages, line] : this.current.messages,
-      });
-      if (answer.kind === "failed" || answer.kind === "canceled") break;
+      const text = sentence(error);
+      if (text === ENDED_SENTENCE) this.update({ status: "ended", message: text });
+      else this.updateResults(document, { messages: [...(this.resultsFor(document)?.messages ?? []), text], activeResult: "messages" });
+    } finally {
+      if (generation === this.generation) {
+        if (pending.discarded && document !== undefined) await this.discard(document);
+        if (generation === this.generation) {
+          this.pending = null;
+          this.update({ running: false });
+        }
+      }
     }
-    this.update({ running: false });
   }
 
   private lineFor(title: string, answer: ConsoleRun): string | null {
@@ -198,10 +254,11 @@ export class ConsoleSession {
   async cancel(): Promise<void> {
     if (!this.current.running) return;
     const generation = this.generation;
+    const document = this.pending?.document;
     try {
       await cancelStatement(this.tabId);
     } catch (error) {
-      if (generation === this.generation) this.update({ messages: [...this.current.messages, sentence(error)], activeResult: "messages" });
+      if (generation === this.generation) this.updateResults(document, { messages: [...(this.resultsFor(document)?.messages ?? []), sentence(error)], activeResult: "messages" });
     }
   }
 
@@ -209,22 +266,27 @@ export class ConsoleSession {
   showResult(key: string): void {
     if (key === this.current.activeResult) return;
     if (key !== "messages" && !this.current.results.some((result) => result.key === key)) return;
-    this.update({ activeResult: key });
+    this.updateResults(this.document, { activeResult: key });
   }
 
   async showPage(key: string, offset: number): Promise<void> {
     const tab = this.current.results.find((result) => result.key === key);
     if (!tab || tab.run?.kind !== "rows") return;
     const generation = this.generation;
-    const isCurrent = () => generation === this.generation && this.current.results.some((result) => result.key === key);
+    const document = this.document;
+    const current = () => generation === this.generation ? this.resultsFor(document) : undefined;
     try {
       const page = await resultPage(this.tabId, tab.run.result_id, offset);
-      if (!isCurrent()) return;
-      this.update({
-        results: this.current.results.map((result) => (result.key === key ? { ...result, page, offset } : result)),
+      const results = current()?.results;
+      if (!results?.some((result) => result.key === key)) return;
+      this.updateResults(document, {
+        results: results.map((result) => (result.key === key ? { ...result, page, offset } : result)),
       });
     } catch (error) {
-      if (isCurrent()) this.update({ messages: [...this.current.messages, sentence(error)], activeResult: "messages" });
+      const results = current();
+      if (results?.results.some((result) => result.key === key)) {
+        this.updateResults(document, { messages: [...results.messages, sentence(error)], activeResult: "messages" });
+      }
     }
   }
 

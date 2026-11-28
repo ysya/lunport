@@ -20,6 +20,7 @@
   transition: width var(--motion-layout) var(--ease-enter);
 }
 .library-shell[data-sidebar-collapsed="true"] .library-sidebar { width: var(--navigation-rail-width); }
+.library-sidebar[hidden] { display: none; }
 .library-sidebar-header {
   display: flex;
   min-height: 3.2rem;
@@ -53,6 +54,9 @@
   border-bottom: 1px solid var(--library-line);
   background: var(--card);
 }
+.library-shell.is-macos[data-database-workspace="true"] .library-titlebar { padding-inline-start: calc(var(--navigation-rail-width) + 0.5rem); }
+.workspace-hosts-button { flex-shrink: 0; }
+.workspace-hosts-count { min-width: 1.1rem; padding: 0 0.2rem; border-radius: 0.3rem; background: var(--muted); font-size: 0.7rem; text-align: center; font-variant-numeric: tabular-nums; }
 .library-titlebar-actions { display: flex; flex-shrink: 0; align-items: center; gap: 0.25rem; }
 .library-titlebar-actions [aria-current="page"] { color: var(--primary); background: var(--library-selected); }
 .library-app-name {

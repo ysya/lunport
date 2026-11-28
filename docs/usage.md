@@ -100,19 +100,21 @@ An AI client can also manage saved databases (see [AI access through MCP](#ai-ac
 
 ## Database console
 
-**Open console** on a saved database's row in **Databases** opens a console tab beside your terminal tabs, up to 8 tabs in all. The console opens its own connection. A Cloud SQL console can open with its local application port stopped and remains available while the profile is in the library.
+**Open console** on a saved database in **Databases** opens the SQL editor and the workspace's database explorer. Expand another saved connection to open it in the same workspace. Cloud SQL, PostgreSQL and SSH can share the workspace, with up to eight open connections. Table tabs share their database's connection. A Cloud SQL console can open while its local application port is stopped.
 
 Cloud SQL console tabs are read-only in every environment. Lunport opens the session with Cloud SQL's `cloudsql_session_read_only` lock, checks that the lock is on, closes the session if it cannot confirm that, and the console toolbar says "Read-only (locked)". A statement that writes is refused by the database. For an older instance without that flag, the tab says so and offers **Open read-only (not locked)**. That choice sets `default_transaction_read_only` instead, which a statement in the session could turn off, and the toolbar says "Read-only (not locked)". Lunport never switches to it on its own.
 
-The Library navigation starts in a compact rail in the database console. Its toggle does not change how the sidebar opens in Library. Use **Hide schema** to make more room, or open **Connection details** from the environment and lock indicator to see the instance, account and route.
+The database explorer lists the saved connections. Filter by database, schema or object name. **Find database objects** (⌘P or Ctrl+P) opens and focuses the explorer filter. Object names are available after the database connects and loads its schema. Collapse individual branches or hide the explorer for more room. The environment and lock indicator opens **Connection details** with the instance, account and route.
 
-To browse a table or view, double-click its name in the schema tree, press Enter on the focused name, or use **Browse data** beside it. **Data** previews up to 200 rows and **Columns** lists column types and primary keys. The arrow in the tree expands the columns there. **SQL editor** brings back your query draft; running a query or opening another preview replaces the results currently shown.
+Click a table or view to open its data in a tab. The arrow beside its name expands its columns in the tree. **Data** previews up to 200 rows, and **Columns** lists column types and primary keys. **SQL editor** switches back to the connection's query draft and results. Refreshing or closing a table tab affects only that table's cached results.
+
+Choose **Hosts** in the title bar to open SSH below the active database. You can enlarge the terminal, dock it again, or hide it and reopen it from **Hosts**. **Disconnect** ends that SSH session.
 
 **Run** runs the selected statements, or the statement at the cursor when nothing is selected: ⌘↩ (Ctrl+↩ on Windows and Linux). **Run all** runs every statement in the editor: ⇧⌘↩ (Shift+Ctrl+↩). Run on a selection of several statements and Run all each start at most 50. Statements run one at a time, each in a result tab of its own. **Cancel** stops the running statement, as does Escape while it runs.
 
-A result shows 200 rows at a time, with **Previous** and **Next**. Lunport keeps at most 10,000 rows and at most 16 MiB of each result, and at most 64 MiB of results in all for a tab, so a later result of a Run all may get less room than the first. When it kept fewer rows than the statement answered, the pager below the grid says how many it kept. Add a `LIMIT` or a `WHERE` to see what lies past it.
+A result shows 200 rows at a time, with **Previous** and **Next**. Lunport keeps at most 10,000 rows and 16 MiB per result and at most 64 MiB across the SQL and table results for a connection. When it kept fewer rows than the statement answered, the pager below the grid says how many it kept. Close table tabs to free their cached results, or use a `LIMIT` or `WHERE` to keep a query smaller.
 
-Select a row in a preview or query result and click **Details**, or press Space while the selected row's number has focus. You can expand long values and copy the original value from each field. JSON values are formatted for easier reading when they fit the display limit.
+Shift-click a row in a preview or query result to open **Details**. You can also click **Details** after selecting a row or press Space while its number has focus. You can expand long values and copy the original value from each field. JSON values are formatted for easier reading when they fit the display limit.
 
 **Export** writes the rows Lunport kept for that result, not the whole query and not a new run of it, as CSV or JSON to the file you choose. CSV has a header row, an empty field for NULL and `""` for an empty string. JSON is an array of objects keyed by column name, with each value as text exactly as PostgreSQL printed it, or `null`.
 

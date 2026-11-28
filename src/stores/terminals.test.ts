@@ -83,3 +83,36 @@ describe("terminal workspace", () => {
     expect(useTerminalStore.getState().tabs).toEqual([]);
   });
 });
+
+describe("docked SSH sessions", () => {
+  it("preserves the selected database when a terminal is docked, maximized, redocked, and hidden", () => {
+    const store = useTerminalStore.getState();
+    const databaseId = store.open(database);
+    const sshId = store.open(input, "dock");
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: sshId, dockMaximized: false });
+
+    store.setDockMaximized(true);
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: sshId, dockMaximized: true });
+    store.setDockMaximized(false);
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: sshId, dockMaximized: false });
+
+    store.hideDock();
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: null });
+    expect(useTerminalStore.getState().tabs.map((tab) => tab.id)).toEqual([databaseId, sshId]);
+  });
+
+  it("moves the dock to an already attached tmux workspace and clears it when the session closes", () => {
+    const store = useTerminalStore.getState();
+    const first = store.open({ ...input, mode: "tmux" });
+    const databaseId = store.open(database);
+    const second = store.open({ ...input, mode: "tmux" }, "dock");
+    const session = { id: "$1", name: "build", created: "1740000000", server: "427:1740000000", destroyUnattached: false };
+    store.claimTmuxSession(first, session);
+    store.claimTmuxSession(second, session);
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: first });
+    expect(useTerminalStore.getState().tabs.map((tab) => tab.id)).toEqual([first, databaseId]);
+
+    store.close(first);
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: null });
+  });
+});

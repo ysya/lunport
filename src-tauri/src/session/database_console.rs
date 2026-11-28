@@ -347,8 +347,10 @@ struct RunState {
 }
 
 struct KeptResult {
+    document: Option<String>,
     columns: Vec<ConsoleColumn>,
     rows: Vec<Vec<Option<String>>>,
+    bytes: usize,
 }
 
 #[derive(Default)]
@@ -356,6 +358,24 @@ struct Results {
     next_id: u32,
     kept: BTreeMap<u32, KeptResult>,
     bytes: usize,
+}
+
+impl Results {
+    fn discard(&mut self, document: Option<&str>) {
+        if let Some(document) = document {
+            let bytes = &mut self.bytes;
+            self.kept.retain(|_, result| {
+                if result.document.as_deref() != Some(document) {
+                    return true;
+                }
+                *bytes -= result.bytes;
+                false
+            });
+        } else {
+            self.kept.clear();
+            self.bytes = 0;
+        }
+    }
 }
 
 struct Inner {
@@ -373,13 +393,6 @@ struct Inner {
 }
 
 impl Inner {
-    /// Drops every kept result, as a statement that starts a run does.
-    fn drop_results(&self) {
-        let mut results = self.results.lock().unwrap();
-        results.kept.clear();
-        results.bytes = 0;
-    }
-
     /// Ends the session with `sentence`, unless it already ended with another.
     fn end(&self, sentence: &str) {
         self.ended.set(sentence);
@@ -1000,8 +1013,14 @@ impl ConsoleConnection {
         Ok((ConsoleConnection { inner }, opened, ended_future))
     }
 
-    /// Runs one statement of the person's. `fresh` drops the session's earlier results first.
+    #[cfg(test)]
     pub(crate) async fn run(&self, sql: &str, fresh: bool) -> Result<ConsoleRun, String> {
+        self.run_for_document(sql, fresh, None).await
+    }
+
+    /// Runs a statement and keeps its rows for paging and export. A fresh run drops earlier results in the given
+    /// document, or in the entire session for callers without a document.
+    async fn run_for_document(&self, sql: &str, fresh: bool, document: Option<&str>) -> Result<ConsoleRun, String> {
         let inner = &self.inner;
         if inner.ended.is_set() {
             return Err(ENDED.to_string());
@@ -1031,7 +1050,7 @@ impl ConsoleConnection {
         };
         if let Some(message) = refused {
             if fresh {
-                inner.drop_results();
+                inner.results.lock().unwrap().discard(document);
             }
             return Ok(ConsoleRun::Failed { message: message.to_string(), sqlstate: None, position: None, elapsed_ms: 0 });
         }
@@ -1040,7 +1059,7 @@ impl ConsoleConnection {
         };
         let _statement = RunningStatement(inner);
         if fresh {
-            inner.drop_results();
+            inner.results.lock().unwrap().discard(document);
         }
         let started = Instant::now();
         let mut bound = Box::pin(cancel_bound(running.cancel_sent.subscribe()));
@@ -1053,7 +1072,7 @@ impl ConsoleConnection {
                         if canceled.load(Ordering::SeqCst) {
                             Ok(ConsoleRun::Canceled { elapsed_ms: elapsed_ms(started) })
                         } else {
-                            self.run_query(sql, &running, started, &mut bound).await
+                            self.run_query(sql, &running, started, &mut bound, document).await
                         }
                     }
                     Err(error) if error.as_db_error().is_some() => Ok(server_error(&error, &running, started)),
@@ -1069,7 +1088,7 @@ impl ConsoleConnection {
             }
             return result;
         }
-        self.run_query(sql, &running, started, &mut bound).await
+        self.run_query(sql, &running, started, &mut bound, document).await
     }
 
     async fn run_query(
@@ -1078,6 +1097,7 @@ impl ConsoleConnection {
         running: &Arc<Running>,
         started: Instant,
         bound: &mut (impl std::future::Future<Output = ()> + Unpin),
+        document: Option<&str>,
     ) -> Result<ConsoleRun, String> {
         let inner = &self.inner;
         // Preparing first refuses a second statement in the same text and names the result's columns.
@@ -1125,7 +1145,12 @@ impl ConsoleConnection {
         let result_id = results.next_id;
         results.next_id = results.next_id.wrapping_add(1);
         results.bytes += streamed.bytes;
-        results.kept.insert(result_id, KeptResult { columns: columns.clone(), rows: streamed.rows });
+        results.kept.insert(result_id, KeptResult {
+            document: document.map(str::to_owned),
+            columns: columns.clone(),
+            rows: streamed.rows,
+            bytes: streamed.bytes,
+        });
         Ok(ConsoleRun::Rows {
             result_id,
             columns,
@@ -1134,6 +1159,11 @@ impl ConsoleConnection {
             elapsed_ms: elapsed_ms(started),
             first_page,
         })
+    }
+
+    /// Discards results kept for a document after its last statement has finished.
+    fn discard_document(&self, document: &str) {
+        self.inner.results.lock().unwrap().discard(Some(document));
     }
 
     /// The `PAGE_ROWS` rows of `result_id` from `offset` on.
@@ -1641,10 +1671,29 @@ pub fn database_console_close(app: tauri::AppHandle, window: tauri::WebviewWindo
 }
 
 #[tauri::command]
-pub async fn database_console_run(app: tauri::AppHandle, window: tauri::WebviewWindow, id: String, sql: String, fresh: bool) -> Result<ConsoleRun, String> {
+pub async fn database_console_run(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+    sql: String,
+    fresh: bool,
+    document: Option<String>,
+) -> Result<ConsoleRun, String> {
     main_only(&window, "Database")?;
     let session = consoles(&app).get(&id)?;
-    session.connection.run(&sql, fresh).await
+    session.connection.run_for_document(&sql, fresh, document.as_deref()).await
+}
+
+#[tauri::command]
+pub fn database_console_discard_document(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    id: String,
+    document: String,
+) -> Result<(), String> {
+    main_only(&window, "Database")?;
+    consoles(&app).get(&id)?.connection.discard_document(&document);
+    Ok(())
 }
 
 #[tauri::command]

@@ -97,6 +97,8 @@ export function RecordsWorkspace({
   const settingsOpen = useUiStore((state) => state.settingsOpen);
   const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
   const setPaletteOpen = useUiStore((state) => state.setPaletteOpen);
+  const [hostPicker, setHostPicker] = useState(false);
+  const closeHostPicker = useCallback(() => setHostPicker(false), []);
   const librarySidebarCollapsed = useUiStore((state) => state.librarySidebarCollapsed);
   const toggleLibrarySidebar = useUiStore((state) => state.toggleLibrarySidebar);
   const openSettings = (category: "general" | "ai") => {
@@ -107,8 +109,7 @@ export function RecordsWorkspace({
   const [panel, setPanel] = useState<WorkspacePanel>("hosts");
   const activeTerminal = useTerminalStore((state) => state.activeId);
   const databaseActive = useTerminalStore((state) => state.tabs.some((tab) => tab.id === state.activeId && tab.kind === "database"));
-  const [databaseSidebarCollapsed, setDatabaseSidebarCollapsed] = useState(true);
-  const sidebarCollapsed = databaseActive ? databaseSidebarCollapsed : librarySidebarCollapsed;
+  const openSshCount = useTerminalStore((state) => state.tabs.filter((tab) => tab.kind === "terminal" && (tab.state === "open" || tab.state === "connecting")).length);
   const setActiveTerminal = useTerminalStore((state) => state.activate);
   const [filter, setFilter] = useState<LibraryFilter>({ kind: "all" });
   const [inspectedId, setInspectedId] = useState<string | null>(null);
@@ -343,8 +344,8 @@ export function RecordsWorkspace({
   const shortcut = platform.data === "macos" ? "⌘ K" : activeTerminal ? "Ctrl Shift K" : "Ctrl K";
   return (
     <div className={cn("app-shell library-shell flex h-screen overflow-hidden", platform.data === "macos" && "is-macos")}
-      data-sidebar-collapsed={sidebarCollapsed}>
-      <div className="library-sidebar" inert={settingsOpen} aria-hidden={settingsOpen || undefined}>
+      data-sidebar-collapsed={librarySidebarCollapsed} data-database-workspace={databaseActive}>
+      <div className="library-sidebar" hidden={databaseActive} inert={settingsOpen} aria-hidden={settingsOpen || undefined}>
         <header className="library-sidebar-header" data-tauri-drag-region>
           <span className="library-app-name">
             <BrandMark className="size-5" />
@@ -353,8 +354,8 @@ export function RecordsWorkspace({
         </header>
         <LibraryNavigation
           overview={overview}
-          panel={databaseActive ? null : panel}
-          collapsed={sidebarCollapsed}
+          panel={panel}
+          collapsed={librarySidebarCollapsed}
           navigate={(next) => { setActiveTerminal(null); setPanel(next); }}
           changeFilter={(next) => { setActiveTerminal(null); changeFilter(next); }}
         />
@@ -370,11 +371,10 @@ export function RecordsWorkspace({
           className="library-titlebar"
           data-has-sessions={!!tabs}
         >
-          <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID}
-            onClick={databaseActive ? () => setDatabaseSidebarCollapsed((collapsed) => !collapsed) : toggleLibrarySidebar}>
-            {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
-          </Button>
+          {!databaseActive && <Button type="button" variant="ghost" size="icon" aria-label={librarySidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!librarySidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleLibrarySidebar}>
+            {librarySidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </Button>}
           {tabs ?? <button
             type="button"
             className="library-quick-connect"
@@ -385,6 +385,13 @@ export function RecordsWorkspace({
             <kbd>{shortcut}</kbd>
           </button>}
           <div className="library-titlebar-actions">
+            <Button type="button" variant="ghost" size="sm" className="workspace-hosts-button" aria-haspopup="dialog" aria-label="Hosts"
+              aria-description={openSshCount ? `${openSshCount} open SSH ${openSshCount === 1 ? "session" : "sessions"}` : undefined}
+              onClick={() => { setHostPicker(true); setPaletteOpen(true); }}>
+              <Terminal className="size-4" />
+              Hosts
+              {openSshCount > 0 && <span className="workspace-hosts-count" aria-hidden="true">{openSshCount}</span>}
+            </Button>
             <UpdateIndicator />
             <Button type="button" variant="ghost" size="sm" title="Sync settings"
               aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => { setActiveTerminal(null); setPanel("account"); }}>
@@ -767,6 +774,8 @@ export function RecordsWorkspace({
         editorBusy={editorBusy}
         edit={editHost}
         create={createHost}
+        hostsOnly={hostPicker}
+        onClose={closeHostPicker}
       />
       <WorkspaceTransfer open={transferOpen} onOpenChange={setTransferOpen} onImport={() => { setTransferOpen(false); setPanel("import"); }} />
       <SettingsPage

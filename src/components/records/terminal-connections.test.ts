@@ -7,6 +7,22 @@ import { connectSavedHost } from "./operations";
 import { hostView, recordOverview } from "./fixtures";
 afterEach(() => { useTerminalStore.getState().reset(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe("saved-host terminal destination", () => {
+  it("docks a host beside the active database and reuses its live shell even with an external preference", async () => {
+    const backend = vi.fn(); stubBackend(backend);
+    const host = hostView();
+    const overview = recordOverview({ hosts: [host] });
+    const databaseId = useTerminalStore.getState().open({ kind: "database", databaseId: "db-1", name: "orders", address: "orders-pg", environment: "prod", readOnly: "locked" });
+
+    await connectSavedHost(overview, host.id, "external", true, undefined, "dock");
+    const sshId = useTerminalStore.getState().dockedId;
+    expect(sshId).toEqual(expect.any(String));
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId });
+    useTerminalStore.getState().hideDock();
+    await connectSavedHost(overview, host.id, "external", true, undefined, "dock");
+    expect(useTerminalStore.getState()).toMatchObject({ activeId: databaseId, dockedId: sshId });
+    expect(useTerminalStore.getState().tabs).toHaveLength(2);
+    expect(backend).not.toHaveBeenCalled();
+  });
   it("opens a tmux workspace in the app even when an external terminal is selected", async () => {
     const backend = vi.fn(); stubBackend(backend);
     const host = hostView();

@@ -324,6 +324,46 @@ async fn fresh_drops_earlier_results() {
     fake.await.unwrap();
 }
 
+#[tokio::test]
+async fn refreshing_or_discarding_a_document_only_releases_its_results() {
+    let (console, _ended, mut peer) = opened(unreachable_dial()).await;
+    let fake = tokio::spawn(async move {
+        for _ in 0..4 {
+            answer_statement(&mut peer, "SELECT 1", &[("?column?", 23)], &one_row()).await;
+        }
+        peer
+    });
+    let mut ids = Vec::new();
+    for (document, fresh) in [("query", true), ("query", false), ("table", true), ("query", true)] {
+        let ConsoleRun::Rows { result_id, .. } = console.run_for_document("SELECT 1", fresh, Some(document)).await.unwrap()
+        else {
+            panic!("not rows");
+        };
+        ids.push(result_id);
+        if ids.len() == 3 {
+            assert_eq!(console.page(ids[0], 0).unwrap(), one_row());
+            assert_eq!(console.page(ids[1], 0).unwrap(), one_row());
+        }
+    }
+
+    let [first, second, table, latest] = ids[..] else {
+        panic!("expected four results");
+    };
+    assert_eq!(console.page(first, 0).unwrap_err(), RESULT_GONE);
+    assert_eq!(console.page(second, 0).unwrap_err(), RESULT_GONE);
+    assert_eq!(console.page(table, 0).unwrap(), one_row());
+    assert_eq!(console.page(latest, 0).unwrap(), one_row());
+    let row_bytes = CELL_OVERHEAD + 1;
+    assert_eq!(console.inner.results.lock().unwrap().bytes, 2 * row_bytes);
+
+    console.discard_document("table");
+    console.discard_document("table");
+    assert_eq!(console.page(table, 0).unwrap_err(), RESULT_GONE);
+    assert_eq!(console.kept(latest).unwrap().1, one_row());
+    assert_eq!(console.inner.results.lock().unwrap().bytes, row_bytes);
+    fake.await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_late_cancel_never_reaches_the_next_statement() {
     let (dial, mut dials) = cancel_line();
@@ -1332,7 +1372,7 @@ async fn a_result_past_the_byte_room_keeps_the_rows_that_fit_and_the_session_goe
 }
 
 #[tokio::test]
-async fn a_later_result_gets_what_is_left_of_the_session_room() {
+async fn documents_share_the_session_result_room() {
     let (console, _ended, mut peer) = opened(unreachable_dial()).await;
     let row = WIDE + CELL_OVERHEAD;
     // Each earlier result keeps all its rows and stays under one result's room.
@@ -1349,7 +1389,8 @@ async fn a_later_result_gets_what_is_left_of_the_session_room() {
         peer
     });
     for index in 0..earlier {
-        match console.run("SELECT payload FROM events", index == 0).await.unwrap() {
+        let document = format!("events-{index}");
+        match console.run_for_document("SELECT payload FROM events", true, Some(&document)).await.unwrap() {
             ConsoleRun::Rows { row_count, truncated, .. } => {
                 assert_eq!(row_count as usize, each);
                 assert_eq!(truncated, None);
@@ -1357,7 +1398,7 @@ async fn a_later_result_gets_what_is_left_of_the_session_room() {
             other => panic!("{other:?}"),
         }
     }
-    match console.run("SELECT payload FROM archive", false).await.unwrap() {
+    match console.run_for_document("SELECT payload FROM archive", true, Some("archive")).await.unwrap() {
         ConsoleRun::Rows { row_count, truncated, .. } => {
             assert_eq!(row_count as usize, fits);
             assert_eq!(truncated, Some(Truncation::Bytes));

@@ -31,7 +31,12 @@ export type SessionTab = TerminalTab | DatabaseTab;
 type TerminalStore = {
   tabs: SessionTab[];
   activeId: string | null;
-  open: (tab: Omit<TerminalTab, "id" | "state" | "tmuxSession"> | DatabaseTabOptions) => string;
+  dockedId: string | null;
+  dockMaximized: boolean;
+  open: (tab: Omit<TerminalTab, "id" | "state" | "tmuxSession"> | DatabaseTabOptions, placement?: "dock") => string;
+  showDock: (id: string) => void;
+  hideDock: () => void;
+  setDockMaximized: (maximized: boolean) => void;
   setReadOnly: (id: string, readOnly: Exclude<ReadOnlyMode, "standard">) => void;
   activate: (id: string | null) => void;
   updateState: (id: string, state: TerminalState) => void;
@@ -46,12 +51,15 @@ function attachedTmux(tabs: SessionTab[], historyKey: string, session: SessionId
 }
 /** Session metadata only. Terminal bytes, credentials and live handles are never persisted. */
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
-  tabs: [], activeId: null,
-  open: (input) => {
+  tabs: [], activeId: null, dockedId: null, dockMaximized: false,
+  open: (input, placement) => {
+    const current = get();
+    const dock = placement === "dock" && input.kind === "terminal" && current.tabs.some((tab) => tab.id === current.activeId && tab.kind === "database");
     if (input.kind === "terminal" && input.mode === "tmux" && input.tmuxResume) {
-      const existing = attachedTmux(get().tabs, input.historyKey, input.tmuxResume.session);
+      const existing = attachedTmux(current.tabs, input.historyKey, input.tmuxResume.session);
       if (existing) {
-        set({ activeId: existing.id });
+        if (dock) current.showDock(existing.id);
+        else current.activate(existing.id);
         return existing.id;
       }
     }
@@ -61,12 +69,18 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       let name = input.name;
       let ordinal = 2;
       while (current.tabs.some((tab) => tab.name === name)) name = `${input.name} (${ordinal++})`;
-      return { tabs: [...current.tabs, { ...input, name, id, state: "connecting" }], activeId: id };
+      return {
+        tabs: [...current.tabs, { ...input, name, id, state: "connecting" }],
+        ...(dock ? { dockedId: id } : { activeId: id, dockMaximized: false }),
+      };
     });
     return id;
   },
+  showDock: (id) => set((current) => current.tabs.some((tab) => tab.id === id && tab.kind === "terminal") ? { dockedId: id } : {}),
+  hideDock: () => set({ dockedId: null, dockMaximized: false }),
+  setDockMaximized: (dockMaximized) => set((current) => current.dockedId ? { dockMaximized } : {}),
   setReadOnly: (id, readOnly) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.kind === "database" && tab.environment !== null && tab.readOnly !== readOnly ? { ...tab, readOnly } : tab) })),
-  activate: (id) => set((current) => id === null || current.tabs.some((tab) => tab.id === id) ? { activeId: id } : {}),
+  activate: (id) => set((current) => id === null || current.tabs.some((tab) => tab.id === id) ? { activeId: id, dockMaximized: false } : {}),
   updateState: (id, state) => set((current) => ({ tabs: current.tabs.map((tab) => tab.id === id && tab.state !== state ? { ...tab, state } : tab) })),
   claimTmuxSession: (id, session) => {
     const current = get();
@@ -74,7 +88,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     if (tab?.kind !== "terminal" || tab.mode !== "tmux") return false;
     const existing = session && attachedTmux(current.tabs, tab.historyKey, session, id);
     if (existing) {
-      set({ tabs: current.tabs.filter((entry) => entry.id !== id), activeId: current.activeId === id ? existing.id : current.activeId });
+      set({
+        tabs: current.tabs.filter((entry) => entry.id !== id),
+        activeId: current.activeId === id ? existing.id : current.activeId,
+        dockedId: current.dockedId === id ? existing.id : current.dockedId,
+      });
       return false;
     }
     set({ tabs: current.tabs.map((entry) => entry === tab ? { ...tab, tmuxSession: session } : entry) });
@@ -83,7 +101,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   close: (id) => set((current) => {
     const index = current.tabs.findIndex((tab) => tab.id === id);
     const tabs = current.tabs.filter((tab) => tab.id !== id);
-    return { tabs, activeId: current.activeId === id ? tabs[Math.max(0, index - 1)]?.id ?? null : current.activeId };
+    return {
+      tabs,
+      ...(current.activeId === id ? { activeId: tabs[Math.max(0, index - 1)]?.id ?? null, dockMaximized: false } : {}),
+      ...(current.dockedId === id ? { dockedId: null, dockMaximized: false } : {}),
+    };
   }),
-  reset: () => set({ tabs: [], activeId: null }),
+  reset: () => set({ tabs: [], activeId: null, dockedId: null, dockMaximized: false }),
 }));
